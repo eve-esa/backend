@@ -1,0 +1,12 @@
+python-dotenv==1.0.1
+langchain==0.2.1
+langchain==0.2.1
+langchain-community==0.2.1
+langchain-core==0.2.1
+langchain-mistralai==0.1.7
+langchain-openai==0.1.7
+langchain-text-splitters==0.2.0
+langsmith==0.1.63
+qdrant-client==1.9.1
+bs4==0.0.2
+streamlit==1.35.0
