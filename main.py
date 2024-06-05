@@ -17,7 +17,6 @@ from qdrant_client import QdrantClient
 import streamlit as st
 
 load_dotenv()
-# os.environ["HUGGINGFACEHUB_API_TOKEN"] = "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"
 mistral_api_key = os.environ.get("MISTRAL_API_KEY")
 qdrant_url = os.environ.get("QDRANT_URL")
 qdrant_api_key = os.environ.get("QDRANT_API_KEY")
