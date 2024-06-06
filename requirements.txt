@@ -10,3 +10,4 @@ langsmith==0.1.63
 qdrant-client==1.9.1
 bs4==0.0.2
 streamlit==1.35.0
+langgraph
