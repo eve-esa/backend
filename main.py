@@ -334,7 +334,7 @@ if query := st.chat_input("What is up?"):
                             source_docs.append(document.metadata["source"])
                     elif isinstance(document, dict):
                         source_docs.append(document["url"])
-        st.text(value["generation"])
+        st.write(value["generation"])
         for doc in source_docs:
             st.markdown(doc)
 
