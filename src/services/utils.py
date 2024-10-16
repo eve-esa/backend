@@ -24,7 +24,7 @@ def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
     if model == "fake":
         embeddings = FakeEmbeddings(size=4096)
         embeddings_size = 4096
-    if model in openai_embedding_model_list.keys():
+    elif model in openai_embedding_model_list.keys():
         embeddings = OpenAIEmbeddings(model=model, api_key=openai_api_key)
         embeddings_size = openai_embedding_model_list[model]
     else:

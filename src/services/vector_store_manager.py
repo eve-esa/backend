@@ -40,7 +40,7 @@ class VectorStoreManager:
     def list_collections(self) -> types.CollectionsResponse:
         return self.client.get_collections()
 
-    def list_collections_names(self) -> list:
+    def list_collections_names(self) -> list[str]:
         try:
             collections_list = []
             collections = self.client.get_collections()
@@ -50,6 +50,14 @@ class VectorStoreManager:
             return collections_list
         except Exception as e:
             raise RuntimeError(f"Failed to list collections: {str(e)}") from e
+
+    def delete_collection(self, collection_name: str) -> None:
+        if collection_name not in self.list_collections_names():
+            raise ValueError(f"Collection '{collection_name}' does not exist.")
+        try:
+            self.client.delete_collection(collection_name=collection_name)
+        except Exception as e:
+            raise
 
 
 if __name__ == "__main__":

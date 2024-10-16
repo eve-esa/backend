@@ -23,10 +23,7 @@ def create_collection(request: CollectionRequest):
     )
 
     collections_name_list = vector_store.list_collections_names()
-    print("QUII")
-    print(collections_name_list)
     if collection_name in collections_name_list:
-        print("Its here")
         raise HTTPException(
             status_code=400, detail=f"Collection '{collection_name}' already exists"
         )
