@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from src.services.vector_store_manager import VectorStoreManager
 from dotenv import load_dotenv
+from pydantic import BaseModel
 import os
 
 load_dotenv()
@@ -10,15 +11,22 @@ qdrant_api_key = os.getenv("QDRANT_API_KEY")
 router = APIRouter()
 
 
+class CollectionRequest(BaseModel):
+    collection_name: str
+
+
 @router.post("/create_collection")
-def create_collection(collection_name: str):
+def create_collection(request: CollectionRequest):
+    collection_name = request.collection_name
     vector_store = VectorStoreManager(
         qdrant_url, qdrant_api_key, embeddings_model="text-embedding-3-small"
     )
 
-    # Check if the collection already exists
-    collections = vector_store.list_collections()
-    if collection_name in collections:
+    collections_name_list = vector_store.list_collections_names()
+    print("QUII")
+    print(collections_name_list)
+    if collection_name in collections_name_list:
+        print("Its here")
         raise HTTPException(
             status_code=400, detail=f"Collection '{collection_name}' already exists"
         )

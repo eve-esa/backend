@@ -1,7 +1,9 @@
 from qdrant_client import QdrantClient
 import qdrant_client
+from qdrant_client.conversions import common_types as types
 from dotenv import load_dotenv
 import os
+
 from src.services.utils import get_embeddings_model
 
 
@@ -35,8 +37,19 @@ class VectorStoreManager:
             raise Exception(f"Failed to create collection: {collection_name}")
         print(f"Collection '{collection_name}' created successfully.")
 
-    def list_collections(self) -> list:
+    def list_collections(self) -> types.CollectionsResponse:
         return self.client.get_collections()
+
+    def list_collections_names(self) -> list:
+        try:
+            collections_list = []
+            collections = self.client.get_collections()
+            for collection in collections:
+                for c in list(collection[1]):
+                    collections_list.append(c.name)
+            return collections_list
+        except Exception as e:
+            raise RuntimeError(f"Failed to list collections: {str(e)}") from e
 
 
 if __name__ == "__main__":
