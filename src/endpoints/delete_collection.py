@@ -1,13 +1,8 @@
 from fastapi import APIRouter
 from fastapi import APIRouter, HTTPException
 from src.services.vector_store_manager import VectorStoreManager
-from dotenv import load_dotenv
-from pydantic import BaseModel
-import os
+from src.config import QDRANT_URL, QDRANT_API_KEY
 
-load_dotenv()
-qdrant_url = os.getenv("QDRANT_URL")
-qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
 router = APIRouter()
 
@@ -15,7 +10,7 @@ router = APIRouter()
 @router.delete("/delete_collection")
 def delete_collection(collection_name: str):
     vector_store = VectorStoreManager(
-        qdrant_url, qdrant_api_key, embeddings_model="fake"
+        QDRANT_URL, QDRANT_API_KEY, embeddings_model="fake"
     )
     try:
         vector_store.delete_collection(collection_name)

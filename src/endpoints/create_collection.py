@@ -1,12 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from src.services.vector_store_manager import VectorStoreManager
-from dotenv import load_dotenv
 from pydantic import BaseModel
-import os
+from src.config import QDRANT_URL, QDRANT_API_KEY
 
-load_dotenv()
-qdrant_url = os.getenv("QDRANT_URL")
-qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
 router = APIRouter()
 
@@ -19,7 +15,7 @@ class CollectionRequest(BaseModel):
 def create_collection(request: CollectionRequest):
     collection_name = request.collection_name
     vector_store = VectorStoreManager(
-        qdrant_url, qdrant_api_key, embeddings_model="text-embedding-3-small"
+        QDRANT_URL, QDRANT_API_KEY, embeddings_model="text-embedding-3-small"
     )
 
     collections_name_list = vector_store.list_collections_names()
