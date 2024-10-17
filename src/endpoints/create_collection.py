@@ -9,6 +9,7 @@ router = APIRouter()
 
 class CollectionRequest(BaseModel):
     collection_name: str
+    embeddings_model: str = "text-embedding-3-small"
 
 
 @router.post("/create_collection")
