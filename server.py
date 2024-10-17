@@ -6,7 +6,8 @@ from fastapi import FastAPI
 from src.endpoints.create_collection import router as create_collection_router
 from src.endpoints.delete_collection import router as delete_collection_router
 from src.endpoints.health_check import router as health_check_router
-from src.endpoints.add_document import router as add_document_list
+from src.endpoints.add_document import router as add_document_list_router
+from src.endpoints.delete_document import router as delete_document_router
 
 # from endpoints.add_document import add_doc_to_existing_collection
 # from src.endpoints.delete_collection import router as delete_collection_router
@@ -44,7 +45,8 @@ def create_app(debug=False, **kwargs):
     app.include_router(create_collection_router)
     app.include_router(health_check_router)
     app.include_router(delete_collection_router)
-    app.include_router(add_document_list)
+    app.include_router(add_document_list_router)
+    app.include_router(delete_document_router)
     # app.include_router(delete_collection_router)
     # app.include_router(delete_doc_from_collection_router)
     # app.include_router(get_collection_info_router)

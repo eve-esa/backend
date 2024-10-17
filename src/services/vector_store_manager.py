@@ -7,6 +7,10 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 import os
 from uuid import uuid4
+from qdrant_client.http.models import FilterSelector
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
+from typing import Any, List
 
 from src.services.utils import get_embeddings_model
 
@@ -24,7 +28,7 @@ class VectorStoreManager:
         self,
         qdrant_url: str,
         qdrant_api_key: str,
-        embeddings_model: str = "sentence-transformers/paraphrase-TinyBERT-L6-v2",
+        embeddings_model: str = "text-embedding-3-small",  # "sentence-transformers/paraphrase-TinyBERT-L6-v2",
     ) -> None:
         self.client = QdrantClient(qdrant_url, api_key=qdrant_api_key)
         self.embeddings_model = embeddings_model
@@ -91,6 +95,47 @@ class VectorStoreManager:
             raise RuntimeError(
                 f"An unexpected error occurred while adding documents to '{collection_name}': {str(e)}"
             ) from e
+
+    def _qdrant_filter_from_dict(self, filter: dict) -> Filter:
+        if not filter:
+            return None
+
+        return Filter(
+            must=[
+                condition
+                for key, value in filter.items()
+                for condition in self._build_condition(key, value)
+            ]
+        )
+
+    def _build_condition(self, key: str, value: Any) -> List[FieldCondition]:
+        out = []
+
+        if isinstance(value, dict):
+            for _key, value in value.items():
+                out.extend(self._build_condition(f"{key}.{_key}", value))
+        elif isinstance(value, list):
+            for _value in value:
+                if isinstance(_value, dict):
+                    out.extend(self._build_condition(f"{key}[]", _value))
+                else:
+                    out.extend(self._build_condition(f"{key}", _value))
+        else:
+            out.append(
+                FieldCondition(
+                    key=f"metadata.{key}",
+                    match=MatchValue(value=value),
+                )
+            )
+
+        return out
+
+    def delete_docs_by_metadata_filter(self, collection_name: str, metadata=None):
+        res = self.client.delete(
+            collection_name=collection_name,
+            points_selector=self._qdrant_filter_from_dict(metadata),
+        )
+        return res
 
 
 if __name__ == "__main__":
