@@ -13,10 +13,13 @@ if __name__ == "__main__":
         QDRANT_URL, QDRANT_API_KEY, embeddings_model="text-embedding-3-small"
     )
 
+    import os
+
     results = vector_store.retrieve_documents_from_query(
-        query="What is the european space agency?",
+        query=f"empty",
         embeddings_model="mistral-embed",
         collection_name="test_llm4eo",
+        score_threshold=0.7,
         k=3,
     )
 
@@ -24,3 +27,5 @@ if __name__ == "__main__":
         print(
             f"Point ID: {result.id}, Score: {result.score}, Metadata: {result.payload['metadata']}"
         )
+    if results == []:
+        print("empty")

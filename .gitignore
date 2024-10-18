@@ -5,6 +5,7 @@ rag_data.txt
 __pycache__/
 *.py[cod]
 *$py.class
+https:
 
 # C extensions
 *.so

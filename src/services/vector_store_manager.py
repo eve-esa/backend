@@ -163,6 +163,7 @@ class VectorStoreManager:
         embeddings_model: str,
         query: str,
         k: int = 5,
+        score_threshold: float = 0.7,
         get_unique_docs=True,
     ):
 
@@ -174,6 +175,7 @@ class VectorStoreManager:
                 collection_name=collection_name,
                 query_vector=query_vector,  # The vector representing the query
                 limit=k,
+                score_threshold=score_threshold,
             )
             return results
 
@@ -181,6 +183,7 @@ class VectorStoreManager:
             collection_name=collection_name,
             query_vector=query_vector,  # The vector representing the query
             limit=k * 10,
+            score_threshold=score_threshold,
         )
         return self._get_unique_source_documents(results, min_docs=k)
 
