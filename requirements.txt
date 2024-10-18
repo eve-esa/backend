@@ -11,3 +11,6 @@ langchain==0.3.3
 python-multipart==0.0.12
 langchain-community==0.3.2
 langchain-mistralai==0.2.0
+pyfiglet==1.0.2
+rich==13.9.2
+openai==1.52.0c

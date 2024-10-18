@@ -6,6 +6,10 @@ from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 import os
+import json
+import requests
+import openai
+from langchain_openai import OpenAI
 from uuid import uuid4
 from qdrant_client.http.models import FilterSelector
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
@@ -16,15 +20,18 @@ from langchain.embeddings.openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from src.services.utils import get_embeddings_model
 from langchain_qdrant import RetrievalMode
-from langchain.vectorstores import Qdrant
-from langchain.embeddings import OpenAIEmbeddings
-from langchain import VectorDBQA, OpenAI
-from langchain.vectorstores import Qdrant
-from collections import OrderedDict
 
-load_dotenv()
-qdrant_url = os.getenv("QDRANT_URL")
-qdrant_api_key = os.getenv("QDRANT_API_KEY")
+
+from langchain import VectorDBQA, OpenAI
+from collections import OrderedDict
+from src.config import (
+    QDRANT_URL,
+    QDRANT_API_KEY,
+    MISTRAL_API_KEY,
+    OPENAI_API_KEY,
+    HUGGINGFACEHUB_API_TOKEN,
+)
+from src.services.system_prompts import generate_prompt_1
 
 
 class VectorStoreManager:
@@ -186,6 +193,40 @@ class VectorStoreManager:
             score_threshold=score_threshold,
         )
         return self._get_unique_source_documents(results, min_docs=k)
+
+    # TODO: this should be updated to custom model
+    def generate_answer(self, query: str, context: str, llm="llama-3.1"):
+        prompt = generate_prompt_1(query=query, context=context)
+
+        if llm == "openai":
+            messages_pompt = []
+            messages_pompt += [{"role": "user", "content": prompt}]
+
+            response = openai.chat.completions.create(
+                messages=messages_pompt,
+                model="gpt-4",
+                temperature=0.3,
+                max_tokens=500,
+            )
+            message = response.choices[0].message.content
+            return message
+
+        elif llm == "llama-3.1":
+            API_URL = (
+                "https://kr3w718lc87a92az.us-east-1.aws.endpoints.huggingface.cloud"
+            )
+            headers = {"Authorization": f"Bearer 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"}
+
+            def query(payload):
+                response = requests.post(API_URL, headers=headers, json=payload)
+                return response.json()
+
+            output = query(
+                {
+                    "inputs": f"{prompt}",
+                }
+            )
+            return output
 
 
 if __name__ == "__main__":
