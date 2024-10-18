@@ -2,19 +2,21 @@ from langchain_core.embeddings import FakeEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
 from typing import Union, Tuple
-
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
+from langchain_mistralai import MistralAIEmbeddings
+from src.config import MISTRAL_API_KEY, OPENAI_API_KEY
 
 
 def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
     FakeEmbeddings,
     OpenAIEmbeddings,
     HuggingFaceEmbeddings,
-    Tuple[Union[FakeEmbeddings, OpenAIEmbeddings, HuggingFaceEmbeddings], int],
+    MistralAIEmbeddings,
+    Tuple[
+        Union[
+            FakeEmbeddings, OpenAIEmbeddings, HuggingFaceEmbeddings, MistralAIEmbeddings
+        ],
+        int,
+    ],
 ]:
     openai_embedding_model_list = {
         "text-embedding-ada-002": 1536,
@@ -24,8 +26,11 @@ def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
     if model == "fake":
         embeddings = FakeEmbeddings(size=4096)
         embeddings_size = 4096
+    elif model == "mistral-embed":
+        embeddings = MistralAIEmbeddings(model=model, api_key=MISTRAL_API_KEY)
+        embeddings_size = 1024
     elif model in openai_embedding_model_list.keys():
-        embeddings = OpenAIEmbeddings(model=model, api_key=openai_api_key)
+        embeddings = OpenAIEmbeddings(model=model, api_key=OPENAI_API_KEY)
         embeddings_size = openai_embedding_model_list[model]
     else:
         embeddings = HuggingFaceEmbeddings(model_name=model)

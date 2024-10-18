@@ -11,9 +11,16 @@ from qdrant_client.http.models import FilterSelector
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
 from typing import Any, List
-
+from langchain_qdrant import QdrantVectorStore
+from langchain.embeddings.openai import OpenAIEmbeddings
+from qdrant_client import QdrantClient
 from src.services.utils import get_embeddings_model
-
+from langchain_qdrant import RetrievalMode
+from langchain.vectorstores import Qdrant
+from langchain.embeddings import OpenAIEmbeddings
+from langchain import VectorDBQA, OpenAI
+from langchain.vectorstores import Qdrant
+from collections import OrderedDict
 
 load_dotenv()
 qdrant_url = os.getenv("QDRANT_URL")
@@ -136,6 +143,46 @@ class VectorStoreManager:
             points_selector=self._qdrant_filter_from_dict(metadata),
         )
         return res
+
+    def _get_unique_source_documents(self, scored_points_list, min_docs=2):
+        sorted_results = sorted(scored_points_list, key=lambda x: x.score, reverse=True)
+
+        unique_source_items = OrderedDict()
+
+        for item in sorted_results:
+            source = item.payload["metadata"]["source"]
+            if source not in unique_source_items:
+                unique_source_items[source] = item
+            if len(unique_source_items) >= min_docs:
+                break
+        return list(unique_source_items.values())
+
+    def retrieve_documents_from_query(
+        self,
+        collection_name: str,
+        embeddings_model: str,
+        query: str,
+        k: int = 5,
+        get_unique_docs=True,
+    ):
+
+        embeddings = get_embeddings_model(embeddings_model)
+        query_vector = embeddings.embed_query(query)
+
+        if not get_unique_docs:
+            results = self.client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,  # The vector representing the query
+                limit=k,
+            )
+            return results
+
+        results = self.client.search(
+            collection_name=collection_name,
+            query_vector=query_vector,  # The vector representing the query
+            limit=k * 10,
+        )
+        return self._get_unique_source_documents(results, min_docs=k)
 
 
 if __name__ == "__main__":
