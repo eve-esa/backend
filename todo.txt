@@ -1,5 +1,4 @@
 - add feaxtures to test_create_collection
 - add_document_list to collection
 --|-- add also pdfs no only txts
-- delete_documet_list from collection
 - add document parser

@@ -9,17 +9,7 @@ from src.endpoints.health_check import router as health_check_router
 from src.endpoints.add_document import router as add_document_list_router
 from src.endpoints.delete_document import router as delete_document_router
 from src.endpoints.retrieve_documents import router as retrieve_documents_router
-
-# from endpoints.add_document import add_doc_to_existing_collection
-# from src.endpoints.delete_collection import router as delete_collection_router
-# from src.endpoints.delete_doc_from_collection import (
-#     router as delete_doc_from_collection_router,
-# )
-# from src.endpoints.get_collection_info import router as get_collection_info_router
-# from src.endpoints.query_collection import router as query_collection_router
-# from src.endpoints.test_add_text_to_existing_collection import (
-#     router as add_text_to_existing_collection_router,
-# )
+from src.endpoints.generate_answer import router as generate_answer_router
 
 origins = [
     "http://localhost",
@@ -42,18 +32,14 @@ def create_app(debug=False, **kwargs):
     def main_page():
         return "Qdrant vector search API"
 
-    # app.include_router(add_doc_to_existing_collection.router)
     app.include_router(create_collection_router)
     app.include_router(health_check_router)
     app.include_router(delete_collection_router)
     app.include_router(add_document_list_router)
     app.include_router(delete_document_router)
     app.include_router(retrieve_documents_router)
-    # app.include_router(delete_collection_router)
-    # app.include_router(delete_doc_from_collection_router)
-    # app.include_router(get_collection_info_router)
-    # app.include_router(query_collection_router)
-    # app.include_router(add_text_to_existing_collection_router)
+    app.include_router(generate_answer_router)
+
     return app
 
 
