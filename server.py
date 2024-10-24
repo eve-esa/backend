@@ -1,5 +1,4 @@
 import uvicorn
-
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 
@@ -10,6 +9,7 @@ from src.endpoints.add_document import router as add_document_list_router
 from src.endpoints.delete_document import router as delete_document_router
 from src.endpoints.retrieve_documents import router as retrieve_documents_router
 from src.endpoints.generate_answer import router as generate_answer_router
+from src.endpoints.completion_llm import router as completion_llm_router
 
 origins = [
     "http://localhost",
@@ -39,6 +39,7 @@ def create_app(debug=False, **kwargs):
     app.include_router(delete_document_router)
     app.include_router(retrieve_documents_router)
     app.include_router(generate_answer_router)
+    app.include_router(completion_llm_router)
 
     return app
 

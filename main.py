@@ -1,10 +1,8 @@
 from src.services.vector_store_manager import VectorStoreManager
-from langchain_core.documents import Document
-import openai
-from openai import OpenAI
 from rich.console import Console
 from rich.text import Text
 from pyfiglet import Figlet
+import config
 
 from src.config import QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
 
