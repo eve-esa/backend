@@ -12,6 +12,7 @@ class GenerationRequest(BaseModel):
     collection_name: str
     llm: str = "openai"
     embeddings_model: str = "mistral-embed"
+    k: int = 3
     score_threshold: float = Field(0.7, ge=0.0, le=1.0)  # Ensure it's between 0 and 1
     get_unique_docs: bool = True
 
@@ -28,6 +29,7 @@ def create_collection(request: GenerationRequest) -> Dict[str, Any]:
             embeddings_model=request.embeddings_model,
             score_threshold=request.score_threshold,
             get_unique_docs=request.get_unique_docs,
+            k=request.k,
         )
         if not results:
             raise HTTPException(status_code=404, detail="No documents found.")
