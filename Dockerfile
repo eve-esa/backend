@@ -11,6 +11,7 @@ COPY ./*.py /code/
 # COPY ./.env /code/
 COPY ./requirements.txt /code/
 COPY ./config.yaml /code/
+COPY ./start.sh /code/
 
 COPY ./src/ /code/src/       
 
