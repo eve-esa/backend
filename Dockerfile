@@ -12,7 +12,7 @@ COPY ./*.py /code/
 COPY ./requirements.txt /code/
 COPY ./config.yaml /code/
 COPY ./start.sh /code/
-
+RUN chmod +x /code/start.sh
 COPY ./src/ /code/src/       
 
 
