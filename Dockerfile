@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 # Copy all files from the main directory (but not directories) into /code
 COPY ./*.py /code/           
-COPY ./.env /code/
+# COPY ./.env /code/
 COPY ./requirements.txt /code/
 COPY ./config.yaml /code/
 
