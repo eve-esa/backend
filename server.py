@@ -30,7 +30,7 @@ def create_app(debug=False, **kwargs):
 
     @app.get(path="/")
     def main_page():
-        return "Qdrant vector search API"
+        return "Welcome to Eve"
 
     app.include_router(create_collection_router)
     app.include_router(health_check_router)

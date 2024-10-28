@@ -16,4 +16,4 @@ COPY ./src/ /code/src/
 
 # Command to run the FastAPI application
 # CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
-CMD ["fastapi", "run", "server.py", "--port", "80"]
+CMD ["fastapi", "run", "server.py", "--port", "${PORT:-8000}"]
