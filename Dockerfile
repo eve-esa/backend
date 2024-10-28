@@ -14,6 +14,10 @@ COPY ./config.yaml /code/
 
 COPY ./src/ /code/src/       
 
-# Command to run the FastAPI application
-# CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
-CMD ["fastapi", "run", "server.py", "--port", "${PORT:-8000}"]
+
+# Set the default port to 8000; Heroku will override this with its own PORT value
+ENV PORT=8000
+ENV HOST 0.0.0.0
+
+# Command to run the FastAPI application using uvicorn with dynamic port binding
+CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
