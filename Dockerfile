@@ -20,4 +20,5 @@ ENV PORT=8000
 ENV HOST 0.0.0.0
 
 # Command to run the FastAPI application using uvicorn with dynamic port binding
-CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
+# CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
+CMD ["./start.sh"]
