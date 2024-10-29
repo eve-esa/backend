@@ -32,7 +32,7 @@ def create_collection(request: GenerationRequest) -> Dict[str, Any]:
             k=request.k,
         )
         if not results:
-            raise HTTPException(status_code=404, detail="No documents found.")
+            print(f"No documents found for query : {request.query}")
 
         retrieved_documents = [
             result.payload.get("page_content", "") for result in results
