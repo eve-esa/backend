@@ -254,9 +254,12 @@ class VectorStoreManager:
             )
 
             # get only response from "Answer:" on
-            output[0]["generated_text"] = (
-                output[0]["generated_text"].split("Answer:", 1)[1].strip()
-            )
+            try:
+                output[0]["generated_text"] = (
+                    output[0]["generated_text"].split("Answer:", 1)[1].strip()
+                )
+            except:
+                print("Cant find answer in answer")
             return output
 
 
