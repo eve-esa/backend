@@ -195,7 +195,9 @@ class VectorStoreManager:
         return self._get_unique_source_documents(results, min_docs=k)
 
     # TODO: this should be updated to custom model
-    def generate_answer(self, query: str, context: str, llm="llama-3.1"):
+    def generate_answer(
+        self, query: str, context: str, llm="llama-3.1", max_new_tokens=150
+    ):
         prompt = generate_prompt_1(query=query, context=context)
 
         if llm == "openai":
@@ -215,7 +217,7 @@ class VectorStoreManager:
             API_URL = (
                 "https://kr3w718lc87a92az.us-east-1.aws.endpoints.huggingface.cloud"
             )
-            headers = {"Authorization": f"Bearer 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"}
+            headers = {"Authorization": f"Bearer {HUGGINGFACEHUB_API_TOKEN}"}
 
             def query(payload):
                 response = requests.post(API_URL, headers=headers, json=payload)
@@ -225,6 +227,35 @@ class VectorStoreManager:
                 {
                     "inputs": f"{prompt}",
                 }
+            )
+            return output
+
+        elif llm == "eve-instruct-8B":
+            context = context[: (1024 - max_new_tokens) * 4]
+            prompt = generate_prompt_1(query=query, context=context)
+            API_URL = (
+                "https://pu3i48lp4d9ovtwg.us-east-1.aws.endpoints.huggingface.cloud"
+            )
+            headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {HUGGINGFACEHUB_API_TOKEN}",
+                "Content-Type": "application/json",
+            }
+
+            def query(payload):
+                response = requests.post(API_URL, headers=headers, json=payload)
+                return response.json()
+
+            output = query(
+                {
+                    "inputs": f"{prompt}",
+                    "parameters": {"max_new_tokens": max_new_tokens},
+                }
+            )
+
+            # get only response from "Answer:" on
+            output[0]["generated_text"] = (
+                output[0]["generated_text"].split("Answer:", 1)[1].strip()
             )
             return output
 

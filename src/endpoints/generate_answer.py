@@ -15,6 +15,7 @@ class GenerationRequest(BaseModel):
     k: int = 3
     score_threshold: float = Field(0.7, ge=0.0, le=1.0)  # Ensure it's between 0 and 1
     get_unique_docs: bool = True
+    max_new_tokens: int = Field(150, ge=100, le=1200)
 
 
 @router.post("/generate_answer", response_model=Dict[str, Any])
@@ -40,7 +41,10 @@ def create_collection(request: GenerationRequest) -> Dict[str, Any]:
         context = "\n".join(retrieved_documents)
 
         answer = vector_store.generate_answer(
-            query=request.query, context=context, llm=request.llm
+            query=request.query,
+            context=context,
+            llm=request.llm,
+            max_new_tokens=request.max_new_tokens,
         )
 
     except Exception as e:
