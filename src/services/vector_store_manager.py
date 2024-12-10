@@ -272,7 +272,7 @@ class VectorStoreManager:
                             "sampling_params": {"max_tokens": max_new_tokens},
                         }
                     },
-                    timeout=120,
+                    timeout=config.get_instruct_llm_timeout(),
                 )
                 return " ".join(response[0]["choices"][0]["tokens"])
             except TimeoutError:
