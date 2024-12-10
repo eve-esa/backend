@@ -29,17 +29,37 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 
+
 runpod.api_key = RUNPOD_API_KEY
 
 
 # CONFIG YAML
+import yaml
+
+
 class Config:
     def __init__(self, config_path: str = "config.yaml"):
         with open(config_path, "r") as file:
             self.config = yaml.safe_load(file)
 
-    def get_completion_llm_id(self):
-        return self.config["runpod"]["completion_llm_id"]
+    def get(self, *keys, default=None):
+        """Generalized method to get a value from a nested dictionary."""
+        value = self.config
+        try:
+            for key in keys:
+                value = value[key]
+            return value
+        except (KeyError, TypeError):
+            return default
 
-    def get_timeout(self):
-        return self.config["runpod"]["timeout"]
+    def get_completion_llm_id(self):
+        return self.get("runpod", "completion_llm", "id")
+
+    def get_completion_llm_timeout(self):
+        return self.get("runpod", "completion_llm", "timeout")
+
+    def get_instruct_llm_id(self):
+        return self.get("runpod", "instruct_llm", "id")
+
+    def get_instruct_llm_timeout(self):
+        return self.get("runpod", "instruct_llm", "timeout")

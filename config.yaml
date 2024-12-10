@@ -1,3 +1,10 @@
+# runpod:
+#   completion_llm_id: "vllm-ii509mysu8npnj"
+#   timeout: 180
 runpod:
-  completion_llm_id: "vllm-ii509mysu8npnj"
-  timeout: 180
+  completion_llm:
+    id: "vllm-ii509mysu8npnj"
+    timeout: 180
+  instruct_llm:
+    id: "vllm-tgzegx5x5g1mr6"
+    timeout: 180

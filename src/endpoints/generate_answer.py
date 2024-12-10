@@ -8,14 +8,14 @@ router = APIRouter()
 
 
 class GenerationRequest(BaseModel):
-    query: str
-    collection_name: str
+    query: str = "What is ESA?"
+    collection_name: str = "test_llm4eo"
     llm: str = "openai"
     embeddings_model: str = "mistral-embed"
     k: int = 3
     score_threshold: float = Field(0.7, ge=0.0, le=1.0)  # Ensure it's between 0 and 1
     get_unique_docs: bool = True
-    max_new_tokens: int = Field(150, ge=100, le=1200)
+    max_new_tokens: int = Field(1500, ge=100, le=8192)
 
 
 @router.post("/generate_answer", response_model=Dict[str, Any])

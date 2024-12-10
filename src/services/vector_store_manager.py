@@ -1,37 +1,31 @@
+import runpod
+import os
 import qdrant_client
 from qdrant_client import QdrantClient
 from qdrant_client.conversions import common_types as types
-from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
-import os
-import json
 import requests
 import openai
-from langchain_openai import OpenAI
 from uuid import uuid4
-from qdrant_client.http.models import FilterSelector
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
 from typing import Any, List
 from langchain_qdrant import QdrantVectorStore
-from langchain.embeddings.openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from src.services.utils import get_embeddings_model
-from langchain_qdrant import RetrievalMode
 
 
-from langchain import VectorDBQA, OpenAI
 from collections import OrderedDict
 from src.config import (
-    QDRANT_URL,
-    QDRANT_API_KEY,
-    MISTRAL_API_KEY,
-    OPENAI_API_KEY,
+    RUNPOD_API_KEY,
     HUGGINGFACEHUB_API_TOKEN,
 )
-from src.services.system_prompts import generate_prompt_1
+from src.services.system_prompts import generate_prompt
+from src.config import Config
+
+config = Config()
 
 
 class VectorStoreManager:
@@ -198,7 +192,7 @@ class VectorStoreManager:
     def generate_answer(
         self, query: str, context: str, llm="llama-3.1", max_new_tokens=150
     ):
-        prompt = generate_prompt_1(query=query, context=context)
+        prompt = generate_prompt(query=query, context=context)
 
         if llm == "openai":
             messages_pompt = []
@@ -232,7 +226,7 @@ class VectorStoreManager:
 
         elif llm == "eve-instruct-8B":
             context = context[: (1024 - max_new_tokens) * 4]
-            prompt = generate_prompt_1(query=query, context=context)
+            prompt = generate_prompt(query=query, context=context)
             API_URL = (
                 "https://pu3i48lp4d9ovtwg.us-east-1.aws.endpoints.huggingface.cloud"
             )
@@ -261,6 +255,30 @@ class VectorStoreManager:
             except:
                 print("Cant find answer in answer")
             return output
+
+        ## DEPLOYED ON RUNPOD
+        elif llm == "eve-instruct-v0.1":
+            context = context[: (1024 - max_new_tokens) * 4]
+            prompt = generate_prompt(query=query, context=context)
+
+            runpod.api_key = RUNPOD_API_KEY
+            endpoint = runpod.Endpoint(config.get_instruct_llm_id())
+
+            try:
+                response = endpoint.run_sync(
+                    {
+                        "input": {
+                            "prompt": f"{prompt}",
+                            "sampling_params": {"max_tokens": max_new_tokens},
+                        }
+                    },
+                    timeout=120,
+                )
+                return " ".join(response[0]["choices"][0]["tokens"])
+            except TimeoutError:
+                print("Job timed out.")
+            except Exception as e:
+                print(f"{str(e)}")
 
 
 if __name__ == "__main__":
