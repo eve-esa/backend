@@ -33,15 +33,18 @@ def create_app(debug=False, **kwargs):
     def main_page():
         return "Welcome to Eve"
 
-    app.include_router(create_collection_router)
-    app.include_router(health_check_router)
-    app.include_router(delete_collection_router)
-    app.include_router(add_document_list_router)
-    app.include_router(delete_document_router)
-    app.include_router(retrieve_documents_router)
-    app.include_router(generate_answer_router)
-    app.include_router(completion_llm_router)
-    app.include_router(list_collections_llm_router)
+    app.include_router(create_collection_router, tags=["Collections"])
+    app.include_router(delete_collection_router, tags=["Collections"])
+    app.include_router(list_collections_llm_router, tags=["Collections"])
+
+    app.include_router(add_document_list_router, tags=["Documents"])
+    app.include_router(delete_document_router, tags=["Documents"])
+    app.include_router(retrieve_documents_router, tags=["Documents"])
+
+    app.include_router(generate_answer_router, tags=["LLM"])
+    app.include_router(completion_llm_router, tags=["LLM"])
+
+    app.include_router(health_check_router, tags=["Health"])
 
     return app
 

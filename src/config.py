@@ -5,21 +5,8 @@ from dotenv import load_dotenv
 import runpod
 import logging
 
-# LOGGING
-# logging.basicConfig(
-#     filename="./results.log",
-#     level=logging.INFO,
-#     filemode="w",
-#     format="%(name)s - %(levelname)s - %(message)s",
-# )
-# logging.info("Logging is set up and working!")
 
-
-# def get_logger(name: str = __name__) -> logging.Logger:
-#     return logging.getLogger(name)
-
-
-load_dotenv()
+load_dotenv(override=True)
 
 # ENV VARIABLES
 QDRANT_URL = os.getenv("QDRANT_URL")

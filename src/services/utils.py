@@ -4,6 +4,17 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from typing import Union, Tuple
 from langchain_mistralai import MistralAIEmbeddings
 from src.config import MISTRAL_API_KEY, OPENAI_API_KEY
+import tempfile
+from fastapi import UploadFile
+
+
+async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
+    """Save an uploaded file to a temporary file and return the path."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+        contents = await upload_file.read()
+        temp_file.write(contents)
+        temp_file.flush()
+        return temp_file.name
 
 
 def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
