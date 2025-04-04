@@ -16,7 +16,7 @@ class CollectionRequest(BaseModel):
 def create_collection(request: CollectionRequest):
     collection_name = request.collection_name
     vector_store = VectorStoreManager(
-        QDRANT_URL, QDRANT_API_KEY, embeddings_model="text-embedding-3-small"
+        QDRANT_URL, QDRANT_API_KEY, embeddings_model=request.embeddings_model
     )
 
     collections_name_list = vector_store.list_collections_names()

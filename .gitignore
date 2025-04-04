@@ -1,5 +1,6 @@
 rag_data.txt
-
+.DS_Store
+src/.DS_Store
 .vscode
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -10,6 +10,7 @@ from src.endpoints.delete_document import router as delete_document_router
 from src.endpoints.retrieve_documents import router as retrieve_documents_router
 from src.endpoints.generate_answer import router as generate_answer_router
 from src.endpoints.completion_llm import router as completion_llm_router
+from src.endpoints.list_collections import router as list_collections_llm_router
 
 origins = [
     "http://localhost",
@@ -40,6 +41,7 @@ def create_app(debug=False, **kwargs):
     app.include_router(retrieve_documents_router)
     app.include_router(generate_answer_router)
     app.include_router(completion_llm_router)
+    app.include_router(list_collections_llm_router)
 
     return app
 
