@@ -6,5 +6,5 @@ runpod:
     id: "vllm-ii509mysu8npnj"
     timeout: 200
   instruct_llm:
-    id: "vllm-tgzegx5x5g1mr6"
+    id: "eswcv2flgp2dun"
     timeout: 200
