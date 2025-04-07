@@ -4,7 +4,7 @@ def generate_prompt(query: str, context: str, history_context: str = "") -> str:
     Givent the following context: {context}.
     
     
-    This is the previous conversation: {history_context}
+    This is the previous conversation: \n {history_context}
     Please reply in a precise and accurate manner to this query: {query}
     
     Answer:

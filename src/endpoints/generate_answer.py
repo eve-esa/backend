@@ -38,7 +38,16 @@ def create_collection(
         user_id = request.cookies.get("user_id")
         if not user_id:
             user_id = str(uuid.uuid4())
-            response.set_cookie(key="user_id", value=user_id)
+            response.set_cookie(
+                key="user_id",
+                value=user_id,
+                httponly=True,
+                samesite="Lax",
+                path="/",
+                max_age=60 * 60 * 24 * 30,  # 30 days
+            )
+
+        print(f"[SESSION] Using user_id: {user_id}")  # Debug/log
 
         user_messages = user_conversations[user_id]
         user_messages.append({"role": "user", "content": request_data.query})
@@ -91,16 +100,15 @@ def create_collection(
     return {"answer": answer, "documents": results, "use_rag": True}
 
 
-# Helper function to save messages to a log file per user
+# Save only the last turn in user logs
 def _log_user_conversation(user_id: str, messages: list):
     timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
     log_path = os.path.join(LOG_DIR, f"{user_id}.json")
 
     if len(messages) < 2:
-        return  # Not enough data to log a conversation turn
+        return
 
-    # Get the last user/assistant messages only
-    last_turn = messages[-6:]  # Should be: [{"role": "user"}, {"role": "assistant"}]
+    last_turn = messages[-2:]
 
     log_entry = {"timestamp": timestamp, "turn": last_turn}
 
@@ -111,13 +119,11 @@ def _log_user_conversation(user_id: str, messages: list):
                     data = json.load(f)
                 except json.JSONDecodeError:
                     data = []
-
                 data.append(log_entry)
                 f.seek(0)
                 json.dump(data, f, indent=2)
         else:
             with open(log_path, "w", encoding="utf-8") as f:
                 json.dump([log_entry], f, indent=2)
-
     except Exception as log_err:
-        print(f"[LOG ERROR] Failed to write conversation log for {user_id}: {log_err}")
+        print(f"[LOG ERROR] Failed to write log for {user_id}: {log_err}")

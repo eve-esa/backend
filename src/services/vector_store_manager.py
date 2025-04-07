@@ -218,7 +218,9 @@ class VectorStoreManager:
         ## DEPLOYED ON RUNPOD
         elif llm == "eve-instruct-v0.1":
             history_context = "\n".join(
-                [f'{m["role"]}: {m["content"]}' for m in history_messages]
+                [
+                    f'{m["role"]}: {m["content"]}' for m in history_messages[-10:-1]
+                ]  # prevopus memory from -10 to -1
             )
             context = (
                 context if context != "" else context[: (1024 - max_new_tokens) * 4]
