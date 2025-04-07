@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 class CollectionRequest(BaseModel):
-    collection_name: str
+    collection_name: str = "esa-nasa-workshop"
     embeddings_model: str = "text-embedding-3-small"
 
 

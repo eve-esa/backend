@@ -9,9 +9,9 @@ router = APIRouter()
 
 class GenerationRequest(BaseModel):
     query: str = "What is ESA?"
-    collection_name: str = "test_llm4eo"
+    collection_name: str = "esa-nasa-workshop"
     llm: str = "openai"
-    embeddings_model: str = "mistral-embed"
+    embeddings_model: str = "text-embedding-3-small"
     k: int = 3
     score_threshold: float = Field(0.7, ge=0.0, le=1.0)  # Ensure it's between 0 and 1
     get_unique_docs: bool = True

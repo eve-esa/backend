@@ -7,9 +7,9 @@ router = APIRouter()
 
 
 class RetrieveRequest(BaseModel):
-    query: str
-    collection_name: str = "test_llm4eo"
-    embeddings_model: str = "mistral-embed"
+    query: str = "What is ESA?"
+    collection_name: str = "esa-nasa-workshop"
+    embeddings_model: str = "text-embedding-3-small"
     score_threshold: float = 0.7
     k: int = 3
 

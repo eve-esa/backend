@@ -9,11 +9,11 @@ router = APIRouter()
 
 @router.delete("/delete_document_list", status_code=status.HTTP_200_OK)
 async def delete_document_list(
-    collection_name: str,
+    collection_name: str = "esa-nasa-workshop",
     embeddings_model: str = "text-embedding-3-small",
     document_list: List[
         str
-    ] = [],  # List of documents, can be passed as comma-separated values
+    ] = [],  # List of documents source_name, can be passed as comma-separated values
 ):
     # Initialize the vector store manager with necessary parameters
     vector_store = VectorStoreManager(
@@ -26,7 +26,7 @@ async def delete_document_list(
     for source in document_list:
         try:
             vector_store.delete_docs_by_metadata_filter(
-                collection_name=collection_name, metadata={"source": source}
+                collection_name=collection_name, metadata={"source_name": source}
             )
         except Exception as e:
             # Collect any errors encountered during the deletion process

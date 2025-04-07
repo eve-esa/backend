@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 @router.delete("/delete_collection")
-def delete_collection(collection_name: str):
+def delete_collection(collection_name: str = "esa-nasa-workshop"):
     vector_store = VectorStoreManager(
         QDRANT_URL, QDRANT_API_KEY, embeddings_model="fake"
     )
