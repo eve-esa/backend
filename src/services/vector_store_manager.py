@@ -14,7 +14,9 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Points
 from typing import Any, List
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
+from openai import OpenAI
 from src.services.utils import get_embeddings_model
+from src.config import OPENAI_API_KEY
 
 
 from collections import OrderedDict
@@ -190,12 +192,18 @@ class VectorStoreManager:
 
     # TODO: this should be updated to custom model
     def generate_answer(
-        self, query: str, context: str, llm="llama-3.1", max_new_tokens=150
+        self,
+        query: str,
+        context: str,
+        llm="llama-3.1",
+        max_new_tokens=150,
+        history_messages=[],
     ):
+        print("HISTORY: ", history_messages)
         prompt = generate_prompt(query=query, context=context)
 
         if llm == "openai":
-            messages_pompt = []
+            messages_pompt = history_messages
             messages_pompt += [{"role": "user", "content": prompt}]
 
             response = openai.chat.completions.create(
@@ -207,62 +215,21 @@ class VectorStoreManager:
             message = response.choices[0].message.content
             return message
 
-        elif llm == "llama-3.1":
-            API_URL = (
-                "https://kr3w718lc87a92az.us-east-1.aws.endpoints.huggingface.cloud"
-            )
-            headers = {"Authorization": f"Bearer {HUGGINGFACEHUB_API_TOKEN}"}
-
-            def query(payload):
-                response = requests.post(API_URL, headers=headers, json=payload)
-                return response.json()
-
-            output = query(
-                {
-                    "inputs": f"{prompt}",
-                }
-            )
-            return output
-
-        elif llm == "eve-instruct-8B":
-            context = context[: (1024 - max_new_tokens) * 4]
-            prompt = generate_prompt(query=query, context=context)
-            API_URL = (
-                "https://pu3i48lp4d9ovtwg.us-east-1.aws.endpoints.huggingface.cloud"
-            )
-            headers = {
-                "Accept": "application/json",
-                "Authorization": f"Bearer {HUGGINGFACEHUB_API_TOKEN}",
-                "Content-Type": "application/json",
-            }
-
-            def query(payload):
-                response = requests.post(API_URL, headers=headers, json=payload)
-                return response.json()
-
-            output = query(
-                {
-                    "inputs": f"{prompt}",
-                    "parameters": {"max_new_tokens": max_new_tokens},
-                }
-            )
-
-            # get only response from "Answer:" on
-            try:
-                output[0]["generated_text"] = (
-                    output[0]["generated_text"].split("Answer:", 1)[1].strip()
-                )
-            except:
-                print("Cant find answer in answer")
-            return output
-
         ## DEPLOYED ON RUNPOD
         elif llm == "eve-instruct-v0.1":
-            context = context[: (1024 - max_new_tokens) * 4]
-            prompt = generate_prompt(query=query, context=context)
+            history_context = "\n".join(
+                [f'{m["role"]}: {m["content"]}' for m in history_messages]
+            )
+            context = (
+                context if context != "" else context[: (1024 - max_new_tokens) * 4]
+            )
+            prompt = generate_prompt(
+                query=query, context=context, history_context=history_context
+            )
 
             runpod.api_key = RUNPOD_API_KEY
             endpoint = runpod.Endpoint(config.get_instruct_llm_id())
+            print("PROMPT: ", prompt)
 
             try:
                 response = endpoint.run_sync(
@@ -279,6 +246,26 @@ class VectorStoreManager:
                 print("Job timed out.")
             except Exception as e:
                 print(f"{str(e)}")
+
+    def should_use_rag(self, query: str):
+        prompt = f"""
+        You are a decision maker. You need to decide if you should use RAG or not.
+        I the question is related to technical earth observation, climate, space, space agencies os similars you need to use RAG
+        Reply with only 'yes' or 'no'.
+        
+        query: {query}
+        answer:
+        """
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        response = client.responses.create(
+            model="gpt-4o",
+            input=prompt,
+        )
+        print("REPSONSE: ", response.output[0].content[0].text)
+        if response.output[0].content[0].text == "yes":
+            return True
+        return False
 
 
 if __name__ == "__main__":
