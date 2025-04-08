@@ -13,7 +13,7 @@ async def delete_document_list(
     embeddings_model: str = "text-embedding-3-small",
     document_list: List[
         str
-    ] = [],  # List of documents source_name, can be passed as comma-separated values
+    ] = [],  # List of documents source_name, can be passed as comma-separated values, e.g ["indus"]
 ):
     # Initialize the vector store manager with necessary parameters
     vector_store = VectorStoreManager(

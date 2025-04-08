@@ -16,3 +16,4 @@ rich==13.9.2
 openai==1.70.0
 runpod==1.7.3
 pyyaml==6.0.2
+pypdf==5.4.0
