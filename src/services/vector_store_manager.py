@@ -197,13 +197,11 @@ class VectorStoreManager:
         context: str,
         llm="llama-3.1",
         max_new_tokens=150,
-        history_messages=[],
     ):
-        print("HISTORY: ", history_messages)
         prompt = generate_prompt(query=query, context=context)
 
         if llm == "openai":
-            messages_pompt = history_messages
+            messages_pompt = []
             messages_pompt += [{"role": "user", "content": prompt}]
 
             response = openai.chat.completions.create(
@@ -217,16 +215,11 @@ class VectorStoreManager:
 
         ## DEPLOYED ON RUNPOD
         elif llm == "eve-instruct-v0.1":
-            history_context = "\n".join(
-                [
-                    f'{m["role"]}: {m["content"]}' for m in history_messages[-10:-1]
-                ]  # prevopus memory from -10 to -1
-            )
             context = (
                 context if context != "" else context[: (1024 - max_new_tokens) * 4]
             )
             prompt = generate_prompt(
-                query=query, context=context, history_context=history_context
+                query=query, context=context
             )
 
             runpod.api_key = RUNPOD_API_KEY
@@ -248,27 +241,6 @@ class VectorStoreManager:
                 print("Job timed out.")
             except Exception as e:
                 print(f"{str(e)}")
-
-    def should_use_rag(self, query: str):
-        prompt = f"""
-        You are a decision maker. You need to decide if you should use RAG or not.
-        I the question is related to technical earth observation, climate, space, space agencies os similars you need to use RAG
-        Reply with only 'yes' or 'no'.
-        
-        query: {query}
-        answer:
-        """
-        client = OpenAI(api_key=OPENAI_API_KEY)
-
-        response = client.responses.create(
-            model="gpt-4o",
-            input=prompt,
-        )
-        print("REPSONSE: ", response.output[0].content[0].text)
-        if response.output[0].content[0].text == "yes":
-            return True
-        return False
-
 
 if __name__ == "__main__":
     pass

@@ -81,42 +81,14 @@ def create_collection(request: GenerationRequest) -> Dict[str, Any]:
             get_rag_context(vector_store, request) if is_rag else ("", [])
         )
         answer = vector_store.generate_answer(
-            query=request_data.query,
+            query=request.query,
             context=context,
-            llm=request_data.llm,
-            max_new_tokens=request_data.max_new_tokens,
-            history_messages=user_messages,
+            llm=request.llm,
+            max_new_tokens=request.max_new_tokens,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {"answer": answer, "documents": results, "use_rag": True}
+    return {"answer": answer, "documents": results, "use_rag": is_rag}
 
 
-# Save only the last turn in user logs
-def _log_user_conversation(user_id: str, messages: list):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(LOG_DIR, f"{user_id}.json")
-
-    if len(messages) < 2:
-        return
-
-    last_turn = messages[-2:]
-
-    log_entry = {"timestamp": timestamp, "turn": last_turn}
-
-    try:
-        if os.path.exists(log_path):
-            with open(log_path, "r+", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    data = []
-                data.append(log_entry)
-                f.seek(0)
-                json.dump(data, f, indent=2)
-        else:
-            with open(log_path, "w", encoding="utf-8") as f:
-                json.dump([log_entry], f, indent=2)
-    except Exception as log_err:
-        print(f"[LOG ERROR] Failed to write log for {user_id}: {log_err}")
