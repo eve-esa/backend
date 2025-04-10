@@ -8,7 +8,7 @@ router = APIRouter()
 @router.get("/list-collections")
 def list_collections():
     try:
-        vector_store_manager = VectorStoreManager(QDRANT_URL, QDRANT_API_KEY)
+        vector_store_manager = VectorStoreManager()
         collection_names: list[str] = vector_store_manager.list_collections_names()
 
         if not collection_names:

@@ -1,6 +1,3 @@
-# runpod:
-#   completion_llm_id: "vllm-ii509mysu8npnj"
-#   timeout: 180
 runpod:
   instruct_llm:
     id: "eswcv2flgp2dun"

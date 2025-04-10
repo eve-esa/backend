@@ -6,7 +6,6 @@ from typing import Union, Tuple, List
 import tempfile
 from fastapi import UploadFile
 import runpod
-
 from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
 
 async def save_upload_file_to_temp(upload_file: UploadFile) -> str:

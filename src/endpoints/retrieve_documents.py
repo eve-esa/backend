@@ -18,9 +18,7 @@ class RetrieveRequest(BaseModel):
 async def retrieve_documents(request: RetrieveRequest):
     try:
         # Initialize VectorStoreManager with the embeddings model provided in the request
-        vector_store = VectorStoreManager(
-            QDRANT_URL, QDRANT_API_KEY, embeddings_model=request.embeddings_model
-        )
+        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 
         # Retrieve documents using the parameters from the request body
         results = vector_store.retrieve_documents_from_query(

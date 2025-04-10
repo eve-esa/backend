@@ -1,5 +1,5 @@
 """
-TODO : Add logging system
+Consider deleting
 """
 
 from fastapi import APIRouter, HTTPException

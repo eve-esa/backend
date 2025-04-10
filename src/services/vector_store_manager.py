@@ -1,36 +1,32 @@
+import openai
+import logging
 import runpod
-import os
+from collections import OrderedDict
+from uuid import uuid4
+from typing import Any, List
+
+from langchain_core.documents import Document
+from langchain_qdrant import QdrantVectorStore
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant.qdrant import QdrantVectorStoreError
+
 import qdrant_client
 from qdrant_client import QdrantClient
 from qdrant_client.conversions import common_types as types
-from langchain_core.documents import Document
-from langchain_qdrant import QdrantVectorStore
-from langchain_qdrant.qdrant import QdrantVectorStoreError
-import requests
-import openai
-from uuid import uuid4
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
-from typing import Any, List
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from openai import OpenAI
+
 from src.services.utils import get_embeddings_model, runpod_api_request
-from src.config import OPENAI_API_KEY
-from langchain_huggingface import HuggingFaceEmbeddings
-import logging
-
-
-from collections import OrderedDict
-from src.config import (
-    RUNPOD_API_KEY,
-    HUGGINGFACEHUB_API_TOKEN,
-)
 from src.services.system_prompts import generate_prompt
 from src.config import Config
 
-config = Config()
+from src.config import (
+    QDRANT_URL,
+    RUNPOD_API_KEY,
+    QDRANT_API_KEY
+    
+)
 
+config = Config()
 
 class VectorStoreManager:
     """When initializing this class, use the same embedding function you \
@@ -38,11 +34,9 @@ class VectorStoreManager:
 
     def __init__(
         self,
-        qdrant_url: str,
-        qdrant_api_key: str,
-        embeddings_model: str = "text-embedding-3-small",  # "sentence-transformers/paraphrase-TinyBERT-L6-v2",
+        embeddings_model: str = "nasa-impact/nasa-smd-ibm-v0.1",  # "sentence-transformers/paraphrase-TinyBERT-L6-v2",
     ) -> None:
-        self.client = QdrantClient(qdrant_url, api_key=qdrant_api_key)
+        self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY)
         self.embeddings_model = embeddings_model
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model=embeddings_model, return_embeddings_size=True

@@ -1,13 +1,13 @@
----
-title: Eove
-emoji: 👁
-colorFrom: red
-colorTo: purple
-sdk: streamlit
-sdk_version: 1.35.0
-app_file: main.py
-pinned: false
-license: apache-2.0
----
+# EVE APIs
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+Build image from docker file
+
+```
+docker build -t eve-image .
+```
+
+Run container based on image
+
+```
+docker run -d -p 8000:8000 --name eve-container --env-file .env eve-image
+```
