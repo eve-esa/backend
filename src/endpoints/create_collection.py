@@ -9,7 +9,7 @@ router = APIRouter()
 
 class CollectionRequest(BaseModel):
     collection_name: str = "esa-nasa-workshop"
-    embeddings_model: str = "text-embedding-3-small"
+    embeddings_model: str = "text-embedding-3-small" #nasa-impact/nasa-smd-ibm-v0.1
 
 
 @router.post("/create_collection")

@@ -22,10 +22,13 @@ class GenerationRequest(BaseModel):
 
 def use_rag(query: str) -> bool:
     prompt = f"""
-    You should decide if using RAG or not to answer to a given query. Use RAG when the query
-    is abuot earth science, space science, climate, space agencies and similar topis.
-    You should answer only with 'yes' or 'no'.
-    
+    Decide whether to use RAG to answer the given query. Follow these rules:
+    - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", "hello", "how are you", "what can you do", or "tell me a joke".
+    - USE RAG for queries related to earth science, space science, climate, space agencies, or similar scientific topics.
+    - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What’s the thermal conductivity of basalt?" or "How does orbital decay work?").
+    - If unsure whether RAG is needed, default to USING RAG.
+    - Respond only with 'yes' or 'no'.
+
     Query: {query}
     """
 

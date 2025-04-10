@@ -50,3 +50,9 @@ class Config:
 
     def get_instruct_llm_timeout(self):
         return self.get("runpod", "instruct_llm", "timeout")
+
+    def get_indus_embedder_id(self):
+        return self.get("runpod", "indus_embedder", "id")
+    
+    def get_indus_embedder_timeout(self):
+        return self.get("runpod", "indus_embedder", "timeout")
