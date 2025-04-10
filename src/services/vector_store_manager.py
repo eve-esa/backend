@@ -15,8 +15,10 @@ from typing import Any, List
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from openai import OpenAI
-from src.services.utils import get_embeddings_model
+from src.services.utils import get_embeddings_model, runpod_api_request
 from src.config import OPENAI_API_KEY
+from langchain_huggingface import HuggingFaceEmbeddings
+import logging
 
 
 from collections import OrderedDict
@@ -87,7 +89,7 @@ class VectorStoreManager:
 
         uuids = [str(uuid4()) for _ in range(len(document_list))]
         try:
-            vector_store = QdrantVectorStore(
+            vector_store : QdrantVectorStore = QdrantVectorStore(
                 client=self.client,
                 collection_name=collection_name,
                 embedding=self.embeddings,
@@ -171,7 +173,20 @@ class VectorStoreManager:
     ):
 
         embeddings = get_embeddings_model(embeddings_model)
-        query_vector = embeddings.embed_query(query)
+        query_vector : List[float] = [] 
+        if isinstance(embeddings, HuggingFaceEmbeddings) and embeddings.model_name == "nasa-impact/nasa-smd-ibm-v0.1":
+           logging.info("Using Runpod API for embedding", )
+           
+           #wait the function to be completed
+           query_vector = runpod_api_request(
+               endpoint_id= Config.get_indus_embedder_id(),
+               #url="https://api.runpod.ai/v2/c9zv853ctjg5ps/run",
+               model=embeddings.model_name,
+               user_input=query
+               )
+           print(query_vector)
+        else:
+            query_vector  =  embeddings.embed_query(query)
 
         if not get_unique_docs:
             results = self.client.search(

@@ -1,12 +1,13 @@
 from langchain_core.embeddings import FakeEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
-from typing import Union, Tuple
 from langchain_mistralai import MistralAIEmbeddings
-from src.config import MISTRAL_API_KEY, OPENAI_API_KEY
+from typing import Union, Tuple, List
 import tempfile
 from fastapi import UploadFile
+import runpod
 
+from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
 
 async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
     """Save an uploaded file to a temporary file and return the path."""
@@ -45,7 +46,40 @@ def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
         embeddings_size = openai_embedding_model_list[model]
     else:
         embeddings = HuggingFaceEmbeddings(model_name=model)
-        embeddings_size = embeddings.client[1].word_embedding_dimension
+        embeddings_size = embeddings._client[1].word_embedding_dimension
     if not return_embeddings_size:
         return embeddings
     return embeddings, embeddings_size
+
+runpod.api_key = RUNPOD_API_KEY
+def runpod_api_request(endpoint_id: str, model: str, user_input: str, timeout: int = 60) -> List[float]:
+    """Return only embeddings as a vector using the RunPod library. Prints errors if they occur."""
+    # Prepare the input payload matching your original structure
+    payload = {
+        "input": {
+            "model": model,
+            "input": user_input
+        }
+    }
+    
+    try:
+        # Create an endpoint instance
+        endpoint = runpod.Endpoint(endpoint_id)
+        
+        # Submit the job
+        run_request = endpoint.run(payload)
+        print(f"Job submitted: {run_request.job_id}")
+        
+        # Poll for the output with a timeout
+        result = run_request.output(timeout=timeout)        
+        embedding = result["data"][0]["embedding"]
+        
+        if not isinstance(embedding, list) or not all(isinstance(x, (int, float)) for x in embedding):
+            raise ValueError("Embedding is not a valid list of numbers")
+        
+        print(f"Job completed: {run_request.job_id}")
+        return embedding
+    
+    except Exception as e:
+        print(f"Error: {e}")
+        return []
