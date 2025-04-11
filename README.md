@@ -24,3 +24,5 @@ OPENAI_API_KEY = ""
 HUGGINGFACEHUB_API_TOKEN = ""
 RUNPOD_API_KEY = ""
 ```
+
+Then access the http://localhost:8000/docs to visualize the endpoits.
