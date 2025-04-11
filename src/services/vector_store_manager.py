@@ -21,7 +21,6 @@ from src.config import (
     OPENAI_API_KEY,
     QDRANT_URL,
     QDRANT_API_KEY
-
 )
 
 config = Config()

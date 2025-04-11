@@ -1,3 +1,9 @@
 #!/bin/bash
-PORT=${PORT:-8000}  # Use 8000 if PORT is unset
-uvicorn server:app --host 0.0.0.0 --port "$PORT"
+PORT=${PORT:-8000}
+WORKERS=${WORKERS:-2}
+
+exec gunicorn server:app \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --bind 0.0.0.0:$PORT \
+  --workers $WORKERS \
+  --timeout 60
