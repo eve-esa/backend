@@ -1,9 +1,11 @@
+"""Endpoint to generate an answer using a language model and vector store."""
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
 from openai import Client
 from pydantic import BaseModel, Field
 
 from src.services.vector_store_manager import VectorStoreManager
+from src.services.llm_manager import LLMManager 
 from src.config import QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
 
 # Constants
@@ -33,37 +35,6 @@ class GenerationRequest(BaseModel):
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
 
 
-def use_rag(query: str) -> bool:
-    prompt = f"""
-    Decide whether to use RAG to answer the given query. Follow these rules:
-    - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", "hello", "how are you", "what can you do", or "tell me a joke".
-    - USE RAG for queries related to earth science, space science, climate, space agencies, or similar scientific topics.
-    - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What’s the thermal conductivity of basalt?" or "How does orbital decay work?").
-    - If unsure whether RAG is needed, default to USING RAG.
-    - Respond only with 'yes' or 'no'.
-
-    Query: {query}
-    """
-
-    response = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=10,
-        temperature=0,
-    )
-
-    if response.choices:
-        answer = response.choices[0].message.content.strip()
-        if answer.lower() == "yes":
-            print("I am using rag...")
-            return True
-        elif answer.lower() == "no":
-            print("I am not using rag...")
-            return False
-        else:
-            raise ValueError("Unexpected response from OpenAI API")
-
-
 def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> str:
@@ -86,18 +57,20 @@ def get_rag_context(
 
 @router.post("/generate_answer", response_model=Dict[str, Any])
 def create_collection(request: GenerationRequest) -> Dict[str, Any]:
+    llm_manager = LLMManager()
+    
     try:
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-        is_rag: bool = use_rag(request.query)
-        context, results = (
-            get_rag_context(vector_store, request) if is_rag else ("", [])
-        )
-        answer = vector_store.generate_answer(
+        is_rag = vector_store.use_rag(request.query)
+        context, results = (get_rag_context(vector_store, request) if is_rag else ("", []))
+        
+        answer = llm_manager.generate_answer(
             query=request.query,
             context=context,
             llm=request.llm,
             max_new_tokens=request.max_new_tokens,
         )
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

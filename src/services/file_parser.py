@@ -1,20 +1,11 @@
 import os
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
-from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, Form
+from typing import List
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-from src.config import QDRANT_API_KEY, QDRANT_URL
-from src.services.vector_store_manager import VectorStoreManager
-from src.services.utils import save_upload_file_to_temp
 
 logger = logging.getLogger(__name__)
-
-
 
 @dataclass
 class FileParser:
@@ -40,7 +31,6 @@ class FileParser:
             logger.warning(f"Unsupported file type: {extension}")
             return []
         try:
-            # Since .load() is synchronous, wrap it in an async-compatible way
             return parser(file_path)
         except Exception as e:
             logger.error(f"Error parsing {extension} file: {str(e)}")

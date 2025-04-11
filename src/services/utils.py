@@ -1,12 +1,17 @@
+import tempfile
+import runpod
+from fastapi import UploadFile
+from typing import Union, Tuple, List
+
 from langchain_core.embeddings import FakeEmbeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
-from typing import Union, Tuple, List
-import tempfile
-from fastapi import UploadFile
-import runpod
+
 from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
+
+runpod.api_key = RUNPOD_API_KEY
+
 
 async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
     """Save an uploaded file to a temporary file and return the path."""
@@ -50,7 +55,6 @@ def get_embeddings_model(model: str, return_embeddings_size=False) -> Union[
         return embeddings
     return embeddings, embeddings_size
 
-runpod.api_key = RUNPOD_API_KEY
 def runpod_api_request(endpoint_id: str, model: str, user_input: str, timeout: int = 60) -> List[float]:
     """Return only embeddings as a vector using the RunPod library. Prints errors if they occur."""
     # Prepare the input payload matching your original structure

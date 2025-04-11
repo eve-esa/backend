@@ -1,6 +1,5 @@
-import openai
 import logging
-import runpod
+from openai import Client
 from collections import OrderedDict
 from uuid import uuid4
 from typing import Any, List
@@ -16,14 +15,13 @@ from qdrant_client.conversions import common_types as types
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 from src.services.utils import get_embeddings_model, runpod_api_request
-from src.services.system_prompts import generate_prompt
 from src.config import Config
 
 from src.config import (
+    OPENAI_API_KEY,
     QDRANT_URL,
-    RUNPOD_API_KEY,
     QDRANT_API_KEY
-    
+
 )
 
 config = Config()
@@ -42,6 +40,8 @@ class VectorStoreManager:
             model=embeddings_model, return_embeddings_size=True
         )
         self.collection = None
+        self.openai_client = Client(api_key=OPENAI_API_KEY)
+
 
     def create_collection(self, collection_name: str) -> None:
         vectors_config = qdrant_client.http.models.VectorParams(
@@ -173,7 +173,7 @@ class VectorStoreManager:
            
            #wait the function to be completed
            query_vector = runpod_api_request(
-               endpoint_id= Config.get_indus_embedder_id(),
+               endpoint_id= config.get_indus_embedder_id(),
                #url="https://api.runpod.ai/v2/c9zv853ctjg5ps/run",
                model=embeddings.model_name,
                user_input=query
@@ -198,58 +198,38 @@ class VectorStoreManager:
             score_threshold=score_threshold,
         )
         return self._get_unique_source_documents(results, min_docs=k)
+    
+    def use_rag(self, query: str) -> bool:
+        prompt = f"""
+        Decide whether to use RAG to answer the given query. Follow these rules:
+        - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", "hello", "how are you", "what can you do", or "tell me a joke".
+        - USE RAG for queries related to earth science, space science, climate, space agencies, or similar scientific topics.
+        - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What’s the thermal conductivity of basalt?" or "How does orbital decay work?").
+        - If unsure whether RAG is needed, default to USING RAG.
+        - Respond only with 'yes' or 'no'.
 
-    # TODO: this should be updated to custom model
-    def generate_answer(
-        self,
-        query: str,
-        context: str,
-        llm="llama-3.1",
-        max_new_tokens=150,
-    ):
-        prompt = generate_prompt(query=query, context=context)
+        Query: {query}
+        """
 
-        if llm == "openai":
-            messages_pompt = []
-            messages_pompt += [{"role": "user", "content": prompt}]
+        response = self.openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+            temperature=0,
+        )
 
-            response = openai.chat.completions.create(
-                messages=messages_pompt,
-                model="gpt-4",
-                temperature=0.3,
-                max_tokens=500,
-            )
-            message = response.choices[0].message.content
-            return message
-
-        ## DEPLOYED ON RUNPOD
-        elif llm == "eve-instruct-v0.1":
-            context = (
-                context if context != "" else context[: (1024 - max_new_tokens) * 4]
-            )
-            prompt = generate_prompt(
-                query=query, context=context
-            )
-
-            runpod.api_key = RUNPOD_API_KEY
-            endpoint = runpod.Endpoint(config.get_instruct_llm_id())
-            print("PROMPT: ", prompt)
-
-            try:
-                response = endpoint.run_sync(
-                    {
-                        "input": {
-                            "prompt": f"{prompt}",
-                            "sampling_params": {"max_tokens": max_new_tokens},
-                        }
-                    },
-                    timeout=config.get_instruct_llm_timeout(),
-                )
-                return " ".join(response[0]["choices"][0]["tokens"])
-            except TimeoutError:
-                print("Job timed out.")
-            except Exception as e:
-                print(f"{str(e)}")
+        if response.choices:
+            answer = response.choices[0].message.content.strip()
+            if answer.lower() == "yes":
+                print("I am using rag...")
+                return True
+            elif answer.lower() == "no":
+                print("I am not using rag...")
+                return False
+            else:
+                raise ValueError("Unexpected response from OpenAI API")
+            
+    
 
 if __name__ == "__main__":
     pass

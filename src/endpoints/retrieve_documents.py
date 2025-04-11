@@ -1,26 +1,28 @@
 from fastapi import APIRouter, HTTPException
 from src.services.vector_store_manager import VectorStoreManager
 from pydantic import BaseModel
-from src.config import QDRANT_URL, QDRANT_API_KEY
 
 router = APIRouter()
 
+# Constants
+DEFAULT_QUERY = "What is ESA?"
+DEFAULT_COLLECTION = "esa-nasa-workshop"
+DEFAULT_EMBEDDING_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
+DEFAULT_SCORE_THRESHOLD = 0.7
+DEFAULT_K = 3
 
 class RetrieveRequest(BaseModel):
-    query: str = "What is ESA?"
-    collection_name: str = "esa-nasa-workshop"
-    embeddings_model: str = "text-embedding-3-small"
-    score_threshold: float = 0.7
-    k: int = 3
+    query: str = DEFAULT_QUERY
+    collection_name: str = DEFAULT_COLLECTION
+    embeddings_model: str = DEFAULT_EMBEDDING_MODEL
+    score_threshold: float = DEFAULT_SCORE_THRESHOLD
+    k: int = DEFAULT_K
 
 
 @router.post("/retrieve_documents")
 async def retrieve_documents(request: RetrieveRequest):
     try:
-        # Initialize VectorStoreManager with the embeddings model provided in the request
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-
-        # Retrieve documents using the parameters from the request body
         results = vector_store.retrieve_documents_from_query(
             query=request.query,
             embeddings_model=request.embeddings_model,
@@ -34,5 +36,4 @@ async def retrieve_documents(request: RetrieveRequest):
         return results
 
     except Exception as e:
-        # Log or handle the exception (logging omitted for brevity)
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")

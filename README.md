@@ -11,3 +11,14 @@ Run container based on image
 ```
 docker run -d -p 8000:8000 --name eve-container --env-file .env eve-image
 ```
+
+.env file
+
+```
+QDRANT_URL = ""
+QDRANT_API_KEY = ""
+MISTRAL_API_KEY =""
+OPENAI_API_KEY = ""
+HUGGINGFACEHUB_API_TOKEN = ""
+RUNPOD_API_KEY = ""
+```
