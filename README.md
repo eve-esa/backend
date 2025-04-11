@@ -2,6 +2,8 @@
 
 Build image from docker file
 
+create a .env file with the variables you find in the env.example file.
+
 ```
 docker build -t eve-image .
 ```
