@@ -1,76 +1,168 @@
-
-import runpod
-import openai 
+"""
+LLM Manager module that handles different language model interactions.
+"""
 import logging
+from enum import Enum
 
-from src.config import RUNPOD_API_KEY
-from src.config import Config
+import openai
+import runpod
 
-config = Config()
+from src.config import Config, RUNPOD_API_KEY
+
+
 logger = logging.getLogger(__name__)
 
 
+class LLMType(Enum):
+    """Enum for supported LLM types."""
+    OPENAI = "openai"
+    EVE_INSTRUCT = "eve-instruct-v0.1"
+    LLAMA = "llama-3.1"
+
+
 class LLMManager:
-    def __call__(self, *args, **kwds):
-        pass
+    """Manages interactions with different language models."""
+    
+    def __init__(self):
+        """Initialize the LLM Manager with configuration."""
+        self.config = Config()
+        self._setup_api_keys()
+    
+    def _setup_api_keys(self):
+        """Set up API keys for different LLM providers."""
+        runpod.api_key = RUNPOD_API_KEY
+        # Consider adding OpenAI API key setup here if needed
+    
+    def __call__(self, *args, **kwargs):
+        """Make the class callable, delegating to generate_answer."""
+        return self.generate_answer(*args, **kwargs)
     
     def _generate_prompt(self, query: str, context: str) -> str:
-        prompt = f"""
-        You are an helpful assistant named Eve developed by ESA and PiSchool that help researchers and students understanding topics reguarding Earth Observation.
-        Givent the following context: {context}.
+        """
+        Generate a prompt for the language model.
+        
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            
+        Returns:
+            A formatted prompt string
+        """
+        return f"""
+        You are a helpful assistant named Eve developed by ESA and PiSchool that helps researchers and students understand topics regarding Earth Observation.
+        Given the following context: {context}.
         
         Please reply in a precise and accurate manner to this query: {query}
         
         Answer:
         """
-        return prompt
+    
+    def _call_openai(self, prompt: str, max_tokens: int = 500) -> str:
+        """
+        Call the OpenAI API with the given prompt.
+        
+        Args:
+            prompt: The formatted prompt to send
+            max_tokens: Maximum tokens for the response
+            
+        Returns:
+            The generated response
+            
+        Raises:
+            Exception: If the API call fails
+        """
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = openai.chat.completions.create(
+                messages=messages,
+                model="gpt-4",
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"OpenAI API call failed: {str(e)}")
+            raise
+    
+    def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
+        """
+        Call the Eve Instruct model via RunPod.
+        
+        Args:
+            prompt: The formatted prompt
+            max_new_tokens: Maximum new tokens for the response
+            
+        Returns:
+            The generated response
+            
+        Raises:
+            TimeoutError: If the job times out
+            Exception: For other errors
+        """
+        try:
+            endpoint = runpod.Endpoint(self.config.get_instruct_llm_id())
+            logger.debug(f"Sending prompt to Eve Instruct: {prompt}")
+            
+            response = endpoint.run_sync(
+                {
+                    "input": {
+                        "prompt": prompt,
+                        "sampling_params": {"max_tokens": max_new_tokens},
+                    }
+                },
+                timeout=self.config.get_instruct_llm_timeout(),
+            )
+            return " ".join(response[0]["choices"][0]["tokens"])
+        except TimeoutError as e:
+            logger.error(f"Eve Instruct job timed out: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Eve Instruct API call failed: {str(e)}")
+            raise
     
     def generate_answer(
         self,
         query: str,
         context: str,
-        llm="llama-3.1",
-        max_new_tokens=150,
-    ):
-
+        llm: str = "llama-3.1",
+        max_new_tokens: int = 150,
+    ) -> str:
+        """
+        Generate an answer using the specified language model.
         
-        prompt = self._generate_prompt(query=query, context=context)
-
-        if llm == "openai":
-            messages_pompt = []
-            messages_pompt += [{"role": "user", "content": prompt}]
-
-            response = openai.chat.completions.create(
-                messages=messages_pompt,
-                model="gpt-4",
-                temperature=0.3,
-                max_tokens=500,
-            )
-            message = response.choices[0].message.content
-            return message
-
-        elif llm == "eve-instruct-v0.1":
-            #TODO: this shall make context smaller. Maybe needs fixings
-            context = (
-                context if context != "" else context[: (1024 - max_new_tokens) * 4]
-            )
-
-            runpod.api_key = RUNPOD_API_KEY
-            endpoint = runpod.Endpoint(config.get_instruct_llm_id())
-            print("PROMPT: ", prompt)
-
-            try:
-                response = endpoint.run_sync(
-                    {
-                        "input": {
-                            "prompt": f"{prompt}",
-                            "sampling_params": {"max_tokens": max_new_tokens},
-                        }
-                    },
-                    timeout=config.get_instruct_llm_timeout(),
-                )
-                return " ".join(response[0]["choices"][0]["tokens"])
-            except TimeoutError as e:
-                logger.error(f"Job timed out. {str(e)}")
-            except Exception as e:
-                logging.error(f"{str(e)}")
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            llm: Which language model to use (default: "llama-3.1")
+            max_new_tokens: Maximum new tokens for the response
+            
+        Returns:
+            The generated answer
+            
+        Raises:
+            ValueError: If an unsupported LLM type is specified
+            Exception: For other errors during generation
+        """
+        try:
+            prompt = self._generate_prompt(query=query, context=context)
+            
+            if llm == LLMType.OPENAI.value:
+                return self._call_openai(prompt, max_tokens=max_new_tokens)
+            
+            elif llm == LLMType.EVE_INSTRUCT.value:
+                # Truncate context if needed
+                if context:
+                    max_context_len = (1024 - max_new_tokens) * 4
+                    if len(context) > max_context_len:
+                        logger.info(f"Truncating context from {len(context)} to {max_context_len} characters")
+                        context = context[:max_context_len]
+                
+                return self._call_eve_instruct(prompt, max_new_tokens=max_new_tokens)
+            
+            else:
+                # Handle other LLM types or raise error
+                raise ValueError(f"Unsupported LLM type: {llm}")
+                
+        except Exception as e:
+            logger.error(f"Failed to generate answer: {str(e)}")
+            raise

@@ -26,3 +26,13 @@ RUNPOD_API_KEY = ""
 ```
 
 Then access the http://localhost:8000/docs to visualize the endpoits.
+
+# Start without docker
+
+```
+pip install -r requirements.txt
+```
+
+```
+./start.sh
+```
