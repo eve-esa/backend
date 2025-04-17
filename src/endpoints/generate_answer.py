@@ -25,38 +25,43 @@ def use_rag(query: str) -> bool:
     Decide whether to use RAG to answer the given query. Follow these rules:
     - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", "hello", "how are you", "what can you do", or "tell me a joke".
     - USE RAG for queries related to earth science, space science, climate, space agencies, or similar scientific topics.
-    - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What’s the thermal conductivity of basalt?" or "How does orbital decay work?").
+    - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
     - If unsure whether RAG is needed, default to USING RAG.
     - Respond only with 'yes' or 'no'.
 
     Query: {query}
     """
 
-    response = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=10,
-        temperature=0,
-    )
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+            temperature=0,
+        )
 
-    if response.choices:
-        answer = response.choices[0].message.content.strip()
-        if answer.lower() == "yes":
-            print("I am using rag...")
-            return True
-        elif answer.lower() == "no":
-            print("I am not using rag...")
-            return False
+        if response.choices:
+            answer = response.choices[0].message.content.strip().lower()
+            if answer == "yes":
+                print("I am using rag...")
+                return True
+            elif answer == "no":
+                print("I am not using rag...")
+                return False
+            else:
+                print(f"Unexpected response: '{answer}'. Defaulting to using RAG...")
+                return True
         else:
-            raise ValueError("Unexpected response from OpenAI API")
+            print("Empty response from OpenAI. Defaulting to using RAG...")
+            return True
+    except Exception as e:
+        print(f"Error determining RAG use: {str(e)}. Defaulting to using RAG...")
+        return True
 
 
 def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> str:
-    vector_store = VectorStoreManager(
-        QDRANT_URL, QDRANT_API_KEY, embeddings_model=request.embeddings_model
-    )
+) -> tuple:
     results = vector_store.retrieve_documents_from_query(
         query=request.query,
         collection_name=request.collection_name,
@@ -67,6 +72,7 @@ def get_rag_context(
     )
     if not results:
         print(f"No documents found for query : {request.query}")
+        return "", []
 
     retrieved_documents = [result.payload.get("page_content", "") for result in results]
     context = "\n".join(retrieved_documents)

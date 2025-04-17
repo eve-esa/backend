@@ -14,9 +14,9 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue, Points
 from typing import Any, List
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from openai import OpenAI
+from openai import OpenAI, Client
 from src.services.utils import get_embeddings_model, runpod_api_request
-from src.config import OPENAI_API_KEY
+from src.config import OPENAI_API_KEY, RUNPOD_API_KEY
 from langchain_huggingface import HuggingFaceEmbeddings
 import logging
 
@@ -177,10 +177,10 @@ class VectorStoreManager:
         if isinstance(embeddings, HuggingFaceEmbeddings) and embeddings.model_name == "nasa-impact/nasa-smd-ibm-v0.1":
            logging.info("Using Runpod API for embedding", )
            
-           #wait the function to be completed
+           # Create a Config instance first before calling its method
+           config_instance = Config()
            query_vector = runpod_api_request(
-               endpoint_id= Config.get_indus_embedder_id(),
-               #url="https://api.runpod.ai/v2/c9zv853ctjg5ps/run",
+               endpoint_id=config_instance.get_indus_embedder_id(),
                model=embeddings.model_name,
                user_input=query
                )
@@ -205,57 +205,76 @@ class VectorStoreManager:
         )
         return self._get_unique_source_documents(results, min_docs=k)
 
-    # TODO: this should be updated to custom model
     def generate_answer(
         self,
         query: str,
         context: str,
-        llm="llama-3.1",
-        max_new_tokens=150,
-    ):
-        prompt = generate_prompt(query=query, context=context)
-
-        if llm == "openai":
-            messages_pompt = []
-            messages_pompt += [{"role": "user", "content": prompt}]
-
-            response = openai.chat.completions.create(
-                messages=messages_pompt,
-                model="gpt-4",
-                temperature=0.3,
-                max_tokens=500,
-            )
-            message = response.choices[0].message.content
-            return message
-
-        ## DEPLOYED ON RUNPOD
-        elif llm == "eve-instruct-v0.1":
-            context = (
-                context if context != "" else context[: (1024 - max_new_tokens) * 4]
-            )
-            prompt = generate_prompt(
-                query=query, context=context
-            )
-
-            runpod.api_key = RUNPOD_API_KEY
-            endpoint = runpod.Endpoint(config.get_instruct_llm_id())
-            print("PROMPT: ", prompt)
-
-            try:
+        llm: str = "eve-instruct-v0.1",
+        max_new_tokens: int = 150,
+    ) -> str:
+        """
+        Generate an answer using the specified language model.
+        
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            llm: Which language model to use (default: "eve-instruct-v0.1")
+            max_new_tokens: Maximum new tokens for the response
+            
+        Returns:
+            The generated answer
+        """
+        try:
+            # Generate a prompt for the language model
+            prompt = f"""
+            You are a helpful assistant named Eve developed by ESA and PiSchool that helps researchers and students understand topics regarding Earth Observation.
+            Given the following context: {context}.
+            
+            Please reply in a precise and accurate manner to this query: {query}
+            
+            Answer:
+            """
+            
+            if llm == "openai":
+                # Call OpenAI API
+                openai_client = Client(api_key=OPENAI_API_KEY)
+                response = openai_client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model="gpt-4",
+                    temperature=0.3,
+                    max_tokens=max_new_tokens,
+                )
+                return response.choices[0].message.content
+            
+            elif llm == "eve-instruct-v0.1":
+                # Use RunPod for Eve Instruct model
+                config_instance = Config()
+                endpoint = runpod.Endpoint(config_instance.get_instruct_llm_id())
+                
+                # Truncate context if needed
+                if context:
+                    max_context_len = (1024 - max_new_tokens) * 4
+                    if len(context) > max_context_len:
+                        context = context[:max_context_len]
+                
                 response = endpoint.run_sync(
                     {
                         "input": {
-                            "prompt": f"{prompt}",
+                            "prompt": prompt,
                             "sampling_params": {"max_tokens": max_new_tokens},
                         }
                     },
-                    timeout=config.get_instruct_llm_timeout(),
+                    timeout=config_instance.get_instruct_llm_timeout(),
                 )
                 return " ".join(response[0]["choices"][0]["tokens"])
-            except TimeoutError:
-                print("Job timed out.")
-            except Exception as e:
-                print(f"{str(e)}")
+            
+            else:
+                # Handle other LLM types or raise error
+                raise ValueError(f"Unsupported LLM type: {llm}")
+                
+        except Exception as e:
+            logging.error(f"Failed to generate answer: {str(e)}")
+            raise
 
 if __name__ == "__main__":
     pass
