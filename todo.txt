@@ -1,5 +1,0 @@
-- add feaxtures to test_create_collection
-- add_document_list to collection
---|-- add also pdfs no only txts
-- add document parser
-- add manually run of pytest on push

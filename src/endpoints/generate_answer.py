@@ -1,68 +1,46 @@
-from fastapi import APIRouter, HTTPException, Request, Response
+"""Endpoint to generate an answer using a language model and vector store."""
+from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
+from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
+
 from src.services.vector_store_manager import VectorStoreManager
+from src.services.llm_manager import LLMManager
 from src.config import QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
-from openai import OpenAI, Client
 
+# Constants
+DEFAULT_QUERY = "What is ESA?"
+DEFAULT_COLLECTION = "esa-nasa-workshop"
+DEFAULT_EMBEDDINGS = "nasa-impact/nasa-smd-ibm-st-v2"
+DEFAULT_LLM = "eve-instruct-v0.1"  # or openai
+DEFAULT_CHUNK_SIZE = 1024
+DEFAULT_CHUNK_OVERLAP = 0
+DEFAULT_K = 3
+DEFAULT_SCORE_THRESHOLD = 0.7
+DEFAULT_MAX_NEW_TOKENS = 1500
+DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
+
+# Setup
 router = APIRouter()
-openai_client = Client(api_key=OPENAI_API_KEY)
-
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
-    query: str = "What is ESA?"
-    collection_name: str = "esa-nasa-workshop"
-    llm: str = "eve-instruct-v0.1"  # or openai
-    embeddings_model: str = "text-embedding-3-small"
-    k: int = 3
-    score_threshold: float = Field(0.7, ge=0.0, le=1.0)
-    get_unique_docs: bool = True
-    max_new_tokens: int = Field(1500, ge=100, le=8192)
+    query: str = DEFAULT_QUERY
+    collection_name: str = DEFAULT_COLLECTION
+    llm: str = DEFAULT_LLM  # or openai
+    embeddings_model: str = DEFAULT_EMBEDDINGS
+    k: int = DEFAULT_K
+    score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
+    get_unique_docs: bool = DEFAULT_GET_UNIQUE_DOCS  # Fixed typo
+    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
 
 
-def use_rag(query: str) -> bool:
-    prompt = f"""
-    Decide whether to use RAG to answer the given query. Follow these rules:
-    - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", "hello", "how are you", "what can you do", or "tell me a joke".
-    - USE RAG for queries related to earth science, space science, climate, space agencies, or similar scientific topics.
-    - USE RAG for specific technical or scientific questions, even if the topic is unclear (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
-    - If unsure whether RAG is needed, default to USING RAG.
-    - Respond only with 'yes' or 'no'.
-
-    Query: {query}
-    """
-
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
-            temperature=0,
-        )
-
-        if response.choices:
-            answer = response.choices[0].message.content.strip().lower()
-            if answer == "yes":
-                print("I am using rag...")
-                return True
-            elif answer == "no":
-                print("I am not using rag...")
-                return False
-            else:
-                print(f"Unexpected response: '{answer}'. Defaulting to using RAG...")
-                return True
-        else:
-            print("Empty response from OpenAI. Defaulting to using RAG...")
-            return True
-    except Exception as e:
-        print(f"Error determining RAG use: {str(e)}. Defaulting to using RAG...")
-        return True
-
-
-def get_rag_context(
+async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple:
-    results = vector_store.retrieve_documents_from_query(
+) -> tuple[str, list]:
+    """Get RAG context from vector store."""
+    # Remove duplicate vector_store initialization
+    results = await vector_store.retrieve_documents_from_query(
         query=request.query,
         collection_name=request.collection_name,
         embeddings_model=request.embeddings_model,
@@ -70,8 +48,9 @@ def get_rag_context(
         get_unique_docs=request.get_unique_docs,
         k=request.k,
     )
+
     if not results:
-        print(f"No documents found for query : {request.query}")
+        print(f"No documents found for query: {request.query}")
         return "", []
 
     retrieved_documents = [result.payload.get("page_content", "") for result in results]
@@ -80,24 +59,31 @@ def get_rag_context(
 
 
 @router.post("/generate_answer", response_model=Dict[str, Any])
-def create_collection(request: GenerationRequest) -> Dict[str, Any]:
+async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Renamed from create_collection
+    """Generate an answer using RAG and LLM."""
+    llm_manager = LLMManager()
+
     try:
-        vector_store = VectorStoreManager(
-            QDRANT_URL, QDRANT_API_KEY, embeddings_model=request.embeddings_model
-        )
-        is_rag: bool = use_rag(request.query)
-        context, results = (
-            get_rag_context(vector_store, request) if is_rag else ("", [])
-        )
-        answer = vector_store.generate_answer(
+        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+
+        # Check if we need to use RAG
+        is_rag = await vector_store.use_rag(request.query)  # Make sure this is awaited if async
+
+        # Get context if using RAG
+        if is_rag:
+            context, results = await get_rag_context(vector_store, request)
+        else:
+            context, results = "", []
+
+        # Generate answer
+        answer =  llm_manager.generate_answer(
             query=request.query,
             context=context,
             llm=request.llm,
             max_new_tokens=request.max_new_tokens,
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"answer": answer, "documents": results, "use_rag": is_rag}
-
-

@@ -1,24 +1,50 @@
-import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
+import logging
+from src.config import configure_logging
 
-from src.endpoints.create_collection import router as create_collection_router
-from src.endpoints.delete_collection import router as delete_collection_router
-from src.endpoints.health_check import router as health_check_router
-from src.endpoints.add_document import router as add_document_list_router
-from src.endpoints.delete_document import router as delete_document_router
-from src.endpoints.retrieve_documents import router as retrieve_documents_router
-from src.endpoints.generate_answer import router as generate_answer_router
-from src.endpoints.completion_llm import router as completion_llm_router
-from src.endpoints.list_collections import router as list_collections_llm_router
+from src.endpoints import (
+    create_collection_router,
+    delete_collection_router,
+    health_check_router,
+    add_document_list_router,
+    delete_document_router,
+    retrieve_documents_router,
+    generate_answer_router,
+    completion_llm_router,
+    list_collections_llm_router,
+)
 
 origins = [
     "http://localhost",
     "http://localhost:6333",
 ]
 
+configure_logging(level=logging.DEBUG)
+
+def register_routers(app: FastAPI):
+    # Collections
+    app.include_router(create_collection_router, tags=["Collections"])
+    app.include_router(delete_collection_router, tags=["Collections"])
+    app.include_router(list_collections_llm_router, tags=["Collections"])
+
+    # Documents
+    app.include_router(add_document_list_router, tags=["Documents"])
+    app.include_router(delete_document_router, tags=["Documents"])
+    app.include_router(retrieve_documents_router, tags=["Documents"])
+
+    # LLM
+    app.include_router(generate_answer_router, tags=["LLM"])
+    app.include_router(completion_llm_router, tags=["LLM"])
+
+    # Health
+    app.include_router(health_check_router, tags=["Health"])
+
 
 def create_app(debug=False, **kwargs):
+    """Create and configure the FastAPI app instance."""
+
+    logging.info("Creating FastAPI app...")
     app = FastAPI(debug=debug, **kwargs)
 
     app.add_middleware(
@@ -33,18 +59,7 @@ def create_app(debug=False, **kwargs):
     def main_page():
         return "Welcome to Eve"
 
-    app.include_router(create_collection_router, tags=["Collections"])
-    app.include_router(delete_collection_router, tags=["Collections"])
-    app.include_router(list_collections_llm_router, tags=["Collections"])
-
-    app.include_router(add_document_list_router, tags=["Documents"])
-    app.include_router(delete_document_router, tags=["Documents"])
-    app.include_router(retrieve_documents_router, tags=["Documents"])
-
-    app.include_router(generate_answer_router, tags=["LLM"])
-    app.include_router(completion_llm_router, tags=["LLM"])
-
-    app.include_router(health_check_router, tags=["Health"])
+    register_routers(app)
 
     return app
 

@@ -1,17 +1,12 @@
-from fastapi import APIRouter
+"""FastAPI endpoint to delete a collection in Qdrant."""
 from fastapi import APIRouter, HTTPException
 from src.services.vector_store_manager import VectorStoreManager
-from src.config import QDRANT_URL, QDRANT_API_KEY
-
 
 router = APIRouter()
 
-
 @router.delete("/delete_collection")
-def delete_collection(collection_name: str = "esa-nasa-workshop"):
-    vector_store = VectorStoreManager(
-        QDRANT_URL, QDRANT_API_KEY, embeddings_model="fake"
-    )
+def delete_collection(collection_name: str = "test_collection"):
+    vector_store = VectorStoreManager(embeddings_model="fake")
     try:
         vector_store.delete_collection(collection_name)
         return {"message": f"Collection '{collection_name}' deleted successfully."}
