@@ -222,7 +222,7 @@ class VectorStoreManager:
             embeddings_model: The name of the embeddings model to use.
                 Defaults to NASA's specialized model.
         """
-        self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY)
+        self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY, timeout=10)
         self.embeddings_model = embeddings_model
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model_name=embeddings_model,
@@ -576,7 +576,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             query_vector = await self.generate_query_vector(query, model)
-
+            logger.info('Retrieving documents from qdrant')
             if not get_unique_docs:
                 # Simple search with limit k
                 results = self.client.search(

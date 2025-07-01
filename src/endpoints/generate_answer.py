@@ -67,8 +67,9 @@ async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Rena
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 
         # Check if we need to use RAG
-        is_rag = await vector_store.use_rag(request.query)  # Make sure this is awaited if async
-
+        #is_rag = await vector_store.use_rag(request.query)  # Make sure this is awaited if async
+        # TODO - fix the usage of RAG
+        is_rag = True
         # Get context if using RAG
         if is_rag:
             context, results = await get_rag_context(vector_store, request)
