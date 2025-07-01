@@ -5,7 +5,7 @@ from src.services.vector_store_manager import VectorStoreManager
 router = APIRouter()
 
 @router.delete("/delete_collection")
-def delete_collection(collection_name: str = "esa-nasa-workshop"):
+def delete_collection(collection_name: str = "test_collection"):
     vector_store = VectorStoreManager(embeddings_model="fake")
     try:
         vector_store.delete_collection(collection_name)

@@ -7,7 +7,7 @@ router = APIRouter()
 # Constants
 DEFAULT_QUERY = "What is ESA?"
 DEFAULT_COLLECTION = "esa-nasa-workshop"
-DEFAULT_EMBEDDING_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
+DEFAULT_EMBEDDING_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
 DEFAULT_SCORE_THRESHOLD = 0.7
 DEFAULT_K = 3
 
@@ -23,7 +23,7 @@ class RetrieveRequest(BaseModel):
 async def retrieve_documents(request: RetrieveRequest):
     try:
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-        results = vector_store.retrieve_documents_from_query(
+        results = await vector_store.retrieve_documents_from_query(
             query=request.query,
             embeddings_model=request.embeddings_model,
             collection_name=request.collection_name,

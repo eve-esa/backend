@@ -1,7 +1,9 @@
 runpod:
   instruct_llm:
-    id: "eswcv2flgp2dun"
-    timeout: 200
+    id: "gt96iviaoxovi0"
+    timeout: 2000
   indus_embedder:
-    id: "c9zv853ctjg5ps"
-    timeout: 100
+    id: "bqwuhwmnb3bdx0"
+    timeout: 1000
+
+

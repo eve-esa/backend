@@ -16,13 +16,13 @@ class CompletionRequest(BaseModel):
 
 
 @router.post("/completion_llm")
-async def create_collection(request: CompletionRequest):
+async def completion(request: CompletionRequest):
     endpoint = runpod.Endpoint(config.get_completion_llm_id())
     input_data = {"input": {"prompt": request.query}}
 
     try:
         print(f"Processing request for query: {request.query}")
-        res = endpoint.run_sync(request_input=input_data, timeout=config.get_timeout())
+        res = endpoint.run_sync(request_input=input_data, timeout=config.get_completion_llm_timeout())
 
         if not res or "choices" not in res[0] or not res[0]["choices"]:
             print(f"Invalid response structure: {res}")

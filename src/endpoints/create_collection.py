@@ -9,8 +9,8 @@ from src.config import QDRANT_URL, QDRANT_API_KEY
 router = APIRouter()
 
 class CollectionRequest(BaseModel):
-    collection_name: str = "esa-nasa-workshop"
-    embeddings_model: str =  "nasa-impact/nasa-smd-ibm-v0.1" 
+    collection_name: str = "test_collection"
+    embeddings_model: str =  "nasa-impact/nasa-smd-ibm-st-v2"
 
 
 @router.post("/create_collection")

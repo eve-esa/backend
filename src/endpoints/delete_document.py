@@ -7,8 +7,8 @@ router = APIRouter()
 
 @router.delete("/delete_document_list", status_code=status.HTTP_200_OK)
 async def delete_document_list(
-    collection_name: str = "esa-nasa-workshop",
-    embeddings_model: str = "nasa-impact/nasa-smd-ibm-v0.1",
+    collection_name: str = "test_openai_collection",
+    embeddings_model: str = "nasa-impact/nasa-smd-ibm-st-v2",
     document_list: List[str] = [],  # List of documents source_name, can be passed as comma-separated values, e.g ["indus"]
 ):
     

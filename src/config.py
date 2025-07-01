@@ -53,6 +53,7 @@ class Config:
         except (KeyError, TypeError):
             return default
 
+
    
     def get_instruct_llm_id(self):
         return self.get("runpod", "instruct_llm", "id")
@@ -65,3 +66,9 @@ class Config:
     
     def get_indus_embedder_timeout(self):
         return self.get("runpod", "indus_embedder", "timeout")
+
+    def get_completion_llm_id(self):
+        return self.get("runpod", "instruct_llm", "id")
+
+    def get_completion_llm_timeout(self):
+        return self.get("runpod", "instruct_llm", "llm")

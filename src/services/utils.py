@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 runpod.api_key = RUNPOD_API_KEY
 
 # Constants
-NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
+NASA_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
 
 
 class EmbeddingModelType(Enum):
@@ -84,7 +84,7 @@ async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
 
 
 def get_embeddings_model(
-    model: str, 
+    model_name: str,
     return_embeddings_size: bool = False
 ) -> Union[Embeddings, Tuple[Embeddings, int]]:
     """
@@ -102,6 +102,7 @@ def get_embeddings_model(
         ValueError: If an unsupported model is specified
     """
     # Handle NASA model specially to prevent local loading
+    model = model_name
     if model == NASA_MODEL:
         logger.info(f"Using RunPod proxy for NASA embedding model: {model}")
         embeddings = RunPodEmbeddings(model_name=model, embedding_size=768)
@@ -128,11 +129,14 @@ def get_embeddings_model(
     # Handle Hugging Face embeddings (default case)
     else:
         logger.info(f"Using Hugging Face embeddings model: {model}")
-        embeddings = HuggingFaceEmbeddings(model_name=model)
+
+        # TODO - do not load the model into memory get it from the config file
+       # embeddings = HuggingFaceEmbeddings(model_name=model)
         
         try:
             # Get embedding size from the model
-            embeddings_size = embeddings.client.get_sentence_embedding_dimension()
+            # embeddings_size = embeddings.client.get_sentence_embedding_dimension()
+         pass
         except AttributeError:
             # Fallback if client structure is different
             try:
