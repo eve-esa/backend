@@ -8,6 +8,10 @@ from .retrieve_documents import router as retrieve_documents_router
 from .generate_answer import router as generate_answer_router
 from .completion_llm import router as completion_llm_router
 from .list_collections import router as list_collections_llm_router
+from .auth import router as auth_router
+from .conversation.get_conversation import router as get_conversation_router
+from .conversation.list_conversations import router as list_conversations_router
+from .conversation.update_conversation import router as update_conversation_router
 
 __all__ = [
     "create_collection_router",
@@ -19,4 +23,8 @@ __all__ = [
     "generate_answer_router",
     "completion_llm_router",
     "list_collections_llm_router",
+    "auth_router",
+    "get_conversation_router",
+    "list_conversations_router",
+    "update_conversation_router",
 ]

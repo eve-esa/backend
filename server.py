@@ -1,3 +1,4 @@
+from src.database.mongo import async_mongo_manager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 import logging
@@ -13,6 +14,10 @@ from src.endpoints import (
     generate_answer_router,
     completion_llm_router,
     list_collections_llm_router,
+    auth_router,
+    list_conversations_router,
+    get_conversation_router,
+    update_conversation_router,
 )
 
 origins = [
@@ -21,6 +26,7 @@ origins = [
 ]
 
 configure_logging(level=logging.DEBUG)
+
 
 def register_routers(app: FastAPI):
     # Collections
@@ -40,6 +46,13 @@ def register_routers(app: FastAPI):
     # Health
     app.include_router(health_check_router, tags=["Health"])
 
+    # Auth
+    app.include_router(auth_router, tags=["Auth"])
+
+    # Conversations
+    app.include_router(list_conversations_router, tags=["Conversations"])
+    app.include_router(get_conversation_router, tags=["Conversations"])
+    app.include_router(update_conversation_router, tags=["Conversations"])
 
 def create_app(debug=False, **kwargs):
     """Create and configure the FastAPI app instance."""
@@ -65,3 +78,16 @@ def create_app(debug=False, **kwargs):
 
 
 app = create_app()
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database connection on startup."""
+    await async_mongo_manager.connect()
+    logging.info("Database connection established")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database connection on shutdown."""
+    await async_mongo_manager.close()
+    logging.info("Database connection closed")

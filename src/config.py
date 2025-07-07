@@ -16,8 +16,20 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
 
+MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
+MONGO_PORT = os.getenv("MONGO_PORT", 27017).strip()
+MONGO_USERNAME = os.getenv("MONGO_USERNAME").strip()
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD").strip()
+MONGO_DATABASE = os.getenv("MONGO_DATABASE").strip()
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY").strip()
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15))
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7))
+
 
 runpod.api_key = RUNPOD_API_KEY
+
 
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
@@ -25,7 +37,7 @@ def configure_logging(level=logging.INFO):
     if not logging.getLogger().hasHandlers():
         # Create formatter
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
 
         # Create console handler
@@ -53,8 +65,6 @@ class Config:
         except (KeyError, TypeError):
             return default
 
-
-   
     def get_instruct_llm_id(self):
         return self.get("runpod", "instruct_llm", "id")
 
@@ -63,7 +73,7 @@ class Config:
 
     def get_indus_embedder_id(self):
         return self.get("runpod", "indus_embedder", "id")
-    
+
     def get_indus_embedder_timeout(self):
         return self.get("runpod", "indus_embedder", "timeout")
 

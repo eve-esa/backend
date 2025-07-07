@@ -20,3 +20,6 @@ pyyaml==6.0.2
 pypdf==5.4.0
 sentence-transformers==4.0.2
 transformers==4.51.1
+pymongo==4.13.2
+motor>=3.0.0
+python-jose[cryptography]==3.3.0

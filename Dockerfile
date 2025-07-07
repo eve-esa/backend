@@ -1,22 +1,17 @@
 FROM python:3.10.10
 
-WORKDIR /code
+WORKDIR /app
 
-# Copy requirements.txt and install dependencies
-COPY ./requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential && rm -rf /var/lib/apt/lists/*
 
-# Copy all files from the main directory (but not directories) into /code
-COPY ./*.py /code/           
-# COPY ./.env /code/
-COPY ./requirements.txt /code/
-COPY ./config.yaml /code/
-COPY ./start.sh /code/
-RUN chmod +x /code/start.sh
-COPY ./src/ /code/src/       
+COPY ./requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade -r ./requirements.txt
 
-ENV PORT=8000
-ENV HOST 0.0.0.0
+COPY ./*.py ./
+COPY ./config.yaml ./
+COPY ./src/ ./src/
 
-# CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
-CMD ["./start.sh"]
+EXPOSE 8080
+
+CMD ["uvicorn", "server:app", "--workers", "2", "--host", "0.0.0.0", "--port", "8080"]

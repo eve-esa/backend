@@ -32,17 +32,17 @@ def process_metadata(metadata_input: Optional[List[str] | str], file_count: int)
     """Process metadata (URLs or names) into a list matching file count."""
     if not metadata_input:
         return [""] * file_count
-    
+
     if isinstance(metadata_input, str):
         parts = [part.strip() for part in metadata_input.split(",")]
         return (parts + [""] * (file_count - len(parts)))[:file_count]
-    
+
     if isinstance(metadata_input, list):
         return [
             item.split(",")[0].strip() if isinstance(item, str) and "," in item else (item.strip() if item else "")
             for item in metadata_input[:file_count]
         ] + [""] * (file_count - len(metadata_input))
-    
+
     return [""] * file_count
 
 @router.post("/add_document_list")
@@ -66,8 +66,8 @@ async def add_document_list(
     # Initialize vector store and text splitter
     vector_store = VectorStoreManager(embeddings_model=embeddings_model,)
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    file_parser = FileParser() 
-    
+    file_parser = FileParser()
+
     all_documents, temp_files = [], []
 
     try:
