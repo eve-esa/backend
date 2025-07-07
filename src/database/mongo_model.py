@@ -109,11 +109,11 @@ class MongoModel(BaseModel):
         )
 
     @classmethod
-    async def create(cls: Type[T], **kwargs) -> str:
+    async def create(cls: Type[T], **kwargs) -> T:
         """Create a new document in the collection and return the id"""
         doc = cls(**kwargs)
         await doc.save()
-        return doc.id
+        return doc
 
     @classmethod
     async def find_one(cls: Type[T], filter_dict: Dict[str, Any]) -> Optional[T]:
