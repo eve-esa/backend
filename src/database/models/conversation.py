@@ -1,6 +1,5 @@
 from typing import ClassVar
 from pydantic import Field
-from datetime import datetime
 from src.database.mongo_model import MongoModel
 
 
@@ -10,11 +9,9 @@ class Conversation(MongoModel):
     user_id: str = Field(..., description="User ID")
     input: str = Field(..., description="Message content (prompt or response)")
     output: str = Field(..., description="Model output or response")
+    feedback: str = Field(default="none", description="Feedback from the user")
     metadata: dict = Field(
         default_factory=dict, description="LLM metadata used to generate the response"
-    )
-    timestamp: datetime = Field(
-        default_factory=datetime.utcnow, description="Time of conversation"
     )
 
     collection_name: ClassVar[str] = "conversations"
