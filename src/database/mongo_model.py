@@ -1,3 +1,5 @@
+import math
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List, TypeVar, Generic, Type, ClassVar
 from bson import ObjectId
@@ -5,16 +7,34 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 import logging
+from datetime import datetime, timezone
 
 from .mongo import get_collection, get_database
 
 T = TypeVar("T", bound="MongoModel")
 
 
+class PaginationMetadata(BaseModel):
+    total_count: int
+    current_page: int
+    total_pages: int
+    has_next: bool
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    data: List[T]
+    meta: PaginationMetadata
+
+
 class MongoModel(BaseModel):
     """Generic base model for MongoDB documents with collection and instance operations."""
 
     id: str = Field(None, description="MongoDB document ID")
+
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Time of creation",
+    )
 
     class Config:
         allow_population_by_field_name = True
@@ -60,6 +80,33 @@ class MongoModel(BaseModel):
 
         documents = await cursor.to_list(length=limit or 0)
         return [cls.from_dict(doc) for doc in documents]
+
+    @classmethod
+    async def find_all_with_pagination(
+        cls: Type[T],
+        limit: int = 10,
+        skip: int = 0,
+        sort: Optional[List[tuple]] = None,
+        filter_dict: Optional[Dict[str, Any]] = None,
+    ) -> PaginatedResponse[T]:
+        """Find all documents in the collection with pagination."""
+        total_count = await cls.count_documents(filter_dict)
+        total_pages = math.ceil(total_count / limit)
+        has_next = skip + limit < total_count
+        current_page = (skip // limit) + 1
+        documents = await cls.find_all(
+            limit=limit, skip=skip, sort=sort, filter_dict=filter_dict
+        )
+
+        return PaginatedResponse[T](
+            data=documents,
+            meta=PaginationMetadata(
+                total_count=total_count,
+                current_page=current_page,
+                total_pages=total_pages,
+                has_next=has_next,
+            ),
+        )
 
     @classmethod
     async def create(cls: Type[T], **kwargs) -> str:
@@ -155,6 +202,11 @@ class MongoModel(BaseModel):
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary for MongoDB storage."""
         doc_dict = self.dict(exclude={"id"})
+
+        for key, value in doc_dict.items():
+            if isinstance(value, Enum):
+                doc_dict[key] = value.value
+
         if self.id:
             doc_dict["_id"] = ObjectId(self.id)
         return doc_dict

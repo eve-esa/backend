@@ -1,8 +1,10 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
 import asyncio
+from src.database.models.user import User
+from src.middlewares.auth import get_current_user
 from src.database.models.conversation import Conversation
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
@@ -39,6 +41,7 @@ class GenerationRequest(BaseModel):
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
 
 
+
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> tuple[str, list]:
@@ -62,10 +65,11 @@ async def get_rag_context(
     return context, results
 
 
-@router.post("/generate_answer", response_model=Dict[str, Any])
+@router.post("/generate_answer", response_model=Conversation)
 async def generate_answer(
     request: GenerationRequest,
-) -> Dict[str, Any]:  # Renamed from create_collection
+    request_user: User = Depends(get_current_user),
+):
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
@@ -94,26 +98,21 @@ async def generate_answer(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    #TODO: add user id to the conversation
-    # Save conversation asynchronously
-    asyncio.create_task(
-        Conversation.safe_create(
-            input=request.query,
-            output=answer,
-            user_id="temp_user_id",
-            metadata={
-                "api_used": "generate_answer",
-                "llm": request.llm,
-                "embeddings_model": request.embeddings_model,
-                "collection_name": request.collection_name,
-                "k": request.k,
-                "score_threshold": request.score_threshold,
-                "get_unique_docs": request.get_unique_docs,
-                "max_new_tokens": request.max_new_tokens,
-                "is_rag": is_rag,
-                # TODO: check if needed context
-            },
-        )
+    conversation = await Conversation.create(
+        input=request.query,
+        output=answer,
+        user_id=request_user.id,
+        metadata={
+            "api_used": "generate_answer",
+            "llm": request.llm,
+            "embeddings_model": request.embeddings_model,
+            "collection_name": request.collection_name,
+            "k": request.k,
+            "score_threshold": request.score_threshold,
+            "get_unique_docs": request.get_unique_docs,
+            "max_new_tokens": request.max_new_tokens,
+            "is_rag": is_rag,
+        },
     )
 
-    return {"answer": answer, "documents": results, "use_rag": is_rag}
+    return conversation

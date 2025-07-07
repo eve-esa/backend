@@ -35,6 +35,8 @@ async def login(request: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user = await User.find_one({"email": request.email})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
 
     return LoginResponse(
         access_token=create_access_token(sub=user.id),

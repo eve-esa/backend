@@ -4,7 +4,6 @@ from fastapi import FastAPI
 import logging
 from src.config import configure_logging
 
-from src.endpoints.auth import router as auth_router
 from src.endpoints import (
     create_collection_router,
     delete_collection_router,
@@ -15,6 +14,10 @@ from src.endpoints import (
     generate_answer_router,
     completion_llm_router,
     list_collections_llm_router,
+    auth_router,
+    list_conversations_router,
+    get_conversation_router,
+    update_conversation_router,
 )
 
 origins = [
@@ -46,6 +49,10 @@ def register_routers(app: FastAPI):
     # Auth
     app.include_router(auth_router, tags=["Auth"])
 
+    # Conversations
+    app.include_router(list_conversations_router, tags=["Conversations"])
+    app.include_router(get_conversation_router, tags=["Conversations"])
+    app.include_router(update_conversation_router, tags=["Conversations"])
 
 def create_app(debug=False, **kwargs):
     """Create and configure the FastAPI app instance."""
