@@ -1,22 +1,29 @@
-FROM python:3.10.10
+FROM python:3.10-slim-bookworm AS builder
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+WORKDIR /app
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv $VIRTUAL_ENV
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.10-slim-bookworm AS prod
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOST=0.0.0.0
 WORKDIR /code
 
-# Copy requirements.txt and install dependencies
-COPY ./requirements.txt /code/requirements.txt
-RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
+COPY --from=builder /opt/venv /opt/venv
 
-# Copy all files from the main directory (but not directories) into /code
-COPY ./*.py /code/           
-# COPY ./.env /code/
-COPY ./requirements.txt /code/
-COPY ./config.yaml /code/
-COPY ./start.sh /code/
-RUN chmod +x /code/start.sh
-COPY ./src/ /code/src/       
+COPY *.py ./
+COPY config.yaml start.sh create_user.sh ./
+RUN chmod +x start.sh create_user.sh
+COPY src/ ./src/
+COPY templates/ ./templates/
 
-ENV PORT=8000
-ENV HOST 0.0.0.0
-
-# CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
 CMD ["./start.sh"]

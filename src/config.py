@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 import runpod
 import logging
 import sys
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 load_dotenv(override=True)
 
@@ -17,6 +17,38 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
 
+MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
+MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
+MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "").strip()
+MONGO_DATABASE = os.getenv("MONGO_DATABASE", "").strip()
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY").strip()
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15))
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7))
+JWT_AUDIENCE_ACCESS = os.getenv("JWT_AUDIENCE_ACCESS", "access").strip()
+JWT_AUDIENCE_REFRESH = os.getenv("JWT_AUDIENCE_REFRESH", "refresh").strip()
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "noreply@eve-ai.com").strip()
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "EVE AI").strip()
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
+
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+]
+
+FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
+    os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
+)
+
+WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 
 runpod.api_key = RUNPOD_API_KEY
 
@@ -43,10 +75,7 @@ def configure_logging(level=logging.INFO):
 class Config:
     def __init__(self, config_path: str = "config.yaml"):
         with open(config_path, "r") as file:
-            raw_config = yaml.safe_load(file)
-
-        # Expand environment variables in the loaded YAML
-        self.config = self._expand_env(raw_config)
+            self.config = yaml.safe_load(file)
 
     def get(self, *keys, default=None):
         """Generalized method to get a value from a nested dictionary."""
@@ -58,18 +87,29 @@ class Config:
         except (KeyError, TypeError):
             return default
 
-    def _expand_env(self, value):
-        """Recursively expand ${VAR} environment placeholders in config values."""
-        if isinstance(value, dict):
-            return {k: self._expand_env(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._expand_env(v) for v in value]
-        if isinstance(value, str):
-            try:
-                return os.path.expandvars(value)
-            except Exception:
-                return value
-        return value
+    def get_instruct_llm_id(self):
+        return self.get("runpod", "instruct_llm", "id")
+
+    def get_instruct_llm_timeout(self):
+        return self.get("runpod", "instruct_llm", "timeout")
+
+    def get_indus_embedder_id(self):
+        return self.get("runpod", "indus_embedder", "id")
+
+    def get_indus_embedder_timeout(self):
+        return self.get("runpod", "indus_embedder", "timeout")
+
+    def get_completion_llm_id(self):
+        return self.get("runpod", "instruct_llm", "id")
+
+    def get_completion_llm_timeout(self):
+        return self.get("runpod", "instruct_llm", "llm")
+
+    def get_mistral_model(self):
+        return self.get("mistral", "model")
+
+    def get_mistral_timeout(self):
+        return self.get("mistral", "timeout")
 
     # MCP
     def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:
@@ -108,20 +148,14 @@ class Config:
             return first_server.get("headers", {})
         return {}
 
-    def get_instruct_llm_id(self):
-        return self.get("runpod", "instruct_llm", "id")
+    def get_reranker_id(self):
+        return self.get("runpod", "reranker", "id")
 
-    def get_instruct_llm_timeout(self):
-        return self.get("runpod", "instruct_llm", "timeout")
+    def get_reranker_timeout(self):
+        return self.get("runpod", "reranker", "timeout")
 
-    def get_indus_embedder_id(self):
-        return self.get("runpod", "indus_embedder", "id")
 
-    def get_indus_embedder_timeout(self):
-        return self.get("runpod", "indus_embedder", "timeout")
-
-    def get_completion_llm_id(self):
-        return self.get("runpod", "instruct_llm", "id")
-
-    def get_completion_llm_timeout(self):
-        return self.get("runpod", "instruct_llm", "llm")
+# Expose a module-level config instance for convenient imports
+# Allow overriding the config file location via EVE_CONFIG_PATH
+CONFIG_PATH = os.getenv("EVE_CONFIG_PATH", "config.yaml")
+config = Config(CONFIG_PATH)
