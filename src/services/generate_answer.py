@@ -1,6 +1,6 @@
 """Endpoint to generate an answer using a language model and vector store."""
-from fastapi import APIRouter, HTTPException
-from typing import Dict, Any
+
+from typing import Any, Dict
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
@@ -21,8 +21,8 @@ DEFAULT_MAX_NEW_TOKENS = 1500
 DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
 
 # Setup
-router = APIRouter()
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
+
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
@@ -58,8 +58,9 @@ async def get_rag_context(
     return context, results
 
 
-@router.post("/generate_answer", response_model=Dict[str, Any])
-async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Renamed from create_collection
+async def generate_answer(
+    request: GenerationRequest,
+) -> tuple[str, list, bool]:  # Renamed from create_collection
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
@@ -67,7 +68,9 @@ async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Rena
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 
         # Check if we need to use RAG
-        is_rag = await vector_store.use_rag(request.query)  # Make sure this is awaited if async
+        is_rag = await vector_store.use_rag(
+            request.query
+        )  # Make sure this is awaited if async
 
         # Get context if using RAG
         if is_rag:
@@ -76,7 +79,7 @@ async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Rena
             context, results = "", []
 
         # Generate answer
-        answer =  llm_manager.generate_answer(
+        answer = llm_manager.generate_answer(
             query=request.query,
             context=context,
             llm=request.llm,
@@ -84,6 +87,6 @@ async def generate_answer(request: GenerationRequest) -> Dict[str, Any]:  # Rena
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise Exception(e)
 
-    return {"answer": answer, "documents": results, "use_rag": is_rag}
+    return answer, results, is_rag

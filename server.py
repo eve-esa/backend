@@ -15,14 +15,14 @@ from src.endpoints import (
     completion_llm_router,
     list_collections_llm_router,
     auth_router,
-    list_conversations_router,
-    get_conversation_router,
-    update_conversation_router,
+    conversation_router,
+    message_router,
 )
 
 origins = [
     "http://localhost",
     "http://localhost:6333",
+    "http://localhost:5173",
 ]
 
 configure_logging(level=logging.DEBUG)
@@ -50,9 +50,8 @@ def register_routers(app: FastAPI):
     app.include_router(auth_router, tags=["Auth"])
 
     # Conversations
-    app.include_router(list_conversations_router, tags=["Conversations"])
-    app.include_router(get_conversation_router, tags=["Conversations"])
-    app.include_router(update_conversation_router, tags=["Conversations"])
+    app.include_router(conversation_router, tags=["Conversations"])
+    app.include_router(message_router, tags=["Messages"])
 
 def create_app(debug=False, **kwargs):
     """Create and configure the FastAPI app instance."""
