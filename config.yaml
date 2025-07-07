@@ -1,0 +1,7 @@
+runpod:
+  instruct_llm:
+    id: "gt96iviaoxovi0"
+    timeout: 2000
+  indus_embedder:
+    id: "bqwuhwmnb3bdx0"
+    timeout: 1000
