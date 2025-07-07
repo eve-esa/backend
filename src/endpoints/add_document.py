@@ -19,8 +19,7 @@ from src.services.file_parser import FileParser
 
 # Constants
 DEFAULT_COLLECTION = "esa-nasa-workshop"
-# TODO: this was changed verify if it is correct
-DEFAULT_EMBEDDINGS = "nasa-impact/nasa-smd-ibm-st-v2"
+DEFAULT_EMBEDDINGS = "nasa-impact/nasa-smd-ibm-v0.1"
 DEFAULT_CHUNK_SIZE = 1024
 DEFAULT_CHUNK_OVERLAP = 0
 
