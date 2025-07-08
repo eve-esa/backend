@@ -1,7 +1,5 @@
-from datetime import datetime, timezone
-from typing import ClassVar
-from pydantic import Field, BaseModel
-from src.database.mongo_model import MongoModel
+from datetime import datetime
+from pydantic import BaseModel
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from fastapi import APIRouter, HTTPException, Depends
@@ -60,7 +58,6 @@ async def get_conversation(
 ):
     try:
         conversation = await Conversation.find_by_id(conversation_id)
-
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
 

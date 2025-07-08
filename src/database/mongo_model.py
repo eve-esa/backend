@@ -78,7 +78,7 @@ class MongoModel(BaseModel):
         if limit:
             cursor = cursor.limit(limit)
 
-        documents = await cursor.to_list(length=limit or 0)
+        documents = await cursor.to_list(length=limit if limit is not None else None)
         return [cls.from_dict(doc) for doc in documents]
 
     @classmethod
@@ -90,6 +90,10 @@ class MongoModel(BaseModel):
         filter_dict: Optional[Dict[str, Any]] = None,
     ) -> PaginatedResponse[T]:
         """Find all documents in the collection with pagination."""
+        if limit == 0:
+            cls.logger.warning("Limit is 0, setting to 10 to avoid division by zero")
+            limit = 10
+
         total_count = await cls.count_documents(filter_dict)
         total_pages = math.ceil(total_count / limit)
         has_next = skip + limit < total_count
@@ -208,7 +212,7 @@ class MongoModel(BaseModel):
                 doc_dict[key] = value.value
 
         if self.id:
-            doc_dict["_id"] = ObjectId(self.id)
+            doc_dict["_id"] = self.id
         return doc_dict
 
     @classmethod
