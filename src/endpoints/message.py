@@ -37,22 +37,35 @@ async def create_message(
                 detail="You are not allowed to add a message to this conversation",
             )
 
-        answer, results, retrieved_documents, is_rag = await generate_answer(request)
+        answer, results, is_rag = await generate_answer(request)
+
+        documents_data = []
+        if results:
+            for result in results:
+                doc_data = {
+                    "id": (
+                        str(result.id) if hasattr(result, "id") else None
+                    ),
+                    "version": (
+                        int(result.version) if hasattr(result, "version") else None
+                    ),
+                    "score": float(result.score) if hasattr(result, "score") else None,
+                    "payload": result.payload if hasattr(result, "payload") else {},
+                }
+                documents_data.append(doc_data)
 
         await Message.create(
             conversation_id=conversation_id,
             input=request.query,
             output=answer,
-            documents=retrieved_documents,
-            results=results,
+            documents=documents_data,
             use_rag=is_rag,
         )
 
         return {
             "query": request.query,
             "answer": answer,
-            "documents": retrieved_documents,
-            "results": results,
+            "documents": documents_data,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
         }
