@@ -46,6 +46,7 @@ async def create_message(
         )
 
         return {
+            "query": request.query,
             "answer": answer,
             "documents": results,
             "use_rag": is_rag,
