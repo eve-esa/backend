@@ -37,7 +37,7 @@ class GenerationRequest(BaseModel):
 
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple[str, list]:
+) -> tuple[str, list, list]:
     """Get RAG context from vector store."""
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
@@ -51,16 +51,16 @@ async def get_rag_context(
 
     if not results:
         print(f"No documents found for query: {request.query}")
-        return "", []
+        return "", [], []
 
     retrieved_documents = [result.payload.get("page_content", "") for result in results]
     context = "\n".join(retrieved_documents)
-    return context, results
+    return context, results, retrieved_documents
 
 
 async def generate_answer(
     request: GenerationRequest,
-) -> tuple[str, list, bool]:  # Renamed from create_collection
+) -> tuple[str, list, list, bool]:  # Renamed from create_collection
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
@@ -74,9 +74,9 @@ async def generate_answer(
 
         # Get context if using RAG
         if is_rag:
-            context, results = await get_rag_context(vector_store, request)
+            context, results, retrieved_documents = await get_rag_context(vector_store, request)
         else:
-            context, results = "", []
+            context, results, retrieved_documents = "", [], []
 
         # Generate answer
         answer = llm_manager.generate_answer(
@@ -89,4 +89,4 @@ async def generate_answer(
     except Exception as e:
         raise Exception(e)
 
-    return answer, results, is_rag
+    return answer, results, retrieved_documents, is_rag
