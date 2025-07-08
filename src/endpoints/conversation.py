@@ -27,6 +27,10 @@ class ConversationWithMessages(BaseModel):
     messages: List[Message] = []
 
 
+class ConversationCreate(BaseModel):
+    name: str
+
+
 class ConversationNameUpdate(BaseModel):
     name: str
 
@@ -42,9 +46,6 @@ async def list_conversations(
             sort=[("timestamp", -1)],
             skip=(pagination.page - 1) * pagination.limit,
         )
-
-        if not result.data:
-            raise HTTPException(status_code=404, detail="No conversations found")
 
         return result
 
@@ -88,12 +89,13 @@ async def get_conversation(
 
 @router.post("/conversations", response_model=Conversation)
 async def create_conversation(
+    request: ConversationCreate,
     requesting_user: User = Depends(get_current_user),
 ):
     try:
         return await Conversation.create(
             user_id=requesting_user.id,
-            name=f"New Chat",
+            name=request.name,
         )
 
     except Exception as e:
