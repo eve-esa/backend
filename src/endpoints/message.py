@@ -37,18 +37,22 @@ async def create_message(
                 detail="You are not allowed to add a message to this conversation",
             )
 
-        answer, results, is_rag = await generate_answer(request)
+        answer, results, retrieved_documents, is_rag = await generate_answer(request)
 
         await Message.create(
             conversation_id=conversation_id,
             input=request.query,
             output=answer,
+            documents=retrieved_documents,
+            results=results,
+            use_rag=is_rag,
         )
 
         return {
             "query": request.query,
             "answer": answer,
-            "documents": results,
+            "documents": retrieved_documents,
+            "results": results,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
         }
