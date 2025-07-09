@@ -54,7 +54,7 @@ async def create_message(
                 }
                 documents_data.append(doc_data)
 
-        await Message.create(
+        message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
             output=answer,
@@ -63,6 +63,7 @@ async def create_message(
         )
 
         return {
+            "id": message.id,
             "query": request.query,
             "answer": answer,
             "documents": documents_data,
