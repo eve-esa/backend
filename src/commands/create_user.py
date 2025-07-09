@@ -1,7 +1,7 @@
-import hashlib
 import logging
 import sys
 import asyncio
+from src.services.utils import hash_password
 from src.config import configure_logging
 
 from src.database.models.user import User
@@ -17,7 +17,7 @@ async def create_user(email: str, password: str):
         print(f"Email {email} already exists")
         sys.exit(1)
 
-    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    password_hash = hash_password(password)
     user = await User.create(email=email, password_hash=password_hash)
     logger.info(
         f"User {email} created successfully with id {user.id} and password {password}"
