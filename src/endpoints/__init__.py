@@ -11,6 +11,7 @@ from .list_collections import router as list_collections_llm_router
 from .auth import router as auth_router
 from .conversation import router as conversation_router
 from .message import router as message_router
+from .user import router as user_router
 
 __all__ = [
     "create_collection_router",
@@ -25,4 +26,5 @@ __all__ = [
     "auth_router",
     "conversation_router",
     "message_router",
+    "user_router",
 ]

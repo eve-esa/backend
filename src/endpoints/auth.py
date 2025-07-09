@@ -43,6 +43,7 @@ async def login(request: LoginRequest):
         refresh_token=create_refresh_token(sub=user.id),
     )
 
+
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh(request: RefreshRequest):
     try:
