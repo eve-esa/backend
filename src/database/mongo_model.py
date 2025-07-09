@@ -211,8 +211,6 @@ class MongoModel(BaseModel):
             if isinstance(value, Enum):
                 doc_dict[key] = value.value
 
-        if self.id:
-            doc_dict["_id"] = self.id
         return doc_dict
 
     @classmethod
@@ -222,11 +220,3 @@ class MongoModel(BaseModel):
             data["id"] = str(data["_id"])
             del data["_id"]
         return cls(**data)
-
-    async def update(self: T, **kwargs) -> T:
-        """Update the instance with new values and save to database."""
-        for key, value in kwargs.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-
-        return await self.save()

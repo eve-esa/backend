@@ -1,7 +1,6 @@
 import hashlib
 import logging
 import sys
-import os
 import asyncio
 from src.config import configure_logging
 
@@ -11,10 +10,18 @@ from src.database.mongo import async_mongo_manager
 configure_logging()
 logger = logging.getLogger(__name__)
 
+
 async def create_user(email: str, password: str):
     await async_mongo_manager.connect()
-    user_id = await User.create(email=email, password_hash=password)
-    logger.info(f"User {email} created successfully with id {user_id}")
+    if await User.find_one({"email": email}):
+        print(f"Email {email} already exists")
+        sys.exit(1)
+
+    password_hash = hashlib.sha256(password.encode()).hexdigest()
+    user = await User.create(email=email, password_hash=password_hash)
+    logger.info(
+        f"User {email} created successfully with id {user.id} and password {password}"
+    )
 
 
 if __name__ == "__main__":

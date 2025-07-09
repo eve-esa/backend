@@ -17,6 +17,7 @@ from src.endpoints import (
     auth_router,
     conversation_router,
     message_router,
+    user_router,
 )
 
 origins = [
@@ -49,9 +50,13 @@ def register_routers(app: FastAPI):
     # Auth
     app.include_router(auth_router, tags=["Auth"])
 
+    # User
+    app.include_router(user_router, tags=["User"])
+
     # Conversations
     app.include_router(conversation_router, tags=["Conversations"])
     app.include_router(message_router, tags=["Messages"])
+
 
 def create_app(debug=False, **kwargs):
     """Create and configure the FastAPI app instance."""
@@ -77,6 +82,7 @@ def create_app(debug=False, **kwargs):
 
 
 app = create_app()
+
 
 @app.on_event("startup")
 async def startup_event():
