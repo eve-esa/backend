@@ -18,6 +18,7 @@ from src.endpoints import (
     conversation_router,
     message_router,
     user_router,
+    forgot_password_router,
 )
 
 origins = [
@@ -53,6 +54,9 @@ def register_routers(app: FastAPI):
     # User
     app.include_router(user_router, tags=["User"])
 
+    # Forgot Password
+    app.include_router(forgot_password_router, tags=["Forgot Password"])
+
     # Conversations
     app.include_router(conversation_router, tags=["Conversations"])
     app.include_router(message_router, tags=["Messages"])
@@ -77,7 +81,6 @@ def create_app(debug=False, **kwargs):
         return "Welcome to Eve"
 
     register_routers(app)
-
     return app
 
 

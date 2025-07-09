@@ -36,6 +36,15 @@ services:
     networks:
       - app-network
 
+  mailcatcher:
+    image: schickling/mailcatcher
+    container_name: eve-ai-mailcatcher
+    ports:
+      - "1025:1025"
+      - "6080:1080"
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge

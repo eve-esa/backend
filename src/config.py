@@ -17,16 +17,28 @@ HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
-MONGO_PORT = os.getenv("MONGO_PORT", 27017).strip()
-MONGO_USERNAME = os.getenv("MONGO_USERNAME").strip()
-MONGO_PASSWORD = os.getenv("MONGO_PASSWORD").strip()
-MONGO_DATABASE = os.getenv("MONGO_DATABASE").strip()
+MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
+MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "").strip()
+MONGO_DATABASE = os.getenv("MONGO_DATABASE", "").strip()
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY").strip()
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15))
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7))
 
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "noreply@eve-ai.com").strip()
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "EVE AI").strip()
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
+
+FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
+    os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
+)
 
 runpod.api_key = RUNPOD_API_KEY
 

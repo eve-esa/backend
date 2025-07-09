@@ -1,7 +1,7 @@
 from jose import jwt
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-import hashlib
+from src.services.utils import hash_password
 from src.database.models.user import User
 from src.config import (
     JWT_SECRET_KEY,
@@ -19,7 +19,7 @@ async def verify_user(email: str, password: str) -> bool:
     if not user:
         return False
 
-    return user.password_hash == hashlib.sha256(password.encode()).hexdigest()
+    return user.password_hash == hash_password(password)
 
 
 def create_access_token(*, sub: str):
