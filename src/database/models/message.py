@@ -16,5 +16,9 @@ class Message(MongoModel):
     use_rag: bool = Field(
         default=False, description="Whether the message was generated using RAG"
     )
+    was_copied: bool = Field(
+        default=False,
+        description="Whether the message was copied from the previous message",
+    )
 
     collection_name: ClassVar[str] = "messages"

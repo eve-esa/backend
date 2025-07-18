@@ -4,7 +4,7 @@ from src.database.models.message import Message
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -16,8 +16,9 @@ class FeedbackEnum(str, Enum):
     NEGATIVE = "negative"
 
 
-class MessageFeedbackUpdate(BaseModel):
-    feedback: FeedbackEnum = Field(..., description="Feedback for the message")
+class MessageUpdate(BaseModel):
+    was_copied: Optional[bool] = None
+    feedback: Optional[FeedbackEnum] = None
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
@@ -79,7 +80,7 @@ async def create_message(
 async def update_message_feedback(
     conversation_id: str,
     message_id: str,
-    request: MessageFeedbackUpdate,
+    request: MessageUpdate,
     requesting_user: User = Depends(get_current_user),
 ):
     try:
@@ -102,7 +103,12 @@ async def update_message_feedback(
                 detail="You are not allowed to update feedback for this message",
             )
 
-        message.feedback = request.feedback.value
+        if request.feedback is not None:
+            message.feedback = request.feedback.value
+
+        if request.was_copied is not None:
+            message.was_copied = request.was_copied
+
         await message.save()
 
         return {"message": "Feedback updated successfully"}
