@@ -40,9 +40,9 @@ async def list_conversations(
     try:
         result = await Conversation.find_all_with_pagination(
             filter_dict={"user_id": request_user.id},
+            page=pagination.page,
             limit=pagination.limit,
             sort=[("timestamp", -1)],
-            skip=(pagination.page - 1) * pagination.limit,
         )
 
         return result

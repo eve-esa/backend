@@ -5,20 +5,14 @@ import logging
 from src.config import configure_logging
 
 from src.endpoints import (
-    create_collection_router,
-    delete_collection_router,
     health_check_router,
-    add_document_list_router,
-    delete_document_router,
-    retrieve_documents_router,
-    generate_answer_router,
-    completion_llm_router,
-    list_collections_llm_router,
     auth_router,
     conversation_router,
     message_router,
     user_router,
     forgot_password_router,
+    collection_router,
+    document_router,
 )
 
 origins = [
@@ -31,19 +25,14 @@ configure_logging(level=logging.DEBUG)
 
 
 def register_routers(app: FastAPI):
-    # Collections
-    app.include_router(create_collection_router, tags=["Collections"])
-    app.include_router(delete_collection_router, tags=["Collections"])
-    app.include_router(list_collections_llm_router, tags=["Collections"])
+    # Documents legacy
+    # app.include_router(add_document_list_router, tags=["Documents"])
+    # app.include_router(delete_document_router, tags=["Documents"])
+    # app.include_router(retrieve_documents_router, tags=["Documents"])
 
-    # Documents
-    app.include_router(add_document_list_router, tags=["Documents"])
-    app.include_router(delete_document_router, tags=["Documents"])
-    app.include_router(retrieve_documents_router, tags=["Documents"])
-
-    # LLM
-    app.include_router(generate_answer_router, tags=["LLM"])
-    app.include_router(completion_llm_router, tags=["LLM"])
+    # LLM legacy
+    # app.include_router(generate_answer_router, tags=["LLM"])
+    # app.include_router(completion_llm_router, tags=["LLM"])
 
     # Health
     app.include_router(health_check_router, tags=["Health"])
@@ -60,6 +49,12 @@ def register_routers(app: FastAPI):
     # Conversations
     app.include_router(conversation_router, tags=["Conversations"])
     app.include_router(message_router, tags=["Messages"])
+
+    # Collections
+    app.include_router(collection_router, tags=["Collections"])
+
+    # Documents
+    app.include_router(document_router, tags=["Documents"])
 
 
 def create_app(debug=False, **kwargs):
