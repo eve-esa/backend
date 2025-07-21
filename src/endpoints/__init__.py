@@ -13,6 +13,8 @@ from .conversation import router as conversation_router
 from .message import router as message_router
 from .user import router as user_router
 from .forgot_password import router as forgot_password_router
+from .collection import router as collection_router
+from .document import router as document_router
 
 __all__ = [
     "create_collection_router",
@@ -29,4 +31,6 @@ __all__ = [
     "message_router",
     "user_router",
     "forgot_password_router",
+    "collection_router",
+    "document_router",
 ]

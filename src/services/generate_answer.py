@@ -1,16 +1,15 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
-from typing import Any, Dict
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
 from src.services.vector_store_manager import VectorStoreManager
+from src.database.models.collection import Collection
 from src.services.llm_manager import LLMManager
-from src.config import QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
+from src.config import OPENAI_API_KEY
 
 # Constants
 DEFAULT_QUERY = "What is ESA?"
-DEFAULT_COLLECTION = "esa-nasa-workshop"
 DEFAULT_EMBEDDINGS = "nasa-impact/nasa-smd-ibm-st-v2"
 DEFAULT_LLM = "eve-instruct-v0.1"  # or openai
 DEFAULT_CHUNK_SIZE = 1024
@@ -26,7 +25,7 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
-    collection_name: str = DEFAULT_COLLECTION
+    collection_id: str = Field(..., description="Target collection ID")
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDINGS
     k: int = DEFAULT_K
@@ -36,13 +35,13 @@ class GenerationRequest(BaseModel):
 
 
 async def get_rag_context(
-    vector_store: VectorStoreManager, request: GenerationRequest
+    vector_store: VectorStoreManager, collection_id: str, request: GenerationRequest
 ) -> tuple[str, list]:
     """Get RAG context from vector store."""
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
-        collection_name=request.collection_name,
+        collection_name=collection_id,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
@@ -65,16 +64,22 @@ async def generate_answer(
     llm_manager = LLMManager()
 
     try:
+        collection = await Collection.find_by_id(request.collection_id)
+        if not collection:
+            raise Exception("Collection not found")
+
+        qdrant_collection = collection.id
+
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 
         # Check if we need to use RAG
-        is_rag = await vector_store.use_rag(
-            request.query
-        )  # Make sure this is awaited if async
+        is_rag = await vector_store.use_rag(request.query)
 
         # Get context if using RAG
         if is_rag:
-            context, results = await get_rag_context(vector_store, request)
+            context, results = await get_rag_context(
+                vector_store, qdrant_collection, request
+            )
         else:
             context, results = "", []
 

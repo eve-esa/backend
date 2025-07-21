@@ -85,7 +85,7 @@ class MongoModel(BaseModel):
     async def find_all_with_pagination(
         cls: Type[T],
         limit: int = 10,
-        skip: int = 0,
+        page: int = 0,
         sort: Optional[List[tuple]] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
     ) -> PaginatedResponse[T]:
@@ -94,6 +94,7 @@ class MongoModel(BaseModel):
             cls.logger.warning("Limit is 0, setting to 10 to avoid division by zero")
             limit = 10
 
+        skip = (page - 1) * limit
         total_count = await cls.count_documents(filter_dict)
         total_pages = math.ceil(total_count / limit)
         has_next = skip + limit < total_count

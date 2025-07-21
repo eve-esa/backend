@@ -8,17 +8,16 @@ document storage, and similarity search operations.
 
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 import asyncio
-import runpod
 
+from src.database.models.collection import Collection
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.models import (
     Distance,
@@ -28,13 +27,12 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
-from openai import AsyncOpenAI
+from src.core.llm_manager import LLMManager
 
-from src.constants import DEFAULT_EMBEDDING_MODEL
+from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
-    OPENAI_API_KEY,
     QDRANT_URL,
     QDRANT_API_KEY,
 )
@@ -80,8 +78,6 @@ class VectorStoreManager:
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model_name=embeddings_model, return_embeddings_size=True
         )
-        # Use AsyncOpenAI for async operations
-        self.openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def create_collection(self, collection_name: str) -> bool:
@@ -125,6 +121,65 @@ class VectorStoreManager:
             types.CollectionsResponse: Qdrant collections response
         """
         return self.client.get_collections()
+
+    async def list_public_collections(
+        self, page: int = 1, limit: int = 10
+    ) -> Tuple[List[Dict[str, str]], int]:
+        """
+        Get all public collections from the vector store.
+
+        Returns:
+            Dict[str, str]: Dictionary of collection names and descriptions
+            int: Total number of public collections for pagination
+        """
+        existing_user_collections = await Collection.find_all(
+            filter_dict={"user_id": {"$ne": None}}
+        )
+
+        collections = self.client.get_collections()
+        # Build a map of collection_name -> alias_name from Qdrant aliases response
+        aliases_response = self.client.get_aliases()
+        alias_map: Dict[str, str] = {}
+        alias_items = getattr(aliases_response, "aliases", aliases_response)
+        for item in alias_items or []:
+            alias_name = getattr(item, "alias_name", None)
+            collection_name = getattr(item, "collection_name", None)
+            if collection_name and alias_name:
+                # Prefer first seen alias per collection
+                alias_map.setdefault(collection_name, alias_name)
+
+        start = (page - 1) * limit
+        end = start + limit
+
+        # Build a map of collection name -> description from PUBLIC_COLLECTIONS constant
+        desc_map: Dict[str, Optional[str]] = {}
+        try:
+            if isinstance(PUBLIC_COLLECTIONS, dict):
+                desc_map = PUBLIC_COLLECTIONS
+            elif isinstance(PUBLIC_COLLECTIONS, list):
+                for item in PUBLIC_COLLECTIONS:
+                    if isinstance(item, dict) and item.get("name"):
+                        desc_map[item["name"]] = item.get("description")
+        except Exception:
+            desc_map = {}
+
+        public_collections = [
+            {
+                "name": collection.name,
+                "alias": alias_map.get(collection.name) or None,
+                # Qdrant does not provide a description for its collections so we use a placeholder "Public Collection from ESA"
+                # if collection.name is known in config, use that description
+                "description": desc_map.get(collection.name)
+                or collection.model_dump().get(
+                    "description", "Public Collection from ESA"
+                ),
+            }
+            for collection in collections.collections
+            if collection.name
+            not in [collection.id for collection in existing_user_collections]
+        ]
+
+        return public_collections[start:end], len(public_collections)
 
     def list_collections_names(self) -> List[str]:
         """
@@ -327,13 +382,10 @@ class VectorStoreManager:
         self, filter_dict: Optional[Dict[str, Any]]
     ) -> Optional[Filter]:
         """
-        Convert a Python dictionary to a Qdrant filter object.
+        Convert a simple dictionary (key -> value) to a Qdrant filter object,
+        applying conditions against payload.metadata.* keys by default.
 
-        Args:
-            filter_dict: Dictionary containing filter criteria
-
-        Returns:
-            Optional[Filter]: Qdrant filter object or None if no filter provided
+        This is kept for backwards compatibility where callers pass a flat dict.
         """
         if not filter_dict:
             return None
@@ -345,6 +397,71 @@ class VectorStoreManager:
                 for condition in self._build_condition(key, value)
             ]
         )
+
+    def _search_across_collections(
+        self,
+        collection_names: List[str],
+        query_vector: List[float],
+        score_threshold: float,
+        query_filter: Optional[Filter],
+        limit_per_collection: int,
+    ) -> List[Any]:
+        """
+        Perform a search against multiple collections and aggregate results.
+
+        Args:
+            collection_names: Names of collections to query
+            query_vector: Embedded query vector
+            score_threshold: Minimum similarity score
+            query_filter: Optional Qdrant filter to apply
+            limit_per_collection: Max results to fetch per collection
+
+        Returns:
+            Aggregated list of search results from all collections
+        """
+        aggregated_results: List[Any] = []
+        for collection_name in collection_names:
+            try:
+                results = self.client.search(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    limit=limit_per_collection,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                    search_params=models.SearchParams(
+                        quantization=models.QuantizationSearchParams(
+                            ignore=False,
+                            rescore=True,
+                            oversampling=2.0,
+                        )
+                    ),
+                )
+                aggregated_results.extend(results)
+            except Exception as e:
+                logger.warning(f"Failed to search collection '{collection_name}': {e}")
+                continue
+
+        logger.info(
+            f"Retrieved {len(aggregated_results)} total documents from {len(collection_names)} collections"
+        )
+        return aggregated_results
+
+    @staticmethod
+    def _sort_by_score_desc(results: List[Any]) -> List[Any]:
+        """
+        Sort a list of scored results in descending order of score.
+
+        Args:
+            results: List of results with a 'score' attribute
+
+        Returns:
+            Sorted list by score (highest first)
+        """
+        try:
+            return sorted(results, key=lambda x: x.score, reverse=True)
+        except Exception:
+            # If objects don't have score attribute, return as-is
+            return results
 
     def _build_condition(self, key: str, value: Any) -> List[FieldCondition]:
         """
@@ -375,7 +492,7 @@ class VectorStoreManager:
         else:
             conditions.append(
                 FieldCondition(
-                    key=f"metadata.{key}",
+                    key=f"{key}",
                     match=MatchValue(value=value),
                 )
             )
@@ -438,37 +555,6 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
-    def _get_unique_source_documents(
-        self, scored_points_list: List[Any], min_docs: int = 2
-    ) -> List[Any]:
-        """
-        Filter search results to keep only one document per source.
-
-        Args:
-            scored_points_list: List of search results with scores
-            min_docs: Minimum number of unique documents to return
-
-        Returns:
-            List[Any]: List of unique documents ordered by relevance score
-        """
-        # Sort results by score (highest first)
-        sorted_results = sorted(scored_points_list, key=lambda x: x.score, reverse=True)
-        unique_source_items = OrderedDict()
-
-        # Keep only one document per source, prioritizing higher scores
-        for item in sorted_results:
-            try:
-                source = item.payload["title"]
-                if source not in unique_source_items:
-                    unique_source_items[source] = item
-                if len(unique_source_items) >= min_docs:
-                    break
-            except (KeyError, TypeError) as e:
-                logger.warning(f"Skipping item with malformed metadata: {e}")
-                continue
-
-        return list(unique_source_items.values())
-
     async def generate_query_vector(
         self, query: str, embeddings_model: str
     ) -> List[float]:
@@ -495,6 +581,7 @@ class VectorStoreManager:
                     endpoint_id=config.get_indus_embedder_id(),
                     model=embeddings_model,
                     user_input=query,
+                    use_retries=False,
                 )
                 logger.debug(query_vector)
                 # Validate the received vector
@@ -519,22 +606,23 @@ class VectorStoreManager:
 
     async def retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         k: int = 5,
         score_threshold: float = 0.7,
-        get_unique_docs: bool = True,
         embeddings_model: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
         """
-        Retrieve relevant documents for a given query.
+        Retrieve relevant documents for a given query from multiple collections.
 
         Args:
-            collection_name: Name of the collection to search
+            collection_names: List of names of the collections to search
             query: The query text
+            year: List with two values [start_year, end_year] to filter by publication year.
+            keywords: List of keywords to filter by title.
             k: Number of documents to retrieve
             score_threshold: Minimum similarity score (0-1)
-            get_unique_docs: Whether to filter for unique source documents
             embeddings_model: Optional custom embedding model to use
                               (defaults to the model used at initialization)
 
@@ -549,109 +637,84 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             query_vector = await self.generate_query_vector(query, model)
+            query_filter = Filter(**filters) if filters else None
 
-            if not get_unique_docs:
-                # Simple search with limit k
-                results = self.client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    limit=k,
-                    score_threshold=score_threshold,
-                )
-                logger.info(f"Retrieved docs: {results}")
-
-                logger.info(
-                    f"Retrieved {len(results)} documents from '{collection_name}'"
-                )
-                return results
-
-            # Get more results to allow filtering for unique sources
-            results = self.client.search(
-                collection_name=collection_name,
+            # Retrieve k per collection (caller may further rerank/filter)
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
                 query_vector=query_vector,
-                limit=k * 10,  # Get more results than needed for filtering
                 score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k,
             )
-            logger.info(f"Retrieved docs: {results}")
 
-            unique_results = self._get_unique_source_documents(results, min_docs=k)
             logger.info(
-                f"Retrieved {len(unique_results)} unique documents from '{collection_name}' "
-                f"(filtered from {len(results)} total matches)"
+                f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
             )
-            return unique_results
+            return all_results
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
             raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
 
-    async def use_rag(self, query: str) -> bool:
+    # RAG decision moved to LLMManager.should_use_rag
+
+    async def retrieve_documents_with_latencies(
+        self,
+        collection_names: List[str],
+        query: str,
+        k: int = 5,
+        score_threshold: float = 0.7,
+        embeddings_model: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
-        Determine if RAG should be used for a given query.
+        Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
 
-        Uses a language model to classify whether the query is appropriate
-        for retrieval-augmented generation.
-
-        Args:
-            query: The user's query
-
-        Returns:
-            bool: True if RAG should be used, False otherwise
-
-        Raises:
-            RuntimeError: If determination fails
+        Returns a tuple of (results, latencies)
+        where latencies contains keys: "query_embedding_latency", "qdrant_retrieval_latency".
         """
+        import time
+
+        model = embeddings_model or self.embeddings_model
+
+        embedding_latency: Optional[float] = None
+        retrieval_latency: Optional[float] = None
+
         try:
-            # Create a prompt to determine if RAG is appropriate
-            prompt = f"""
-            Decide whether to use RAG to answer the given query. Follow these rules:
-            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", 
-              "hello", "how are you", "what can you do", or "tell me a joke".
-            - USE RAG for queries related to earth science, space science, climate, 
-              space agencies, or similar scientific topics.
-            - USE RAG for specific technical or scientific questions, even if the topic is unclear
-              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
-            - If unsure whether RAG is needed, default to USING RAG.
-            - Respond only with 'yes' or 'no'.
+            # Generate embedding vector for the query
+            t0 = time.perf_counter()
+            query_vector = await self.generate_query_vector(query, model)
+            embedding_latency = time.perf_counter() - t0
 
-            Query: {query}
-            """
+            query_filter = Filter(**filters) if filters else None
 
-            # Call OpenAI to decide
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0,
+            # Search across collections
+            t1 = time.perf_counter()
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
+                query_vector=query_vector,
+                score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k,
+            )
+            retrieval_latency = time.perf_counter() - t1
+
+            logger.info(
+                f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
             )
 
-            if response.choices:
-                answer = response.choices[0].message.content.strip().lower()
-
-                if answer == "yes":
-                    logger.info(f"Using RAG for query: '{query}'")
-                    return True
-
-                elif answer == "no":
-                    logger.info(f"Not using RAG for query: '{query}'")
-                    return False
-
-                else:
-                    logger.warning(f"Unexpected RAG determination response: '{answer}'")
-                    # Default to using RAG when response is unclear
-                    return True
-
-            else:
-                logger.warning(
-                    "Empty response from language model for RAG determination"
-                )
-                # Default to using RAG when there's no response
-                return True
+            latencies: Dict[str, Optional[float]] = {
+                "query_embedding_latency": embedding_latency,
+                "qdrant_retrieval_latency": retrieval_latency,
+            }
+            return all_results, latencies
 
         except Exception as e:
-            logger.error(f"Failed to determine if RAG should be used: {e}")
-            # In case of errors, default to using RAG to be safe
-            return True
+            logger.error(f"Failed to retrieve documents: {e}")
+            raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
 
     def sync_retrieve_documents_from_query(
         self,
@@ -659,7 +722,6 @@ class VectorStoreManager:
         query: str,
         k: int = 5,
         score_threshold: float = 0.7,
-        get_unique_docs: bool = True,
         embeddings_model: Optional[str] = None,
     ) -> List[Any]:
         """
@@ -673,18 +735,11 @@ class VectorStoreManager:
                 query=query,
                 k=k,
                 score_threshold=score_threshold,
-                get_unique_docs=get_unique_docs,
                 embeddings_model=embeddings_model,
             )
         )
 
-    def sync_use_rag(self, query: str) -> bool:
-        """
-        Synchronous wrapper for use_rag.
-
-        This method allows calling the async RAG determination from sync contexts.
-        """
-        return asyncio.run(self.use_rag(query))
+    # RAG decision moved to LLMManager.should_use_rag
 
 
 if __name__ == "__main__":
