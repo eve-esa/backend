@@ -28,7 +28,7 @@ document_service = DocumentService()
 @router.put("/collections/{collection_name}/documents")
 async def add_document_to_collection(
     collection_name: str,
-    request: CollectionRequest,
+    embeddings_model: str = Form(default="nasa-impact/nasa-smd-ibm-st-v2"),
     files: List[UploadFile] = File(...),
     chunk_size: int = Form(default=1024),
     chunk_overlap: int = Form(default=0),
@@ -38,6 +38,9 @@ async def add_document_to_collection(
     """Add a list of documents with metadata to a vector store."""
     logger.info(f"Received {len(files)} files for processing")
 
+    # Create CollectionRequest from form data
+    request = CollectionRequest(embeddings_model=embeddings_model)
+    
     # Create AddDocumentRequest from the parameters
     add_request = AddDocumentRequest(
         embeddings_model=request.embeddings_model,
