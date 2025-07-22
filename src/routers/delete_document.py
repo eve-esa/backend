@@ -1,7 +1,7 @@
 """Enfdpoint to delete documents from a vector store."""
 from fastapi import APIRouter, HTTPException, status
 from typing import List
-from src.services.vector_store_manager import VectorStoreManager
+from src.utils.vector_store_manager import VectorStoreManager
 
 router = APIRouter()
 

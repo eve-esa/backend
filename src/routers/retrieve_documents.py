@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from src.services.vector_store_manager import VectorStoreManager
+from src.utils.vector_store_manager import VectorStoreManager
 from pydantic import BaseModel
 
 router = APIRouter()

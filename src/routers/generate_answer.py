@@ -4,7 +4,7 @@ from typing import Dict, Any
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
-from src.services.vector_store_manager import VectorStoreManager
+from src.utils.vector_store_manager import VectorStoreManager
 from src.services.llm_manager import LLMManager
 from src.config import QDRANT_URL, QDRANT_API_KEY, OPENAI_API_KEY
 

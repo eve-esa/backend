@@ -12,8 +12,7 @@ from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-from src.config import QDRANT_API_KEY, QDRANT_URL
-from src.services.vector_store_manager import VectorStoreManager
+from src.utils.vector_store_manager import VectorStoreManager
 from src.services.utils import save_upload_file_to_temp
 from src.services.file_parser import FileParser
 

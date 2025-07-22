@@ -3,16 +3,14 @@ from fastapi import FastAPI
 import logging
 from src.config import configure_logging
 
-from src.endpoints import (
-    create_collection_router,
-    delete_collection_router,
+from src.routers import (
+    collections_router,
     health_check_router,
     add_document_list_router,
     delete_document_router,
     retrieve_documents_router,
     generate_answer_router,
     completion_llm_router,
-    list_collections_llm_router,
 )
 
 origins = [
@@ -24,9 +22,7 @@ configure_logging(level=logging.DEBUG)
 
 def register_routers(app: FastAPI):
     # Collections
-    app.include_router(create_collection_router, tags=["Collections"])
-    app.include_router(delete_collection_router, tags=["Collections"])
-    app.include_router(list_collections_llm_router, tags=["Collections"])
+    app.include_router(collections_router, tags=["Collections"])
 
     # Documents
     app.include_router(add_document_list_router, tags=["Documents"])
