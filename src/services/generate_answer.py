@@ -1,5 +1,6 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
+from typing import Optional
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,7 @@ from src.config import OPENAI_API_KEY
 DEFAULT_QUERY = "What is ESA?"
 DEFAULT_EMBEDDINGS = "nasa-impact/nasa-smd-ibm-st-v2"
 DEFAULT_LLM = "eve-instruct-v0.1"  # or openai
+DEFAULT_COLLECTION = "esa-nasa-workshop"
 DEFAULT_CHUNK_SIZE = 1024
 DEFAULT_CHUNK_OVERLAP = 0
 DEFAULT_K = 3
@@ -25,7 +27,9 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
-    collection_id: str = Field(..., description="Target collection ID")
+    collection_id: Optional[str] = Field(
+        default=None, description="Target collection ID"
+    )
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDINGS
     k: int = DEFAULT_K
@@ -64,7 +68,9 @@ async def generate_answer(
     llm_manager = LLMManager()
 
     try:
-        collection = await Collection.find_by_id(request.collection_id)
+        collection = await Collection.find_by_id(
+            request.collection_id if request.collection_id else DEFAULT_COLLECTION
+        )
         if not collection:
             raise Exception("Collection not found")
 
