@@ -6,9 +6,7 @@ from src.config import configure_logging
 from src.routers import (
     collections_router,
     health_check_router,
-    add_document_list_router,
-    delete_document_router,
-    retrieve_documents_router,
+    documents_router,
     generate_answer_router,
     completion_llm_router,
 )
@@ -25,9 +23,7 @@ def register_routers(app: FastAPI):
     app.include_router(collections_router, tags=["Collections"])
 
     # Documents
-    app.include_router(add_document_list_router, tags=["Documents"])
-    app.include_router(delete_document_router, tags=["Documents"])
-    app.include_router(retrieve_documents_router, tags=["Documents"])
+    app.include_router(documents_router, tags=["Documents"])
 
     # LLM
     app.include_router(generate_answer_router, tags=["LLM"])
