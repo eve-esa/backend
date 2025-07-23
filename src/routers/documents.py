@@ -8,16 +8,14 @@ from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 
 from src.schemas import (
-    CollectionRequest, 
-    RetrieveRequest, 
-    DeleteRequest, 
-    AddDocumentRequest, 
-    UpdateDocumentRequest
+    CollectionRequest,
+    RetrieveRequest,
+    DeleteRequest,
+    AddDocumentRequest,
+    UpdateDocumentRequest,
 )
 from src.services.document import DocumentService
-
-# Constants
-DEFAULT_COLLECTION = "esa-nasa-workshop"
+from src.constants import DEFAULT_COLLECTION
 
 # Setup
 router = APIRouter()
@@ -40,12 +38,12 @@ async def add_document_to_collection(
 
     # Create CollectionRequest from form data
     request = CollectionRequest(embeddings_model=embeddings_model)
-    
+
     # Create AddDocumentRequest from the parameters
     add_request = AddDocumentRequest(
         embeddings_model=request.embeddings_model,
         chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
+        chunk_overlap=chunk_overlap,
     )
 
     # Use the document service
@@ -54,7 +52,7 @@ async def add_document_to_collection(
         files=files,
         request=add_request,
         metadata_urls=metadata_urls,
-        metadata_names=metadata_names
+        metadata_names=metadata_names,
     )
 
     if not result.success:
@@ -72,8 +70,7 @@ async def retrieve_documents(
 ):
     """Retrieve documents from a collection based on a query."""
     result = await document_service.retrieve_documents(
-        collection_name=collection_name,
-        request=request
+        collection_name=collection_name, request=request
     )
 
     if not result.success:
@@ -84,15 +81,16 @@ async def retrieve_documents(
     return result.data["results"]
 
 
-@router.delete("/collections/{collection_name}/documents", status_code=status.HTTP_200_OK)
+@router.delete(
+    "/collections/{collection_name}/documents", status_code=status.HTTP_200_OK
+)
 async def delete_document_list(
     request: DeleteRequest,
     collection_name: str = DEFAULT_COLLECTION,
 ):
     """Delete documents from a collection."""
     result = await document_service.delete_documents(
-        collection_name=collection_name,
-        request=request
+        collection_name=collection_name, request=request
     )
 
     if not result.success:
@@ -100,7 +98,7 @@ async def delete_document_list(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "message": result.message,
-                "errors": result.data.get("errors", []) if result.data else []
+                "errors": result.data.get("errors", []) if result.data else [],
             },
         )
 
@@ -114,8 +112,7 @@ async def update_documents(
 ):
     """Update document metadata in a collection."""
     result = await document_service.update_documents(
-        collection_name=collection_name,
-        request=request
+        collection_name=collection_name, request=request
     )
 
     if not result.success:
