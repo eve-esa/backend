@@ -8,7 +8,6 @@ from src.routers import (
     health_check_router,
     documents_router,
     generate_answer_router,
-    completion_llm_router,
 )
 
 origins = [
@@ -17,6 +16,7 @@ origins = [
 ]
 
 configure_logging(level=logging.DEBUG)
+
 
 def register_routers(app: FastAPI):
     # Collections
@@ -27,7 +27,6 @@ def register_routers(app: FastAPI):
 
     # LLM
     app.include_router(generate_answer_router, tags=["LLM"])
-    app.include_router(completion_llm_router, tags=["LLM"])
 
     # Health
     app.include_router(health_check_router, tags=["Health"])
