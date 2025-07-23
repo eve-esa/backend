@@ -32,7 +32,7 @@ from qdrant_client.http.models import (
 from openai import AsyncOpenAI
 
 from src.constants import DEFAULT_EMBEDDING_MODEL
-from src.services.utils import get_embeddings_model
+from src.utils.utils import get_embeddings_model
 from src.config import (
     Config,
     OPENAI_API_KEY,

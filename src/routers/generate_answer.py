@@ -6,7 +6,7 @@ from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
 from src.utils.vector_store_manager import VectorStoreManager
-from src.services.llm_manager import LLMManager
+from src.utils.llm_manager import LLMManager
 from src.config import OPENAI_API_KEY
 from src.constants import (
     DEFAULT_QUERY,

@@ -16,13 +16,13 @@ from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from src.utils.vector_store_manager import VectorStoreManager
-from src.services.utils import save_upload_file_to_temp
-from src.services.file_parser import FileParser
+from src.utils.utils import save_upload_file_to_temp
+from src.utils.file_parser import FileParser
 from src.schemas.documents import (
-    RetrieveRequest, 
-    DeleteRequest, 
-    AddDocumentRequest, 
-    UpdateDocumentRequest
+    RetrieveRequest,
+    DeleteRequest,
+    AddDocumentRequest,
+    UpdateDocumentRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DocumentResult:
     """Represents the result of a document operation."""
+
     success: bool
     message: str
     data: Optional[Dict[str, Any]] = None
@@ -40,99 +41,111 @@ class DocumentResult:
 class DocumentService:
     """
     Service for managing documents in the vector store.
-    
+
     This class provides methods to add, retrieve, update, and delete documents
     using the VectorStoreManager.
     """
-    
+
     def __init__(self):
         """Initialize the document service."""
         self.vector_store_manager = None
         self.file_parser = FileParser()
-    
+
     def _get_vector_store_manager(self, embeddings_model: str) -> VectorStoreManager:
         """
         Get or create a VectorStoreManager instance.
-        
+
         Args:
             embeddings_model: The embeddings model to use
-            
+
         Returns:
             VectorStoreManager: The vector store manager instance
         """
-        if self.vector_store_manager is None or self.vector_store_manager.embeddings_model != embeddings_model:
-            self.vector_store_manager = VectorStoreManager(embeddings_model=embeddings_model)
+        if (
+            self.vector_store_manager is None
+            or self.vector_store_manager.embeddings_model != embeddings_model
+        ):
+            self.vector_store_manager = VectorStoreManager(
+                embeddings_model=embeddings_model
+            )
         return self.vector_store_manager
-    
-    def _process_metadata(self, metadata_input: Optional[List[str] | str], file_count: int) -> List[str]:
+
+    def _process_metadata(
+        self, metadata_input: Optional[List[str] | str], file_count: int
+    ) -> List[str]:
         """Process metadata (URLs or names) into a list matching file count."""
         if not metadata_input:
             return [""] * file_count
-        
+
         if isinstance(metadata_input, str):
             parts = [part.strip() for part in metadata_input.split(",")]
             return (parts + [""] * (file_count - len(parts)))[:file_count]
-        
+
         if isinstance(metadata_input, list):
             return [
-                item.split(",")[0].strip() if isinstance(item, str) and "," in item else (item.strip() if item else "")
+                (
+                    item.split(",")[0].strip()
+                    if isinstance(item, str) and "," in item
+                    else (item.strip() if item else "")
+                )
                 for item in metadata_input[:file_count]
             ] + [""] * (file_count - len(metadata_input))
-        
+
         return [""] * file_count
-    
+
     async def add_documents(
-        self, 
-        collection_name: str, 
-        files: List[UploadFile], 
+        self,
+        collection_name: str,
+        files: List[UploadFile],
         request: AddDocumentRequest,
         metadata_urls: Optional[List[str] | str] = None,
-        metadata_names: Optional[List[str] | str] = None
+        metadata_names: Optional[List[str] | str] = None,
     ) -> DocumentResult:
         """
         Add documents to a collection.
-        
+
         Args:
             collection_name: Name of the collection
             files: List of uploaded files
             request: Add document request with configuration
             metadata_urls: Optional metadata URLs
             metadata_names: Optional metadata names
-            
+
         Returns:
             DocumentResult: Result of the operation
         """
         try:
-            logger.info(f"Processing {len(files)} files for collection '{collection_name}'")
-            
+            logger.info(
+                f"Processing {len(files)} files for collection '{collection_name}'"
+            )
+
             # Process metadata
             processed_urls = self._process_metadata(metadata_urls, len(files))
             processed_names = self._process_metadata(metadata_names, len(files))
-            
+
             # Initialize components
             vector_store = self._get_vector_store_manager(request.embeddings_model)
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=request.chunk_size, 
-                chunk_overlap=request.chunk_overlap
+                chunk_size=request.chunk_size, chunk_overlap=request.chunk_overlap
             )
-            
+
             all_documents, temp_files = [], []
-            
+
             for file, url, name in zip(files, processed_urls, processed_names):
                 if not name.strip():
                     logger.warning(f"Skipping {file.filename} - no valid source_name")
                     continue
-                
+
                 # Save and parse file
                 temp_path = await save_upload_file_to_temp(file)
                 temp_files.append(temp_path)
                 extension = os.path.splitext(file.filename)[1].lower()
                 documents = await self.file_parser(temp_path, extension)
-                
+
                 if not documents:
                     logger.warning(f"No documents parsed from {file.filename}")
                     continue
-                
+
                 # Add metadata and split
                 for doc in documents:
                     doc.metadata = {
@@ -145,44 +158,52 @@ class DocumentService:
                 split_docs = text_splitter.split_documents(documents)
                 all_documents.extend(split_docs)
                 logger.info(f"Processed {len(split_docs)} chunks from {file.filename}")
-            
+
             # Handle results
             if not all_documents:
                 return DocumentResult(
                     success=False,
                     message="No documents processed",
-                    data={"collection": collection_name}
+                    data={"collection": collection_name},
                 )
-            
-            valid_documents = [doc for doc in all_documents if doc.metadata.get("source_name", "").strip()]
+
+            valid_documents = [
+                doc
+                for doc in all_documents
+                if doc.metadata.get("source_name", "").strip()
+            ]
             if len(valid_documents) != len(all_documents):
-                logger.warning(f"Filtered out {len(all_documents) - len(valid_documents)} documents with invalid source_name")
-            
+                logger.warning(
+                    f"Filtered out {len(all_documents) - len(valid_documents)} documents with invalid source_name"
+                )
+
             if valid_documents:
-                vector_store.add_document_list(collection_name=collection_name, document_list=valid_documents)
+                vector_store.add_document_list(
+                    collection_name=collection_name, document_list=valid_documents
+                )
                 return DocumentResult(
                     success=True,
                     message=f"Successfully processed {len(valid_documents)} chunks from {len(files)} files",
                     data={
                         "collection": collection_name,
                         "chunk_count": len(valid_documents),
-                        "file_count": len(files)
-                    }
+                        "file_count": len(files),
+                    },
                 )
-            
+
             return DocumentResult(
                 success=False,
                 message="No valid documents with source_name",
-                data={"collection": collection_name}
+                data={"collection": collection_name},
             )
-            
+
         except Exception as e:
             logger.error(f"Error processing documents: {str(e)}", exc_info=True)
             return DocumentResult(
                 success=False,
                 message="Error processing documents",
                 error=str(e),
-                data={"collection": collection_name}
+                data={"collection": collection_name},
             )
         finally:
             # Clean up temp files
@@ -192,19 +213,17 @@ class DocumentService:
                         os.unlink(temp_path)
                 except Exception as e:
                     logger.error(f"Failed to remove temp file {temp_path}: {str(e)}")
-    
+
     async def retrieve_documents(
-        self, 
-        collection_name: str, 
-        request: RetrieveRequest
+        self, collection_name: str, request: RetrieveRequest
     ) -> DocumentResult:
         """
         Retrieve documents from a collection based on a query.
-        
+
         Args:
             collection_name: Name of the collection
             request: Retrieve request with query parameters
-            
+
         Returns:
             DocumentResult: Result with retrieved documents
         """
@@ -217,45 +236,43 @@ class DocumentService:
                 k=request.k,
                 score_threshold=request.score_threshold,
             )
-            
+
             if not results:
                 return DocumentResult(
                     success=False,
                     message="No documents found",
-                    data={"collection": collection_name, "results": []}
+                    data={"collection": collection_name, "results": []},
                 )
-            
+
             return DocumentResult(
                 success=True,
                 message="Documents retrieved successfully",
                 data={
                     "collection": collection_name,
                     "results": results,
-                    "count": len(results)
-                }
+                    "count": len(results),
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Error retrieving documents: {str(e)}", exc_info=True)
             return DocumentResult(
                 success=False,
                 message="Error retrieving documents",
                 error=str(e),
-                data={"collection": collection_name}
+                data={"collection": collection_name},
             )
-    
+
     async def delete_documents(
-        self, 
-        collection_name: str, 
-        request: DeleteRequest
+        self, collection_name: str, request: DeleteRequest
     ) -> DocumentResult:
         """
         Delete documents from a collection.
-        
+
         Args:
             collection_name: Name of the collection
             request: Delete request with document list
-            
+
         Returns:
             DocumentResult: Result of the deletion operation
         """
@@ -263,17 +280,17 @@ class DocumentService:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
             errors = []
             deleted_count = 0
-            
+
             for source in request.document_list:
                 try:
                     vector_store.delete_docs_by_metadata_filter(
-                        collection_name=collection_name, 
-                        metadata={"source_name": source}
+                        collection_name=collection_name,
+                        metadata={"source_name": source},
                     )
                     deleted_count += 1
                 except Exception as e:
                     errors.append(f"Failed to delete document {source}: {str(e)}")
-            
+
             if errors:
                 return DocumentResult(
                     success=False,
@@ -283,47 +300,45 @@ class DocumentService:
                         "collection": collection_name,
                         "deleted_count": deleted_count,
                         "total_requested": len(request.document_list),
-                        "errors": errors
-                    }
+                        "errors": errors,
+                    },
                 )
-            
+
             return DocumentResult(
                 success=True,
                 message="Documents deleted successfully",
                 data={
                     "collection": collection_name,
                     "deleted_documents": request.document_list,
-                    "deleted_count": deleted_count
-                }
+                    "deleted_count": deleted_count,
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Error deleting documents: {str(e)}", exc_info=True)
             return DocumentResult(
                 success=False,
                 message="Error deleting documents",
                 error=str(e),
-                data={"collection": collection_name}
+                data={"collection": collection_name},
             )
-    
+
     async def update_documents(
-        self, 
-        collection_name: str, 
-        request: UpdateDocumentRequest
+        self, collection_name: str, request: UpdateDocumentRequest
     ) -> DocumentResult:
         """
         Update document metadata in a collection.
-        
+
         Args:
             collection_name: Name of the collection
             request: Update request with new metadata
-            
+
         Returns:
             DocumentResult: Result of the update operation
         """
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
-            
+
             # This would need to be implemented in VectorStoreManager
             # For now, return a placeholder result
             return DocumentResult(
@@ -331,15 +346,15 @@ class DocumentService:
                 message="Document update functionality not yet implemented",
                 data={
                     "collection": collection_name,
-                    "source_name": request.source_name
-                }
+                    "source_name": request.source_name,
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"Error updating documents: {str(e)}", exc_info=True)
             return DocumentResult(
                 success=False,
                 message="Error updating documents",
                 error=str(e),
-                data={"collection": collection_name}
+                data={"collection": collection_name},
             )

@@ -19,7 +19,7 @@ from langchain_core.embeddings import Embeddings, FakeEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
 
-from src.services.embeddings import RunPodEmbeddings
+from src.utils.embeddings import RunPodEmbeddings
 from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
