@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from src.constants import (
     DEFAULT_QUERY,
     DEFAULT_EMBEDDING_MODEL,
@@ -29,7 +29,8 @@ class RetrieveRequest(BaseModel):
         default=DEFAULT_K, ge=1, le=100, description="Number of documents to retrieve"
     )
 
-    @validator("query")
+    @field_validator("query")
+    @classmethod
     def validate_query(cls, v):
         if not v.strip():
             raise ValueError("Query cannot be empty or whitespace only")
@@ -46,7 +47,8 @@ class DeleteRequest(BaseModel):
         default=[], description="List of document IDs to delete"
     )
 
-    @validator("document_list")
+    @field_validator("document_list")
+    @classmethod
     def validate_document_list(cls, v):
         if len(v) > 100:
             raise ValueError("Cannot delete more than 100 documents at once")
@@ -75,13 +77,15 @@ class AddDocumentRequest(BaseModel):
         default=None, description="Optional names for metadata"
     )
 
-    @validator("chunk_overlap")
-    def validate_chunk_overlap(cls, v, values):
-        if "chunk_size" in values and v >= values["chunk_size"]:
+    @field_validator("chunk_overlap")
+    @classmethod
+    def validate_chunk_overlap(cls, v, info):
+        if info.data and "chunk_size" in info.data and v >= info.data["chunk_size"]:
             raise ValueError("Chunk overlap must be less than chunk size")
         return v
 
-    @validator("metadata_urls", "metadata_names")
+    @field_validator("metadata_urls", "metadata_names")
+    @classmethod
     def validate_metadata_lists(cls, v):
         if v is not None and len(v) > 50:
             raise ValueError("Metadata lists cannot exceed 50 items")
@@ -101,13 +105,15 @@ class UpdateDocumentRequest(BaseModel):
         default=None, description="New metadata to update"
     )
 
-    @validator("source_name")
+    @field_validator("source_name")
+    @classmethod
     def validate_source_name(cls, v):
         if not v.strip():
             raise ValueError("Source name cannot be empty or whitespace only")
         return v.strip()
 
-    @validator("new_metadata")
+    @field_validator("new_metadata")
+    @classmethod
     def validate_metadata(cls, v):
         if v is not None and len(v) > 20:
             raise ValueError("Metadata cannot have more than 20 key-value pairs")

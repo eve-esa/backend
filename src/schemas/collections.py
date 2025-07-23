@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
 
@@ -9,7 +9,8 @@ class CollectionRequest(BaseModel):
         description="Embedding model to use for the collection",
     )
 
-    @validator("embeddings_model")
+    @field_validator("embeddings_model")
+    @classmethod
     def validate_embeddings_model(cls, v):
         if not v.strip():
             raise ValueError("Embeddings model cannot be empty or whitespace only")
