@@ -5,6 +5,7 @@ This module provides a complete interface for creating, managing, and querying
 vector collections using Qdrant as the backend. It handles embedding generation,
 document storage, and similarity search operations.
 """
+
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
@@ -25,14 +26,20 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
-    VectorParams
+    VectorParams,
 )
 
 from openai import AsyncOpenAI
 
-from src.services.embeddings import RunPodEmbeddings, NASA_MODEL
-from src.services.utils import get_embeddings_model
-from src.config import Config, OPENAI_API_KEY, QDRANT_URL, QDRANT_API_KEY, RUNPOD_API_KEY
+from src.constants import DEFAULT_EMBEDDING_MODEL
+from src.utils.utils import get_embeddings_model
+from src.config import (
+    Config,
+    OPENAI_API_KEY,
+    QDRANT_URL,
+    QDRANT_API_KEY,
+    RUNPOD_API_KEY,
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -40,10 +47,10 @@ logger = logging.getLogger(__name__)
 # Initialize configuration
 config = Config()
 
-# Constants
-NASA_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
 
-async def get_embedding_from_runpod(endpoint_id: str, model: str, user_input: str, timeout_sec: int = 60) -> List[float]:
+async def get_embedding_from_runpod(
+    endpoint_id: str, model: str, user_input: str, timeout_sec: int = 60
+) -> List[float]:
     """
     Submit a job to RunPod and poll until the embedding vector is ready.
 
@@ -62,14 +69,9 @@ async def get_embedding_from_runpod(endpoint_id: str, model: str, user_input: st
     submit_url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
     headers = {
         "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    payload = {
-        "input": {
-            "input": user_input,
-            "model": model
-        }
-    }
+    payload = {"input": {"input": user_input, "model": model}}
 
     async with aiohttp.ClientSession() as session:
         # Submit the job
@@ -91,7 +93,7 @@ async def get_embedding_from_runpod(endpoint_id: str, model: str, user_input: st
                 if status == "COMPLETED":
                     logger.info(f"RunPod status: {status_data}")
                     output = status_data.get("output")
-                    if 'data' in output:
+                    if "data" in output:
                         output = output.get("data")[0].get("embedding")
                         return output
                     else:
@@ -103,12 +105,14 @@ async def get_embedding_from_runpod(endpoint_id: str, model: str, user_input: st
 
             await asyncio.sleep(1)  # Wait before polling again
 
-        raise RuntimeError(f"RunPod job {job_id} did not complete within {timeout_sec} seconds")
+        raise RuntimeError(
+            f"RunPod job {job_id} did not complete within {timeout_sec} seconds"
+        )
 
 
-
-
-async def runpod_api_request(endpoint_id: str, model: str, user_input: str) -> List[float]:
+async def runpod_api_request(
+    endpoint_id: str, model: str, user_input: str
+) -> List[float]:
     """
     Send a request to RunPod API to get embeddings.
 
@@ -128,16 +132,11 @@ async def runpod_api_request(endpoint_id: str, model: str, user_input: str) -> L
         url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
 
         # Prepare request payload
-        payload = {
-            "input": {
-                "input": user_input,
-                "model": model
-            }
-        }
+        payload = {"input": {"input": user_input, "model": model}}
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {RUNPOD_API_KEY}"
+            "Authorization": f"Bearer {RUNPOD_API_KEY}",
         }
 
         logger.info(f"Sending embedding request to RunPod for model: {model}")
@@ -155,7 +154,9 @@ async def runpod_api_request(endpoint_id: str, model: str, user_input: str) -> L
 
                 # Check for errors in the response
                 if "error" in response_json:
-                    logger.error(f"RunPod API returned an error: {response_json['error']}")
+                    logger.error(
+                        f"RunPod API returned an error: {response_json['error']}"
+                    )
                     raise RuntimeError(f"RunPod API error: {response_json['error']}")
 
                 # Extract embedding vector from response
@@ -180,15 +181,21 @@ async def runpod_api_request(endpoint_id: str, model: str, user_input: str) -> L
                     embedding_vector = response_json["embedding"]
 
                 if not embedding_vector:
-                    logger.error(f"No embedding vector found in response: {response_json}")
+                    logger.error(
+                        f"No embedding vector found in response: {response_json}"
+                    )
                     raise RuntimeError("No embedding vector found in RunPod response")
 
                 # Ensure it's a list of floats
                 if not isinstance(embedding_vector, list):
-                    logger.error(f"Embedding vector is not a list: {type(embedding_vector)}")
+                    logger.error(
+                        f"Embedding vector is not a list: {type(embedding_vector)}"
+                    )
                     raise RuntimeError("Embedding vector is not in expected format")
 
-                logger.info(f"Successfully received embedding vector of length {len(embedding_vector)}")
+                logger.info(
+                    f"Successfully received embedding vector of length {len(embedding_vector)}"
+                )
                 return embedding_vector
 
     except aiohttp.ClientError as e:
@@ -214,7 +221,7 @@ class VectorStoreManager:
     was used to embed the collection you want to work with.
     """
 
-    def __init__(self, embeddings_model: str = NASA_MODEL) -> None:
+    def __init__(self, embeddings_model: str = DEFAULT_EMBEDDING_MODEL) -> None:
         """
         Initialize the VectorStoreManager with the specified embeddings model.
 
@@ -225,8 +232,7 @@ class VectorStoreManager:
         self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY)
         self.embeddings_model = embeddings_model
         self.embeddings, self.embeddings_size = get_embeddings_model(
-            model_name=embeddings_model,
-            return_embeddings_size=True
+            model_name=embeddings_model, return_embeddings_size=True
         )
         # Use AsyncOpenAI for async operations
         self.openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -252,8 +258,7 @@ class VectorStoreManager:
 
         try:
             success = self.client.recreate_collection(
-                collection_name=collection_name,
-                vectors_config=vectors_config
+                collection_name=collection_name, vectors_config=vectors_config
             )
 
             if not success:
@@ -290,7 +295,7 @@ class VectorStoreManager:
             collections = self.client.get_collections()
 
             # Fix the collection name extraction
-            if hasattr(collections, 'collections'):
+            if hasattr(collections, "collections"):
                 for collection in collections.collections:
                     collections_list.append(collection.name)
             else:
@@ -323,7 +328,9 @@ class VectorStoreManager:
             RuntimeError: If deletion fails for other reasons
         """
         if collection_name not in self.list_collections_names():
-            logger.warning(f"Attempted to delete non-existent collection '{collection_name}'")
+            logger.warning(
+                f"Attempted to delete non-existent collection '{collection_name}'"
+            )
             raise ValueError(f"Collection '{collection_name}' does not exist")
 
         try:
@@ -336,9 +343,7 @@ class VectorStoreManager:
             raise RuntimeError(f"Failed to delete collection: {str(e)}") from e
 
     def add_document_list(
-        self,
-        collection_name: str,
-        document_list: List[Document]
+        self, collection_name: str, document_list: List[Document]
     ) -> List[str]:
         """
         Add a list of documents to a collection.
@@ -385,7 +390,9 @@ class VectorStoreManager:
                 f"Failed to add documents to '{collection_name}': {str(e)}"
             ) from e
 
-    def _qdrant_filter_from_dict(self, filter_dict: Optional[Dict[str, Any]]) -> Optional[Filter]:
+    def _qdrant_filter_from_dict(
+        self, filter_dict: Optional[Dict[str, Any]]
+    ) -> Optional[Filter]:
         """
         Convert a Python dictionary to a Qdrant filter object.
 
@@ -443,9 +450,7 @@ class VectorStoreManager:
         return conditions
 
     def delete_docs_by_metadata_filter(
-        self,
-        collection_name: str,
-        metadata: Optional[Dict[str, Any]] = None
+        self, collection_name: str, metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Delete documents that match a metadata filter.
@@ -466,7 +471,7 @@ class VectorStoreManager:
                 points_selector=self._qdrant_filter_from_dict(metadata),
             )
 
-            deleted_count = getattr(result, 'deleted', 0)
+            deleted_count = getattr(result, "deleted", 0)
             logger.info(f"Deleted {deleted_count} documents from '{collection_name}'")
             return result
 
@@ -474,7 +479,9 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
-    def _get_unique_source_documents(self, scored_points_list: List[Any], min_docs: int = 2) -> List[Any]:
+    def _get_unique_source_documents(
+        self, scored_points_list: List[Any], min_docs: int = 2
+    ) -> List[Any]:
         """
         Filter search results to keep only one document per source.
 
@@ -503,7 +510,9 @@ class VectorStoreManager:
 
         return list(unique_source_items.values())
 
-    async def generate_query_vector(self, query: str, embeddings_model: str) -> List[float]:
+    async def generate_query_vector(
+        self, query: str, embeddings_model: str
+    ) -> List[float]:
         """
         Generate an embedding vector for a query.
 
@@ -519,20 +528,22 @@ class VectorStoreManager:
         """
         try:
             # Special handling for NASA model which uses RunPod API
-            if embeddings_model == NASA_MODEL:
+            if embeddings_model == DEFAULT_EMBEDDING_MODEL:
                 logger.info("Using RunPod API for embedding generation")
 
                 # Call the remote API to generate embeddings
                 query_vector = await get_embedding_from_runpod(
                     endpoint_id=config.get_indus_embedder_id(),
                     model=embeddings_model,
-                    user_input=query
+                    user_input=query,
                 )
                 logger.debug(query_vector)
                 # Validate the received vector
                 if not query_vector or not isinstance(query_vector, list):
                     logger.error(f"Invalid embedding vector received: {query_vector}")
-                    raise RuntimeError("Invalid embedding vector received from RunPod API")
+                    raise RuntimeError(
+                        "Invalid embedding vector received from RunPod API"
+                    )
 
                 return query_vector
 
@@ -587,7 +598,9 @@ class VectorStoreManager:
                 )
                 logger.info(f"Retrieved docs: {results}")
 
-                logger.info(f"Retrieved {len(results)} documents from '{collection_name}'")
+                logger.info(
+                    f"Retrieved {len(results)} documents from '{collection_name}'"
+                )
                 return results
 
             # Get more results to allow filtering for unique sources
@@ -667,7 +680,9 @@ class VectorStoreManager:
                     return True
 
             else:
-                logger.warning("Empty response from language model for RAG determination")
+                logger.warning(
+                    "Empty response from language model for RAG determination"
+                )
                 # Default to using RAG when there's no response
                 return True
 
@@ -714,5 +729,5 @@ if __name__ == "__main__":
     # Configure logging when run as a script
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
