@@ -5,7 +5,6 @@ LLM Manager module that handles different language model interactions.
 import logging
 from enum import Enum
 import asyncio
-import json
 from typing import AsyncGenerator
 
 import openai
@@ -204,6 +203,59 @@ class LLMManager:
             logger.error(f"Eve Instruct API call failed: {str(e)}")
             raise
 
+    def _process_stream_chunk(self, chunk) -> str:
+        """
+        Process a single stream chunk and extract text content.
+
+        Args:
+            chunk: The stream chunk to process
+
+        Returns:
+            str: The extracted text content
+        """
+        if isinstance(chunk, dict):
+            if "output" in chunk:
+                output = chunk["output"]
+                if isinstance(output, str):
+                    return output
+                elif isinstance(output, dict) and "text" in output:
+                    return output["text"]
+                elif isinstance(output, list) and len(output) > 0:
+                    texts = []
+                    for item in output:
+                        if isinstance(item, dict):
+                            if "text" in item:
+                                texts.append(item["text"])
+                            elif "tokens" in item:
+                                tokens = item["tokens"]
+                                if isinstance(tokens, list):
+                                    texts.append(
+                                        " ".join(str(token) for token in tokens)
+                                    )
+                                else:
+                                    texts.append(str(tokens))
+                        else:
+                            texts.append(str(item))
+                    return " ".join(texts)
+            elif "text" in chunk:
+                return chunk["text"]
+            elif "choices" in chunk and len(chunk["choices"]) > 0:
+                choice = chunk["choices"][0]
+                if "text" in choice:
+                    return choice["text"]
+                elif "message" in choice:
+                    return choice["message"]["content"]
+                elif "tokens" in choice:
+                    tokens = choice["tokens"]
+                    if isinstance(tokens, list):
+                        return " ".join(str(token) for token in tokens)
+                    else:
+                        return str(tokens)
+        elif isinstance(chunk, str):
+            return chunk
+        else:
+            return str(chunk)
+
     async def _stream_eve_instruct(
         self, prompt: str, max_new_tokens: int = 150
     ) -> AsyncGenerator[str, None]:
@@ -221,44 +273,27 @@ class LLMManager:
             endpoint = runpod.Endpoint(self.config.get_instruct_llm_id())
             logger.debug(f"Streaming prompt to Eve Instruct: {prompt}")
 
-            # For now, we'll simulate streaming by getting the full response and yielding it in chunks
-            # This can be improved when RunPod supports true streaming
-            try:
-                # Try async first
-                response = await endpoint.run_sync(
-                    {
-                        "input": {
-                            "prompt": prompt,
-                            "sampling_params": {"max_tokens": max_new_tokens},
-                        }
-                    },
-                    timeout=self.config.get_instruct_llm_timeout(),
-                )
-            except (TypeError, AttributeError) as e:
-                if "coroutine" in str(e).lower() or "await" in str(e).lower():
-                    # If we get a coroutine error, try the sync version
-                    logger.info("Detected coroutine response, trying sync approach")
-                    response = endpoint.run_sync(
-                        {
-                            "input": {
-                                "prompt": prompt,
-                                "sampling_params": {"max_tokens": max_new_tokens},
-                            }
-                        },
-                        timeout=self.config.get_instruct_llm_timeout(),
-                    )
-                else:
-                    raise
+            job = endpoint.run(
+                {
+                    "input": {
+                        "prompt": prompt,
+                        "sampling_params": {"max_tokens": max_new_tokens},
+                    }
+                }
+            )
 
-            # Process the response
-            text_response = self._process_eve_response(response)
+            logger.debug(f"Submitted job with ID: {job.job_id}")
 
-            # Simulate streaming by yielding chunks
-            chunk_size = 10  # Characters per chunk
-            for i in range(0, len(text_response), chunk_size):
-                chunk = text_response[i : i + chunk_size]
-                yield chunk
-                await asyncio.sleep(0.01)  # Small delay to simulate streaming
+            for chunk in job.stream():
+                if chunk:
+                    try:
+                        text_content = self._process_stream_chunk(chunk)
+                        if text_content:
+                            yield text_content
+
+                    except Exception as e:
+                        logger.error(f"Error processing stream chunk: {e}")
+                        continue
 
         except Exception as e:
             logger.error(f"Eve Instruct streaming API call failed: {str(e)}")

@@ -63,6 +63,31 @@ async def get_rag_context(
     return context, results
 
 
+async def setup_rag_and_context(request: GenerationRequest):
+    """Setup RAG and get context for the request."""
+    vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+
+    # Check if we need to use RAG
+    try:
+        is_rag = await vector_store.use_rag(request.query)
+    except Exception as e:
+        logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
+        is_rag = False
+
+    # Get context if using RAG
+    if is_rag:
+        try:
+            context, results = await get_rag_context(vector_store, request)
+        except Exception as e:
+            logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
+            context, results = "", []
+            is_rag = False
+    else:
+        context, results = "", []
+
+    return context, results, is_rag
+
+
 @router.post("/generate_answer", response_model=Dict[str, Any])
 async def generate_answer(
     request: GenerationRequest,
@@ -71,18 +96,7 @@ async def generate_answer(
     llm_manager = LLMManager()
 
     try:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-
-        # Check if we need to use RAG
-        is_rag = await vector_store.use_rag(
-            request.query
-        )  # Make sure this is awaited if async
-
-        # Get context if using RAG
-        if is_rag:
-            context, results = await get_rag_context(vector_store, request)
-        else:
-            context, results = "", []
+        context, results, is_rag = await setup_rag_and_context(request)
 
         # Generate answer
         answer = llm_manager.generate_answer(
@@ -98,79 +112,18 @@ async def generate_answer(
     return {"answer": answer, "documents": results, "use_rag": is_rag}
 
 
-async def generate_answer_stream_generator(
-    request: GenerationRequest,
+async def generate_answer_stream_generator_helper(
+    request: GenerationRequest, output_format: str = "plain"
 ):
-    """Generate streaming answer using RAG and LLM."""
+    """Helper function to generate streaming answer with different output formats."""
     llm_manager = LLMManager()
 
     try:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+        context, results, is_rag = await setup_rag_and_context(request)
 
-        # Check if we need to use RAG
-        try:
-            is_rag = await vector_store.use_rag(request.query)
-        except Exception as e:
-            logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
-            is_rag = False
-
-        # Get context if using RAG
-        if is_rag:
-            try:
-                context, results = await get_rag_context(vector_store, request)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get RAG context, falling back to no RAG: {e}"
-                )
-                context, results = "", []
-                is_rag = False
-        else:
-            context, results = "", []
-
-        # Generate streaming answer
-        async for chunk in llm_manager.generate_answer_stream(
-            query=request.query,
-            context=context,
-            llm=request.llm,
-            max_new_tokens=request.max_new_tokens,
-        ):
-            yield f"data: {chunk}\n\n"
-
-    except Exception as e:
-        yield f"data: Error: {str(e)}\n\n"
-
-
-async def generate_answer_json_stream_generator(
-    request: GenerationRequest,
-):
-    """Generate streaming answer using RAG and LLM with JSON format."""
-    llm_manager = LLMManager()
-
-    try:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-
-        # Check if we need to use RAG
-        try:
-            is_rag = await vector_store.use_rag(request.query)
-        except Exception as e:
-            logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
-            is_rag = False
-
-        # Get context if using RAG
-        if is_rag:
-            try:
-                context, results = await get_rag_context(vector_store, request)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to get RAG context, falling back to no RAG: {e}"
-                )
-                context, results = "", []
-                is_rag = False
-        else:
-            context, results = "", []
-
-        # Send initial metadata
-        yield f"data: {json.dumps({'type': 'start', 'use_rag': is_rag, 'documents_count': len(results)})}\n\n"
+        # Send initial metadata for JSON format
+        if output_format == "json":
+            yield f"data: {json.dumps({'type': 'start', 'use_rag': is_rag, 'documents_count': len(results)})}\n\n"
 
         # Generate streaming answer
         full_answer = ""
@@ -180,14 +133,39 @@ async def generate_answer_json_stream_generator(
             llm=request.llm,
             max_new_tokens=request.max_new_tokens,
         ):
-            full_answer += chunk
-            yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+            if output_format == "json":
+                full_answer += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+            else:
+                yield f"data: {chunk}\n\n"
 
-        # Send final metadata
-        yield f"data: {json.dumps({'type': 'end', 'full_answer': full_answer})}\n\n"
+        # Send final metadata for JSON format
+        if output_format == "json":
+            yield f"data: {json.dumps({'type': 'end', 'full_answer': full_answer})}\n\n"
 
     except Exception as e:
-        yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        error_msg = (
+            f"data: Error: {str(e)}\n\n"
+            if output_format == "plain"
+            else f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        )
+        yield error_msg
+
+
+async def generate_answer_stream_generator(
+    request: GenerationRequest,
+):
+    """Generate streaming answer using RAG and LLM."""
+    async for chunk in generate_answer_stream_generator_helper(request, "plain"):
+        yield chunk
+
+
+async def generate_answer_json_stream_generator(
+    request: GenerationRequest,
+):
+    """Generate streaming answer using RAG and LLM with JSON format."""
+    async for chunk in generate_answer_stream_generator_helper(request, "json"):
+        yield chunk
 
 
 @router.post("/generate_answer_stream")
