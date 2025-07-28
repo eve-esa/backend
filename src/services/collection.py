@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass
 
-from src.utils.vector_store_manager import VectorStoreManager
+from src.core.vector_store_manager import VectorStoreManager
 from src.schemas.collections import CollectionRequest
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
