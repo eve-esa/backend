@@ -77,3 +77,13 @@ chmod +x test.sh
 ```
 
 The server will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+### Create a new user
+
+Inside the container, run the following command:
+
+```bash
+python -m src.commands.create_user test@gmail.com test
+```
+
+
