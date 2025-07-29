@@ -1,7 +1,7 @@
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
-from src.config import JWT_SECRET_KEY, JWT_ALGORITHM
+from src.config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_AUDIENCE_ACCESS
 from src.database.models.user import User
 
 security = HTTPBearer()
@@ -12,7 +12,10 @@ async def get_current_user(
 ):
     try:
         payload = jwt.decode(
-            credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM]
+            credentials.credentials,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE_ACCESS,
         )
         user_id = payload.get("sub")
         if not user_id:
