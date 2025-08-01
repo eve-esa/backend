@@ -70,7 +70,12 @@ class VectorStoreManager:
             embeddings_model: The name of the embeddings model to use.
                 Defaults to NASA's specialized model.
         """
-        self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY)
+        # Initialize Qdrant client with timeout configuration
+        self.client = QdrantClient(
+            QDRANT_URL,
+            api_key=QDRANT_API_KEY,
+            timeout=120.0,  # 2 minutes timeout for operations
+        )
         self.embeddings_model = embeddings_model
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model_name=embeddings_model, return_embeddings_size=True
@@ -190,11 +195,11 @@ class VectorStoreManager:
         Add a list of documents to a collection.
 
         Args:
-            collection_name: Name of the collection to add documents to
+            collection_name: Name of the collection
             document_list: List of documents to add
 
         Returns:
-            List[str]: List of document IDs created
+            List[str]: List of UUIDs for the added documents
 
         Raises:
             ValueError: If there's a model mismatch or configuration issue
@@ -213,7 +218,11 @@ class VectorStoreManager:
                 embedding=self.embeddings,
             )
 
-            vector_store.add_documents(documents=document_list, ids=uuids)
+            # Use batch writing to prevent timeout issues
+            # Batch size 32 matches RunPod Infinity Embedding BATCH_SIZES=32 configuration
+            self._add_documents_in_batches(
+                vector_store, document_list, uuids, batch_size=32
+            )
             logger.info(f"Added {len(document_list)} documents to '{collection_name}'")
             return uuids
 
@@ -230,6 +239,89 @@ class VectorStoreManager:
             raise RuntimeError(
                 f"Failed to add documents to '{collection_name}': {str(e)}"
             ) from e
+
+    def _add_documents_in_batches(
+        self,
+        vector_store: QdrantVectorStore,
+        documents: List[Document],
+        uuids: List[str],
+        batch_size: int = 32,
+    ) -> None:
+        """
+        Add documents to Qdrant in batches to prevent timeout issues.
+
+        Args:
+            vector_store: The Qdrant vector store instance
+            documents: List of documents to add
+            uuids: List of UUIDs for the documents
+            batch_size: Number of documents to process in each batch
+        """
+        import time
+
+        total_documents = len(documents)
+        logger.info(f"Adding {total_documents} documents in batches of {batch_size}")
+
+        for i in range(0, total_documents, batch_size):
+            batch_end = min(i + batch_size, total_documents)
+            batch_documents = documents[i:batch_end]
+            batch_uuids = uuids[i:batch_end]
+
+            batch_num = (i // batch_size) + 1
+            total_batches = (total_documents + batch_size - 1) // batch_size
+
+            logger.info(
+                f"Processing batch {batch_num}/{total_batches} ({len(batch_documents)} documents)"
+            )
+
+            try:
+                # Use direct Qdrant client operations instead of LangChain wrapper
+                self._add_documents_directly(
+                    batch_documents, batch_uuids, vector_store.collection_name
+                )
+                logger.info(f"Successfully added batch {batch_num}/{total_batches}")
+
+                # Add a small delay between batches to prevent overwhelming Qdrant
+                if batch_num < total_batches:
+                    time.sleep(0.5)
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to add batch {batch_num}/{total_batches}: {str(e)}"
+                )
+                raise RuntimeError(f"Failed to add batch {batch_num}: {str(e)}") from e
+
+    def _add_documents_directly(
+        self, documents: List[Document], uuids: List[str], collection_name: str
+    ) -> None:
+        """
+        Add documents directly to Qdrant using the client API to avoid LangChain wrapper issues.
+
+        Args:
+            documents: List of documents to add
+            uuids: List of UUIDs for the documents
+            collection_name: Name of the collection
+        """
+        from qdrant_client.models import PointStruct
+
+        # Extract texts and metadata
+        texts = [doc.page_content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+
+        # Generate embeddings for this batch
+        embeddings = self.embeddings.embed_documents(texts)
+
+        # Create points for Qdrant
+        points = []
+        for i, (text, metadata, embedding, uuid) in enumerate(
+            zip(texts, metadatas, embeddings, uuids)
+        ):
+            point = PointStruct(
+                id=uuid, vector=embedding, payload={"text": text, "metadata": metadata}
+            )
+            points.append(point)
+
+        # Upsert points to Qdrant
+        self.client.upsert(collection_name=collection_name, points=points, wait=True)
 
     def _qdrant_filter_from_dict(
         self, filter_dict: Optional[Dict[str, Any]]
