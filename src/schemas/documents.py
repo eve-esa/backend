@@ -28,6 +28,9 @@ class RetrieveRequest(BaseModel):
     k: int = Field(
         default=DEFAULT_K, ge=1, le=100, description="Number of documents to retrieve"
     )
+    get_unique_docs: bool = Field(
+        default=True, description="Whether to get unique documents"
+    )
 
     @field_validator("query")
     @classmethod

@@ -238,6 +238,7 @@ class DocumentService:
                 collection_name=collection_name,
                 k=request.k,
                 score_threshold=request.score_threshold,
+                get_unique_docs=request.get_unique_docs,
             )
 
             if not results:
