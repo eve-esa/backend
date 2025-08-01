@@ -460,20 +460,46 @@ class VectorStoreManager:
             metadata: Metadata filter to select documents for deletion
 
         Returns:
-            Dict[str, Any]: Result of the deletion operation
+            Dict[str, Any]: Result of the deletion operation with deleted count
 
         Raises:
             RuntimeError: If deletion fails
         """
         try:
+            # Get the count of documents before deletion using the count method
+            filter_obj = self._qdrant_filter_from_dict(metadata)
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,  # For an exact count
+            )
+            count_before = count_result.count
+
+            # Perform the deletion
             result = self.client.delete(
                 collection_name=collection_name,
-                points_selector=self._qdrant_filter_from_dict(metadata),
+                points_selector=filter_obj,
             )
 
-            deleted_count = getattr(result, "deleted", 0)
+            # Get the count of documents after deletion
+            count_result_after = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,  # For an exact count
+            )
+            count_after = count_result_after.count
+
+            # Calculate the actual number of deleted documents
+            deleted_count = count_before - count_after
+
             logger.info(f"Deleted {deleted_count} documents from '{collection_name}'")
-            return result
+
+            # Create a result object with the deleted count
+            class DeleteResult:
+                def __init__(self, deleted_count):
+                    self.deleted = deleted_count
+
+            return DeleteResult(deleted_count)
 
         except Exception as e:
             logger.error(f"Failed to delete documents: {e}")
