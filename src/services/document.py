@@ -16,7 +16,7 @@ from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from src.core.vector_store_manager import VectorStoreManager
-from src.utils.utils import save_upload_file_to_temp
+from src.utils.helpers import save_upload_file_to_temp
 from src.utils.file_parser import FileParser
 from src.schemas.documents import (
     RetrieveRequest,
@@ -114,6 +114,9 @@ class DocumentService:
         Returns:
             DocumentResult: Result of the operation
         """
+        # Initialize temp_files at the beginning to ensure it's always defined
+        temp_files = []
+        
         try:
             logger.info(
                 f"Processing {len(files)} files for collection '{collection_name}'"
@@ -129,7 +132,7 @@ class DocumentService:
                 chunk_size=request.chunk_size, chunk_overlap=request.chunk_overlap
             )
 
-            all_documents, temp_files = [], []
+            all_documents = []
 
             for file, url, name in zip(files, processed_urls, processed_names):
                 if not name.strip():

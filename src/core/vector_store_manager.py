@@ -32,7 +32,7 @@ from qdrant_client.http.models import (
 from openai import AsyncOpenAI
 
 from src.constants import DEFAULT_EMBEDDING_MODEL
-from src.utils.utils import get_embeddings_model
+from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
     OPENAI_API_KEY,
@@ -549,7 +549,10 @@ class VectorStoreManager:
 
             # Standard local embedding generation for other models
             embeddings = get_embeddings_model(embeddings_model)
-            return embeddings.embed_query(query)
+            if hasattr(embeddings, "embed_query_async"):
+                return await embeddings.embed_query_async(query)
+            else:
+                return embeddings.embed_query(query)
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")
