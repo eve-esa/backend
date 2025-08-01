@@ -11,8 +11,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 import asyncio
-import aiohttp
-import json
+import runpod
 
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -38,7 +37,6 @@ from src.config import (
     OPENAI_API_KEY,
     QDRANT_URL,
     QDRANT_API_KEY,
-    RUNPOD_API_KEY,
 )
 
 # Setup logging
@@ -48,165 +46,8 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 
-async def get_embedding_from_runpod(
-    endpoint_id: str, model: str, user_input: str, timeout_sec: int = 60
-) -> List[float]:
-    """
-    Submit a job to RunPod and poll until the embedding vector is ready.
-
-    Args:
-        endpoint_id: RunPod endpoint ID.
-        model: Model name to use.
-        user_input: Input text for embedding.
-        timeout_sec: Max time to wait for the job to complete.
-
-    Returns:
-        List of floats representing the embedding vector.
-
-    Raises:
-        RuntimeError: If job fails or times out.
-    """
-    submit_url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
-    headers = {
-        "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {"input": {"input": user_input, "model": model}}
-
-    async with aiohttp.ClientSession() as session:
-        # Submit the job
-        async with session.post(submit_url, json=payload, headers=headers) as response:
-            submit_data = await response.json()
-            if "id" not in submit_data:
-                logger.error(f"RunPod submission failed: {submit_data}")
-                raise RuntimeError(f"RunPod submission failed: {submit_data}")
-            job_id = submit_data["id"]
-            logger.info(f"Submitted RunPod job with ID: {job_id}")
-
-        # Poll for result
-        status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-        for _ in range(timeout_sec):
-            async with session.get(status_url, headers=headers) as status_response:
-                status_data = await status_response.json()
-                status = status_data.get("status")
-
-                if status == "COMPLETED":
-                    logger.info(f"RunPod status: {status_data}")
-                    output = status_data.get("output")
-                    if "data" in output:
-                        output = output.get("data")[0].get("embedding")
-                        return output
-                    else:
-                        raise RuntimeError("Output is not a list or dict")
-
-                elif status in {"FAILED", "CANCELLED"}:
-                    logger.error(f"RunPod job failed with status: {status}")
-                    raise RuntimeError(f"RunPod job failed with status: {status}")
-
-            await asyncio.sleep(1)  # Wait before polling again
-
-        raise RuntimeError(
-            f"RunPod job {job_id} did not complete within {timeout_sec} seconds"
-        )
-
-
-async def runpod_api_request(
-    endpoint_id: str, model: str, user_input: str
-) -> List[float]:
-    """
-    Send a request to RunPod API to get embeddings.
-
-    Args:
-        endpoint_id: The RunPod endpoint ID
-        model: Model name to use
-        user_input: Text to generate embeddings for
-
-    Returns:
-        List[float]: Generated embedding vector
-
-    Raises:
-        RuntimeError: If API request fails
-    """
-    try:
-        # Construct API URL
-        url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
-
-        # Prepare request payload
-        payload = {"input": {"input": user_input, "model": model}}
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        }
-
-        logger.info(f"Sending embedding request to RunPod for model: {model}")
-
-        timeout = aiohttp.ClientTimeout(total=3000)  # 30 second timeout
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"RunPod API error: {response.status} - {error_text}")
-                    raise RuntimeError(f"RunPod API request failed: {error_text}")
-
-                response_json = await response.json()
-
-                # Check for errors in the response
-                if "error" in response_json:
-                    logger.error(
-                        f"RunPod API returned an error: {response_json['error']}"
-                    )
-                    raise RuntimeError(f"RunPod API error: {response_json['error']}")
-
-                # Extract embedding vector from response
-                # Handle different possible response structures
-                embedding_vector = None
-
-                if "output" in response_json:
-                    output = response_json["output"]
-                    if isinstance(output, list):
-                        embedding_vector = output
-                    elif isinstance(output, dict):
-                        # Try different possible keys
-                        for key in ["embedding", "embeddings", "vector", "vectors"]:
-                            if key in output:
-                                embedding_vector = output[key]
-                                break
-                        if embedding_vector is None:
-                            embedding_vector = output
-                elif "embeddings" in response_json:
-                    embedding_vector = response_json["embeddings"]
-                elif "embedding" in response_json:
-                    embedding_vector = response_json["embedding"]
-
-                if not embedding_vector:
-                    logger.error(
-                        f"No embedding vector found in response: {response_json}"
-                    )
-                    raise RuntimeError("No embedding vector found in RunPod response")
-
-                # Ensure it's a list of floats
-                if not isinstance(embedding_vector, list):
-                    logger.error(
-                        f"Embedding vector is not a list: {type(embedding_vector)}"
-                    )
-                    raise RuntimeError("Embedding vector is not in expected format")
-
-                logger.info(
-                    f"Successfully received embedding vector of length {len(embedding_vector)}"
-                )
-                return embedding_vector
-
-    except aiohttp.ClientError as e:
-        logger.error(f"HTTP client error: {e}")
-        raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
-    except asyncio.TimeoutError as e:
-        logger.error(f"Request timeout: {e}")
-        raise RuntimeError("RunPod API request timed out") from e
-    except Exception as e:
-        logger.error(f"Failed to get embeddings from RunPod: {e}")
-        raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
+# Import the RunPod function from utils to avoid circular imports
+from src.utils.runpod_utils import get_embedding_from_runpod
 
 
 class VectorStoreManager:
