@@ -438,6 +438,98 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
+    def update_documents_by_metadata_filter(
+        self,
+        collection_name: str,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        new_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update document metadata that matches a metadata filter.
+
+        Args:
+            collection_name: Name of the collection
+            metadata_filter: Metadata filter to select documents for update
+            new_metadata: New metadata to update the documents with
+
+        Returns:
+            Dict[str, Any]: Result of the update operation with updated count
+
+        Raises:
+            RuntimeError: If update fails
+        """
+        try:
+            if not new_metadata:
+                logger.warning("No new metadata provided for update")
+                return {"updated": 0}
+
+            # Get the count of documents before update
+            filter_obj = self._qdrant_filter_from_dict(metadata_filter)
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,
+            )
+            count_before = count_result.count
+
+            if count_before == 0:
+                logger.warning(
+                    f"No documents found matching the filter in '{collection_name}'"
+                )
+                return {"updated": 0}
+
+            # Get the points that match the filter
+            points = self.client.scroll(
+                collection_name=collection_name,
+                scroll_filter=filter_obj,
+                limit=count_before,
+                with_payload=True,
+                with_vectors=False,  # We don't need vectors for updates
+            )[0]
+
+            if not points:
+                logger.warning("No points found for update")
+                return {"updated": 0}
+
+            # Update each point's metadata
+            updated_count = 0
+            for point in points:
+                try:
+                    current_payload = point.payload
+
+                    if "metadata" in current_payload:
+                        current_metadata = current_payload["metadata"]
+                        current_metadata.update(new_metadata)
+                        updated_payload = {
+                            **current_payload,
+                            "metadata": current_metadata,
+                        }
+                    else:
+                        updated_payload = {**current_payload, "metadata": new_metadata}
+
+                    self.client.set_payload(
+                        collection_name=collection_name,
+                        payload=updated_payload,
+                        points=[point.id],
+                    )
+                    updated_count += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to update point {point.id}: {str(e)}")
+                    continue
+
+            logger.info(f"Updated {updated_count} documents in '{collection_name}'")
+
+            class UpdateResult:
+                def __init__(self, updated_count):
+                    self.updated = updated_count
+
+            return UpdateResult(updated_count)
+
+        except Exception as e:
+            logger.error(f"Failed to update documents: {e}")
+            raise RuntimeError(f"Failed to update documents: {str(e)}") from e
+
     def _get_unique_source_documents(
         self, scored_points_list: List[Any], min_docs: int = 2
     ) -> List[Any]:

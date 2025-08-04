@@ -348,14 +348,36 @@ class DocumentService:
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
 
-            # This would need to be implemented in VectorStoreManager
-            # For now, return a placeholder result
+            metadata_filter = {"source_name": request.source_name}
+
+            result = vector_store.update_documents_by_metadata_filter(
+                collection_name=collection_name,
+                metadata_filter=metadata_filter,
+                new_metadata=request.new_metadata,
+            )
+
+            updated_count = getattr(result, "updated", 0)
+
+            if updated_count == 0:
+                return DocumentResult(
+                    success=False,
+                    message="No documents found to update",
+                    error=f"No documents found with source_name '{request.source_name}'",
+                    data={
+                        "collection": collection_name,
+                        "source_name": request.source_name,
+                        "updated_count": updated_count,
+                    },
+                )
+
             return DocumentResult(
                 success=True,
-                message="Document update functionality not yet implemented",
+                message="Documents updated successfully",
                 data={
                     "collection": collection_name,
                     "source_name": request.source_name,
+                    "updated_count": updated_count,
+                    "new_metadata": request.new_metadata,
                 },
             )
 
