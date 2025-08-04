@@ -16,7 +16,7 @@ from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from src.core.vector_store_manager import VectorStoreManager
-from src.utils.utils import save_upload_file_to_temp
+from src.utils.helpers import save_upload_file_to_temp
 from src.utils.file_parser import FileParser
 from src.schemas.documents import (
     RetrieveRequest,
@@ -114,6 +114,9 @@ class DocumentService:
         Returns:
             DocumentResult: Result of the operation
         """
+        # Initialize temp_files at the beginning to ensure it's always defined
+        temp_files = []
+
         try:
             logger.info(
                 f"Processing {len(files)} files for collection '{collection_name}'"
@@ -129,7 +132,7 @@ class DocumentService:
                 chunk_size=request.chunk_size, chunk_overlap=request.chunk_overlap
             )
 
-            all_documents, temp_files = [], []
+            all_documents = []
 
             for file, url, name in zip(files, processed_urls, processed_names):
                 if not name.strip():
@@ -235,6 +238,7 @@ class DocumentService:
                 collection_name=collection_name,
                 k=request.k,
                 score_threshold=request.score_threshold,
+                get_unique_docs=request.get_unique_docs,
             )
 
             if not results:
@@ -279,15 +283,20 @@ class DocumentService:
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
             errors = []
-            deleted_count = 0
+            total_deleted_count = 0
 
             for source in request.document_list:
                 try:
-                    vector_store.delete_docs_by_metadata_filter(
+                    result = vector_store.delete_docs_by_metadata_filter(
                         collection_name=collection_name,
                         metadata={"source_name": source},
                     )
-                    deleted_count += 1
+                    # Get the actual number of documents deleted
+                    deleted_count = getattr(result, "deleted", 0)
+                    total_deleted_count += deleted_count
+                    logger.info(
+                        f"Deleted {deleted_count} documents for source '{source}'"
+                    )
                 except Exception as e:
                     errors.append(f"Failed to delete document {source}: {str(e)}")
 
@@ -298,7 +307,7 @@ class DocumentService:
                     error="; ".join(errors),
                     data={
                         "collection": collection_name,
-                        "deleted_count": deleted_count,
+                        "deleted_count": total_deleted_count,
                         "total_requested": len(request.document_list),
                         "errors": errors,
                     },
@@ -310,7 +319,7 @@ class DocumentService:
                 data={
                     "collection": collection_name,
                     "deleted_documents": request.document_list,
-                    "deleted_count": deleted_count,
+                    "deleted_count": total_deleted_count,
                 },
             )
 

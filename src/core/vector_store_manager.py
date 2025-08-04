@@ -11,8 +11,7 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 import asyncio
-import aiohttp
-import json
+import runpod
 
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -32,13 +31,12 @@ from qdrant_client.http.models import (
 from openai import AsyncOpenAI
 
 from src.constants import DEFAULT_EMBEDDING_MODEL
-from src.utils.utils import get_embeddings_model
+from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
     OPENAI_API_KEY,
     QDRANT_URL,
     QDRANT_API_KEY,
-    RUNPOD_API_KEY,
 )
 
 # Setup logging
@@ -48,165 +46,8 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 
-async def get_embedding_from_runpod(
-    endpoint_id: str, model: str, user_input: str, timeout_sec: int = 60
-) -> List[float]:
-    """
-    Submit a job to RunPod and poll until the embedding vector is ready.
-
-    Args:
-        endpoint_id: RunPod endpoint ID.
-        model: Model name to use.
-        user_input: Input text for embedding.
-        timeout_sec: Max time to wait for the job to complete.
-
-    Returns:
-        List of floats representing the embedding vector.
-
-    Raises:
-        RuntimeError: If job fails or times out.
-    """
-    submit_url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
-    headers = {
-        "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {"input": {"input": user_input, "model": model}}
-
-    async with aiohttp.ClientSession() as session:
-        # Submit the job
-        async with session.post(submit_url, json=payload, headers=headers) as response:
-            submit_data = await response.json()
-            if "id" not in submit_data:
-                logger.error(f"RunPod submission failed: {submit_data}")
-                raise RuntimeError(f"RunPod submission failed: {submit_data}")
-            job_id = submit_data["id"]
-            logger.info(f"Submitted RunPod job with ID: {job_id}")
-
-        # Poll for result
-        status_url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
-        for _ in range(timeout_sec):
-            async with session.get(status_url, headers=headers) as status_response:
-                status_data = await status_response.json()
-                status = status_data.get("status")
-
-                if status == "COMPLETED":
-                    logger.info(f"RunPod status: {status_data}")
-                    output = status_data.get("output")
-                    if "data" in output:
-                        output = output.get("data")[0].get("embedding")
-                        return output
-                    else:
-                        raise RuntimeError("Output is not a list or dict")
-
-                elif status in {"FAILED", "CANCELLED"}:
-                    logger.error(f"RunPod job failed with status: {status}")
-                    raise RuntimeError(f"RunPod job failed with status: {status}")
-
-            await asyncio.sleep(1)  # Wait before polling again
-
-        raise RuntimeError(
-            f"RunPod job {job_id} did not complete within {timeout_sec} seconds"
-        )
-
-
-async def runpod_api_request(
-    endpoint_id: str, model: str, user_input: str
-) -> List[float]:
-    """
-    Send a request to RunPod API to get embeddings.
-
-    Args:
-        endpoint_id: The RunPod endpoint ID
-        model: Model name to use
-        user_input: Text to generate embeddings for
-
-    Returns:
-        List[float]: Generated embedding vector
-
-    Raises:
-        RuntimeError: If API request fails
-    """
-    try:
-        # Construct API URL
-        url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
-
-        # Prepare request payload
-        payload = {"input": {"input": user_input, "model": model}}
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {RUNPOD_API_KEY}",
-        }
-
-        logger.info(f"Sending embedding request to RunPod for model: {model}")
-
-        timeout = aiohttp.ClientTimeout(total=3000)  # 30 second timeout
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"RunPod API error: {response.status} - {error_text}")
-                    raise RuntimeError(f"RunPod API request failed: {error_text}")
-
-                response_json = await response.json()
-
-                # Check for errors in the response
-                if "error" in response_json:
-                    logger.error(
-                        f"RunPod API returned an error: {response_json['error']}"
-                    )
-                    raise RuntimeError(f"RunPod API error: {response_json['error']}")
-
-                # Extract embedding vector from response
-                # Handle different possible response structures
-                embedding_vector = None
-
-                if "output" in response_json:
-                    output = response_json["output"]
-                    if isinstance(output, list):
-                        embedding_vector = output
-                    elif isinstance(output, dict):
-                        # Try different possible keys
-                        for key in ["embedding", "embeddings", "vector", "vectors"]:
-                            if key in output:
-                                embedding_vector = output[key]
-                                break
-                        if embedding_vector is None:
-                            embedding_vector = output
-                elif "embeddings" in response_json:
-                    embedding_vector = response_json["embeddings"]
-                elif "embedding" in response_json:
-                    embedding_vector = response_json["embedding"]
-
-                if not embedding_vector:
-                    logger.error(
-                        f"No embedding vector found in response: {response_json}"
-                    )
-                    raise RuntimeError("No embedding vector found in RunPod response")
-
-                # Ensure it's a list of floats
-                if not isinstance(embedding_vector, list):
-                    logger.error(
-                        f"Embedding vector is not a list: {type(embedding_vector)}"
-                    )
-                    raise RuntimeError("Embedding vector is not in expected format")
-
-                logger.info(
-                    f"Successfully received embedding vector of length {len(embedding_vector)}"
-                )
-                return embedding_vector
-
-    except aiohttp.ClientError as e:
-        logger.error(f"HTTP client error: {e}")
-        raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
-    except asyncio.TimeoutError as e:
-        logger.error(f"Request timeout: {e}")
-        raise RuntimeError("RunPod API request timed out") from e
-    except Exception as e:
-        logger.error(f"Failed to get embeddings from RunPod: {e}")
-        raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
+# Import the RunPod function from utils to avoid circular imports
+from src.utils.runpod_utils import get_embedding_from_runpod
 
 
 class VectorStoreManager:
@@ -229,7 +70,12 @@ class VectorStoreManager:
             embeddings_model: The name of the embeddings model to use.
                 Defaults to NASA's specialized model.
         """
-        self.client = QdrantClient(QDRANT_URL, api_key=QDRANT_API_KEY)
+        # Initialize Qdrant client with timeout configuration
+        self.client = QdrantClient(
+            QDRANT_URL,
+            api_key=QDRANT_API_KEY,
+            timeout=120.0,  # 2 minutes timeout for operations
+        )
         self.embeddings_model = embeddings_model
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model_name=embeddings_model, return_embeddings_size=True
@@ -349,11 +195,11 @@ class VectorStoreManager:
         Add a list of documents to a collection.
 
         Args:
-            collection_name: Name of the collection to add documents to
+            collection_name: Name of the collection
             document_list: List of documents to add
 
         Returns:
-            List[str]: List of document IDs created
+            List[str]: List of UUIDs for the added documents
 
         Raises:
             ValueError: If there's a model mismatch or configuration issue
@@ -372,7 +218,11 @@ class VectorStoreManager:
                 embedding=self.embeddings,
             )
 
-            vector_store.add_documents(documents=document_list, ids=uuids)
+            # Use batch writing to prevent timeout issues
+            # Batch size 32 matches RunPod Infinity Embedding BATCH_SIZES=32 configuration
+            self._add_documents_in_batches(
+                vector_store, document_list, uuids, batch_size=32
+            )
             logger.info(f"Added {len(document_list)} documents to '{collection_name}'")
             return uuids
 
@@ -389,6 +239,89 @@ class VectorStoreManager:
             raise RuntimeError(
                 f"Failed to add documents to '{collection_name}': {str(e)}"
             ) from e
+
+    def _add_documents_in_batches(
+        self,
+        vector_store: QdrantVectorStore,
+        documents: List[Document],
+        uuids: List[str],
+        batch_size: int = 32,
+    ) -> None:
+        """
+        Add documents to Qdrant in batches to prevent timeout issues.
+
+        Args:
+            vector_store: The Qdrant vector store instance
+            documents: List of documents to add
+            uuids: List of UUIDs for the documents
+            batch_size: Number of documents to process in each batch
+        """
+        import time
+
+        total_documents = len(documents)
+        logger.info(f"Adding {total_documents} documents in batches of {batch_size}")
+
+        for i in range(0, total_documents, batch_size):
+            batch_end = min(i + batch_size, total_documents)
+            batch_documents = documents[i:batch_end]
+            batch_uuids = uuids[i:batch_end]
+
+            batch_num = (i // batch_size) + 1
+            total_batches = (total_documents + batch_size - 1) // batch_size
+
+            logger.info(
+                f"Processing batch {batch_num}/{total_batches} ({len(batch_documents)} documents)"
+            )
+
+            try:
+                # Use direct Qdrant client operations instead of LangChain wrapper
+                self._add_documents_directly(
+                    batch_documents, batch_uuids, vector_store.collection_name
+                )
+                logger.info(f"Successfully added batch {batch_num}/{total_batches}")
+
+                # Add a small delay between batches to prevent overwhelming Qdrant
+                if batch_num < total_batches:
+                    time.sleep(0.5)
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to add batch {batch_num}/{total_batches}: {str(e)}"
+                )
+                raise RuntimeError(f"Failed to add batch {batch_num}: {str(e)}") from e
+
+    def _add_documents_directly(
+        self, documents: List[Document], uuids: List[str], collection_name: str
+    ) -> None:
+        """
+        Add documents directly to Qdrant using the client API to avoid LangChain wrapper issues.
+
+        Args:
+            documents: List of documents to add
+            uuids: List of UUIDs for the documents
+            collection_name: Name of the collection
+        """
+        from qdrant_client.models import PointStruct
+
+        # Extract texts and metadata
+        texts = [doc.page_content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+
+        # Generate embeddings for this batch
+        embeddings = self.embeddings.embed_documents(texts)
+
+        # Create points for Qdrant
+        points = []
+        for i, (text, metadata, embedding, uuid) in enumerate(
+            zip(texts, metadatas, embeddings, uuids)
+        ):
+            point = PointStruct(
+                id=uuid, vector=embedding, payload={"text": text, "metadata": metadata}
+            )
+            points.append(point)
+
+        # Upsert points to Qdrant
+        self.client.upsert(collection_name=collection_name, points=points, wait=True)
 
     def _qdrant_filter_from_dict(
         self, filter_dict: Optional[Dict[str, Any]]
@@ -460,20 +393,46 @@ class VectorStoreManager:
             metadata: Metadata filter to select documents for deletion
 
         Returns:
-            Dict[str, Any]: Result of the deletion operation
+            Dict[str, Any]: Result of the deletion operation with deleted count
 
         Raises:
             RuntimeError: If deletion fails
         """
         try:
+            # Get the count of documents before deletion using the count method
+            filter_obj = self._qdrant_filter_from_dict(metadata)
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,  # For an exact count
+            )
+            count_before = count_result.count
+
+            # Perform the deletion
             result = self.client.delete(
                 collection_name=collection_name,
-                points_selector=self._qdrant_filter_from_dict(metadata),
+                points_selector=filter_obj,
             )
 
-            deleted_count = getattr(result, "deleted", 0)
+            # Get the count of documents after deletion
+            count_result_after = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,  # For an exact count
+            )
+            count_after = count_result_after.count
+
+            # Calculate the actual number of deleted documents
+            deleted_count = count_before - count_after
+
             logger.info(f"Deleted {deleted_count} documents from '{collection_name}'")
-            return result
+
+            # Create a result object with the deleted count
+            class DeleteResult:
+                def __init__(self, deleted_count):
+                    self.deleted = deleted_count
+
+            return DeleteResult(deleted_count)
 
         except Exception as e:
             logger.error(f"Failed to delete documents: {e}")
@@ -549,7 +508,10 @@ class VectorStoreManager:
 
             # Standard local embedding generation for other models
             embeddings = get_embeddings_model(embeddings_model)
-            return embeddings.embed_query(query)
+            if hasattr(embeddings, "embed_query_async"):
+                return await embeddings.embed_query_async(query)
+            else:
+                return embeddings.embed_query(query)
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")

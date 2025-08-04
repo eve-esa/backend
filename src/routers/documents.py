@@ -15,7 +15,7 @@ from src.schemas import (
     UpdateDocumentRequest,
 )
 from src.services.document import DocumentService
-from src.constants import DEFAULT_COLLECTION
+from src.constants import DEFAULT_COLLECTION, DEFAULT_EMBEDDING_MODEL
 
 # Setup
 router = APIRouter()
@@ -26,7 +26,7 @@ document_service = DocumentService()
 @router.put("/collections/{collection_name}/documents")
 async def add_document_to_collection(
     collection_name: str,
-    embeddings_model: str = Form(default="nasa-impact/nasa-smd-ibm-st-v2"),
+    embeddings_model: str = Form(default=DEFAULT_EMBEDDING_MODEL),
     files: List[UploadFile] = File(...),
     chunk_size: int = Form(default=1024),
     chunk_overlap: int = Form(default=0),

@@ -18,16 +18,14 @@ from fastapi import UploadFile
 from langchain_core.embeddings import Embeddings, FakeEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from src.utils.embeddings import RunPodEmbeddings
-from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
+from src.config import MISTRAL_API_KEY, OPENAI_API_KEY
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Configure RunPod API key
-runpod.api_key = RUNPOD_API_KEY
 
 
 class EmbeddingModelType(Enum):
@@ -39,6 +37,13 @@ class EmbeddingModelType(Enum):
     OPENAI_SMALL = "text-embedding-3-small"
     OPENAI_LARGE = "text-embedding-3-large"
     NASA = DEFAULT_EMBEDDING_MODEL
+
+    # Popular Hugging Face embedding models
+    ALL_MINILM_L6_V2 = "sentence-transformers/all-MiniLM-L6-v2"
+    ALL_MPNET_BASE_V2 = "sentence-transformers/all-mpnet-base-v2"
+    E5_BASE_V2 = "intfloat/e5-base-v2"
+    BGE_SMALL_EN_V1_5 = "BAAI/bge-small-en-v1.5"
+    BGE_BASE_EN_V1_5 = "BAAI/bge-base-en-v1.5"
 
 
 # OpenAI embedding model dimensions
@@ -131,83 +136,34 @@ def get_embeddings_model(
     else:
         logger.info(f"Using Hugging Face embeddings model: {model}")
 
-        # TODO - do not load the model into memory get it from the config file
-        # embeddings = HuggingFaceEmbeddings(model_name=model)
-
         try:
+            # Load Hugging Face embeddings model
+            embeddings = HuggingFaceEmbeddings(
+                model_name=model,
+                model_kwargs={"device": "cpu"},  # Use CPU by default
+                encode_kwargs={"normalize_embeddings": True},
+            )
+
             # Get embedding size from the model
-            # embeddings_size = embeddings.client.get_sentence_embedding_dimension()
-            pass
-        except AttributeError:
-            # Fallback if client structure is different
             try:
-                embeddings_size = embeddings._client[1].word_embedding_dimension
-            except (AttributeError, IndexError):
-                logger.warning(
-                    f"Could not determine embedding size for {model}, using default"
-                )
-                embeddings_size = 768
+                # Try to get the embedding dimension from the model
+                embeddings_size = embeddings.client.get_sentence_embedding_dimension()
+            except AttributeError:
+                # Fallback if client structure is different
+                try:
+                    embeddings_size = embeddings._client[1].word_embedding_dimension
+                except (AttributeError, IndexError):
+                    logger.warning(
+                        f"Could not determine embedding size for {model}, using default"
+                    )
+                    embeddings_size = 768
+
+        except Exception as e:
+            logger.warning(f"Failed to load Hugging Face model {model}: {str(e)}")
+            logger.info(f"Falling back to RunPod embeddings for model: {model}")
+            embeddings = RunPodEmbeddings(model_name=model, embedding_size=768)
+            embeddings_size = 768
 
     if return_embeddings_size:
         return embeddings, embeddings_size
     return embeddings
-
-
-async def runpod_api_request(
-    endpoint_id: str, model: str, user_input: str, timeout: int = 60
-) -> List[float]:
-    """
-    Get embeddings as a vector using the RunPod API.
-
-    Args:
-        endpoint_id: The RunPod endpoint ID
-        model: The model to use for embedding
-        user_input: The text to embed
-        timeout: Maximum time to wait for the result in seconds
-
-    Returns:
-        List[float]: The embedding vector
-
-    Raises:
-        ValueError: If the returned embedding is invalid
-        RuntimeError: If the API call fails
-    """
-    # Prepare the input payload
-    payload = {"input": {"model": model, "input": user_input}}
-
-    try:
-        # Create an endpoint instance
-        endpoint = runpod.Endpoint(endpoint_id)
-
-        # Submit the job
-        run_request = endpoint.run(payload)
-        job_id = run_request.job_id
-        logger.info(f"RunPod job submitted: {job_id}")
-
-        # Poll for the output with a timeout
-        result = run_request.output(timeout=timeout)
-
-        # Validate the result
-        if not result or "data" not in result:
-            logger.error(f"Invalid response from RunPod: {result}")
-            raise ValueError(f"Invalid response from RunPod: {result}")
-
-        # Extract and validate the embedding
-        embedding = result["data"][0]["embedding"]
-
-        if not isinstance(embedding, list) or not all(
-            isinstance(x, (int, float)) for x in embedding
-        ):
-            logger.error(f"Invalid embedding format: {type(embedding)}")
-            raise ValueError("Embedding is not a valid list of numbers")
-
-        logger.info(f"RunPod job completed successfully: {job_id}")
-        return embedding
-
-    except asyncio.TimeoutError:
-        logger.error(f"RunPod request timed out after {timeout} seconds")
-        raise RuntimeError(f"RunPod API request timed out after {timeout} seconds")
-
-    except Exception as e:
-        logger.error(f"RunPod API error: {str(e)}")
-        raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
