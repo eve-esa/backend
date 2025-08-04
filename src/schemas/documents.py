@@ -14,6 +14,14 @@ class RetrieveRequest(BaseModel):
     query: str = Field(
         default=DEFAULT_QUERY, min_length=1, max_length=1000, description="Search query"
     )
+    year: List[int] = Field(
+        default=[],
+        description="A list with two values [start_year, end_year] to filter by publication year.",
+    )
+    keywords: List[str] = Field(
+        default=[],
+        description="List of keywords to filter by title.",
+    )
     embeddings_model: str = Field(
         default=DEFAULT_EMBEDDING_MODEL,
         min_length=1,

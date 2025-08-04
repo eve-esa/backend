@@ -4,7 +4,7 @@ import json
 import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any
+from typing import Dict, Any, List
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
@@ -31,6 +31,8 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    year: List[int] = []
+    keywords: List[str] = []
     collection_name: str = DEFAULT_COLLECTION
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
@@ -46,12 +48,14 @@ async def get_rag_context(
     """Get RAG context from vector store."""
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
-        query=request.query,
         collection_name=request.collection_name,
-        embeddings_model=request.embeddings_model,
+        query=request.query,
+        year=request.year,
+        keywords=request.keywords,
+        k=request.k,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
-        k=request.k,
+        embeddings_model=request.embeddings_model,
     )
 
     if not results:
