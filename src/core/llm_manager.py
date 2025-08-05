@@ -229,7 +229,7 @@ class LLMManager:
             )
 
             response = client.chat.completions.create(
-                model="mistral-large-latest",  # This is Mistral 3.2 24B
+                model="mistral-small-latest",  # This is Mistral 3.2 24B
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_new_tokens,
                 temperature=0.3,
@@ -645,7 +645,7 @@ class LLMManager:
             )
 
             stream = client.chat.completions.create(
-                model="mistral-large-latest",  # This is Mistral 3.2 24B
+                model="mistral-small-latest",  # This is Mistral 3.2 24B
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_new_tokens,
                 temperature=0.3,
