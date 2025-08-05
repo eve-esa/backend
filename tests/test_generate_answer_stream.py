@@ -19,14 +19,18 @@ def client():
     return TestClient(app)
 
 
-async def _mock_stream(query, context, llm, max_new_tokens):
+async def _mock_stream(
+    query, context, llm, max_new_tokens, fallback_llm="mistral-vanilla"
+):
     """Mock stream generator."""
     yield "Hello"
     yield " world"
     yield "!"
 
 
-async def _mock_stream_rag(query, context, llm, max_new_tokens):
+async def _mock_stream_rag(
+    query, context, llm, max_new_tokens, fallback_llm="mistral-vanilla"
+):
     """Mock stream generator for RAG tests."""
     yield "Based on the context"
     yield ", Earth observation is"

@@ -4,11 +4,11 @@ LLM Manager module that handles different language model interactions.
 
 import logging
 from enum import Enum
-import asyncio
 from typing import AsyncGenerator
 
 import openai
 import runpod
+from openai import OpenAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 
@@ -36,7 +36,6 @@ class LLMManager:
     def _setup_api_keys(self):
         """Set up API keys for different LLM providers."""
         runpod.api_key = RUNPOD_API_KEY
-        # Consider adding OpenAI API key setup here if needed
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
@@ -220,9 +219,6 @@ class LLMManager:
             Exception: If the API call fails
         """
         try:
-            from openai import OpenAI
-            import time
-
             # Use OpenAI client to call Mistral API
             mistral_timeout_seconds = self.config.get_mistral_timeout() / 1000
 
@@ -639,8 +635,6 @@ class LLMManager:
             Exception: For other errors
         """
         try:
-            from openai import OpenAI
-
             # Use OpenAI client to call Mistral API
             mistral_timeout_seconds = self.config.get_mistral_timeout() / 1000
 
