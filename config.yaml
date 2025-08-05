@@ -6,6 +6,10 @@ runpod:
     id: "bqwuhwmnb3bdx0"
     timeout: 1000
 
+mistral:
+  model: "mistral-large-latest"
+  timeout: 3000
+
 
 mcp:
   servers:
