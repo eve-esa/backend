@@ -15,12 +15,12 @@ services:
         "8000",
         "--reload",
         "--reload-dir",
-        "/app",
+        "/code",
       ]
     env_file:
       - .env
     volumes:
-      - .:/app
+      - .:/code
     depends_on:
       - mongo
     networks:
