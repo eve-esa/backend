@@ -10,7 +10,7 @@ from src.database.models.collection import Collection
 from src.database.models.user import User
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
-from src.services.vector_store_manager import VectorStoreManager
+from src.core.vector_store_manager import VectorStoreManager
 
 logger = logging.getLogger(__name__)
 
