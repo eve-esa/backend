@@ -8,6 +8,10 @@ class CollectionRequest(BaseModel):
         min_length=1,
         description="Embedding model to use for the collection",
     )
+    name: str = Field(
+        min_length=1,
+        description="Name of the collection",
+    )
 
     @field_validator("embeddings_model")
     @classmethod

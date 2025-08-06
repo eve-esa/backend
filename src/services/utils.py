@@ -21,7 +21,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
 
-from src.services.embeddings import RunPodEmbeddings, NASA_MODEL
+from src.utils.embeddings import RunPodEmbeddings
 from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
 
 
