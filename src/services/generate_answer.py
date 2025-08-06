@@ -27,9 +27,7 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
-    collection_id: Optional[str] = Field(
-        default=None, description="Target collection ID"
-    )
+    collection_id: Optional[str] = None
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDINGS
     k: int = DEFAULT_K
@@ -68,13 +66,15 @@ async def generate_answer(
     llm_manager = LLMManager()
 
     try:
-        collection = await Collection.find_by_id(
-            request.collection_id if request.collection_id else DEFAULT_COLLECTION
+        collection = (
+            (await Collection.find_by_id(request.collection_id))
+            if request.collection_id
+            else None
         )
         if not collection:
-            raise Exception("Collection not found")
+            collection = {"id": DEFAULT_COLLECTION}
 
-        qdrant_collection = collection.id
+        qdrant_collection = collection.get("id", DEFAULT_COLLECTION)
 
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 

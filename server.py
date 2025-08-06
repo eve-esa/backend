@@ -25,15 +25,6 @@ configure_logging(level=logging.DEBUG)
 
 
 def register_routers(app: FastAPI):
-    # Documents legacy
-    # app.include_router(add_document_list_router, tags=["Documents"])
-    # app.include_router(delete_document_router, tags=["Documents"])
-    # app.include_router(retrieve_documents_router, tags=["Documents"])
-
-    # LLM legacy
-    # app.include_router(generate_answer_router, tags=["LLM"])
-    # app.include_router(completion_llm_router, tags=["LLM"])
-
     # Health
     app.include_router(health_check_router, tags=["Health"])
 
@@ -65,7 +56,11 @@ def create_app(debug=False, **kwargs):
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
+        allow_origins=[
+            "http://localhost",
+            "http://localhost:6333",
+            "http://localhost:5173",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

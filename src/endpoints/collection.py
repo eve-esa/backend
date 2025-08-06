@@ -1,6 +1,7 @@
 import logging
 import anyio
 
+from src.schemas.collections import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -22,15 +23,6 @@ router = APIRouter()
 class Pagination(BaseModel):
     page: int = 1
     limit: int = 10
-
-
-class CollectionCreate(BaseModel):
-    name: str
-    embeddings_model: str = DEFAULT_EMBEDDINGS_MODEL
-
-
-class CollectionUpdate(BaseModel):
-    name: str
 
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
@@ -56,7 +48,7 @@ async def list_collections(
 
 @router.post("/collections", response_model=Collection)
 async def create_collection(
-    request: CollectionCreate,
+    request: CollectionRequest,
     requesting_user: User = Depends(get_current_user),
 ):
     collection = Collection(
