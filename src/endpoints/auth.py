@@ -1,5 +1,5 @@
 import logging
-from src.config import JWT_ALGORITHM, JWT_SECRET_KEY
+from src.config import JWT_ALGORITHM, JWT_SECRET_KEY, JWT_AUDIENCE_REFRESH
 from src.database.models.user import User
 from pydantic import BaseModel, EmailStr
 from fastapi import APIRouter, HTTPException
@@ -48,7 +48,10 @@ async def login(request: LoginRequest):
 async def refresh(request: RefreshRequest):
     try:
         payload = jwt.decode(
-            request.refresh_token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM]
+            request.refresh_token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE_REFRESH,
         )
         user_id = payload.get("sub")
         if not user_id:
