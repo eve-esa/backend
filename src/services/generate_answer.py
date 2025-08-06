@@ -90,7 +90,7 @@ async def setup_rag_and_context(request: GenerationRequest):
 
 async def generate_answer(
     request: GenerationRequest,
-) -> dict[str, str | list[Any] | bool]:
+) -> tuple[str, list, bool]:
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
@@ -107,4 +107,4 @@ async def generate_answer(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return {"answer": answer, "documents": results, "use_rag": is_rag}
+    return answer, results, is_rag
