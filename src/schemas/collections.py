@@ -15,3 +15,7 @@ class CollectionRequest(BaseModel):
         if not v.strip():
             raise ValueError("Embeddings model cannot be empty or whitespace only")
         return v.strip()
+
+
+class CollectionUpdate(BaseModel):
+    name: str
