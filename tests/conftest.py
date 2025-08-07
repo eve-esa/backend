@@ -1,34 +1,47 @@
 # tests/conftest.py
 import os
 import sys
-from typing import AsyncIterator
+import asyncio
 
 import pytest
-from mongomock_motor import AsyncMongoMockClient
+import pytest_asyncio
+from httpx import AsyncClient
+from server import app
 
-# Make sure the project root is importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Signal to the application code that we want to use the mock.
-os.environ["USE_MOCK_MONGO"] = "1"
-
-from src.database.mongo import (
-    async_mongo_manager,
-)
+from src.database.mongo import async_mongo_manager
 
 
-@pytest.fixture(scope="session", autouse=True)
-async def _mongo_mock() -> AsyncIterator[None]:
-    """Initialise a *single* in-memory MongoDB instance for the session."""
-    client: AsyncMongoMockClient = AsyncMongoMockClient()
-    db_name = os.getenv("MONGO_DATABASE", "eve_backend_test")
+@pytest.fixture(scope="session")
+def event_loop():
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
-    # Wire the mocked client/database into the global manager used by the app.
-    async_mongo_manager.client = client
-    async_mongo_manager.database = client[db_name]
+
+@pytest.fixture(autouse=True)
+async def _db_connection():
+    """Connect to MongoDB before each test and close afterwards.
+
+    Any MongoModel instances created during the test that are registered via
+    ``tests.model_tracker.register_model`` will be deleted automatically at the
+    end of the test.
+    """
+
+    connection_string = (
+        os.getenv("MONGO_URI") or "mongodb://localhost:27017/eve_backend_test"
+    )
+
+    await async_mongo_manager.connect(connection_string)
 
     try:
         yield
     finally:
-        async_mongo_manager.client = None
-        async_mongo_manager.database = None
+        await async_mongo_manager.close()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def async_client():
+    async with AsyncClient(app=app, base_url="http://test") as ac:
+        yield ac
