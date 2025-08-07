@@ -100,7 +100,7 @@ async def update_message(
 
         await message.save()
 
-        return {"message": "Message updated successfully"}
+        return {"message": "Feedback updated successfully"}
 
     except HTTPException:
         raise
