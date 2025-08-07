@@ -1,10 +1,10 @@
 import logging
 import anyio
 
-from src.schemas.collections import CollectionRequest, CollectionUpdate
+from src.schemas.common import Pagination
+from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
 
 from src.database.models.collection import Collection
 from src.database.models.user import User
@@ -14,15 +14,7 @@ from src.core.vector_store_manager import VectorStoreManager
 
 logger = logging.getLogger(__name__)
 
-# Default embedding model for new collections (adjust as needed)
-DEFAULT_EMBEDDINGS_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
-
 router = APIRouter()
-
-
-class Pagination(BaseModel):
-    page: int = 1
-    limit: int = 10
 
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
@@ -30,6 +22,7 @@ async def list_public_collections(pagination: Pagination = Depends()):
     return await Collection.find_all_with_pagination(
         limit=pagination.limit,
         page=pagination.page,
+        filter_dict={"user_id": None},
         sort=[("timestamp", -1)],
     )
 
@@ -39,9 +32,9 @@ async def list_collections(
     request: Pagination = Depends(), request_user: User = Depends(get_current_user)
 ):
     return await Collection.find_all_with_pagination(
-        filter_dict={"user_id": request_user.id},
         limit=request.limit,
         page=request.page,
+        filter_dict={"user_id": request_user.id},
         sort=[("timestamp", -1)],
     )
 

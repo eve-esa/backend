@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
 
 from src.routers.generate_answer import router
-from src.schemas.collections import CollectionRequest
+from schemas.collection import CollectionRequest
 
 
 @pytest.fixture

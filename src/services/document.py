@@ -184,6 +184,7 @@ class DocumentService:
                 vector_store.add_document_list(
                     collection_name=collection_name, document_list=valid_documents
                 )
+
                 return DocumentResult(
                     success=True,
                     message=f"Successfully processed {len(valid_documents)} chunks from {len(files)} files",

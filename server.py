@@ -4,7 +4,7 @@ from fastapi import FastAPI
 import logging
 from src.config import configure_logging
 
-from src.endpoints import (
+from src.routers import (
     health_check_router,
     auth_router,
     conversation_router,

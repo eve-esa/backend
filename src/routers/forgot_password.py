@@ -1,28 +1,21 @@
 from datetime import datetime, timedelta, timezone
 from typing import Dict
 import logging
+from src.schemas.forgot_password import (
+    ForgotPasswordRequest,
+    ForgotPasswordConfirmation,
+)
 from src.services.email import email_service
 from src.config import FORGOT_PASSWORD_CODE_EXPIRE_MINUTES, FRONTEND_URL
 from src.services.utils import hash_password
 from src.database.models.forgot_password import ForgotPassword
 from src.database.models.user import User
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
 import random
 import string
 
 router = APIRouter(prefix="/forgot-password")
 logger = logging.getLogger(__name__)
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class ForgotPasswordConfirmation(BaseModel):
-    new_password: str
-    confirm_password: str
-    code: str
 
 
 @router.post("/code", response_model=Dict[str, str])

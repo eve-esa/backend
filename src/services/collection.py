@@ -11,7 +11,7 @@ from typing import Optional
 from dataclasses import dataclass
 
 from src.core.vector_store_manager import VectorStoreManager
-from src.schemas.collections import CollectionRequest
+from schemas.collection import CollectionRequest
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
