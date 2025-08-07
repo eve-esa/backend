@@ -1,24 +1,13 @@
+from src.schemas.message import MessageUpdate
 from src.services.generate_answer import GenerationRequest, generate_answer
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
-from enum import Enum
+from typing import Dict, Any
 
 router = APIRouter()
-
-
-class FeedbackEnum(str, Enum):
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
-
-
-class MessageUpdate(BaseModel):
-    was_copied: Optional[bool] = None
-    feedback: Optional[FeedbackEnum] = None
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
@@ -44,9 +33,7 @@ async def create_message(
         if results:
             for result in results:
                 doc_data = {
-                    "id": (
-                        str(result.id) if hasattr(result, "id") else None
-                    ),
+                    "id": (str(result.id) if hasattr(result, "id") else None),
                     "version": (
                         int(result.version) if hasattr(result, "version") else None
                     ),

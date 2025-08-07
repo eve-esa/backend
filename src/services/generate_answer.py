@@ -1,7 +1,10 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
+import json
+import logging
 from fastapi import HTTPException
-from typing import Any, Optional
+from fastapi.responses import StreamingResponse
+from typing import Dict, Any
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
@@ -19,7 +22,6 @@ from src.constants import (
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -108,3 +110,74 @@ async def generate_answer(
         raise HTTPException(status_code=500, detail=str(e))
 
     return answer, results, is_rag
+
+
+async def generate_answer_stream_generator_helper(
+    request: GenerationRequest, output_format: str = "plain"
+):
+    """Helper function to generate streaming answer with different output formats."""
+    llm_manager = LLMManager()
+
+    try:
+        context, results, is_rag = await setup_rag_and_context(request)
+
+        # Send initial metadata for JSON format
+        if output_format == "json":
+            yield f"data: {json.dumps({'type': 'start', 'use_rag': is_rag, 'documents_count': len(results)})}\n\n"
+
+        # Generate streaming answer
+        full_answer = ""
+        async for chunk in llm_manager.generate_answer_stream(
+            query=request.query,
+            context=context,
+            llm=request.llm,
+            max_new_tokens=request.max_new_tokens,
+        ):
+            if output_format == "json":
+                full_answer += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+            else:
+                yield f"data: {chunk}\n\n"
+
+        # Send final metadata for JSON format
+        if output_format == "json":
+            yield f"data: {json.dumps({'type': 'end', 'full_answer': full_answer})}\n\n"
+
+    except Exception as e:
+        error_msg = (
+            f"data: Error: {str(e)}\n\n"
+            if output_format == "plain"
+            else f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        )
+        yield error_msg
+
+
+async def generate_answer_stream_generator(
+    request: GenerationRequest,
+):
+    """Generate streaming answer using RAG and LLM."""
+    async for chunk in generate_answer_stream_generator_helper(request, "plain"):
+        yield chunk
+
+
+async def generate_answer_json_stream_generator(
+    request: GenerationRequest,
+):
+    """Generate streaming answer using RAG and LLM with JSON format."""
+    async for chunk in generate_answer_stream_generator_helper(request, "json"):
+        yield chunk
+
+
+async def generate_answer_stream_json(
+    request: GenerationRequest,
+) -> StreamingResponse:
+    """Generate a streaming answer using RAG and LLM with JSON format."""
+    return StreamingResponse(
+        generate_answer_json_stream_generator(request),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        },
+    )

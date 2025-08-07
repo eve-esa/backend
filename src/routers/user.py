@@ -1,16 +1,11 @@
 import logging
+from src.schemas.user import UpdateUserRequest
 from src.database.models.user import User
 from fastapi import APIRouter, Depends
 from src.middlewares.auth import get_current_user
-from pydantic import BaseModel
 
 router = APIRouter(prefix="/users")
 logger = logging.getLogger(__name__)
-
-
-class UpdateUserRequest(BaseModel):
-    first_name: str
-    last_name: str
 
 
 @router.get("/me", response_model=User)

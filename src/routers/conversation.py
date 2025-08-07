@@ -1,36 +1,17 @@
-from datetime import datetime
-from pydantic import BaseModel
+from src.schemas.conversation import (
+    ConversationDetail,
+    ConversationCreate,
+    ConversationNameUpdate,
+)
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from pydantic import BaseModel
 from src.database.mongo_model import PaginatedResponse
-from typing import List
+from src.schemas.common import Pagination
 
 router = APIRouter()
-
-
-class Pagination(BaseModel):
-    page: int = 1
-    limit: int = 10
-
-
-class ConversationWithMessages(BaseModel):
-    id: str
-    user_id: str
-    name: str
-    timestamp: datetime
-    messages: List[Message] = []
-
-
-class ConversationCreate(BaseModel):
-    name: str
-
-
-class ConversationNameUpdate(BaseModel):
-    name: str
 
 
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
@@ -51,7 +32,7 @@ async def list_conversations(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
-@router.get("/conversations/{conversation_id}", response_model=ConversationWithMessages)
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
 async def get_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
@@ -72,7 +53,7 @@ async def get_conversation(
             filter_dict={"conversation_id": conversation_id}, sort=[("timestamp", 1)]
         )
 
-        return ConversationWithMessages(
+        return ConversationDetail(
             id=conversation.id,
             user_id=conversation.user_id,
             name=conversation.name,

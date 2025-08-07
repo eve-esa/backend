@@ -1,28 +1,15 @@
 import logging
+from src.schemas.auth import (
+    LoginRequest,
+    LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
+)
 from src.config import JWT_ALGORITHM, JWT_SECRET_KEY, JWT_AUDIENCE_REFRESH
 from src.database.models.user import User
-from pydantic import BaseModel, EmailStr
 from fastapi import APIRouter, HTTPException
 from src.services.auth import verify_user, create_access_token, create_refresh_token
 from jose import jwt, JWTError
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-
-
-class RefreshResponse(BaseModel):
-    access_token: str
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str
 
 
 router = APIRouter()

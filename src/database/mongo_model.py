@@ -9,7 +9,7 @@ from pymongo.errors import DuplicateKeyError
 import logging
 from datetime import datetime, timezone
 
-from .mongo import get_collection, get_database
+from src.database.mongo import get_collection, get_database
 
 T = TypeVar("T", bound="MongoModel")
 
@@ -119,6 +119,13 @@ class MongoModel(BaseModel):
         doc = cls(**kwargs)
         await doc.save()
         return doc
+
+    @classmethod
+    async def bulk_create(cls: Type[T], documents: List[T]) -> List[T]:
+        """Create multiple documents in the collection and return the ids"""
+        collection = cls.get_collection()
+        result = await collection.insert_many([doc.to_dict() for doc in documents])
+        return [cls.from_dict(doc) for doc in result.inserted_ids]
 
     @classmethod
     async def find_one(cls: Type[T], filter_dict: Dict[str, Any]) -> Optional[T]:
