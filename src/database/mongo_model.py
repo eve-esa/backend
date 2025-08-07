@@ -122,10 +122,15 @@ class MongoModel(BaseModel):
 
     @classmethod
     async def bulk_create(cls: Type[T], documents: List[T]) -> List[T]:
-        """Create multiple documents in the collection and return the ids"""
+        """Insert multiple documents and return them with assigned IDs."""
         collection = cls.get_collection()
-        result = await collection.insert_many([doc.to_dict() for doc in documents])
-        return [cls.from_dict(doc) for doc in result.inserted_ids]
+
+        docs_dicts = [doc.to_dict() for doc in documents]
+        result = await collection.insert_many(docs_dicts)
+        for doc, inserted_id in zip(documents, result.inserted_ids):
+            doc.id = str(inserted_id)
+
+        return documents
 
     @classmethod
     async def find_one(cls: Type[T], filter_dict: Dict[str, Any]) -> Optional[T]:

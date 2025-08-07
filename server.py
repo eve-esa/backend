@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 import logging
 from src.config import configure_logging
+from contextlib import asynccontextmanager
 
 from src.routers import (
     health_check_router,
@@ -52,7 +53,18 @@ def create_app(debug=False, **kwargs):
     """Create and configure the FastAPI app instance."""
 
     logging.info("Creating FastAPI app...")
-    app = FastAPI(debug=debug, **kwargs)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await async_mongo_manager.connect()
+        logging.info("Database connection established")
+        try:
+            yield
+        finally:
+            await async_mongo_manager.close()
+            logging.info("Database connection closed")
+
+    app = FastAPI(debug=debug, lifespan=lifespan, **kwargs)
 
     app.add_middleware(
         CORSMiddleware,
@@ -71,17 +83,3 @@ def create_app(debug=False, **kwargs):
 
 
 app = create_app()
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database connection on startup."""
-    await async_mongo_manager.connect()
-    logging.info("Database connection established")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Close database connection on shutdown."""
-    await async_mongo_manager.close()
-    logging.info("Database connection closed")
