@@ -32,7 +32,7 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
-    collection_name: str = DEFAULT_COLLECTION
+    collection_id: str = DEFAULT_COLLECTION
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
@@ -49,7 +49,7 @@ async def get_rag_context(
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
-        collection_name=request.collection_name,
+        collection_name=request.collection_id,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
