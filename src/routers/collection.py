@@ -53,7 +53,12 @@ async def create_collection(
     try:
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
         vector_store.create_collection(collection.id)
+    except HTTPException as e:
+        raise e
     except Exception as e:
+        logger.warning(
+            f"Warning: failed to create Qdrant collection {collection.id}: {e}"
+        )
         await collection.delete()
         raise HTTPException(
             status_code=500,
@@ -84,6 +89,8 @@ async def update_collection(
         updated_collection = await collection.save()
         return updated_collection
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -118,5 +125,7 @@ async def delete_collection(
         await collection.delete()
         return {"message": "Collection deleted successfully"}
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

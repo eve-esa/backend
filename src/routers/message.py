@@ -59,12 +59,14 @@ async def create_message(
             "conversation_id": conversation_id,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
 @router.patch("/conversations/{conversation_id}/messages/{message_id}")
-async def update_message_feedback(
+async def update_message(
     conversation_id: str,
     message_id: str,
     request: MessageUpdate,
@@ -98,7 +100,9 @@ async def update_message_feedback(
 
         await message.save()
 
-        return {"message": "Feedback updated successfully"}
+        return {"message": "Message updated successfully"}
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

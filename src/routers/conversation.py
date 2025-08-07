@@ -28,6 +28,8 @@ async def list_conversations(
 
         return result
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -61,6 +63,8 @@ async def get_conversation(
             messages=messages,
         )
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -76,6 +80,8 @@ async def create_conversation(
             name=request.name,
         )
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -102,6 +108,8 @@ async def update_conversation_name(
 
         return conversation
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -125,5 +133,7 @@ async def delete_conversation(
         await conversation.delete()
         return {"message": "Conversation deleted successfully"}
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
