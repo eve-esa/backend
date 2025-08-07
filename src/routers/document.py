@@ -109,7 +109,7 @@ async def upload_documents(
     )
 
     docs_data = [
-        await DocumentModel.create(
+        DocumentModel(
             user_id=requesting_user.id,
             collection_id=collection_id,
             name=file.filename,
@@ -141,6 +141,8 @@ async def upload_documents(
 
         await DocumentModel.bulk_create(docs_data)
         return result.data
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Error processing documents: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -177,6 +179,8 @@ async def delete_document(
             collection_name=collection_id,
             metadata={"document_id": document_id},
         )
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Failed to delete vectors for document {document_id}: {e}")
 
