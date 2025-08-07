@@ -458,7 +458,13 @@ class VectorStoreManager:
         # Keep only one document per source, prioritizing higher scores
         for item in sorted_results:
             try:
-                source = item.payload["title"]
+                # Derive a stable source identifier even if the expected key is missing.
+                source = (
+                    item.payload.get("title")
+                    or item.payload.get("metadata", {}).get("filename")
+                    or item.payload.get("metadata", {}).get("source_name")
+                    or str(item.id)
+                )
                 if source not in unique_source_items:
                     unique_source_items[source] = item
                 if len(unique_source_items) >= min_docs:
@@ -605,9 +611,9 @@ class VectorStoreManager:
             # Create a prompt to determine if RAG is appropriate
             prompt = f"""
             Decide whether to use RAG to answer the given query. Follow these rules:
-            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi", 
+            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
               "hello", "how are you", "what can you do", or "tell me a joke".
-            - USE RAG for queries related to earth science, space science, climate, 
+            - USE RAG for queries related to earth science, space science, climate,
               space agencies, or similar scientific topics.
             - USE RAG for specific technical or scientific questions, even if the topic is unclear
               (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").

@@ -60,7 +60,10 @@ async def get_rag_context(
         print(f"No documents found for query: {request.query}")
         return "", []
 
-    retrieved_documents = [result.payload.get("page_content", "") for result in results]
+    retrieved_documents = [
+        result.payload.get("page_content") or result.payload.get("text") or ""
+        for result in results
+    ]
     context = "\n".join(retrieved_documents)
     return context, results
 
