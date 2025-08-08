@@ -8,6 +8,7 @@ from src.routers import (
     health_check_router,
     documents_router,
     generate_answer_router,
+    mcp_client_router,
 )
 
 origins = [
@@ -30,6 +31,9 @@ def register_routers(app: FastAPI):
 
     # Health
     app.include_router(health_check_router, tags=["Health"])
+
+    # MCP client
+    app.include_router(mcp_client_router, tags=["MCP"])
 
 
 def create_app(debug=False, **kwargs):
