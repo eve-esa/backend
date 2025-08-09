@@ -10,4 +10,4 @@ runpod:
 mcp:
   server_url: "https://eve-mcp-demo.literatum.com/mcp"
   headers:
-    Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0NjYxMzEwLCJqdGkiOiIxNTlhMjQxYS02MWYxLTQ0MjgtODMxZS00YTNiY2Q1M2UzNDQiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.BwjPEICb37xNgfV-i1_QcagCfcZkiRcOTeZPs0FYd1Y"
+    Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0NzUwMTE1LCJqdGkiOiI4MWQxN2I3Yy0xMmUxLTQ2ODEtYWVjNy1mMzI3MTI3YjIzYjIiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.VhoH-xW1I_mp_VcpyC0Y1ZOtQm_wvTSmayiQRPq30Gc"

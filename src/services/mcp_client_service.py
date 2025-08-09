@@ -1,16 +1,33 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, AsyncIterator
 
-from mcp.client.streamable_http import streamablehttp_client  # type: ignore
-from mcp.client.websocket import websocket_client  # type: ignore
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.websocket import websocket_client
 from mcp.client.session import ClientSession
 from urllib.parse import quote
-from typing import Tuple, Union
 from contextlib import AsyncExitStack
 
 from src.config import Config
+
+# Import FastAPI MCP Client for streaming capabilities
+try:
+    from fastapi_mcp_client import MCPClient, MCPClientConfig
+    from fastapi_mcp_client.exceptions import (
+        MCPClientError,
+        MCPConnectionError,
+        MCPStreamError,
+    )
+
+    FASTAPI_MCP_AVAILABLE = True
+except ImportError:
+    FASTAPI_MCP_AVAILABLE = False
+    MCPClient = None
+    MCPClientConfig = None
+    MCPClientError = Exception
+    MCPConnectionError = Exception
+    MCPStreamError = Exception
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +52,34 @@ class MCPClientService:
             raise ValueError(
                 "MCP Authorization header not configured (config.yaml -> mcp.headers.Authorization)"
             )
+
+        # Initialize FastAPI MCP Client if available
+        self._fastapi_mcp_client: Optional[MCPClient] = None
+        if FASTAPI_MCP_AVAILABLE and self._server_url.startswith(
+            ("http://", "https://")
+        ):
+            try:
+                # Extract base URL and path from server URL
+                if "/mcp" in self._server_url:
+                    base_url = self._server_url.split("/mcp")[0]
+                else:
+                    base_url = self._server_url.rstrip("/")
+
+                # Create FastAPI MCP Client configuration
+                fastapi_config = MCPClientConfig(
+                    base_url=base_url,
+                    default_headers=self._headers,
+                    timeout=30.0,
+                    log_level="INFO",
+                )
+
+                self._fastapi_mcp_client = MCPClient(
+                    base_url=base_url, config=fastapi_config
+                )
+                logger.info("FastAPI MCP Client initialized for streaming operations")
+            except Exception as e:
+                logger.warning(f"Failed to initialize FastAPI MCP Client: {e}")
+                self._fastapi_mcp_client = None
 
     def _open_session(self):
         """Open MCP session using appropriate transport based on URL scheme."""
@@ -151,3 +196,55 @@ class MCPClientService:
             except BaseException as e:
                 logger.debug(f"Ignoring transport teardown error: {e}")
         return processed
+
+    async def call_tool_stream(
+        self, name: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Call a specific tool on the MCP server with streaming support.
+
+        This method uses the FastAPI MCP Client for streaming operations when available,
+        falling back to the regular call_tool method if streaming is not supported.
+        """
+        if self._fastapi_mcp_client is not None:
+            try:
+                logger.debug(
+                    f"Using FastAPI MCP Client for streaming tool call: {name}"
+                )
+                async for event in self._fastapi_mcp_client.call_operation(
+                    name, arguments, stream=True
+                ):
+                    yield event
+            except (MCPConnectionError, MCPStreamError) as e:
+                logger.warning(f"FastAPI MCP Client streaming failed: {e}")
+                # Fall back to non-streaming
+                result = await self.call_tool(name, arguments)
+                yield result
+            except Exception as e:
+                logger.error(f"Unexpected error in streaming tool call: {e}")
+                # Fall back to non-streaming
+                result = await self.call_tool(name, arguments)
+                yield result
+        else:
+            # Fall back to non-streaming if FastAPI MCP Client is not available
+            logger.debug(
+                f"FastAPI MCP Client not available, using regular tool call: {name}"
+            )
+            result = await self.call_tool(name, arguments)
+            yield result
+
+    async def close(self) -> None:
+        """Close any open connections."""
+        if self._fastapi_mcp_client is not None:
+            try:
+                await self._fastapi_mcp_client.close()
+            except Exception as e:
+                logger.debug(f"Error closing FastAPI MCP Client: {e}")
+
+    async def __aenter__(self) -> "MCPClientService":
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit."""
+        await self.close()
