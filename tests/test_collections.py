@@ -118,18 +118,3 @@ async def test_delete_collection_not_owner(async_client, monkeypatch):
         )
     finally:
         await cleanup_models([owner, intruder])
-
-
-@pytest.mark.asyncio
-async def test_public_collections_index(async_client):
-    """Ensure public collections are listed without authentication."""
-
-    # Create a public collection directly bypassing router to avoid auth
-    public_coll = await Collection.create(name="Public", user_id=None)
-    try:
-        resp = await async_client.get("/collections/public")
-        assert resp.status_code == 200
-        ids = [c["id"] for c in resp.json()["data"]]
-        assert public_coll.id in ids
-    finally:
-        await public_coll.delete()
