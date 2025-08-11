@@ -11,6 +11,7 @@ class Collection(MongoModel):
     user_id: Optional[str] = Field(None, description="User ID")
 
     name: str = Field(..., description="Collection name")
+    description: Optional[str] = Field(None, description="Collection description")
     embeddings_model: str = Field(
         default=DEFAULT_EMBEDDING_MODEL,
         min_length=1,

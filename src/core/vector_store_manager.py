@@ -30,7 +30,7 @@ from qdrant_client.http.models import (
 
 from openai import AsyncOpenAI
 
-from src.constants import DEFAULT_EMBEDDING_MODEL
+from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
@@ -125,6 +125,27 @@ class VectorStoreManager:
             types.CollectionsResponse: Qdrant collections response
         """
         return self.client.get_collections()
+
+    def list_public_collections(
+        self, page: int = 1, limit: int = 10
+    ) -> List[Dict[str, str]]:
+        """
+        Get all public collections from the vector store.
+
+        Returns:
+            Dict[str, str]: Dictionary of collection names and descriptions
+        """
+        collections = self.client.get_collections()
+        start = (page - 1) * limit
+        end = start + limit
+        return [
+            {
+                "name": collection.name,
+                "description": PUBLIC_COLLECTIONS[collection.name],
+            }
+            for collection in collections.collections
+            if collection.name in PUBLIC_COLLECTIONS.keys()
+        ][start:end]
 
     def list_collections_names(self) -> List[str]:
         """

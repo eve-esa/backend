@@ -1,6 +1,7 @@
 import logging
 import anyio
 
+from src.constants import DEFAULT_EMBEDDING_MODEL
 from src.schemas.common import Pagination
 from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
@@ -8,22 +9,37 @@ from fastapi import APIRouter, HTTPException, Depends
 
 from src.database.models.collection import Collection
 from src.database.models.user import User
-from src.database.mongo_model import PaginatedResponse
+from src.database.mongo_model import PaginatedResponse, get_pagination_metadata
 from src.middlewares.auth import get_current_user
 from src.core.vector_store_manager import VectorStoreManager
 
 logger = logging.getLogger(__name__)
+vector_store = VectorStoreManager()
 
 router = APIRouter()
 
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
 async def list_public_collections(pagination: Pagination = Depends()):
-    return await Collection.find_all_with_pagination(
-        limit=pagination.limit,
-        page=pagination.page,
-        filter_dict={"user_id": None},
-        sort=[("timestamp", -1)],
+    public_collections = vector_store.list_public_collections(
+        page=pagination.page, limit=pagination.limit
+    )
+
+    # Pagination must be done manually since qdrant doesn't support collection pagination
+    return PaginatedResponse(
+        data=[
+            Collection(
+                id=collection["name"],
+                name=collection["name"],
+                description=collection["description"],
+                user_id=None,
+                embeddings_model=DEFAULT_EMBEDDING_MODEL,
+            )
+            for collection in public_collections
+        ],
+        meta=get_pagination_metadata(
+            len(public_collections), pagination.page, pagination.limit
+        ),
     )
 
 
@@ -51,7 +67,6 @@ async def create_collection(
     await collection.save()
 
     try:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
         vector_store.create_collection(collection.id)
     except HTTPException as e:
         raise e
@@ -113,7 +128,6 @@ async def delete_collection(
         await Document.delete_many({"collection_id": collection_id})
 
         try:
-            vector_store = VectorStoreManager()
             await anyio.to_thread.run_sync(
                 vector_store.delete_collection, collection_id
             )
