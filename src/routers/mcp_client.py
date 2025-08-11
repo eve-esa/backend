@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-import json
 
-from src.services.mcp_client_service import MCPClientService
+from src.services.mcp_client_service import MultiServerMCPClientService
 
 
 router = APIRouter()
@@ -18,83 +16,92 @@ class ToolCallBody(BaseModel):
 
 @router.get("/mcp/tools")
 async def get_mcp_tools() -> Dict[str, Any]:
-    """List tools exposed by the configured MCP server."""
+    """List tools exposed by all configured MCP servers."""
     try:
-        async with MCPClientService() as service:
-            tools = await service.list_tools()
+        async with MultiServerMCPClientService() as service:
+            tools = await service.list_tools_from_all_servers()
             return {"tools": tools}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.post("/mcp/tools/{tool_name}")
-async def call_mcp_tool(tool_name: str, body: ToolCallBody) -> Dict[str, Any]:
-    """Invoke a tool on the MCP server with optional arguments."""
+@router.get("/mcp/servers/{server_name}/tools")
+async def get_mcp_tools_from_server(server_name: str) -> Dict[str, Any]:
+    """List tools exposed by a specific MCP server."""
     try:
-        async with MCPClientService() as service:
-            result = await service.call_tool(tool_name, body.arguments or {})
+        async with MultiServerMCPClientService() as service:
+            tools = await service.list_tools_from_server(server_name)
+            return {"tools": tools, "server": server_name}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/mcp/tools/{tool_name}")
+async def call_mcp_tool_on_all_servers(
+    tool_name: str, body: ToolCallBody
+) -> Dict[str, Any]:
+    """Invoke a tool on all configured MCP servers with optional arguments."""
+    try:
+        async with MultiServerMCPClientService() as service:
+            result = await service.call_tool_on_all_servers(
+                tool_name, body.arguments or {}
+            )
             return {"result": result}
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@router.post("/mcp/tools/{tool_name}/stream")
-async def call_mcp_tool_stream(tool_name: str, body: ToolCallBody) -> StreamingResponse:
-    """Invoke a tool on the MCP server with streaming support."""
+@router.post("/mcp/servers/{server_name}/tools/{tool_name}")
+async def call_mcp_tool_on_server(
+    tool_name: str, server_name: str, body: ToolCallBody
+) -> Dict[str, Any]:
+    """Invoke a tool on a specific MCP server with optional arguments."""
+    try:
+        async with MultiServerMCPClientService() as service:
+            result = await service.call_tool_on_server(
+                server_name, tool_name, body.arguments or {}
+            )
+            return {"result": result}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
-    async def generate_stream():
-        try:
-            async with MCPClientService() as service:
-                async for event in service.call_tool_stream(
-                    tool_name, body.arguments or {}
-                ):
-                    # Convert event to JSON string with newline for SSE format
-                    yield f"data: {json.dumps(event, default=str)}\n\n"
-        except Exception as e:
-            # Send error as SSE event
-            error_event = {"error": str(e), "tool_name": tool_name}
-            yield f"data: {json.dumps(error_event, default=str)}\n\n"
 
-    return StreamingResponse(
-        generate_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Cache-Control",
-        },
-    )
+@router.get("/mcp/servers")
+async def get_mcp_servers() -> Dict[str, Any]:
+    """Get list of configured MCP servers and their status."""
+    try:
+        async with MultiServerMCPClientService() as service:
+            server_names = service.get_server_names()
+            server_status = service.get_server_status()
+            return {"servers": server_names, "status": server_status}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.get("/mcp/status")
 async def get_mcp_status() -> Dict[str, Any]:
     """Get the status of MCP client capabilities."""
     try:
-        async with MCPClientService() as service:
-            # Check if FastAPI MCP Client is available
-            fastapi_mcp_available = (
-                hasattr(service, "_fastapi_mcp_client")
-                and service._fastapi_mcp_client is not None
-            )
+        async with MultiServerMCPClientService() as service:
+            server_names = service.get_server_names()
+            server_status = service.get_server_status()
 
-            # Test basic connectivity
-            tools = await service.list_tools()
+            # Get total tools count from all servers
+            all_tools = await service.list_tools_from_all_servers()
 
             return {
                 "status": "connected",
-                "fastapi_mcp_client_available": fastapi_mcp_available,
-                "streaming_supported": fastapi_mcp_available,
-                "tools_count": len(tools),
-                "server_url": (
-                    service._server_url if hasattr(service, "_server_url") else None
-                ),
+                "servers_count": len(server_names),
+                "servers": server_names,
+                "server_status": server_status,
+                "total_tools_count": len(all_tools),
+                "multi_server_support": True,
             }
     except Exception as e:
         return {
             "status": "error",
             "error": str(e),
-            "fastapi_mcp_client_available": False,
-            "streaming_supported": False,
-            "tools_count": 0,
+            "multi_server_support": True,
+            "servers_count": 0,
+            "total_tools_count": 0,
         }

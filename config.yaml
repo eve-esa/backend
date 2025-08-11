@@ -8,6 +8,10 @@ runpod:
 
 
 mcp:
-  server_url: "https://eve-mcp-demo.literatum.com/mcp"
-  headers:
-    Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0NzUwMTE1LCJqdGkiOiI4MWQxN2I3Yy0xMmUxLTQ2ODEtYWVjNy1mMzI3MTI3YjIzYjIiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.VhoH-xW1I_mp_VcpyC0Y1ZOtQm_wvTSmayiQRPq30Gc"
+  servers:
+    eve-mcp-demo:
+      url: "https://eve-mcp-demo.literatum.com/mcp"
+      transport: "streamable_http"
+      headers:
+        Authorization: "eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0ODk5NzE4LCJqdGkiOiIxMzFlZjNlMi1iODU1LTRjYzUtODE1ZC1kZWI3MzVkNGI4N2QiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.vNQxJkB5pGkMTNNQwhG3y0iXhsPHv5Lw1HtM_X4gUBE"
+      enabled: true

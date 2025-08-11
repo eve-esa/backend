@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import runpod
 import logging
 import sys
+from typing import List, Dict, Any
 
 load_dotenv(override=True)
 
@@ -71,11 +72,41 @@ class Config:
         return value
 
     # MCP
+    def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:
+        """Get dictionary of configured MCP servers for MultiServerMCPClient."""
+        servers = self.get("mcp", "servers", default={})
+        if not servers:
+            # Fallback to legacy single server configuration
+            legacy_url = self.get("mcp", "server_url")
+            legacy_headers = self.get("mcp", "headers", default={})
+            if legacy_url:
+                return {
+                    "legacy-server": {
+                        "url": legacy_url,
+                        "transport": "streamable_http",
+                        "headers": legacy_headers,
+                        "enabled": True,
+                    }
+                }
+        return servers
+
     def get_mcp_server_url(self):
-        return self.get("mcp", "server_url")
+        """Legacy method for backward compatibility."""
+        servers = self.get_mcp_servers()
+        if servers:
+            # Get the first server's URL
+            first_server = next(iter(servers.values()))
+            return first_server.get("url")
+        return None
 
     def get_mcp_headers(self):
-        return self.get("mcp", "headers", default={}) or {}
+        """Legacy method for backward compatibility."""
+        servers = self.get_mcp_servers()
+        if servers:
+            # Get the first server's headers
+            first_server = next(iter(servers.values()))
+            return first_server.get("headers", {})
+        return {}
 
     def get_instruct_llm_id(self):
         return self.get("runpod", "instruct_llm", "id")
