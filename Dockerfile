@@ -12,7 +12,10 @@ COPY ./*.py /code/
 COPY ./requirements.txt /code/
 COPY ./config.yaml /code/
 COPY ./start.sh /code/
+COPY ./create_user.sh /code/
 RUN chmod +x /code/start.sh
+RUN chmod +x /code/create_user.sh
+
 COPY ./src/ /code/src/
 
 ENV HOST 0.0.0.0

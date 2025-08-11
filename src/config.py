@@ -38,6 +38,11 @@ EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "EVE AI").strip()
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
 
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+]
+
 FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
     os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
 )

@@ -2,7 +2,7 @@ from src.database.mongo import async_mongo_manager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 import logging
-from src.config import configure_logging
+from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from contextlib import asynccontextmanager
 
 from src.routers import (
@@ -15,12 +15,6 @@ from src.routers import (
     collection_router,
     document_router,
 )
-
-origins = [
-    "http://localhost",
-    "http://localhost:6333",
-    "http://localhost:5173",
-]
 
 configure_logging(level=logging.DEBUG)
 
@@ -68,7 +62,7 @@ def create_app(debug=False, **kwargs):
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
+        allow_origins=CORS_ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
