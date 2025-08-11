@@ -38,10 +38,11 @@ async def create_message(
         user_collections = await CollectionModel.find_all(
             filter_dict={"user_id": requesting_user.id}
         )
+
         if len(user_collections) > 0:
-            request.collection_ids = [
+            request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
-            ] + request.collection_ids
+            ]
 
         answer, results, is_rag = await generate_answer(request)
 
