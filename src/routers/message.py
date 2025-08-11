@@ -1,3 +1,4 @@
+from src.core.vector_store_manager import VectorStoreManager
 from src.schemas.message import MessageUpdate
 from src.services.generate_answer import GenerationRequest, generate_answer
 from src.database.models.conversation import Conversation
@@ -28,6 +29,11 @@ async def create_message(
                 detail="You are not allowed to add a message to this conversation",
             )
 
+        # All public collections are used by default
+        public_collections = VectorStoreManager().list_public_collections()
+        if len(public_collections) > 0:
+            request.collection_ids = [c["name"] for c in public_collections]
+
         # All user collections are used by default
         user_collections = await CollectionModel.find_all(
             filter_dict={"user_id": requesting_user.id}
@@ -35,15 +41,6 @@ async def create_message(
         if len(user_collections) > 0:
             request.collection_ids = [
                 c.id for c in user_collections
-            ] + request.collection_ids
-
-        # All public collections are used by default
-        public_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": None}
-        )
-        if len(public_collections) > 0:
-            request.collection_ids = [
-                c.id for c in public_collections
             ] + request.collection_ids
 
         answer, results, is_rag = await generate_answer(request)

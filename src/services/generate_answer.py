@@ -32,10 +32,7 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
-    # todo remove default when we have the list of public collections in the database
-    collection_ids: List[str] = Field(
-        default_factory=lambda: [DEFAULT_COLLECTION], exclude=True
-    )
+    collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
@@ -52,9 +49,8 @@ async def get_rag_context(
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
-        collection_name=request.collection_ids[
-            0
-        ],  # todo extend support for multiple collections
+        # todo extend support for multiple collections
+        collection_name=request.collection_ids[0],
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,

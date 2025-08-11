@@ -26,6 +26,20 @@ class PaginatedResponse(BaseModel, Generic[T]):
     meta: PaginationMetadata
 
 
+def get_pagination_metadata(
+    total_count: int, current_page: int, limit: int
+) -> PaginationMetadata:
+    if limit == 0:
+        limit = 10
+
+    return PaginationMetadata(
+        total_count=total_count,
+        current_page=current_page,
+        total_pages=math.ceil(total_count / limit),
+        has_next=current_page < math.ceil(total_count / limit),
+    )
+
+
 class MongoModel(BaseModel):
     """Generic base model for MongoDB documents with collection and instance operations."""
 
@@ -105,12 +119,7 @@ class MongoModel(BaseModel):
 
         return PaginatedResponse[T](
             data=documents,
-            meta=PaginationMetadata(
-                total_count=total_count,
-                current_page=current_page,
-                total_pages=total_pages,
-                has_next=has_next,
-            ),
+            meta=get_pagination_metadata(total_count, current_page, limit),
         )
 
     @classmethod
