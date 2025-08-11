@@ -50,10 +50,13 @@ jobs:
           key: ${{ secrets.STAGING_KEY }}
           port: ${{ secrets.STAGING_PORT }}
           script: |
+            aws ecr get-login-password --region ${AWS_REGION:-eu-west-1} \
+            | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
             cd ${{ secrets.STAGING_PATH }}
             # pull new backend image
-            docker compose -f docker-compose.staging.yml pull
-            docker compose -f docker-compose.staging.yml up -d
+            docker compose -f docker-compose.staging.yml pull backend
+            docker compose -f docker-compose.staging.yml up -d --force-recreate backend
 
-            # clean up old images older than 24 hours
-            docker image prune -f --filter "until=24h"
+            # clean up old images
+            docker image prune -f
