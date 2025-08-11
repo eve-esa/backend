@@ -7,3 +7,11 @@ runpod:
     timeout: 1000
 
 
+mcp:
+  servers:
+    eve-mcp-demo:
+      url: "https://eve-mcp-demo.literatum.com/mcp"
+      transport: "streamable_http"
+      headers:
+        Authorization: "eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0ODk5NzE4LCJqdGkiOiIxMzFlZjNlMi1iODU1LTRjYzUtODE1ZC1kZWI3MzVkNGI4N2QiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.vNQxJkB5pGkMTNNQwhG3y0iXhsPHv5Lw1HtM_X4gUBE"
+      enabled: true
