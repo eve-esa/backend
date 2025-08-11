@@ -1,4 +1,4 @@
-FROM python:3.10.10
+FROM python:3.10.10-slim
 
 WORKDIR /code
 
@@ -15,7 +15,6 @@ COPY ./start.sh /code/
 RUN chmod +x /code/start.sh
 COPY ./src/ /code/src/
 
-ENV PORT=8000
 ENV HOST 0.0.0.0
 
 # CMD ["uvicorn", "server:app", "--host", "$HOST", "--port", "$PORT"]
