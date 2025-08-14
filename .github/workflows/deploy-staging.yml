@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: eu-west-1
-  AWS_ROLE_ARN: arn:aws:iam::686812424034:role/gh-action-eve-esa-be-staging
-  AWS_ECR_REPOSITORY: eve-esa-be-staging
+  AWS_REGION: ${{ secrets.STAGING_AWS_REGION }}
+  AWS_ROLE_ARN: ${{ secrets.STAGING_AWS_ROLE_ARN }}
+  AWS_ECR_REPOSITORY: ${{ secrets.STAGING_AWS_ECR_REPOSITORY }}
 
 jobs:
   deploy:
@@ -50,7 +50,7 @@ jobs:
           key: ${{ secrets.STAGING_KEY }}
           port: ${{ secrets.STAGING_PORT }}
           script: |
-            aws ecr get-login-password --region ${AWS_REGION:-eu-west-1} \
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} \
             | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
 
             cd ${{ secrets.STAGING_PATH }}
