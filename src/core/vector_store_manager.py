@@ -624,7 +624,7 @@ class VectorStoreManager:
 
     async def retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         year: Optional[List[int]] = None,
         keywords: Optional[List[str]] = None,
@@ -634,10 +634,10 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
     ) -> List[Any]:
         """
-        Retrieve relevant documents for a given query.
+        Retrieve relevant documents for a given query from multiple collections.
 
         Args:
-            collection_name: Name of the collection to search
+            collection_names: List of names of the collections to search
             query: The query text
             year: List with two values [start_year, end_year] to filter by publication year.
             keywords: List of keywords to filter by title.
@@ -661,33 +661,59 @@ class VectorStoreManager:
             query_filter = self.get_filter(year=year, keywords=keywords)
 
             if not get_unique_docs:
-                # Simple search with limit k
-                results = self.client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    limit=k,
-                    score_threshold=score_threshold,
-                )
-                logger.info(f"Retrieved docs: {results}")
+                # Search across multiple collections with limit k
+                all_results = []
+                for collection_name in collection_names:
+                    try:
+                        collection_results = self.client.search(
+                            collection_name=collection_name,
+                            query_vector=query_vector,
+                            limit=k,
+                            score_threshold=score_threshold,
+                            query_filter=query_filter,
+                        )
+                        all_results.extend(collection_results)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to search collection '{collection_name}': {e}"
+                        )
+                        continue
+
+                # Sort all results by score and take top k
+                all_results.sort(key=lambda x: x.score, reverse=True)
+                final_results = all_results[:k]
 
                 logger.info(
-                    f"Retrieved {len(results)} documents from '{collection_name}'"
+                    f"Retrieved {len(final_results)} documents from {len(collection_names)} collections"
                 )
-                return results
+                return final_results
 
             # Get more results to allow filtering for unique sources
-            results = self.client.search(
-                collection_name=collection_name,
-                query_vector=query_vector,
-                limit=k * 10,  # Get more results than needed for filtering
-                score_threshold=score_threshold,
-            )
-            logger.info(f"Retrieved docs: {results}")
+            all_results = []
+            for collection_name in collection_names:
+                try:
+                    collection_results = self.client.search(
+                        collection_name=collection_name,
+                        query_vector=query_vector,
+                        limit=k * 10,  # Get more results than needed for filtering
+                        score_threshold=score_threshold,
+                        query_filter=query_filter,
+                    )
+                    all_results.extend(collection_results)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to search collection '{collection_name}': {e}"
+                    )
+                    continue
 
-            unique_results = self._get_unique_source_documents(results, min_docs=k)
             logger.info(
-                f"Retrieved {len(unique_results)} unique documents from '{collection_name}' "
-                f"(filtered from {len(results)} total matches)"
+                f"Retrieved {len(all_results)} total documents from {len(collection_names)} collections"
+            )
+
+            unique_results = self._get_unique_source_documents(all_results, min_docs=k)
+            logger.info(
+                f"Retrieved {len(unique_results)} unique documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
             )
             return unique_results
 
@@ -765,7 +791,7 @@ class VectorStoreManager:
 
     def sync_retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         year: Optional[List[int]] = None,
         keywords: Optional[List[str]] = None,
@@ -781,7 +807,7 @@ class VectorStoreManager:
         """
         return asyncio.run(
             self.retrieve_documents_from_query(
-                collection_name=collection_name,
+                collection_names=collection_names,
                 query=query,
                 year=year,
                 keywords=keywords,
