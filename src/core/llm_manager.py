@@ -4,13 +4,13 @@ LLM Manager module that handles different language model interactions.
 
 import logging
 from enum import Enum
-import asyncio
 from typing import AsyncGenerator
 
 import openai
 import runpod
+from openai import OpenAI
 
-from src.config import Config, RUNPOD_API_KEY
+from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,7 @@ class LLMType(Enum):
     OPENAI = "openai"
     EVE_INSTRUCT = "eve-instruct-v0.1"
     LLAMA = "llama-3.1"
+    MISTRAL_VANILLA = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 
 
 class LLMManager:
@@ -35,7 +36,6 @@ class LLMManager:
     def _setup_api_keys(self):
         """Set up API keys for different LLM providers."""
         runpod.api_key = RUNPOD_API_KEY
-        # Consider adding OpenAI API key setup here if needed
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
@@ -201,6 +201,46 @@ class LLMManager:
             raise
         except Exception as e:
             logger.error(f"Eve Instruct API call failed: {str(e)}")
+            raise
+
+    def _call_vanilla_mistral(self, prompt: str, max_new_tokens: int = 150) -> str:
+        """
+        Call vanilla Mistral 3.2 24B as a fallback when RunPod fails.
+
+        Args:
+            prompt: The formatted prompt
+            max_new_tokens: Maximum new tokens for the response
+
+        Returns:
+            The generated response
+
+        Raises:
+            TimeoutError: If the API call times out
+            Exception: If the API call fails
+        """
+        try:
+            # Use OpenAI client to call Mistral API
+            mistral_timeout_seconds = self.config.get_mistral_timeout() / 1000
+
+            client = OpenAI(
+                api_key=MISTRAL_API_KEY,  # Use environment variable directly
+                base_url="https://api.mistral.ai/v1",
+                timeout=mistral_timeout_seconds,
+            )
+
+            response = client.chat.completions.create(
+                model="mistral-small-latest",  # This is Mistral 3.2 24B
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_new_tokens,
+                temperature=0.3,
+            )
+            return response.choices[0].message.content
+
+        except TimeoutError as e:
+            logger.error(f"Vanilla Mistral API call timed out: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Vanilla Mistral API call failed: {str(e)}")
             raise
 
     def _process_stream_chunk(self, chunk) -> str:
@@ -410,6 +450,7 @@ class LLMManager:
         context: str,
         llm: str = "llama-3.1",
         max_new_tokens: int = 150,
+        fallback_llm: str = "mistral-vanilla",
     ) -> str:
         """
         Generate an answer using the specified language model.
@@ -419,6 +460,7 @@ class LLMManager:
             context: Contextual information to assist the model
             llm: Which language model to use (default: "llama-3.1")
             max_new_tokens: Maximum new tokens for the response
+            fallback_llm: Fallback LLM to use if primary fails (default: "mistral-vanilla")
 
         Returns:
             The generated answer
@@ -447,17 +489,31 @@ class LLMManager:
                     return self._call_eve_instruct(
                         prompt, max_new_tokens=max_new_tokens
                     )
-                except TypeError as e:
-                    if "coroutine" in str(e).lower():
-                        # If we get a coroutine error, try the async version
-                        logger.info(
-                            "Detected coroutine response, trying async approach"
-                        )
-                        return asyncio.run(
-                            self._call_eve_instruct_async(prompt, max_new_tokens)
-                        )
-                    else:
-                        raise
+                except (TypeError, TimeoutError, Exception) as e:
+                    logger.warning(
+                        f"Eve Instruct failed: {str(e)}. Falling back to {fallback_llm}."
+                    )
+                    try:
+                        if fallback_llm == LLMType.MISTRAL_VANILLA.value:
+                            return self._call_vanilla_mistral(
+                                prompt, max_new_tokens=max_new_tokens
+                            )
+                        elif fallback_llm == LLMType.OPENAI.value:
+                            return self._call_openai(prompt, max_tokens=max_new_tokens)
+                        else:
+                            logger.error(f"Unsupported fallback LLM: {fallback_llm}")
+                            raise ValueError(
+                                f"Unsupported fallback LLM: {fallback_llm}"
+                            )
+                    except TimeoutError as fallback_timeout:
+                        logger.error(f"Fallback LLM timed out: {str(fallback_timeout)}")
+                        raise fallback_timeout
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback LLM also failed: {str(fallback_error)}")
+                        raise fallback_error
+
+            elif llm == LLMType.MISTRAL_VANILLA.value:
+                return self._call_vanilla_mistral(prompt, max_new_tokens=max_new_tokens)
 
             else:
                 # Handle other LLM types or raise error
@@ -473,6 +529,7 @@ class LLMManager:
         context: str,
         llm: str = "llama-3.1",
         max_new_tokens: int = 150,
+        fallback_llm: str = "mistral-vanilla",
     ) -> AsyncGenerator[str, None]:
         """
         Generate an answer stream using the specified language model.
@@ -482,6 +539,7 @@ class LLMManager:
             context: Contextual information to assist the model
             llm: Which language model to use (default: "llama-3.1")
             max_new_tokens: Maximum new tokens for the response
+            fallback_llm: Fallback LLM to use if primary fails (default: "mistral-vanilla")
 
         Yields:
             Chunks of the generated answer
@@ -509,7 +567,44 @@ class LLMManager:
                         )
                         context = context[:max_context_len]
 
-                async for chunk in self._stream_eve_instruct(
+                try:
+                    async for chunk in self._stream_eve_instruct(
+                        prompt, max_new_tokens=max_new_tokens
+                    ):
+                        yield chunk
+                except (TypeError, TimeoutError, Exception) as e:
+                    logger.warning(
+                        f"Eve Instruct streaming failed: {str(e)}. Falling back to {fallback_llm}."
+                    )
+                    try:
+                        if fallback_llm == LLMType.MISTRAL_VANILLA.value:
+                            async for chunk in self._stream_vanilla_mistral(
+                                prompt, max_new_tokens=max_new_tokens
+                            ):
+                                yield chunk
+                        elif fallback_llm == LLMType.OPENAI.value:
+                            async for chunk in self._stream_openai(
+                                prompt, max_tokens=max_new_tokens
+                            ):
+                                yield chunk
+                        else:
+                            logger.error(f"Unsupported fallback LLM: {fallback_llm}")
+                            raise ValueError(
+                                f"Unsupported fallback LLM: {fallback_llm}"
+                            )
+                    except TimeoutError as fallback_timeout:
+                        logger.error(
+                            f"Fallback LLM streaming timed out: {str(fallback_timeout)}"
+                        )
+                        raise fallback_timeout
+                    except Exception as fallback_error:
+                        logger.error(
+                            f"Fallback LLM streaming also failed: {str(fallback_error)}"
+                        )
+                        raise fallback_error
+
+            elif llm == LLMType.MISTRAL_VANILLA.value:
+                async for chunk in self._stream_vanilla_mistral(
                     prompt, max_new_tokens=max_new_tokens
                 ):
                     yield chunk
@@ -520,4 +615,50 @@ class LLMManager:
 
         except Exception as e:
             logger.error(f"Failed to generate answer stream: {str(e)}")
+            raise
+
+    async def _stream_vanilla_mistral(
+        self, prompt: str, max_new_tokens: int = 150
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream response from vanilla Mistral 3.2 24B as a fallback.
+
+        Args:
+            prompt: The formatted prompt
+            max_new_tokens: Maximum new tokens for the response
+
+        Yields:
+            Chunks of the generated response
+
+        Raises:
+            TimeoutError: If the API call times out
+            Exception: For other errors
+        """
+        try:
+            # Use OpenAI client to call Mistral API
+            mistral_timeout_seconds = self.config.get_mistral_timeout() / 1000
+
+            client = OpenAI(
+                api_key=MISTRAL_API_KEY,  # Use environment variable directly
+                base_url="https://api.mistral.ai/v1",
+                timeout=mistral_timeout_seconds,
+            )
+
+            stream = client.chat.completions.create(
+                model="mistral-small-latest",  # This is Mistral 3.2 24B
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_new_tokens,
+                temperature=0.3,
+                stream=True,
+            )
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+
+        except TimeoutError as e:
+            logger.error(f"Vanilla Mistral streaming API call timed out: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Vanilla Mistral streaming API call failed: {str(e)}")
             raise

@@ -6,6 +6,10 @@ runpod:
     id: "bqwuhwmnb3bdx0"
     timeout: 1000
 
+mistral:
+  model: "mistral-large-latest"
+  timeout: 3000
+
 
 mcp:
   servers:
@@ -13,5 +17,5 @@ mcp:
       url: "https://eve-mcp-demo.literatum.com/mcp"
       transport: "streamable_http"
       headers:
-        Authorization: "eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0ODk5NzE4LCJqdGkiOiIxMzFlZjNlMi1iODU1LTRjYzUtODE1ZC1kZWI3MzVkNGI4N2QiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.vNQxJkB5pGkMTNNQwhG3y0iXhsPHv5Lw1HtM_X4gUBE"
+        Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0OTE0NjE1LCJqdGkiOiIzY2IyN2M4Yi00ODQ1LTQ0MTYtYjg2Ni1jOTRiNWJkN2E2NTMiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.gJuHpsI9csIODP1NhvCkbY2fIJ7zLaWXtDtj9myVPEU"
       enabled: true

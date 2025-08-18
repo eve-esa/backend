@@ -11,10 +11,8 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 import asyncio
-import runpod
 
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 
@@ -25,8 +23,11 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    MatchText,
+    Range,
     VectorParams,
 )
+
 
 from openai import AsyncOpenAI
 
@@ -438,6 +439,98 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
+    def update_documents_by_metadata_filter(
+        self,
+        collection_name: str,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        new_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update document metadata that matches a metadata filter.
+
+        Args:
+            collection_name: Name of the collection
+            metadata_filter: Metadata filter to select documents for update
+            new_metadata: New metadata to update the documents with
+
+        Returns:
+            Dict[str, Any]: Result of the update operation with updated count
+
+        Raises:
+            RuntimeError: If update fails
+        """
+        try:
+            if not new_metadata:
+                logger.warning("No new metadata provided for update")
+                return {"updated": 0}
+
+            # Get the count of documents before update
+            filter_obj = self._qdrant_filter_from_dict(metadata_filter)
+            count_result = self.client.count(
+                collection_name=collection_name,
+                count_filter=filter_obj,
+                exact=True,
+            )
+            count_before = count_result.count
+
+            if count_before == 0:
+                logger.warning(
+                    f"No documents found matching the filter in '{collection_name}'"
+                )
+                return {"updated": 0}
+
+            # Get the points that match the filter
+            points = self.client.scroll(
+                collection_name=collection_name,
+                scroll_filter=filter_obj,
+                limit=count_before,
+                with_payload=True,
+                with_vectors=False,  # We don't need vectors for updates
+            )[0]
+
+            if not points:
+                logger.warning("No points found for update")
+                return {"updated": 0}
+
+            # Update each point's metadata
+            updated_count = 0
+            for point in points:
+                try:
+                    current_payload = point.payload
+
+                    if "metadata" in current_payload:
+                        current_metadata = current_payload["metadata"]
+                        current_metadata.update(new_metadata)
+                        updated_payload = {
+                            **current_payload,
+                            "metadata": current_metadata,
+                        }
+                    else:
+                        updated_payload = {**current_payload, "metadata": new_metadata}
+
+                    self.client.set_payload(
+                        collection_name=collection_name,
+                        payload=updated_payload,
+                        points=[point.id],
+                    )
+                    updated_count += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to update point {point.id}: {str(e)}")
+                    continue
+
+            logger.info(f"Updated {updated_count} documents in '{collection_name}'")
+
+            class UpdateResult:
+                def __init__(self, updated_count):
+                    self.updated = updated_count
+
+            return UpdateResult(updated_count)
+
+        except Exception as e:
+            logger.error(f"Failed to update documents: {e}")
+            raise RuntimeError(f"Failed to update documents: {str(e)}") from e
+
     def _get_unique_source_documents(
         self, scored_points_list: List[Any], min_docs: int = 2
     ) -> List[Any]:
@@ -486,27 +579,6 @@ class VectorStoreManager:
             RuntimeError: If embedding generation fails
         """
         try:
-            # Special handling for NASA model which uses RunPod API
-            if embeddings_model == DEFAULT_EMBEDDING_MODEL:
-                logger.info("Using RunPod API for embedding generation")
-
-                # Call the remote API to generate embeddings
-                query_vector = await get_embedding_from_runpod(
-                    endpoint_id=config.get_indus_embedder_id(),
-                    model=embeddings_model,
-                    user_input=query,
-                )
-                logger.debug(query_vector)
-                # Validate the received vector
-                if not query_vector or not isinstance(query_vector, list):
-                    logger.error(f"Invalid embedding vector received: {query_vector}")
-                    raise RuntimeError(
-                        "Invalid embedding vector received from RunPod API"
-                    )
-
-                return query_vector
-
-            # Standard local embedding generation for other models
             embeddings = get_embeddings_model(embeddings_model)
             if hasattr(embeddings, "embed_query_async"):
                 return await embeddings.embed_query_async(query)
@@ -517,10 +589,45 @@ class VectorStoreManager:
             logger.error(f"Failed to generate query vector: {e}")
             raise RuntimeError(f"Failed to generate embedding: {str(e)}") from e
 
+    def get_filter(
+        self, year: Optional[List[int]] = None, keywords: Optional[List[str]] = None
+    ) -> Optional[Filter]:
+        """
+        Create a Qdrant filter based on optional year range and list of keywords.
+
+        Args:
+            year (Optional[List[int]]): A list containing two integers [start_year, end_year] for filtering by year.
+            keywords (Optional[List[str]]): A list of keyword strings to filter the "title" field.
+
+        Returns:
+            Optional[Filter]: A Qdrant Filter object combining year and keyword conditions, or None if no filter is applied.
+        """
+        conditions = []
+        # Skip year filter if input is invalid
+        if year and len(year) == 2 and all(isinstance(y, (int, float)) for y in year):
+            conditions.append(
+                FieldCondition(
+                    key="year", range=Range(gte=int(year[0]), lte=int(year[1]))
+                )
+            )
+
+        if keywords:
+            keyword_conditions = [
+                FieldCondition(key="title", match=MatchText(text=kw)) for kw in keywords
+            ]
+            if len(keyword_conditions) == 1:
+                conditions.append(keyword_conditions[0])
+            else:
+                return Filter(must=conditions, should=keyword_conditions)
+
+        return Filter(must=conditions) if conditions else Filter()
+
     async def retrieve_documents_from_query(
         self,
         collection_name: str,
         query: str,
+        year: Optional[List[int]] = None,
+        keywords: Optional[List[str]] = None,
         k: int = 5,
         score_threshold: float = 0.7,
         get_unique_docs: bool = True,
@@ -532,6 +639,8 @@ class VectorStoreManager:
         Args:
             collection_name: Name of the collection to search
             query: The query text
+            year: List with two values [start_year, end_year] to filter by publication year.
+            keywords: List of keywords to filter by title.
             k: Number of documents to retrieve
             score_threshold: Minimum similarity score (0-1)
             get_unique_docs: Whether to filter for unique source documents
@@ -549,6 +658,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             query_vector = await self.generate_query_vector(query, model)
+            query_filter = self.get_filter(year=year, keywords=keywords)
 
             if not get_unique_docs:
                 # Simple search with limit k
@@ -657,6 +767,8 @@ class VectorStoreManager:
         self,
         collection_name: str,
         query: str,
+        year: Optional[List[int]] = None,
+        keywords: Optional[List[str]] = None,
         k: int = 5,
         score_threshold: float = 0.7,
         get_unique_docs: bool = True,
@@ -671,6 +783,8 @@ class VectorStoreManager:
             self.retrieve_documents_from_query(
                 collection_name=collection_name,
                 query=query,
+                year=year,
+                keywords=keywords,
                 k=k,
                 score_threshold=score_threshold,
                 get_unique_docs=get_unique_docs,

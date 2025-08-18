@@ -4,7 +4,7 @@ import json
 import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any
+from typing import Dict, Any, List
 from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ from src.constants import (
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
+    FALLBACK_LLM,
 )
 
 # Setup
@@ -31,6 +32,8 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    year: List[int] = []
+    keywords: List[str] = []
     collection_name: str = DEFAULT_COLLECTION
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
@@ -38,6 +41,7 @@ class GenerationRequest(BaseModel):
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     get_unique_docs: bool = DEFAULT_GET_UNIQUE_DOCS  # Fixed typo
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
+    fallback_llm: str = FALLBACK_LLM  # Fallback LLM when primary fails
 
 
 async def get_rag_context(
@@ -46,12 +50,14 @@ async def get_rag_context(
     """Get RAG context from vector store."""
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
-        query=request.query,
         collection_name=request.collection_name,
-        embeddings_model=request.embeddings_model,
+        query=request.query,
+        year=request.year,
+        keywords=request.keywords,
+        k=request.k,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
-        k=request.k,
+        embeddings_model=request.embeddings_model,
     )
 
     if not results:
@@ -104,6 +110,7 @@ async def generate_answer(
             context=context,
             llm=request.llm,
             max_new_tokens=request.max_new_tokens,
+            fallback_llm=request.fallback_llm,
         )
 
     except Exception as e:
@@ -132,6 +139,7 @@ async def generate_answer_stream_generator_helper(
             context=context,
             llm=request.llm,
             max_new_tokens=request.max_new_tokens,
+            fallback_llm=request.fallback_llm,
         ):
             if output_format == "json":
                 full_answer += chunk
