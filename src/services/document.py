@@ -233,7 +233,7 @@ class DocumentService:
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
             results = await vector_store.retrieve_documents_from_query(
-                collection_name=collection_name,
+                collection_names=[collection_name],
                 query=request.query,
                 year=request.year,
                 keywords=request.keywords,

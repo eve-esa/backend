@@ -34,7 +34,7 @@ class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
     year: List[int] = []
     keywords: List[str] = []
-    collection_name: str = DEFAULT_COLLECTION
+    collection_names: List[str] = [DEFAULT_COLLECTION]
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
@@ -50,7 +50,7 @@ async def get_rag_context(
     """Get RAG context from vector store."""
     # Remove duplicate vector_store initialization
     results = await vector_store.retrieve_documents_from_query(
-        collection_name=request.collection_name,
+        collection_names=request.collection_names,
         query=request.query,
         year=request.year,
         keywords=request.keywords,

@@ -347,6 +347,64 @@ class VectorStoreManager:
             ]
         )
 
+    def _search_across_collections(
+        self,
+        collection_names: List[str],
+        query_vector: List[float],
+        score_threshold: float,
+        query_filter: Optional[Filter],
+        limit_per_collection: int,
+    ) -> List[Any]:
+        """
+        Perform a search against multiple collections and aggregate results.
+
+        Args:
+            collection_names: Names of collections to query
+            query_vector: Embedded query vector
+            score_threshold: Minimum similarity score
+            query_filter: Optional Qdrant filter to apply
+            limit_per_collection: Max results to fetch per collection
+
+        Returns:
+            Aggregated list of search results from all collections
+        """
+        aggregated_results: List[Any] = []
+        for collection_name in collection_names:
+            try:
+                results = self.client.search(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    limit=limit_per_collection,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
+                aggregated_results.extend(results)
+            except Exception as e:
+                logger.warning(f"Failed to search collection '{collection_name}': {e}")
+                continue
+
+        logger.info(
+            f"Retrieved {len(aggregated_results)} total documents from {len(collection_names)} collections"
+        )
+        return aggregated_results
+
+    @staticmethod
+    def _sort_by_score_desc(results: List[Any]) -> List[Any]:
+        """
+        Sort a list of scored results in descending order of score.
+
+        Args:
+            results: List of results with a 'score' attribute
+
+        Returns:
+            Sorted list by score (highest first)
+        """
+        try:
+            return sorted(results, key=lambda x: x.score, reverse=True)
+        except Exception:
+            # If objects don't have score attribute, return as-is
+            return results
+
     def _build_condition(self, key: str, value: Any) -> List[FieldCondition]:
         """
         Build Qdrant field conditions from keys and values.
@@ -624,7 +682,7 @@ class VectorStoreManager:
 
     async def retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         year: Optional[List[int]] = None,
         keywords: Optional[List[str]] = None,
@@ -634,10 +692,10 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
     ) -> List[Any]:
         """
-        Retrieve relevant documents for a given query.
+        Retrieve relevant documents for a given query from multiple collections.
 
         Args:
-            collection_name: Name of the collection to search
+            collection_names: List of names of the collections to search
             query: The query text
             year: List with two values [start_year, end_year] to filter by publication year.
             keywords: List of keywords to filter by title.
@@ -661,33 +719,37 @@ class VectorStoreManager:
             query_filter = self.get_filter(year=year, keywords=keywords)
 
             if not get_unique_docs:
-                # Simple search with limit k
-                results = self.client.search(
-                    collection_name=collection_name,
+                # Search across multiple collections with limit k
+                all_results = self._search_across_collections(
+                    collection_names=collection_names,
                     query_vector=query_vector,
-                    limit=k,
                     score_threshold=score_threshold,
+                    query_filter=query_filter,
+                    limit_per_collection=k,
                 )
-                logger.info(f"Retrieved docs: {results}")
+
+                # Sort all results by score and take top k
+                final_results = self._sort_by_score_desc(all_results)[:k]
 
                 logger.info(
-                    f"Retrieved {len(results)} documents from '{collection_name}'"
+                    f"Retrieved {len(final_results)} documents from {len(collection_names)} collections"
                 )
-                return results
+                return final_results
 
             # Get more results to allow filtering for unique sources
-            results = self.client.search(
-                collection_name=collection_name,
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
                 query_vector=query_vector,
-                limit=k * 10,  # Get more results than needed for filtering
                 score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k
+                * 10,  # Get more per-collection results for uniqueness filtering
             )
-            logger.info(f"Retrieved docs: {results}")
 
-            unique_results = self._get_unique_source_documents(results, min_docs=k)
+            unique_results = self._get_unique_source_documents(all_results, min_docs=k)
             logger.info(
-                f"Retrieved {len(unique_results)} unique documents from '{collection_name}' "
-                f"(filtered from {len(results)} total matches)"
+                f"Retrieved {len(unique_results)} unique documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
             )
             return unique_results
 
@@ -765,7 +827,7 @@ class VectorStoreManager:
 
     def sync_retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         year: Optional[List[int]] = None,
         keywords: Optional[List[str]] = None,
@@ -781,7 +843,7 @@ class VectorStoreManager:
         """
         return asyncio.run(
             self.retrieve_documents_from_query(
-                collection_name=collection_name,
+                collection_names=collection_names,
                 query=query,
                 year=year,
                 keywords=keywords,

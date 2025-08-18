@@ -14,7 +14,7 @@ def test_generate_answer_endpoint_structure():
     # Arrange - test with minimal data that won't require external API calls
     request_data = {
         "query": "What is ESA?",
-        "collection_name": "test_collection",
+        "collection_names": ["test_collection"],
         "llm": "openai",
         "embeddings_model": "text-embedding-3-small",
         "score_threshold": 0.7,
@@ -25,7 +25,12 @@ def test_generate_answer_endpoint_structure():
     response = client.post("/generate_answer", json=request_data)
 
     # The endpoint should exist and return some response (even if it's an error)
-    assert response.status_code in [400, 401, 403, 500]  # Expected error codes for missing API keys
+    assert response.status_code in [
+        400,
+        401,
+        403,
+        500,
+    ]  # Expected error codes for missing API keys
     assert "detail" in response.json()  # Should return error details
 
 
@@ -37,11 +42,15 @@ def test_generate_answer_missing_required_fields():
     # Test with missing required fields
     request_data = {
         "query": "What is ESA?",
-        # Missing collection_name and other required fields
+        # Missing collection_names and other required fields
     }
 
     response = client.post("/generate_answer", json=request_data)
 
     # Should return some response (could be 200 with no results or an error)
     assert response.status_code in [200, 400, 500]  # Accept various responses
-    assert "detail" in response.json() or "answer" in response.json() or "documents" in response.json()
+    assert (
+        "detail" in response.json()
+        or "answer" in response.json()
+        or "documents" in response.json()
+    )
