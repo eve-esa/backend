@@ -347,6 +347,64 @@ class VectorStoreManager:
             ]
         )
 
+    def _search_across_collections(
+        self,
+        collection_names: List[str],
+        query_vector: List[float],
+        score_threshold: float,
+        query_filter: Optional[Filter],
+        limit_per_collection: int,
+    ) -> List[Any]:
+        """
+        Perform a search against multiple collections and aggregate results.
+
+        Args:
+            collection_names: Names of collections to query
+            query_vector: Embedded query vector
+            score_threshold: Minimum similarity score
+            query_filter: Optional Qdrant filter to apply
+            limit_per_collection: Max results to fetch per collection
+
+        Returns:
+            Aggregated list of search results from all collections
+        """
+        aggregated_results: List[Any] = []
+        for collection_name in collection_names:
+            try:
+                results = self.client.search(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    limit=limit_per_collection,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
+                aggregated_results.extend(results)
+            except Exception as e:
+                logger.warning(f"Failed to search collection '{collection_name}': {e}")
+                continue
+
+        logger.info(
+            f"Retrieved {len(aggregated_results)} total documents from {len(collection_names)} collections"
+        )
+        return aggregated_results
+
+    @staticmethod
+    def _sort_by_score_desc(results: List[Any]) -> List[Any]:
+        """
+        Sort a list of scored results in descending order of score.
+
+        Args:
+            results: List of results with a 'score' attribute
+
+        Returns:
+            Sorted list by score (highest first)
+        """
+        try:
+            return sorted(results, key=lambda x: x.score, reverse=True)
+        except Exception:
+            # If objects don't have score attribute, return as-is
+            return results
+
     def _build_condition(self, key: str, value: Any) -> List[FieldCondition]:
         """
         Build Qdrant field conditions from keys and values.
@@ -662,26 +720,16 @@ class VectorStoreManager:
 
             if not get_unique_docs:
                 # Search across multiple collections with limit k
-                all_results = []
-                for collection_name in collection_names:
-                    try:
-                        collection_results = self.client.search(
-                            collection_name=collection_name,
-                            query_vector=query_vector,
-                            limit=k,
-                            score_threshold=score_threshold,
-                            query_filter=query_filter,
-                        )
-                        all_results.extend(collection_results)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to search collection '{collection_name}': {e}"
-                        )
-                        continue
+                all_results = self._search_across_collections(
+                    collection_names=collection_names,
+                    query_vector=query_vector,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                    limit_per_collection=k,
+                )
 
                 # Sort all results by score and take top k
-                all_results.sort(key=lambda x: x.score, reverse=True)
-                final_results = all_results[:k]
+                final_results = self._sort_by_score_desc(all_results)[:k]
 
                 logger.info(
                     f"Retrieved {len(final_results)} documents from {len(collection_names)} collections"
@@ -689,25 +737,13 @@ class VectorStoreManager:
                 return final_results
 
             # Get more results to allow filtering for unique sources
-            all_results = []
-            for collection_name in collection_names:
-                try:
-                    collection_results = self.client.search(
-                        collection_name=collection_name,
-                        query_vector=query_vector,
-                        limit=k * 10,  # Get more results than needed for filtering
-                        score_threshold=score_threshold,
-                        query_filter=query_filter,
-                    )
-                    all_results.extend(collection_results)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to search collection '{collection_name}': {e}"
-                    )
-                    continue
-
-            logger.info(
-                f"Retrieved {len(all_results)} total documents from {len(collection_names)} collections"
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
+                query_vector=query_vector,
+                score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k
+                * 10,  # Get more per-collection results for uniqueness filtering
             )
 
             unique_results = self._get_unique_source_documents(all_results, min_docs=k)
