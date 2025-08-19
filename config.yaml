@@ -5,6 +5,9 @@ runpod:
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
     timeout: 1000
+  reranker:
+    id: "4947q1tk0d2lle"
+    timeout: 1000
 
 mistral:
   model: "mistral-large-latest"
@@ -17,5 +20,5 @@ mcp:
       url: "https://eve-mcp-demo.literatum.com/mcp"
       transport: "streamable_http"
       headers:
-        Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU0OTE0NjE1LCJqdGkiOiIzY2IyN2M4Yi00ODQ1LTQ0MTYtYjg2Ni1jOTRiNWJkN2E2NTMiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.gJuHpsI9csIODP1NhvCkbY2fIJ7zLaWXtDtj9myVPEU"
+        Authorization: "eyJhbGciOiJIUzI1NiJ9.eyJzY29wZSI6WyJtY3AiXSwiZXhwIjoxNzU1NjEzMzg5LCJqdGkiOiIzYzg4YzIxZS1iZjk5LTRlNTYtOWIzMS1kZmM2ZmJhMjgyMGIiLCJjbGllbnRfaWQiOiJjQU9jdmw0Q3c5In0.SJc_39PQBBfWUng1WipOQcJSO7v5FWR4p1Mr3oy9kfQ"
       enabled: true

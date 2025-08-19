@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.core.llm_manager import LLMManager
-from src.config import OPENAI_API_KEY
+from src.config import OPENAI_API_KEY, config
 from src.constants import (
     DEFAULT_QUERY,
     DEFAULT_COLLECTION,
@@ -23,7 +23,10 @@ from src.constants import (
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
     FALLBACK_LLM,
+    RERANKER_MODEL,
 )
+
+from src.utils.runpod_utils import get_reranked_documents_from_runpod
 
 # Setup
 router = APIRouter()
@@ -59,6 +62,18 @@ async def get_rag_context(
         get_unique_docs=request.get_unique_docs,
         embeddings_model=request.embeddings_model,
     )
+
+    # reranking documents
+    reranked_documents = await get_reranked_documents_from_runpod(
+        endpoint_id=config.get_reranker_id(),
+        docs=results,
+        query=request.query,
+        model="BAAI/bge-reranker-large",
+        timeout=config.get_reranker_timeout(),
+    )
+
+    # update results with reranked documents
+    results = reranked_documents
 
     if not results:
         print(f"No documents found for query: {request.query}")

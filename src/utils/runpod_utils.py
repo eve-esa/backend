@@ -11,6 +11,8 @@ import runpod
 from typing import List, Optional
 import time
 
+from src.constants import RERANKER_MODEL
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -200,5 +202,81 @@ async def get_batch_embeddings_from_runpod(
             if attempt == max_retries - 1:
                 raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
             time.sleep(2**attempt)  # Exponential backoff
+
+    raise RuntimeError("All retry attempts failed")
+
+
+async def get_reranked_documents_from_runpod(
+    endpoint_id: str,
+    docs: List[str],
+    query: str,
+    model: str = RERANKER_MODEL,
+    timeout: int = 60,
+    max_retries: int = 3,
+) -> List[List[float]]:
+    """Get reranked documents from the RunPod API.
+
+    Args:
+        endpoint_id: The RunPod endpoint ID
+        model: The model to use for reranking
+        texts: List of texts to rerank
+        timeout: Maximum time to wait for the result in seconds
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        List[List[float]]: List of reranked documents
+    """
+    for attempt in range(max_retries):
+        try:
+            payload = {
+                "input": {
+                    "model": model,
+                    "query": query,
+                    "docs": docs,
+                    "return_docs": True,
+                }
+            }
+
+            endpoint = runpod.Endpoint(endpoint_id)
+
+            reponse = endpoint.run(payload)
+            job_id = reponse.job_id
+            logger.info(f"RunPod rerank job submitted: {job_id}")
+
+            result = reponse.output(timeout=timeout)
+
+            if not result or "data" not in result:
+                logger.error(f"Invalid response from RunPod: {result}")
+                raise ValueError(f"Invalid response from RunPod: {result}")
+
+            # Extract and validate the reranked documents
+            reranked_docs = result["data"]["reranked_docs"]
+
+            if not isinstance(reranked_docs, list):
+                logger.error(
+                    f"Invalid reranked documents format: {type(reranked_docs)}"
+                )
+                raise ValueError("Reranked documents is not a valid list")
+
+            logger.info(f"RunPod rerank job completed successfully: {job_id}")
+            return reranked_docs
+
+        except asyncio.TimeoutError:
+            logger.error(
+                f"RunPod reranking request timed out after {timeout} seconds (attempt {attempt + 1}/{max_retries})"
+            )
+            if attempt == max_retries - 1:
+                raise RuntimeError(
+                    f"RunPod reranking request timed out after {timeout} seconds"
+                )
+            time.sleep(2**attempt)
+
+        except Exception as e:
+            logger.error(
+                f"RunPod rerank error (attempt {attempt + 1}/{max_retries}): {str(e)}"
+            )
+            if attempt == max_retries - 1:
+                raise RuntimeError(f"RunPod reranking request failed: {str(e)}") from e
+            time.sleep(2**attempt)
 
     raise RuntimeError("All retry attempts failed")
