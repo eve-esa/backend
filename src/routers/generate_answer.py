@@ -47,41 +47,90 @@ class GenerationRequest(BaseModel):
     fallback_llm: str = FALLBACK_LLM  # Fallback LLM when primary fails
 
 
+def _extract_candidate_texts(results: List[Any]) -> List[str]:
+    """Extract plain text strings from vector-store results payloads."""
+    texts: List[str] = []
+    for item in results:
+        payload = getattr(item, "payload", {}) or {}
+        text = (
+            payload.get("page_content")
+            or payload.get("text")
+            or payload.get("metadata", {}).get("page_content")
+            or ""
+        )
+        texts.append(text)
+    return texts
+
+
+def _build_context(texts: List[str]) -> str:
+    """Join non-empty texts into a single context string."""
+    return "\n".join([t for t in texts if t])
+
+
+async def _maybe_rerank(
+    candidate_texts: List[str], query: str, k: int
+) -> List[dict] | None:
+    """Call reranker if configured and if reranking is useful (more candidates than k)."""
+    endpoint_id = config.get_reranker_id()
+    if not (endpoint_id and len(candidate_texts) > k):
+        return None
+
+    try:
+        return await get_reranked_documents_from_runpod(
+            endpoint_id=endpoint_id,
+            docs=candidate_texts,
+            query=query,
+            model=RERANKER_MODEL or "BAAI/bge-reranker-large",
+            timeout=config.get_reranker_timeout(),
+        )
+    except Exception as e:
+        logger.warning(f"Reranker failed, using vector similarity order: {e}")
+        return None
+
+
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> tuple[str, list]:
     """Get RAG context from vector store."""
-    # Remove duplicate vector_store initialization
+    # Retrieve a larger candidate set so reranker can select the top-k
+    candidate_k = max(request.k * 10, request.k)
     results = await vector_store.retrieve_documents_from_query(
         collection_names=request.collection_names,
         query=request.query,
         year=request.year,
         keywords=request.keywords,
-        k=request.k,
+        k=candidate_k,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
         embeddings_model=request.embeddings_model,
     )
 
-    # reranking documents
-    reranked_documents = await get_reranked_documents_from_runpod(
-        endpoint_id=config.get_reranker_id(),
-        docs=results,
-        query=request.query,
-        model="BAAI/bge-reranker-large",
-        timeout=config.get_reranker_timeout(),
-    )
-
-    # update results with reranked documents
-    results = reranked_documents
-
     if not results:
-        print(f"No documents found for query: {request.query}")
+        logger.info(f"No documents found for query: {request.query}")
         return "", []
 
-    retrieved_documents = [result.payload.get("page_content", "") for result in results]
-    context = "\n".join(retrieved_documents)
-    return context, results
+    # Extract plain text for reranker input (support both 'page_content' and 'text')
+    candidate_texts = _extract_candidate_texts(results)
+
+    # Optionally rerank and build context directly from reranker documents
+    reranked = await _maybe_rerank(candidate_texts, request.query, request.k)
+    if isinstance(reranked, list) and reranked:
+        try:
+            reranked_sorted = sorted(
+                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )
+            top_reranked = reranked_sorted[: request.k]
+            context = _build_context([r.get("document", "") for r in top_reranked])
+            return context, top_reranked
+        except Exception as e:
+            logger.warning(
+                f"Failed to process reranker output, using vector similarity order: {e}"
+            )
+
+    # Fallback: use the first k results (already sorted by vector score upstream)
+    trimmed = results[: request.k]
+    trimmed_texts = _extract_candidate_texts(trimmed)
+    return _build_context(trimmed_texts), trimmed
 
 
 async def setup_rag_and_context(request: GenerationRequest):

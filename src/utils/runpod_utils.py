@@ -8,7 +8,7 @@ to generate embeddings without creating circular imports.
 import asyncio
 import logging
 import runpod
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import time
 
 from src.constants import RERANKER_MODEL
@@ -213,7 +213,7 @@ async def get_reranked_documents_from_runpod(
     model: str = RERANKER_MODEL,
     timeout: int = 60,
     max_retries: int = 3,
-) -> List[List[float]]:
+) -> List[Dict[str, Any]]:
     """Get reranked documents from the RunPod API.
 
     Args:
@@ -224,7 +224,8 @@ async def get_reranked_documents_from_runpod(
         max_retries: Maximum number of retry attempts
 
     Returns:
-        List[List[float]]: List of reranked documents
+        List[Dict[str, Any]]: List of reranked items, each with keys like
+            'document', 'index', and 'relevance_score'
     """
     for attempt in range(max_retries):
         try:
@@ -245,12 +246,32 @@ async def get_reranked_documents_from_runpod(
 
             result = reponse.output(timeout=timeout)
 
-            if not result or "data" not in result:
+            if not result:
                 logger.error(f"Invalid response from RunPod: {result}")
                 raise ValueError(f"Invalid response from RunPod: {result}")
 
-            # Extract and validate the reranked documents
-            reranked_docs = result["data"]["reranked_docs"]
+            # Accept multiple possible shapes: {data: {results: [...]}} or {results: [...]} or {output: {...}}
+            if isinstance(result, dict):
+                if (
+                    "data" in result
+                    and isinstance(result["data"], dict)
+                    and "results" in result["data"]
+                ):
+                    reranked_docs = result["data"]["results"]
+                elif "results" in result:
+                    reranked_docs = result["results"]
+                elif (
+                    "output" in result
+                    and isinstance(result["output"], dict)
+                    and "results" in result["output"]
+                ):
+                    reranked_docs = result["output"]["results"]
+                else:
+                    logger.error(f"Invalid response from RunPod: {result}")
+                    raise ValueError(f"Invalid response from RunPod: {result}")
+            else:
+                logger.error(f"Invalid response from RunPod: {result}")
+                raise ValueError(f"Invalid response from RunPod: {result}")
 
             if not isinstance(reranked_docs, list):
                 logger.error(
