@@ -13,3 +13,5 @@ NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
 
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
+
+RERANKER_MODEL = "BAAI/bge-reranker-large"

@@ -131,3 +131,15 @@ class Config:
 
     def get_mistral_timeout(self):
         return self.get("mistral", "timeout")
+
+    def get_reranker_id(self):
+        return self.get("runpod", "reranker", "id")
+
+    def get_reranker_timeout(self):
+        return self.get("runpod", "reranker", "timeout")
+
+
+# Expose a module-level config instance for convenient imports
+# Allow overriding the config file location via EVE_CONFIG_PATH
+CONFIG_PATH = os.getenv("EVE_CONFIG_PATH", "config.yaml")
+config = Config(CONFIG_PATH)
