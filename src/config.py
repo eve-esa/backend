@@ -16,6 +16,7 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
+WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 
 
 runpod.api_key = RUNPOD_API_KEY
