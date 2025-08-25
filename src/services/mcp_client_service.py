@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+import time
+from urllib.parse import urlparse
 
-from src.config import Config
+from src.config import Config, WILEY_AUTH_TOKEN
 
 # Import MultiServerMCPClient from langchain_mcp_adapters
 try:
@@ -41,6 +43,9 @@ class MultiServerMCPClientService:
     def __init__(self, config: Optional[Config] = None) -> None:
         self._config = config or Config()
         self._client: Optional[MultiServerMCPClient] = None
+        # Wiley OAuth token cache (process memory only)
+        self._wiley_access_token: Optional[str] = None
+        self._wiley_access_token_expiry_epoch: float = 0.0
 
         if not MULTI_SERVER_MCP_AVAILABLE:
             raise ImportError(
@@ -335,8 +340,59 @@ class MultiServerMCPClientService:
     ) -> Dict[str, Any]:
         """Call tool over HTTP or WebSocket transport."""
         url = server_config.get("url")
-        headers = server_config.get("headers", {})
         transport = server_config.get("transport")
+        # Start with configured headers if present
+        headers = dict(server_config.get("headers", {}))
+
+        # Ensure Authorization header is a Bearer token for Wiley servers.
+        # If missing or expired, fetch a new token using client_credentials.
+        if url:
+            parsed = urlparse(url)
+            # Wiley OAuth token endpoint lives at /oauth2/token on the same host
+            token_endpoint = f"{parsed.scheme}://{parsed.netloc}/oauth2/token?grant_type=client_credentials"
+
+            # Reuse token if valid; otherwise refresh it
+            now = time.time()
+            token_value: Optional[str] = None
+
+            if self._wiley_access_token and now < self._wiley_access_token_expiry_epoch:
+                token_value = self._wiley_access_token
+            else:
+                try:
+                    import httpx
+
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        if not WILEY_AUTH_TOKEN:
+                            raise RuntimeError(
+                                "WILEY_AUTH_TOKEN is not set in environment"
+                            )
+                        resp = await client.post(
+                            token_endpoint,
+                            headers={"Authorization": WILEY_AUTH_TOKEN},
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        token_value = data.get("access_token")
+                        expires_in = int(data.get("expires_in", 3600))
+                        self._wiley_access_token_expiry_epoch = now + max(
+                            0, expires_in - 60
+                        )
+                        self._wiley_access_token = token_value
+                except Exception as e:
+                    logger.error(f"Failed to obtain Wiley token: {e}")
+                    raise
+
+            if token_value:
+                headers["Authorization"] = f"Bearer {token_value}"
+
+        # If Authorization provided but without Bearer prefix, add it
+        auth_value = headers.get("Authorization")
+        if (
+            auth_value
+            and not auth_value.startswith("Bearer ")
+            and not auth_value.startswith("Basic ")
+        ):
+            headers["Authorization"] = f"Bearer {auth_value}"
 
         if not url:
             raise ValueError("URL not configured for network transport")
