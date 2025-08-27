@@ -599,7 +599,6 @@ class VectorStoreManager:
                 limit=k * 10,  # Get more results than needed for filtering
                 score_threshold=score_threshold,
             )
-            logger.info(f"Retrieved docs: {results}")
 
             unique_results = self._get_unique_source_documents(results, min_docs=k)
             logger.info(
