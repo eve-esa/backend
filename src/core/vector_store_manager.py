@@ -11,7 +11,6 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 import asyncio
-import runpod
 
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -28,13 +27,12 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
-from openai import AsyncOpenAI
+from src.core.llm_manager import LLMManager
 
 from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
-    OPENAI_API_KEY,
     QDRANT_URL,
     QDRANT_API_KEY,
 )
@@ -80,8 +78,6 @@ class VectorStoreManager:
         self.embeddings, self.embeddings_size = get_embeddings_model(
             model_name=embeddings_model, return_embeddings_size=True
         )
-        # Use AsyncOpenAI for async operations
-        self.openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def create_collection(self, collection_name: str) -> bool:
@@ -611,73 +607,7 @@ class VectorStoreManager:
             logger.error(f"Failed to retrieve documents: {e}")
             raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
 
-    async def use_rag(self, query: str) -> bool:
-        """
-        Determine if RAG should be used for a given query.
-
-        Uses a language model to classify whether the query is appropriate
-        for retrieval-augmented generation.
-
-        Args:
-            query: The user's query
-
-        Returns:
-            bool: True if RAG should be used, False otherwise
-
-        Raises:
-            RuntimeError: If determination fails
-        """
-        try:
-            # Create a prompt to determine if RAG is appropriate
-            prompt = f"""
-            Decide whether to use RAG to answer the given query. Follow these rules:
-            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
-              "hello", "how are you", "what can you do", or "tell me a joke".
-            - USE RAG for queries related to earth science, space science, climate,
-              space agencies, or similar scientific topics.
-            - USE RAG for specific technical or scientific questions, even if the topic is unclear
-              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
-            - If unsure whether RAG is needed, default to USING RAG.
-            - Respond only with 'yes' or 'no'.
-
-            Query: {query}
-            """
-
-            # Call OpenAI to decide
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
-                temperature=0,
-            )
-
-            if response.choices:
-                answer = response.choices[0].message.content.strip().lower()
-
-                if answer == "yes":
-                    logger.info(f"Using RAG for query: '{query}'")
-                    return True
-
-                elif answer == "no":
-                    logger.info(f"Not using RAG for query: '{query}'")
-                    return False
-
-                else:
-                    logger.warning(f"Unexpected RAG determination response: '{answer}'")
-                    # Default to using RAG when response is unclear
-                    return True
-
-            else:
-                logger.warning(
-                    "Empty response from language model for RAG determination"
-                )
-                # Default to using RAG when there's no response
-                return True
-
-        except Exception as e:
-            logger.error(f"Failed to determine if RAG should be used: {e}")
-            # In case of errors, default to using RAG to be safe
-            return True
+    # RAG decision moved to LLMManager.should_use_rag
 
     def sync_retrieve_documents_from_query(
         self,
@@ -704,13 +634,7 @@ class VectorStoreManager:
             )
         )
 
-    def sync_use_rag(self, query: str) -> bool:
-        """
-        Synchronous wrapper for use_rag.
-
-        This method allows calling the async RAG determination from sync contexts.
-        """
-        return asyncio.run(self.use_rag(query))
+    # RAG decision moved to LLMManager.should_use_rag
 
 
 if __name__ == "__main__":
