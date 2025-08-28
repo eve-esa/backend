@@ -2,6 +2,7 @@
 
 import json
 import logging
+import asyncio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
@@ -127,11 +128,37 @@ def _build_mongodb_uri() -> str:
     return f"mongodb://{mongo_host}:{mongo_port}/{mongo_database}"
 
 
-async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) -> Any:
-    """Invoke a minimal LangGraph with Async MongoDB checkpointer and return result dict."""
+# --- Lazy singletons for compiled LangGraph and checkpointers ---
+_compiled_graph = None  # Mongo-backed compiled graph
+_compiled_graph_mode = None  # "mongo" or "memory"
+_mongo_checkpointer_cm = None  # context manager kept open for process lifetime
+_mongo_checkpointer = None  # active AsyncMongoDBSaver obtained from __aenter__
+_inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
+_graph_init_lock = asyncio.Lock()
+
+
+async def _get_or_create_compiled_graph():
+    """Lazily compile LangGraph once and reuse across calls.
+
+    Tries MongoDB checkpointer first and keeps it open for the process lifetime.
+    Falls back to a single in-memory compiled graph if Mongo is unavailable.
+    Returns a tuple: (graph, mode) where mode in {"mongo", "memory"}.
+    """
+    global _compiled_graph, _compiled_graph_mode
+    global _mongo_checkpointer_cm, _mongo_checkpointer
+    global _inmemory_compiled_graph
+
     if not _langgraph_available:
-        return None
-    try:
+        return None, None
+
+    async with _graph_init_lock:
+        # If already compiled, reuse it.
+        if _compiled_graph is not None and _compiled_graph_mode == "mongo":
+            return _compiled_graph, _compiled_graph_mode
+        if _inmemory_compiled_graph is not None and _compiled_graph_mode == "memory":
+            return _inmemory_compiled_graph, _compiled_graph_mode
+
+        # Build the simple one-node graph
         llm = LLMManager().get_langchain_chat_llm()
 
         async def call_model(state: "MessagesState"):
@@ -142,21 +169,44 @@ async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) 
         builder.add_node(call_model)
         builder.add_edge(START, "call_model")
 
-        uri = _build_mongodb_uri()
+        # Try Mongo-backed checkpointer first, keep it open
         try:
-            async with AsyncMongoDBSaver.from_conn_string(
-                uri
-            ) as checkpointer:  # proper async context
-                graph = builder.compile(checkpointer=checkpointer)
-                config = {"configurable": {"thread_id": thread_id}}
-                return await graph.ainvoke({"messages": messages_for_turn}, config)
-        except Exception:
-            # Fallback to in-memory checkpointer to avoid runtime errors
-            from langgraph.checkpoint.memory import InMemorySaver
+            uri = _build_mongodb_uri()
+            cm = AsyncMongoDBSaver.from_conn_string(uri)
+            checkpointer = await cm.__aenter__()
+            graph = builder.compile(checkpointer=checkpointer)
 
-            graph = builder.compile(checkpointer=InMemorySaver())
-            config = {"configurable": {"thread_id": thread_id}}
-            return await graph.ainvoke({"messages": messages_for_turn}, config)
+            _mongo_checkpointer_cm = cm
+            _mongo_checkpointer = checkpointer
+            _compiled_graph = graph
+            _compiled_graph_mode = "mongo"
+            return graph, "mongo"
+        except Exception:
+            # Fall back to a single shared in-memory saver (persists within process)
+            try:
+                from langgraph.checkpoint.memory import InMemorySaver
+
+                if _inmemory_compiled_graph is None:
+                    _inmemory_compiled_graph = builder.compile(
+                        checkpointer=InMemorySaver()
+                    )
+                _compiled_graph_mode = "memory"
+                return _inmemory_compiled_graph, "memory"
+            except Exception:
+                # As a last resort, no graph
+                return None, None
+
+
+async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) -> Any:
+    """Invoke a minimal LangGraph with Async MongoDB checkpointer and return result dict."""
+    if not _langgraph_available:
+        return None
+    try:
+        graph, mode = await _get_or_create_compiled_graph()
+        if graph is None:
+            return None
+        config = {"configurable": {"thread_id": thread_id}}
+        return await graph.ainvoke({"messages": messages_for_turn}, config)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -369,11 +419,23 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
 
         # Reset LangGraph memory for this thread and seed with the summary as a system message
         if _langgraph_available:
-            # Reset thread by deleting and re-seeding with summary in a new context
+            # Prefer the shared Mongo checkpointer when available; otherwise best-effort local context
             try:
-                uri = _build_mongodb_uri()
-                async with AsyncMongoDBSaver.from_conn_string(uri) as checkpointer:
-                    await checkpointer.delete_thread(conversation_id)
+                graph, mode = await _get_or_create_compiled_graph()
+                if mode == "mongo" and _mongo_checkpointer is not None:
+                    try:
+                        await _mongo_checkpointer.delete_thread(conversation_id)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        uri = _build_mongodb_uri()
+                        async with AsyncMongoDBSaver.from_conn_string(
+                            uri
+                        ) as checkpointer:
+                            await checkpointer.delete_thread(conversation_id)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             await _ainvoke_with_langgraph(
