@@ -518,6 +518,7 @@ class VectorStoreManager:
                     endpoint_id=config.get_indus_embedder_id(),
                     model=embeddings_model,
                     user_input=query,
+                    use_retries=False,
                 )
                 logger.debug(query_vector)
                 # Validate the received vector

@@ -289,8 +289,6 @@ async def get_rag_context(
 
 async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
-    vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-
     # Check if we need to use RAG using LLMManager
     try:
         is_rag = await LLMManager().should_use_rag(request.query)
@@ -300,12 +298,8 @@ async def setup_rag_and_context(request: GenerationRequest):
 
     # Get context if using RAG
     if is_rag:
-        try:
-            context, results = await get_rag_context(vector_store, request)
-        except Exception as e:
-            logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
-            context, results = "", []
-            is_rag = False
+        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+        context, results = await get_rag_context(vector_store, request)
     else:
         context, results = "", []
 
