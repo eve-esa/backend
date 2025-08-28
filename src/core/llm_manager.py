@@ -88,6 +88,41 @@ class LLMManager:
         """
         return self._get_runpod_llm()
 
+    async def should_use_rag(self, query: str) -> bool:
+        """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
+
+        Returns True for scientific/technical queries; False for casual/generic ones.
+        Defaults to True on uncertainty/errors.
+        """
+        try:
+            prompt = f"""
+            Decide whether to use RAG to answer the given query. Follow these rules:
+            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
+              "hello", "how are you", "what can you do", or "tell me a joke".
+            - USE RAG for queries related to earth science, space science, climate,
+              space agencies, or similar scientific topics.
+            - USE RAG for specific technical or scientific questions, even if the topic is unclear
+              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
+            - If unsure whether RAG is needed, default to USING RAG.
+            - Respond only with 'yes' or 'no'.
+
+            Query: {query}
+            """
+
+            base_llm = self.get_langchain_chat_llm()
+            llm = base_llm.bind(max_tokens=10, temperature=0)
+            response = await llm.ainvoke(prompt)
+            answer = getattr(response, "content", "").strip().lower()
+            if answer == "yes":
+                return True
+            if answer == "no":
+                return False
+            logger.warning(f"Unexpected should_use_rag response: '{answer}'")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to decide should_use_rag: {e}")
+            return True
+
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
         return self.generate_answer(*args, **kwargs)

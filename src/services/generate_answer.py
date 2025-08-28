@@ -6,13 +6,11 @@ import asyncio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
-from openai import AsyncOpenAI  # Use AsyncOpenAI for async operations
 from pydantic import BaseModel, Field
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.database.models.collection import Collection
 from src.core.llm_manager import LLMManager
-from src.config import OPENAI_API_KEY
 from src.constants import (
     DEFAULT_QUERY,
     DEFAULT_COLLECTION,
@@ -27,8 +25,7 @@ from src.constants import (
 logger = logging.getLogger(__name__)
 
 
-# Setup
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)  # Use AsyncOpenAI
+# No direct OpenAI client usage; we use Runpod-backed ChatOpenAI via LLMManager
 
 
 class GenerationRequest(BaseModel):
@@ -294,9 +291,9 @@ async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
     vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
 
-    # Check if we need to use RAG
+    # Check if we need to use RAG using LLMManager
     try:
-        is_rag = await vector_store.use_rag(request.query)
+        is_rag = await LLMManager().should_use_rag(request.query)
     except Exception as e:
         logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
         is_rag = False
