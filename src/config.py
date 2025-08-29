@@ -101,3 +101,9 @@ class Config:
 
     def get_completion_llm_timeout(self):
         return self.get("runpod", "instruct_llm", "llm")
+
+    def get_mistral_model(self):
+        return self.get("mistral", "model")
+
+    def get_mistral_timeout(self):
+        return self.get("mistral", "timeout")

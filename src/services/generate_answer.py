@@ -21,6 +21,7 @@ from src.constants import (
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
 )
+from src.utils.helpers import get_mongodb_uri
 
 logger = logging.getLogger(__name__)
 
@@ -115,16 +116,6 @@ except Exception:
     AIMessage = None  # type: ignore
 
 
-def _build_mongodb_uri() -> str:
-    """Build MongoDB URI from environment, matching src.database.mongo defaults."""
-    import os
-
-    mongo_host = os.getenv("MONGO_HOST", "localhost")
-    mongo_port = os.getenv("MONGO_PORT", "27017")
-    mongo_database = os.getenv("MONGO_DATABASE", "eve_backend")
-    return f"mongodb://{mongo_host}:{mongo_port}/{mongo_database}"
-
-
 # --- Lazy singletons for compiled LangGraph and checkpointers ---
 _compiled_graph = None  # Mongo-backed compiled graph
 _compiled_graph_mode = None  # "mongo" or "memory"
@@ -168,7 +159,7 @@ async def _get_or_create_compiled_graph():
 
         # Try Mongo-backed checkpointer first, keep it open
         try:
-            uri = _build_mongodb_uri()
+            uri = get_mongodb_uri()
             cm = AsyncMongoDBSaver.from_conn_string(uri)
             checkpointer = await cm.__aenter__()
             graph = builder.compile(checkpointer=checkpointer)
@@ -276,7 +267,7 @@ async def get_rag_context(
     )
 
     if not results:
-        print(f"No documents found for query: {request.query}")
+        logger.warning(f"No documents found for query: {request.query}")
         return "", []
 
     retrieved_documents = [
@@ -344,14 +335,28 @@ async def generate_answer(
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
         if _langgraph_available and conversation_id:
-            # Single invoke to append assistant response to memory (async)
-            result = await _ainvoke_with_langgraph(messages_for_turn, conversation_id)
-            # result should contain {"messages": List[BaseMessage]} or similar
             try:
-                messages_out = result.get("messages")
-                final_answer = _extract_final_assistant_content(messages_out) or ""
-            except Exception:
-                # Fallback to direct generation if unexpected structure
+                # Single invoke to append assistant response to memory (async)
+                result = await _ainvoke_with_langgraph(
+                    messages_for_turn, conversation_id
+                )
+                # result should contain {"messages": List[BaseMessage]} or similar
+                try:
+                    messages_out = result.get("messages")
+                    final_answer = _extract_final_assistant_content(messages_out) or ""
+                except Exception:
+                    # Fallback to direct generation if unexpected structure
+                    final_answer = llm_manager.generate_answer(
+                        query=request.query,
+                        context=context,
+                        llm=request.llm,
+                        max_new_tokens=request.max_new_tokens,
+                    )
+            except Exception as e:
+                # If LangGraph/Runpod path fails, fallback to direct generation (with internal Mistral fallback)
+                logger.warning(
+                    f"LangGraph invocation failed, falling back to direct generation: {e}"
+                )
                 final_answer = llm_manager.generate_answer(
                     query=request.query,
                     context=context,

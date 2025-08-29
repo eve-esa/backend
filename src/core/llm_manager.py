@@ -11,7 +11,7 @@ import os
 import openai
 from langchain_openai import ChatOpenAI
 
-from src.config import Config, RUNPOD_API_KEY
+from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,20 @@ class LLMManager:
             self._runpod_model_name = None
             self._runpod_chat_openai = None
 
+        # Configure Mistral (OpenAI-compatible) fallback client lazily
+        try:
+            # Mistral provides an OpenAI-compatible Chat Completions API
+            self._mistral_base_url = os.getenv(
+                "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"
+            )
+            self._mistral_model_name = self.config.get_mistral_model()
+            self._mistral_chat_openai: ChatOpenAI | None = None
+        except Exception as e:
+            logger.error(f"Failed to initialize Mistral fallback client config: {e}")
+            self._mistral_base_url = None
+            self._mistral_model_name = None
+            self._mistral_chat_openai = None
+
     def _get_runpod_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for Runpod."""
         if self._runpod_chat_openai is None:
@@ -72,21 +86,42 @@ class LLMManager:
                 raise RuntimeError("Runpod base URL is not configured")
             if not RUNPOD_API_KEY:
                 raise RuntimeError("RUNPOD_API_KEY is not set")
-
+            instruct_llm_timeout = self.config.get_instruct_llm_timeout()
             self._runpod_chat_openai = ChatOpenAI(
                 api_key=RUNPOD_API_KEY,
                 base_url=self._runpod_base_url,
                 model=self._runpod_model_name or "",
                 temperature=0.3,
+                timeout=instruct_llm_timeout,
             )
         return self._runpod_chat_openai
 
-    def get_langchain_chat_llm(self) -> ChatOpenAI:
-        """Public accessor for the configured LangChain ChatOpenAI client.
+    def _get_mistral_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Mistral (fallback)."""
+        if self._mistral_chat_openai is None:
+            if not self._mistral_base_url:
+                raise RuntimeError("Mistral base URL is not configured")
+            if not MISTRAL_API_KEY:
+                raise RuntimeError("MISTRAL_API_KEY is not set")
+            mistral_timeout = self.config.get_mistral_timeout()
+            self._mistral_chat_openai = ChatOpenAI(
+                api_key=MISTRAL_API_KEY,
+                base_url=self._mistral_base_url,
+                model=self._mistral_model_name or "mistral-small-latest",
+                temperature=0.3,
+                timeout=mistral_timeout,
+            )
+        return self._mistral_chat_openai
 
-        This is useful for integrating with LangGraph/Agents to support multi-turn flows.
-        """
-        return self._get_runpod_llm()
+    def get_langchain_chat_llm(self) -> ChatOpenAI:
+        """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
+        try:
+            return self._get_runpod_llm()
+        except Exception as e:
+            logger.warning(
+                f"Falling back to Mistral ChatOpenAI due to Runpod error: {e}"
+            )
+            return self._get_mistral_llm()
 
     async def should_use_rag(self, query: str) -> bool:
         """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
@@ -226,8 +261,17 @@ class LLMManager:
             response = llm.invoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
-            logger.error(f"Eve Instruct API call failed: {str(e)}")
-            raise
+            logger.error(
+                f"Eve Instruct API call failed: {str(e)}. Trying Mistral fallback."
+            )
+            try:
+                base_llm = self._get_mistral_llm()
+                llm = base_llm.bind(max_tokens=max_new_tokens)
+                response = llm.invoke(prompt)
+                return getattr(response, "content", str(response))
+            except Exception as e2:
+                logger.error(f"Mistral fallback also failed: {str(e2)}")
+                raise
 
     def _process_stream_chunk(self, chunk) -> str:
         """
@@ -303,8 +347,19 @@ class LLMManager:
                 if content:
                     yield content
         except Exception as e:
-            logger.error(f"Eve Instruct streaming API call failed: {str(e)}")
-            raise
+            logger.error(
+                f"Eve Instruct streaming API call failed: {str(e)}. Trying Mistral fallback."
+            )
+            try:
+                base_llm = self._get_mistral_llm()
+                llm = base_llm.bind(max_tokens=max_new_tokens)
+                async for chunk in llm.astream(prompt):
+                    content = getattr(chunk, "content", None)
+                    if content:
+                        yield content
+            except Exception as e2:
+                logger.error(f"Mistral streaming fallback also failed: {str(e2)}")
+                raise
 
     async def _call_eve_instruct_async(
         self, prompt: str, max_new_tokens: int = 150
@@ -316,8 +371,17 @@ class LLMManager:
             response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
-            logger.error(f"Eve Instruct async API call failed: {str(e)}")
-            raise
+            logger.error(
+                f"Eve Instruct async API call failed: {str(e)}. Trying Mistral fallback."
+            )
+            try:
+                base_llm = self._get_mistral_llm()
+                llm = base_llm.bind(max_tokens=max_new_tokens)
+                response = await llm.ainvoke(prompt)
+                return getattr(response, "content", str(response))
+            except Exception as e2:
+                logger.error(f"Mistral async fallback also failed: {str(e2)}")
+                raise
 
     def _process_eve_response(self, response) -> str:
         """Kept for backward compatibility; now simply returns content if present."""
