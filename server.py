@@ -14,6 +14,7 @@ from src.routers import (
     forgot_password_router,
     collection_router,
     document_router,
+    tool_router,
 )
 
 configure_logging(level=logging.DEBUG)
@@ -41,6 +42,9 @@ def register_routers(app: FastAPI):
 
     # Documents
     app.include_router(document_router, tags=["Documents"])
+
+    # Tools
+    app.include_router(tool_router, tags=["Tools"])
 
 
 def create_app(debug=False, **kwargs):
