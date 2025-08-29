@@ -1,9 +1,9 @@
-import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from motor.motor_asyncio import AsyncIOMotorCollection
 from typing import Optional
 import logging
+from src.utils.helpers import get_mongodb_uri
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +18,7 @@ class AsyncMongoDBManager:
     ) -> AsyncIOMotorDatabase:
         """Connect to MongoDB and return the database instance."""
         if connection_string is None:
-            mongo_host = os.getenv("MONGO_HOST", "localhost")
-            mongo_port = os.getenv("MONGO_PORT", "27017")
-            mongo_username = os.getenv("MONGO_USERNAME", "root")
-            mongo_password = os.getenv("MONGO_PASSWORD", "root")
-            mongo_database = os.getenv("MONGO_DATABASE", "eve_backend")
-
-            connection_string = f"mongodb://{mongo_username}:{mongo_password}@{mongo_host}:{mongo_port}/{mongo_database}?authSource=admin"
+            connection_string = get_mongodb_uri()
 
         try:
             self.client = AsyncIOMotorClient(connection_string)
