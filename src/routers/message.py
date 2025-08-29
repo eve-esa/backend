@@ -1,6 +1,10 @@
 from src.core.vector_store_manager import VectorStoreManager
 from src.schemas.message import MessageUpdate
-from src.services.generate_answer import GenerationRequest, generate_answer
+from src.services.generate_answer import (
+    GenerationRequest,
+    generate_answer,
+    maybe_rollup_and_trim_history,
+)
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
@@ -44,7 +48,9 @@ async def create_message(
                 c.id for c in user_collections
             ]
 
-        answer, results, is_rag = await generate_answer(request)
+        answer, results, is_rag = await generate_answer(
+            request, conversation_id=conversation_id
+        )
 
         documents_data = []
         if results:
@@ -66,6 +72,12 @@ async def create_message(
             documents=documents_data,
             use_rag=is_rag,
         )
+
+        # Every-N-turn rolling summary and memory reset
+        try:
+            await maybe_rollup_and_trim_history(conversation_id)
+        except Exception:
+            pass
 
         return {
             "id": message.id,

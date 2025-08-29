@@ -6,9 +6,10 @@ import logging
 from enum import Enum
 import asyncio
 from typing import AsyncGenerator
+import os
 
 import openai
-import runpod
+from langchain_openai import ChatOpenAI
 
 from src.config import Config, RUNPOD_API_KEY
 
@@ -31,11 +32,61 @@ class LLMManager:
         """Initialize the LLM Manager with configuration."""
         self.config = Config()
         self._setup_api_keys()
+        self._init_langchain_clients()
 
     def _setup_api_keys(self):
         """Set up API keys for different LLM providers."""
-        runpod.api_key = RUNPOD_API_KEY
-        # Consider adding OpenAI API key setup here if needed
+        # OpenAI key is read by the OpenAI SDK from env; nothing to set explicitly here
+        # Runpod key will be passed directly to LangChain's ChatOpenAI client
+        pass
+
+    def _init_langchain_clients(self) -> None:
+        """Initialize LangChain ChatOpenAI client configured for Runpod OpenAI-compatible endpoint."""
+        try:
+            runpod_endpoint_id = self.config.get_instruct_llm_id()
+            if not runpod_endpoint_id:
+                raise ValueError("Runpod endpoint id not configured")
+
+            # Build OpenAI-compatible base URL for Runpod vLLM worker
+            self._runpod_base_url = (
+                f"https://api.runpod.ai/v2/{runpod_endpoint_id}/openai/v1"
+            )
+
+            # Model name can be provided via env RUNPOD_MODEL_NAME, else rely on worker override
+            self._runpod_model_name = os.getenv(
+                "RUNPOD_MODEL_NAME", "eve-esa/eve-lora-merged"
+            )
+
+            # Lazily initialized; create on first use to avoid unnecessary startup cost
+            self._runpod_chat_openai: ChatOpenAI | None = None
+        except Exception as e:
+            logger.error(f"Failed to initialize LangChain Runpod client: {e}")
+            self._runpod_base_url = None
+            self._runpod_model_name = None
+            self._runpod_chat_openai = None
+
+    def _get_runpod_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Runpod."""
+        if self._runpod_chat_openai is None:
+            if not self._runpod_base_url:
+                raise RuntimeError("Runpod base URL is not configured")
+            if not RUNPOD_API_KEY:
+                raise RuntimeError("RUNPOD_API_KEY is not set")
+
+            self._runpod_chat_openai = ChatOpenAI(
+                api_key=RUNPOD_API_KEY,
+                base_url=self._runpod_base_url,
+                model=self._runpod_model_name or "",
+                temperature=0.3,
+            )
+        return self._runpod_chat_openai
+
+    def get_langchain_chat_llm(self) -> ChatOpenAI:
+        """Public accessor for the configured LangChain ChatOpenAI client.
+
+        This is useful for integrating with LangGraph/Agents to support multi-turn flows.
+        """
+        return self._get_runpod_llm()
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
@@ -121,7 +172,7 @@ class LLMManager:
 
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
         """
-        Call the Eve Instruct model via RunPod.
+        Call the Eve Instruct model via Runpod using LangChain ChatOpenAI (OpenAI-compatible API).
 
         Args:
             prompt: The formatted prompt
@@ -135,70 +186,10 @@ class LLMManager:
             Exception: For other errors
         """
         try:
-            endpoint = runpod.Endpoint(self.config.get_instruct_llm_id())
-            logger.debug(f"Sending prompt to Eve Instruct: {prompt}")
-
-            response = endpoint.run_sync(
-                {
-                    "input": {
-                        "prompt": prompt,
-                        "sampling_params": {"max_tokens": max_new_tokens},
-                    }
-                },
-                timeout=self.config.get_instruct_llm_timeout(),
-            )
-
-            # Debug: Log the actual response structure
-            logger.debug(f"Eve Instruct response: {response}")
-
-            # Handle different possible response structures
-            if isinstance(response, dict):
-                # If response is a dictionary, extract the text
-                if "output" in response:
-                    return response["output"]
-                elif "text" in response:
-                    return response["text"]
-                elif "choices" in response and len(response["choices"]) > 0:
-                    choice = response["choices"][0]
-                    if "text" in choice:
-                        return choice["text"]
-                    elif "message" in choice:
-                        return choice["message"]["content"]
-                    elif "tokens" in choice:
-                        # Handle tokens array
-                        tokens = choice["tokens"]
-                        if isinstance(tokens, list):
-                            return " ".join(str(token) for token in tokens)
-                        else:
-                            return str(tokens)
-            elif isinstance(response, list) and len(response) > 0:
-                # If response is a list, try to extract from first element
-                first_item = response[0]
-                if isinstance(first_item, dict):
-                    if "choices" in first_item and len(first_item["choices"]) > 0:
-                        choice = first_item["choices"][0]
-                        if "tokens" in choice:
-                            tokens = choice["tokens"]
-                            if isinstance(tokens, list):
-                                return " ".join(str(token) for token in tokens)
-                            else:
-                                return str(tokens)
-                        elif "text" in choice:
-                            return choice["text"]
-                        elif "message" in choice:
-                            return choice["message"]["content"]
-                return str(first_item)
-            elif isinstance(response, str):
-                # If response is already a string, return it
-                return response
-
-            # Fallback: convert to string
-            logger.warning(f"Unexpected response format: {type(response)}")
-            return str(response)
-
-        except TimeoutError as e:
-            logger.error(f"Eve Instruct job timed out: {str(e)}")
-            raise
+            base_llm = self._get_runpod_llm()
+            llm = base_llm.bind(max_tokens=max_new_tokens)
+            response = llm.invoke(prompt)
+            return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(f"Eve Instruct API call failed: {str(e)}")
             raise
@@ -260,7 +251,7 @@ class LLMManager:
         self, prompt: str, max_new_tokens: int = 150
     ) -> AsyncGenerator[str, None]:
         """
-        Stream response from Eve Instruct model via RunPod.
+        Stream response from Eve Instruct model via Runpod OpenAI-compatible API using LangChain.
 
         Args:
             prompt: The formatted prompt
@@ -270,31 +261,12 @@ class LLMManager:
             Chunks of the generated response
         """
         try:
-            endpoint = runpod.Endpoint(self.config.get_instruct_llm_id())
-            logger.debug(f"Streaming prompt to Eve Instruct: {prompt}")
-
-            job = endpoint.run(
-                {
-                    "input": {
-                        "prompt": prompt,
-                        "sampling_params": {"max_tokens": max_new_tokens},
-                    }
-                }
-            )
-
-            logger.debug(f"Submitted job with ID: {job.job_id}")
-
-            for chunk in job.stream():
-                if chunk:
-                    try:
-                        text_content = self._process_stream_chunk(chunk)
-                        if text_content:
-                            yield text_content
-
-                    except Exception as e:
-                        logger.error(f"Error processing stream chunk: {e}")
-                        continue
-
+            base_llm = self._get_runpod_llm()
+            llm = base_llm.bind(max_tokens=max_new_tokens)
+            async for chunk in llm.astream(prompt):
+                content = getattr(chunk, "content", None)
+                if content:
+                    yield content
         except Exception as e:
             logger.error(f"Eve Instruct streaming API call failed: {str(e)}")
             raise
@@ -302,107 +274,19 @@ class LLMManager:
     async def _call_eve_instruct_async(
         self, prompt: str, max_new_tokens: int = 150
     ) -> str:
-        """
-        Async version of Eve Instruct call in case run_sync returns a coroutine.
-
-        Args:
-            prompt: The formatted prompt
-            max_new_tokens: Maximum new tokens for the response
-
-        Returns:
-            The generated response
-        """
+        """Async version using LangChain ChatOpenAI."""
         try:
-            endpoint = runpod.Endpoint(self.config.get_instruct_llm_id())
-            logger.debug(f"Sending prompt to Eve Instruct (async): {prompt}")
-
-            # If run_sync actually returns a coroutine, await it
-            try:
-                response = await endpoint.run_sync(
-                    {
-                        "input": {
-                            "prompt": prompt,
-                            "sampling_params": {"max_tokens": max_new_tokens},
-                        }
-                    },
-                    timeout=self.config.get_instruct_llm_timeout(),
-                )
-            except (TypeError, AttributeError) as e:
-                if "coroutine" in str(e).lower() or "await" in str(e).lower():
-                    # If we get a coroutine error, try the sync version
-                    logger.info("Detected coroutine response, trying sync approach")
-                    response = endpoint.run_sync(
-                        {
-                            "input": {
-                                "prompt": prompt,
-                                "sampling_params": {"max_tokens": max_new_tokens},
-                            }
-                        },
-                        timeout=self.config.get_instruct_llm_timeout(),
-                    )
-                else:
-                    raise
-
-            # Process response similar to sync version
-            return self._process_eve_response(response)
-
+            base_llm = self._get_runpod_llm()
+            llm = base_llm.bind(max_tokens=max_new_tokens)
+            response = await llm.ainvoke(prompt)
+            return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(f"Eve Instruct async API call failed: {str(e)}")
             raise
 
     def _process_eve_response(self, response) -> str:
-        """
-        Process the Eve Instruct response and extract text.
-
-        Args:
-            response: The response from Eve Instruct
-
-        Returns:
-            Processed text response
-        """
-        # Debug: Log the actual response structure
-        logger.debug(f"Processing Eve response: {response}")
-
-        # Handle different possible response structures
-        if isinstance(response, dict):
-            if "output" in response:
-                return response["output"]
-            elif "text" in response:
-                return response["text"]
-            elif "choices" in response and len(response["choices"]) > 0:
-                choice = response["choices"][0]
-                if "text" in choice:
-                    return choice["text"]
-                elif "message" in choice:
-                    return choice["message"]["content"]
-                elif "tokens" in choice:
-                    tokens = choice["tokens"]
-                    if isinstance(tokens, list):
-                        return " ".join(str(token) for token in tokens)
-                    else:
-                        return str(tokens)
-        elif isinstance(response, list) and len(response) > 0:
-            first_item = response[0]
-            if isinstance(first_item, dict):
-                if "choices" in first_item and len(first_item["choices"]) > 0:
-                    choice = first_item["choices"][0]
-                    if "tokens" in choice:
-                        tokens = choice["tokens"]
-                        if isinstance(tokens, list):
-                            return " ".join(str(token) for token in tokens)
-                        else:
-                            return str(tokens)
-                    elif "text" in choice:
-                        return choice["text"]
-                    elif "message" in choice:
-                        return choice["message"]["content"]
-            return str(first_item)
-        elif isinstance(response, str):
-            return response
-
-        # Fallback
-        logger.warning(f"Unexpected response format: {type(response)}")
-        return str(response)
+        """Kept for backward compatibility; now simply returns content if present."""
+        return getattr(response, "content", str(response))
 
     def generate_answer(
         self,
