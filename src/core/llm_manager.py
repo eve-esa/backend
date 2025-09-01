@@ -12,6 +12,8 @@ import openai
 from langchain_openai import ChatOpenAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
+from pydantic import BaseModel, Field
+from typing import Optional
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,17 @@ class LLMType(Enum):
     OPENAI = "openai"
     EVE_INSTRUCT = "eve-instruct-v0.1"
     LLAMA = "llama-3.1"
+
+
+class ShouldUseRagDecision(BaseModel):
+    """Schema for deciding whether to use RAG."""
+
+    use_rag: bool = Field(
+        description="True if the query should use RAG; False for casual/generic queries."
+    )
+    reason: Optional[str] = Field(
+        default=None, description="Optional brief justification for the decision."
+    )
 
 
 class LLMManager:
@@ -131,7 +144,9 @@ class LLMManager:
         """
         try:
             prompt = f"""
-            Decide whether to use RAG to answer the given query. Follow these rules:
+            You are an AI assistant specialized in deciding whether a user query requires 
+            retrieval-augmented generation (RAG) or can be answered directly without external retrieval. 
+            Follow these rules:
             - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
               "hello", "how are you", "what can you do", or "tell me a joke".
             - USE RAG for queries related to earth science, space science, climate,
@@ -139,21 +154,22 @@ class LLMManager:
             - USE RAG for specific technical or scientific questions, even if the topic is unclear
               (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
             - If unsure whether RAG is needed, default to USING RAG.
-            - Respond only with 'yes' or 'no'.
+
+            Only return a value that conforms to the provided schema.
 
             Query: {query}
             """
 
             base_llm = self.get_langchain_chat_llm()
-            llm = base_llm.bind(max_tokens=10, temperature=0)
-            response = await llm.ainvoke(prompt)
-            answer = getattr(response, "content", "").strip().lower()
-            if answer == "yes":
-                return True
-            if answer == "no":
-                return False
-            logger.warning(f"Unexpected should_use_rag response: '{answer}'")
-            return True
+            structured_llm = base_llm.bind(temperature=0).with_structured_output(
+                ShouldUseRagDecision
+            )
+            result = await structured_llm.ainvoke(prompt)
+            logger.info(f"should_use_rag result: {result}")
+            # with_structured_output returns a Pydantic object matching the schema
+            if isinstance(result, ShouldUseRagDecision):
+                return bool(result.use_rag)
+            return False
         except Exception as e:
             logger.error(f"Failed to decide should_use_rag: {e}")
             return True
