@@ -21,7 +21,15 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from src.utils.embeddings import RunPodEmbeddings
-from src.config import MISTRAL_API_KEY, OPENAI_API_KEY
+from src.config import (
+    MISTRAL_API_KEY,
+    OPENAI_API_KEY,
+    MONGO_HOST,
+    MONGO_PORT,
+    MONGO_USERNAME,
+    MONGO_PASSWORD,
+    MONGO_DATABASE,
+)
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
 # Configure logging
@@ -167,3 +175,8 @@ def get_embeddings_model(
     if return_embeddings_size:
         return embeddings, embeddings_size
     return embeddings
+
+
+def get_mongodb_uri() -> str:
+    """Build MongoDB URI from environment, matching src.database.mongo defaults."""
+    return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}?authSource=admin"

@@ -15,12 +15,60 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _validate_embedding_result(result) -> List[float]:
+    """Validate RunPod response structure and return the embedding vector.
+
+    Raises ValueError if the structure is invalid.
+    """
+    if not result or "data" not in result:
+        logger.error(f"Invalid response from RunPod: {result}")
+        raise ValueError(f"Invalid response from RunPod: {result}")
+
+    embedding = (
+        result["data"][0].get("embedding") if isinstance(result["data"], list) else None
+    )
+    if not isinstance(embedding, list) or not all(
+        isinstance(x, (int, float)) for x in embedding
+    ):
+        logger.error(f"Invalid embedding format: {type(embedding)}")
+        raise ValueError("Embedding is not a valid list of numbers")
+    return embedding
+
+
+def _request_embedding_once(
+    endpoint_id: str, payload: dict, timeout: int
+) -> List[float]:
+    """Perform a single RunPod embedding request and return the embedding vector.
+
+    Raises RuntimeError on failure with the original error message.
+    """
+    try:
+        endpoint = runpod.Endpoint(endpoint_id)
+        run_request = endpoint.run(payload)
+        job_id = getattr(run_request, "job_id", None)
+        if job_id:
+            logger.info(f"RunPod job submitted: {job_id}")
+        result = run_request.output(timeout=timeout)
+        embedding = _validate_embedding_result(result)
+        if job_id:
+            logger.info(f"RunPod job completed successfully: {job_id}")
+        return embedding
+    except asyncio.TimeoutError as e:
+        raise RuntimeError(
+            f"RunPod API request timed out after {timeout} seconds"
+        ) from e
+    except Exception as e:
+        # Preserve original message to surface at the API layer
+        raise RuntimeError(str(e)) from e
+
+
 async def get_embedding_from_runpod(
     endpoint_id: str,
     model: str,
     user_input: str,
     timeout: int = 60,
     max_retries: int = 3,
+    use_retries: bool = True,
 ) -> List[float]:
     """
     Get embeddings as a vector using the RunPod API.
@@ -43,35 +91,13 @@ async def get_embedding_from_runpod(
     # Note: Never log the actual text content for privacy/security reasons
     payload = {"input": {"model": model, "input": user_input}}
 
+    # If retries are disabled, perform a single attempt and propagate any error
+    if not use_retries:
+        return _request_embedding_once(endpoint_id, payload, timeout)
+
     for attempt in range(max_retries):
         try:
-            # Create an endpoint instance
-            endpoint = runpod.Endpoint(endpoint_id)
-
-            # Submit the job
-            run_request = endpoint.run(payload)
-            job_id = run_request.job_id
-            logger.info(f"RunPod job submitted: {job_id}")
-
-            # Poll for the output with a timeout
-            result = run_request.output(timeout=timeout)
-
-            # Validate the result
-            if not result or "data" not in result:
-                logger.error(f"Invalid response from RunPod: {result}")
-                raise ValueError(f"Invalid response from RunPod: {result}")
-
-            # Extract and validate the embedding
-            embedding = result["data"][0]["embedding"]
-
-            if not isinstance(embedding, list) or not all(
-                isinstance(x, (int, float)) for x in embedding
-            ):
-                logger.error(f"Invalid embedding format: {type(embedding)}")
-                raise ValueError("Embedding is not a valid list of numbers")
-
-            logger.info(f"RunPod job completed successfully: {job_id}")
-            return embedding
+            return _request_embedding_once(endpoint_id, payload, timeout)
 
         except asyncio.TimeoutError:
             logger.error(

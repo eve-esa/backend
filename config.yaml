@@ -1,9 +1,11 @@
 runpod:
   instruct_llm:
     id: "gt96iviaoxovi0"
-    timeout: 2000
+    timeout: 100 # seconds in ChatOpenAI
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
     timeout: 1000
 
-
+mistral:
+  model: "mistral-small-latest"
+  timeout: 3 # seconds

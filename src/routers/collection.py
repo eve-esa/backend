@@ -63,6 +63,7 @@ async def create_collection(
     collection = Collection(
         name=request.name,
         user_id=requesting_user.id,
+        description=request.description,
     )
     await collection.save()
 
