@@ -754,8 +754,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             query_vector = await self.generate_query_vector(query, model)
-            # Prefer advanced filters if provided; otherwise, fallback to year/keywords
-            query_filter = self._build_advanced_filter(filters)
+            query_filter = Filter(**filters) if filters else None
 
             if not get_unique_docs:
                 # Search across multiple collections with limit k
