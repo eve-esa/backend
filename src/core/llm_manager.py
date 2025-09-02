@@ -407,7 +407,7 @@ class LLMManager:
         self,
         query: str,
         context: str,
-        llm: str = "llama-3.1",
+        llm: str,
         max_new_tokens: int = 150,
     ) -> str:
         """
