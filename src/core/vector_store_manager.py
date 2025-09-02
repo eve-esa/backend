@@ -13,7 +13,6 @@ from uuid import uuid4
 import asyncio
 
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 
@@ -24,13 +23,6 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
-    MatchText,
-    Range,
-    GeoPoint,
-    GeoRadius,
-    GeoBoundingBox,
-    GeoPolygon,
-    ValuesCount,
     VectorParams,
 )
 
