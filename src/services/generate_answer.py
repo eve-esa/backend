@@ -439,28 +439,6 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 except Exception:
                     pass
 
-        # Reset LangGraph memory for this thread and seed with the summary as an assistant message
-        if _langgraph_available:
-            # Prefer the shared Mongo checkpointer when available; otherwise best-effort local context
-            try:
-                graph, mode = await _get_or_create_compiled_graph()
-                if mode == "mongo" and _mongo_checkpointer is not None:
-                    try:
-                        await _mongo_checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        uri = get_mongodb_uri()
-                        async with AsyncMongoDBSaver.from_conn_string(
-                            uri
-                        ) as checkpointer:
-                            await checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            # We now inject the summary at generation time as a system message instead of seeding here
     except Exception:
         # Non-critical path; ignore errors
         return
