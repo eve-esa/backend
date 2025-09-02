@@ -24,6 +24,13 @@ from qdrant_client.http.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    MatchText,
+    Range,
+    GeoPoint,
+    GeoRadius,
+    GeoBoundingBox,
+    GeoPolygon,
+    ValuesCount,
     VectorParams,
 )
 
@@ -344,13 +351,10 @@ class VectorStoreManager:
         self, filter_dict: Optional[Dict[str, Any]]
     ) -> Optional[Filter]:
         """
-        Convert a Python dictionary to a Qdrant filter object.
+        Convert a simple dictionary (key -> value) to a Qdrant filter object,
+        applying conditions against payload.metadata.* keys by default.
 
-        Args:
-            filter_dict: Dictionary containing filter criteria
-
-        Returns:
-            Optional[Filter]: Qdrant filter object or None if no filter provided
+        This is kept for backwards compatibility where callers pass a flat dict.
         """
         if not filter_dict:
             return None
@@ -362,6 +366,180 @@ class VectorStoreManager:
                 for condition in self._build_condition(key, value)
             ]
         )
+
+    def _build_advanced_filter(self, filters: Dict[str, Any]) -> Optional[Filter]:
+        """
+        Build a Qdrant Filter from an advanced filter dict with keys:
+        - must, should, must_not: lists of condition dicts
+        - min_should: optional integer (currently ignored by Qdrant)
+
+        Each condition dict supports:
+        - key: metadata field path
+        - match: {value: any} or {text: str}
+        - range: {lt, lte, gt, gte}
+        - geo_bounding_box: { top_left: {lat, lon}, bottom_right: {lat, lon} }
+        - geo_radius: { center: {lat, lon}, radius: float }
+        - geo_polygon: { exterior: [{lat, lon}, ...], interiors: [[{lat, lon}, ...], ...]? }
+        - values_count: { gte|lte|lt|gt: int }
+        """
+        if not filters:
+            return None
+
+        def to_field_condition(cond: Dict[str, Any]) -> FieldCondition:
+            raw_key = (cond.get("key") or "").strip()
+            key = raw_key
+
+            # match
+            match_obj = None
+            match_dict = cond.get("match")
+            if isinstance(match_dict, dict):
+                if "text" in match_dict and match_dict.get("text") is not None:
+                    match_obj = MatchText(text=str(match_dict.get("text")))
+                elif "value" in match_dict:
+                    match_obj = MatchValue(value=match_dict.get("value"))
+
+            # range
+            range_dict = cond.get("range") or {}
+            range_obj = None
+            if isinstance(range_dict, dict) and any(
+                range_dict.get(k) is not None for k in ("lt", "lte", "gt", "gte")
+            ):
+                range_obj = Range(
+                    lt=range_dict.get("lt"),
+                    lte=range_dict.get("lte"),
+                    gt=range_dict.get("gt"),
+                    gte=range_dict.get("gte"),
+                )
+
+            # geo filters
+            gb_dict = cond.get("geo_bounding_box")
+            gbb_obj = None
+            if (
+                isinstance(gb_dict, dict)
+                and gb_dict.get("top_left")
+                and gb_dict.get("bottom_right")
+            ):
+                tl = gb_dict["top_left"]
+                br = gb_dict["bottom_right"]
+                gbb_obj = GeoBoundingBox(
+                    top_left=GeoPoint(lat=tl.get("lat"), lon=tl.get("lon")),
+                    bottom_right=GeoPoint(lat=br.get("lat"), lon=br.get("lon")),
+                )
+
+            gr_dict = cond.get("geo_radius")
+            gr_obj = None
+            if (
+                isinstance(gr_dict, dict)
+                and gr_dict.get("center")
+                and gr_dict.get("radius") is not None
+            ):
+                center = gr_dict["center"]
+                gr_obj = GeoRadius(
+                    center=GeoPoint(lat=center.get("lat"), lon=center.get("lon")),
+                    radius=gr_dict.get("radius"),
+                )
+
+            gp_dict = cond.get("geo_polygon")
+            gp_obj = None
+            if isinstance(gp_dict, dict) and gp_dict.get("exterior"):
+                exterior = [
+                    GeoPoint(lat=p.get("lat"), lon=p.get("lon"))
+                    for p in gp_dict.get("exterior", [])
+                ]
+                interiors = [
+                    [GeoPoint(lat=p.get("lat"), lon=p.get("lon")) for p in ring]
+                    for ring in gp_dict.get("interiors", [])
+                ]
+                gp_obj = GeoPolygon(exterior=exterior, interiors=interiors or None)
+
+            vc_dict = cond.get("values_count")
+            vc_obj = None
+            if isinstance(vc_dict, dict) and any(
+                vc_dict.get(k) is not None for k in ("lt", "lte", "gt", "gte")
+            ):
+                vc_obj = ValuesCount(
+                    lt=vc_dict.get("lt"),
+                    lte=vc_dict.get("lte"),
+                    gt=vc_dict.get("gt"),
+                    gte=vc_dict.get("gte"),
+                )
+
+            return FieldCondition(
+                key=key,
+                match=match_obj,
+                range=range_obj,
+                geo_bounding_box=gbb_obj,
+                geo_radius=gr_obj,
+                geo_polygon=gp_obj,
+                values_count=vc_obj,
+            )
+
+        must = [to_field_condition(c) for c in (filters.get("must") or [])]
+        should = [to_field_condition(c) for c in (filters.get("should") or [])]
+        must_not = [to_field_condition(c) for c in (filters.get("must_not") or [])]
+
+        # Qdrant has no explicit min_should field in Filter model; if provided we'll ignore for now.
+        return Filter(
+            must=must or None, should=should or None, must_not=must_not or None
+        )
+
+    def _search_across_collections(
+        self,
+        collection_names: List[str],
+        query_vector: List[float],
+        score_threshold: float,
+        query_filter: Optional[Filter],
+        limit_per_collection: int,
+    ) -> List[Any]:
+        """
+        Perform a search against multiple collections and aggregate results.
+
+        Args:
+            collection_names: Names of collections to query
+            query_vector: Embedded query vector
+            score_threshold: Minimum similarity score
+            query_filter: Optional Qdrant filter to apply
+            limit_per_collection: Max results to fetch per collection
+
+        Returns:
+            Aggregated list of search results from all collections
+        """
+        aggregated_results: List[Any] = []
+        for collection_name in collection_names:
+            try:
+                results = self.client.search(
+                    collection_name=collection_name,
+                    query_vector=query_vector,
+                    limit=limit_per_collection,
+                    score_threshold=score_threshold,
+                    query_filter=query_filter,
+                )
+                aggregated_results.extend(results)
+            except Exception as e:
+                logger.warning(f"Failed to search collection '{collection_name}': {e}")
+                continue
+
+        logger.info(
+            f"Retrieved {len(aggregated_results)} total documents from {len(collection_names)} collections"
+        )
+        return aggregated_results
+
+    @staticmethod
+    def _sort_by_score_desc(results: List[Any]) -> List[Any]:
+        """
+        Sort a list of scored results in descending order of score.
+
+        Args:
+            results: List of results with a 'score' attribute
+
+        Returns:
+            Sorted list by score (highest first)
+        """
+        try:
+            return sorted(results, key=lambda x: x.score, reverse=True)
+        except Exception:
+            # If objects don't have score attribute, return as-is
+            return results
 
     def _build_condition(self, key: str, value: Any) -> List[FieldCondition]:
         """
@@ -392,7 +570,7 @@ class VectorStoreManager:
         else:
             conditions.append(
                 FieldCondition(
-                    key=f"metadata.{key}",
+                    key=f"{key}",
                     match=MatchValue(value=value),
                 )
             )
@@ -543,19 +721,22 @@ class VectorStoreManager:
 
     async def retrieve_documents_from_query(
         self,
-        collection_name: str,
+        collection_names: List[str],
         query: str,
         k: int = 5,
         score_threshold: float = 0.7,
         get_unique_docs: bool = True,
         embeddings_model: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
         """
-        Retrieve relevant documents for a given query.
+        Retrieve relevant documents for a given query from multiple collections.
 
         Args:
-            collection_name: Name of the collection to search
+            collection_names: List of names of the collections to search
             query: The query text
+            year: List with two values [start_year, end_year] to filter by publication year.
+            keywords: List of keywords to filter by title.
             k: Number of documents to retrieve
             score_threshold: Minimum similarity score (0-1)
             get_unique_docs: Whether to filter for unique source documents
@@ -573,34 +754,41 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             query_vector = await self.generate_query_vector(query, model)
+            # Prefer advanced filters if provided; otherwise, fallback to year/keywords
+            query_filter = self._build_advanced_filter(filters)
 
             if not get_unique_docs:
-                # Simple search with limit k
-                results = self.client.search(
-                    collection_name=collection_name,
+                # Search across multiple collections with limit k
+                all_results = self._search_across_collections(
+                    collection_names=collection_names,
                     query_vector=query_vector,
-                    limit=k,
                     score_threshold=score_threshold,
+                    query_filter=query_filter,
+                    limit_per_collection=k,
                 )
-                logger.info(f"Retrieved docs: {results}")
+
+                # Sort all results by score and take top k
+                final_results = self._sort_by_score_desc(all_results)[:k]
 
                 logger.info(
-                    f"Retrieved {len(results)} documents from '{collection_name}'"
+                    f"Retrieved {len(final_results)} documents from {len(collection_names)} collections"
                 )
-                return results
+                return final_results
 
             # Get more results to allow filtering for unique sources
-            results = self.client.search(
-                collection_name=collection_name,
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
                 query_vector=query_vector,
-                limit=k * 10,  # Get more results than needed for filtering
                 score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k
+                * 10,  # Get more per-collection results for uniqueness filtering
             )
 
-            unique_results = self._get_unique_source_documents(results, min_docs=k)
+            unique_results = self._get_unique_source_documents(all_results, min_docs=k)
             logger.info(
-                f"Retrieved {len(unique_results)} unique documents from '{collection_name}' "
-                f"(filtered from {len(results)} total matches)"
+                f"Retrieved {len(unique_results)} unique documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
             )
             return unique_results
 

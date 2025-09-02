@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    filters: Optional[Dict[str, Any]] = None
     collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
@@ -243,11 +244,12 @@ async def get_rag_context(
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
         # todo extend support for multiple collections
-        collection_name=request.collection_ids[0],
+        collection_names=request.collection_ids,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
         k=request.k,
+        filters=request.filters,
     )
 
     if not results:
