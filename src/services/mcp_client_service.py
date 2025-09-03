@@ -2,34 +2,17 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+import time
+from urllib.parse import urlparse
 
-from src.config import Config
+from src.config import Config, WILEY_AUTH_TOKEN
 
-# Import MultiServerMCPClient from langchain_mcp_adapters
-try:
-    from langchain_mcp_adapters.client import MultiServerMCPClient
-
-    MULTI_SERVER_MCP_AVAILABLE = True
-except ImportError:
-    MULTI_SERVER_MCP_AVAILABLE = False
-    MultiServerMCPClient = None
-
-# Import original MCP client libraries for actual tool execution
-try:
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp.client.websocket import websocket_client
-    from mcp.client.session import ClientSession
-    from urllib.parse import quote
-    from contextlib import AsyncExitStack
-
-    ORIGINAL_MCP_AVAILABLE = True
-except ImportError:
-    ORIGINAL_MCP_AVAILABLE = False
-    streamablehttp_client = None
-    websocket_client = None
-    ClientSession = None
-    quote = None
-    AsyncExitStack = None
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.websocket import websocket_client
+from mcp.client.session import ClientSession
+from urllib.parse import quote
+from contextlib import AsyncExitStack
 
 
 logger = logging.getLogger(__name__)
@@ -38,14 +21,14 @@ logger = logging.getLogger(__name__)
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
+    # Shared singleton and token cache across the process
+    _shared_instance: Optional["MultiServerMCPClientService"] = None
+    _wiley_access_token_shared: Optional[str] = None
+    _wiley_access_token_expiry_epoch_shared: float = 0.0
+
     def __init__(self, config: Optional[Config] = None) -> None:
         self._config = config or Config()
         self._client: Optional[MultiServerMCPClient] = None
-
-        if not MULTI_SERVER_MCP_AVAILABLE:
-            raise ImportError(
-                "MultiServerMCPClient from langchain_mcp_adapters is not available"
-            )
 
         # Load server configurations
         self._load_server_configs()
@@ -132,6 +115,15 @@ class MultiServerMCPClientService:
             logger.error(f"Failed to initialize MultiServerMCPClient: {e}")
             self._client = None
 
+    @classmethod
+    def get_shared(
+        cls, config: Optional[Config] = None
+    ) -> "MultiServerMCPClientService":
+        """Return a process-wide shared instance, initializing once on first use."""
+        if cls._shared_instance is None:
+            cls._shared_instance = cls(config=config)
+        return cls._shared_instance
+
     async def list_tools_from_server(self, server_name: str) -> List[Dict[str, Any]]:
         """List available tools from a specific MCP server."""
         if not self._client:
@@ -163,7 +155,7 @@ class MultiServerMCPClientService:
             return formatted_tools
         except Exception as e:
             logger.error(f"Failed to list tools from server '{server_name}': {e}")
-            raise
+            return []
 
     async def list_tools_from_all_servers(self) -> List[Dict[str, Any]]:
         """List available tools from all enabled MCP servers."""
@@ -196,7 +188,7 @@ class MultiServerMCPClientService:
 
         except Exception as e:
             logger.error(f"Failed to list tools from all servers: {e}")
-            raise
+            return []
 
         return all_tools
 
@@ -208,26 +200,25 @@ class MultiServerMCPClientService:
             raise RuntimeError("MultiServerMCPClient not initialized")
 
         try:
-            # Since MultiServerMCPClient doesn't provide actual connection objects,
-            # we'll use the fallback approach directly
-            if not ORIGINAL_MCP_AVAILABLE:
-                raise RuntimeError(
-                    "Original MCP client libraries not available for tool execution"
-                )
-
-            logger.info(f"Using fallback MCP client for server '{server_name}'")
             return await self._call_tool_with_original_client(
                 server_name, name, arguments
             )
 
         except Exception as e:
             logger.error(f"Failed to call tool '{name}' on server '{server_name}': {e}")
-            raise
+            return {
+                "content": [],
+                "is_error": True,
+                "server": server_name,
+                "tool_name": name,
+                "arguments": arguments or {},
+                "error": str(e),
+            }
 
     async def _call_tool_with_original_client(
         self, server_name: str, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Fallback method using original MCP client libraries."""
+        """Call tool over HTTP or WebSocket transport."""
         server_configs = self._config.get_mcp_servers()
         if server_name not in server_configs:
             raise ValueError(f"Server '{server_name}' not found in configuration")
@@ -243,7 +234,14 @@ class MultiServerMCPClientService:
         elif transport in ["streamable_http", "websocket"]:
             return await self._call_tool_over_network(server_config, name, arguments)
         else:
-            raise ValueError(f"Unsupported transport: {transport}")
+            return {
+                "content": [],
+                "is_error": True,
+                "server": server_name,
+                "tool_name": name,
+                "arguments": arguments or {},
+                "error": f"Unsupported transport: {transport}",
+            }
 
     async def _call_tool_over_stdio(
         self,
@@ -335,8 +333,64 @@ class MultiServerMCPClientService:
     ) -> Dict[str, Any]:
         """Call tool over HTTP or WebSocket transport."""
         url = server_config.get("url")
-        headers = server_config.get("headers", {})
         transport = server_config.get("transport")
+        # Start with configured headers if present
+        headers = dict(server_config.get("headers", {}))
+
+        # Ensure Authorization header is a Bearer token for Wiley servers.
+        # If missing or expired, fetch a new token using client_credentials.
+        if url:
+            parsed = urlparse(url)
+            # Wiley OAuth token endpoint lives at /oauth2/token on the same host
+            token_endpoint = f"{parsed.scheme}://{parsed.netloc}/oauth2/token?grant_type=client_credentials"
+
+            # Reuse token if valid; otherwise refresh it
+            now = time.time()
+            token_value: Optional[str] = None
+
+            # Use class-level shared cache to persist across requests/instances
+            cls = type(self)
+            if (
+                cls._wiley_access_token_shared
+                and now < cls._wiley_access_token_expiry_epoch_shared
+            ):
+                token_value = cls._wiley_access_token_shared
+            else:
+                try:
+                    import httpx
+
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        if not WILEY_AUTH_TOKEN:
+                            raise RuntimeError(
+                                "WILEY_AUTH_TOKEN is not set in environment"
+                            )
+                        resp = await client.post(
+                            token_endpoint,
+                            headers={"Authorization": WILEY_AUTH_TOKEN},
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        token_value = data.get("access_token")
+                        expires_in = int(data.get("expires_in", 3600))
+                        cls._wiley_access_token_expiry_epoch_shared = now + max(
+                            0, expires_in - 60
+                        )
+                        cls._wiley_access_token_shared = token_value
+                except Exception as e:
+                    logger.error(f"Failed to obtain Wiley token: {e}")
+                    raise
+
+            if token_value:
+                headers["Authorization"] = f"Bearer {token_value}"
+
+        # If Authorization provided but without Bearer prefix, add it
+        auth_value = headers.get("Authorization")
+        if (
+            auth_value
+            and not auth_value.startswith("Bearer ")
+            and not auth_value.startswith("Basic ")
+        ):
+            headers["Authorization"] = f"Bearer {auth_value}"
 
         if not url:
             raise ValueError("URL not configured for network transport")
@@ -441,7 +495,7 @@ class MultiServerMCPClientService:
                     }
         except Exception as e:
             logger.error(f"Failed to call tool '{name}' on all servers: {e}")
-            raise
+            return {}
 
         return results
 
