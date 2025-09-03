@@ -13,15 +13,18 @@ from src.database.models.collection import Collection
 from src.core.llm_manager import LLMManager
 from src.constants import (
     DEFAULT_QUERY,
-    DEFAULT_COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_LLM,
     DEFAULT_K,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
+    RERANKER_MODEL,
 )
 from src.utils.helpers import get_mongodb_uri
+from src.utils.runpod_utils import get_reranked_documents_from_runpod
+from src.services.mcp_client_service import MultiServerMCPClientService
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    year: Optional[List[int]] = None
     filters: Optional[Dict[str, Any]] = None
     collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
     llm: str = DEFAULT_LLM  # or openai
@@ -236,6 +240,165 @@ def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> 
         return ""
 
 
+def _extract_candidate_texts(results: List[Any]) -> List[str]:
+    """Extract plain text strings from vector-store results payloads."""
+    texts: List[str] = []
+    for item in results:
+        payload = getattr(item, "payload", {}) or {}
+        text = (
+            payload.get("page_content")
+            or payload.get("text")
+            or payload.get("metadata", {}).get("page_content")
+            or ""
+        )
+        texts.append(text)
+    return texts
+
+
+def _build_context(texts: List[str]) -> str:
+    """Join non-empty texts into a single context string."""
+    return "\n".join([t for t in texts if t])
+
+
+async def _maybe_rerank(
+    candidate_texts: List[str], query: str, k: int
+) -> List[dict] | None:
+    """Call reranker if configured and if reranking is useful (more candidates than k)."""
+    endpoint_id = config.get_reranker_id()
+    if not (endpoint_id and len(candidate_texts) > k):
+        return None
+
+    try:
+        return await get_reranked_documents_from_runpod(
+            endpoint_id=endpoint_id,
+            docs=candidate_texts,
+            query=query,
+            model=RERANKER_MODEL or "BAAI/bge-reranker-large",
+            timeout=config.get_reranker_timeout(),
+        )
+    except Exception as e:
+        logger.warning(f"Reranker failed, using vector similarity order: {e}")
+        return None
+
+
+async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
+    """Call MCP semantic search and return (context, results) like get_rag_context."""
+    mcp_client = MultiServerMCPClientService()
+
+    # Build tool arguments
+    args: Dict[str, Any] = {
+        "query": request.query,
+        "topN": request.k,
+        "threshold": request.score_threshold,
+    }
+    if isinstance(request.year, list) and len(request.year) >= 2:
+        args["filters"] = {"start_year": request.year[0], "end_year": request.year[1]}
+
+    # Call tool
+    raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
+
+    # Normalize response payload
+    content_items = raw.get("content", []) if isinstance(raw, dict) else []
+
+    def _ensure_list(obj: Any) -> List[Any]:
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return obj
+        return [obj]
+
+    # Extract result items from various possible shapes
+    extracted: List[Dict[str, Any]] = []
+    for item in content_items:
+        data = item
+        if isinstance(item, dict) and "text" in item:
+            data = item["text"]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                # treat as plain text record
+                data = {"text": data}
+
+        # common wrappers
+        if isinstance(data, dict):
+            for key in ("results", "documents", "items", "data"):
+                if isinstance(data.get(key), list):
+                    extracted.extend(_ensure_list(data[key]))
+                    break
+            else:
+                extracted.extend(_ensure_list(data))
+        elif isinstance(data, list):
+            extracted.extend(data)
+
+    # Fallback if nothing extracted
+    if not extracted:
+        extracted = _ensure_list(raw)
+
+    # Helper to extract displayable text
+    def _extract_text(obj: Dict[str, Any]) -> str:
+        if not isinstance(obj, dict):
+            return str(obj)
+        return (
+            obj.get("document")
+            or obj.get("content")
+            or obj.get("text")
+            or obj.get("snippet")
+            or obj.get("abstract")
+            or obj.get("page_content")
+            or ""
+        )
+
+    # Reduce to {text, metadata}
+    simplified_all: List[Dict[str, Any]] = []
+    for r in extracted:
+        text_val = _extract_text(r)
+        metadata_val: Dict[str, Any] = {}
+        if isinstance(r, dict):
+            metadata_val = r.get("metadata") or r.get("meta") or {}
+        simplified_all.append({"text": text_val, "metadata": metadata_val})
+
+    # Prepare candidate texts for optional reranking
+    candidate_texts = [item["text"] for item in simplified_all]
+
+    reranked = await _maybe_rerank(candidate_texts, request.query, request.k)
+    if isinstance(reranked, list) and reranked:
+        try:
+            reranked_sorted = sorted(
+                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )
+            top_reranked = reranked_sorted[: request.k]
+
+            # Map reranked documents back to original items to preserve metadata
+            from collections import defaultdict
+
+            text_to_indices: Dict[str, List[int]] = defaultdict(list)
+            for idx, item in enumerate(simplified_all):
+                text_to_indices[item["text"]].append(idx)
+
+            mapped_results: List[Dict[str, Any]] = []
+            for r in top_reranked:
+                doc_text = r.get("document", "")
+                indices = text_to_indices.get(doc_text, [])
+                if indices:
+                    mapped_idx = indices.pop(0)
+                    mapped_results.append(simplified_all[mapped_idx])
+                else:
+                    mapped_results.append({"text": doc_text, "metadata": {}})
+
+            context = _build_context([item["text"] for item in mapped_results])
+            return context, mapped_results
+        except Exception as e:
+            logger.warning(
+                f"Failed to process reranker output for MCP, using original order: {e}"
+            )
+
+    # Fallback: use the first k results as-is
+    trimmed = simplified_all[: request.k]
+    context = _build_context([item["text"] for item in trimmed])
+    return context, trimmed
+
+
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> tuple[str, list]:
@@ -256,12 +419,28 @@ async def get_rag_context(
         logger.warning(f"No documents found for query: {request.query}")
         return "", []
 
-    retrieved_documents = [
-        result.payload.get("page_content") or result.payload.get("text") or ""
-        for result in results
-    ]
-    context = "\n".join(retrieved_documents)
-    return context, results
+    # Extract plain text for reranker input (support both 'page_content' and 'text')
+    candidate_texts = _extract_candidate_texts(results)
+
+    # Optionally rerank and build context directly from reranker documents
+    reranked = await _maybe_rerank(candidate_texts, request.query, request.k)
+    if isinstance(reranked, list) and reranked:
+        try:
+            reranked_sorted = sorted(
+                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )
+            top_reranked = reranked_sorted[: request.k]
+            context = _build_context([r.get("document", "") for r in top_reranked])
+            return context, top_reranked
+        except Exception as e:
+            logger.warning(
+                f"Failed to process reranker output, using vector similarity order: {e}"
+            )
+
+    # Fallback: use the first k results (already sorted by vector score upstream)
+    trimmed = results[: request.k]
+    trimmed_texts = _extract_candidate_texts(trimmed)
+    return _build_context(trimmed_texts), trimmed
 
 
 async def setup_rag_and_context(request: GenerationRequest):
@@ -275,8 +454,20 @@ async def setup_rag_and_context(request: GenerationRequest):
 
     # Get context if using RAG
     if is_rag:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-        context, results = await get_rag_context(vector_store, request)
+        try:
+            vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+            context, results = await get_rag_context(vector_store, request)
+            mcp_context, mcp_results = await get_mcp_context(request)
+
+            # Merge RAG and MCP contexts and results
+            if mcp_context:
+                context = f"{context}\n{mcp_context}" if context else mcp_context
+            if isinstance(results, list) and isinstance(mcp_results, list):
+                results = results + mcp_results
+        except Exception as e:
+            logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
+            context, results = "", []
+            is_rag = False
     else:
         context, results = "", []
 

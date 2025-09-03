@@ -16,6 +16,51 @@ from typing import Dict, Any
 router = APIRouter()
 
 
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    """Return value for key from dict-like or attribute-like object."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_int(value: Any) -> Any:
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _to_float(value: Any) -> Any:
+    try:
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _extract_document_data(result: Any) -> Dict[str, Any]:
+    result_id = _field(result, "id")
+    result_version = _to_int(_field(result, "version"))
+    result_score = _to_float(_field(result, "score"))
+    result_payload = _field(result, "payload", {}) or {}
+    result_text = _field(result, "text", "") or ""
+    result_metadata = _field(result, "metadata", {}) or {}
+
+    # Fallbacks from payload
+    if not result_text and isinstance(result_payload, dict):
+        result_text = result_payload.get("text", "") or ""
+    if not result_metadata and isinstance(result_payload, dict):
+        result_metadata = result_payload.get("metadata", {}) or {}
+
+    return {
+        "id": str(result_id) if result_id is not None else None,
+        "version": result_version,
+        "score": result_score,
+        "payload": result_payload,
+        "text": result_text,
+        "metadata": result_metadata,
+    }
+
+
 @router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
 async def create_message(
     request: GenerationRequest,
@@ -54,16 +99,7 @@ async def create_message(
 
         documents_data = []
         if results:
-            for result in results:
-                doc_data = {
-                    "id": (str(result.id) if hasattr(result, "id") else None),
-                    "version": (
-                        int(result.version) if hasattr(result, "version") else None
-                    ),
-                    "score": float(result.score) if hasattr(result, "score") else None,
-                    "payload": result.payload if hasattr(result, "payload") else {},
-                }
-                documents_data.append(doc_data)
+            documents_data = [_extract_document_data(result) for result in results]
 
         message = await Message.create(
             conversation_id=conversation_id,
