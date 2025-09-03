@@ -283,7 +283,7 @@ async def _maybe_rerank(
 
 async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
     """Call MCP semantic search and return (context, results) like get_rag_context."""
-    mcp_client = MultiServerMCPClientService()
+    mcp_client = MultiServerMCPClientService.get_shared()
 
     # Build tool arguments
     args: Dict[str, Any] = {

@@ -40,12 +40,14 @@ logger = logging.getLogger(__name__)
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
+    # Shared singleton and token cache across the process
+    _shared_instance: Optional["MultiServerMCPClientService"] = None
+    _wiley_access_token_shared: Optional[str] = None
+    _wiley_access_token_expiry_epoch_shared: float = 0.0
+
     def __init__(self, config: Optional[Config] = None) -> None:
         self._config = config or Config()
         self._client: Optional[MultiServerMCPClient] = None
-        # Wiley OAuth token cache (process memory only)
-        self._wiley_access_token: Optional[str] = None
-        self._wiley_access_token_expiry_epoch: float = 0.0
 
         if not MULTI_SERVER_MCP_AVAILABLE:
             raise ImportError(
@@ -136,6 +138,15 @@ class MultiServerMCPClientService:
         except Exception as e:
             logger.error(f"Failed to initialize MultiServerMCPClient: {e}")
             self._client = None
+
+    @classmethod
+    def get_shared(
+        cls, config: Optional[Config] = None
+    ) -> "MultiServerMCPClientService":
+        """Return a process-wide shared instance, initializing once on first use."""
+        if cls._shared_instance is None:
+            cls._shared_instance = cls(config=config)
+        return cls._shared_instance
 
     async def list_tools_from_server(self, server_name: str) -> List[Dict[str, Any]]:
         """List available tools from a specific MCP server."""
@@ -355,8 +366,13 @@ class MultiServerMCPClientService:
             now = time.time()
             token_value: Optional[str] = None
 
-            if self._wiley_access_token and now < self._wiley_access_token_expiry_epoch:
-                token_value = self._wiley_access_token
+            # Use class-level shared cache to persist across requests/instances
+            cls = type(self)
+            if (
+                cls._wiley_access_token_shared
+                and now < cls._wiley_access_token_expiry_epoch_shared
+            ):
+                token_value = cls._wiley_access_token_shared
             else:
                 try:
                     import httpx
@@ -374,10 +390,10 @@ class MultiServerMCPClientService:
                         data = resp.json()
                         token_value = data.get("access_token")
                         expires_in = int(data.get("expires_in", 3600))
-                        self._wiley_access_token_expiry_epoch = now + max(
+                        cls._wiley_access_token_expiry_epoch_shared = now + max(
                             0, expires_in - 60
                         )
-                        self._wiley_access_token = token_value
+                        cls._wiley_access_token_shared = token_value
                 except Exception as e:
                     logger.error(f"Failed to obtain Wiley token: {e}")
                     raise
