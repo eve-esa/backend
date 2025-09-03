@@ -13,7 +13,7 @@ async def me(user: User = Depends(get_current_user)):
     return user
 
 
-@router.patch("/", response_model=User)
+@router.patch("", response_model=User)
 async def update_user(
     request: UpdateUserRequest, user: User = Depends(get_current_user)
 ):
