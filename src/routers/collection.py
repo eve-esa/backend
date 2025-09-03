@@ -21,11 +21,11 @@ router = APIRouter()
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
 async def list_public_collections(pagination: Pagination = Depends()):
-    public_collections = vector_store.list_public_collections(
+    public_collections, total_count = await vector_store.list_public_collections(
         page=pagination.page, limit=pagination.limit
     )
 
-    # Pagination must be done manually since qdrant doesn't support collection pagination
+    # Pagination must be done manually since Qdrant doesn't support collection pagination
     return PaginatedResponse(
         data=[
             Collection(
@@ -38,7 +38,7 @@ async def list_public_collections(pagination: Pagination = Depends()):
             for collection in public_collections
         ],
         meta=get_pagination_metadata(
-            len(public_collections), pagination.page, pagination.limit
+            total_count, pagination.page, pagination.limit
         ),
     )
 
