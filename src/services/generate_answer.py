@@ -310,9 +310,10 @@ async def generate_answer(
                 summary_text = None
 
         # Build user message including optional summary and raw RAG context (when available)
-        user_parts: List[str] = [request.query]
+        user_parts: List[str] = []
         if summary_text:
             user_parts.append(f"Conversation summary up to now:\n{summary_text}")
+        user_parts.append(request.query)
         if is_rag and context:
             user_parts.append(f"Context:\n{context}")
         user_content = "\n\n".join(user_parts)
