@@ -11,7 +11,7 @@ from src.database.models.collection import Collection as CollectionModel
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 router = APIRouter()
 
@@ -61,6 +61,47 @@ def _extract_document_data(result: Any) -> Dict[str, Any]:
     }
 
 
+def _extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
+    """Extract [start_year, end_year] from request.filters structure.
+
+    Expected shape:
+      {
+        "must": [
+          {"key": "year", "range": {"gte": <start>, "lte": <end>}},
+          ...
+        ]
+      }
+    Returns None if not found or values are invalid.
+    """
+    try:
+        if not isinstance(filters, dict):
+            return None
+        conditions = filters.get("must") or []
+        if not isinstance(conditions, list):
+            return None
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if cond.get("key") != "year":
+                continue
+            rng = cond.get("range") or {}
+            if not isinstance(rng, dict):
+                continue
+            start = _to_int(rng.get("gte"))
+            end = _to_int(rng.get("lte"))
+            if start is None and end is None:
+                return None
+            if start is not None and end is not None:
+                return [start, end]
+            if start is not None:
+                return [start, start]
+            if end is not None:
+                return [end, end]
+        return None
+    except Exception:
+        return None
+
+
 @router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
 async def create_message(
     request: GenerationRequest,
@@ -92,6 +133,12 @@ async def create_message(
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
+
+        # Extract year range from filters for MCP usage
+        try:
+            request.year = _extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
 
         answer, results, is_rag = await generate_answer(
             request, conversation_id=conversation_id
