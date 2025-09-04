@@ -5,7 +5,17 @@ runpod:
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
     timeout: 1000
+  reranker:
+    id: "4947q1tk0d2lle"
+    timeout: 1000
 
 mistral:
   model: "mistral-small-latest"
   timeout: 3 # seconds
+
+mcp:
+  servers:
+    eve-mcp-demo:
+      url: "https://eve-mcp-demo.literatum.com/mcp"
+      transport: "streamable_http"
+      enabled: true
