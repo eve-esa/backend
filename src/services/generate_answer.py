@@ -37,7 +37,6 @@ class GenerationRequest(BaseModel):
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    get_unique_docs: bool = DEFAULT_GET_UNIQUE_DOCS  # Fixed typo
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
 
