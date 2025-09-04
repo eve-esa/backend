@@ -116,6 +116,21 @@ except Exception:
     AIMessage = None  # type: ignore
 
 
+# Unified message factory to avoid branching at call sites
+def _make_message(role: str, content: str) -> Any:
+    """Create a message compatible with LangChain if available, else dict style."""
+    try:
+        if role == "system" and SystemMessage:
+            return SystemMessage(content=content)
+        if role == "user" and HumanMessage:
+            return HumanMessage(content=content)
+        if role == "assistant" and AIMessage:
+            return AIMessage(content=content)
+    except Exception:
+        pass
+    return {"role": role, "content": content}
+
+
 # --- Lazy singletons for compiled LangGraph and checkpointers ---
 _compiled_graph = None  # Mongo-backed compiled graph
 _compiled_graph_mode = None  # "mongo" or "memory"
@@ -199,51 +214,20 @@ async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _summarize_context_with_runpod(context: str, max_tokens: int = 600) -> str:
-    """Summarize retrieved documents into a compact system message using Runpod ChatOpenAI."""
-    if not context:
-        return ""
-    llm = LLMManager().get_langchain_chat_llm()
-    system = (
-        "Summarize the following retrieved passages into a concise, factual brief. "
-        "Preserve key entities, numbers, and references. Maximize information density."
-    )
-    if SystemMessage and HumanMessage:
-        messages = [
-            SystemMessage(content=system),
-            HumanMessage(content=f"Retrieved context to summarize:\n{context}"),
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Retrieved context to summarize:\n{context}"},
-        ]
-    try:
-        resp = llm.bind(max_tokens=max_tokens).invoke(messages)
-        return getattr(resp, "content", str(resp))
-    except Exception:
-        return ""
-
-
-def _summarize_history_with_runpod(transcript: str, max_tokens: int = 400) -> str:
+def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> str:
     """Summarize entire conversation history."""
     if not transcript:
         return ""
     llm = LLMManager().get_langchain_chat_llm()
     system = (
-        "Create a rolling summary of the dialogue capturing goals, constraints, "
-        "named entities, preferences, and decisions. Keep it compact and actionable."
+        "You are an AI assistant specialized in summarizing chat histories. "
+        "Your role is to read a transcript of a conversation and produce a clear, "
+        "concise, and neutral summary of the main points."
     )
-    if SystemMessage and HumanMessage:
-        messages = [
-            SystemMessage(content=system),
-            HumanMessage(content=f"Conversation transcript:\n{transcript}"),
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
-        ]
+    messages = [
+        _make_message("system", system),
+        _make_message("user", f"Conversation transcript:\n{transcript}"),
+    ]
     try:
         resp = llm.bind(max_tokens=max_tokens).invoke(messages)
         return getattr(resp, "content", str(resp))
@@ -310,27 +294,32 @@ async def generate_answer(
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
-        # If RAG was used and we have context, add a system summary of the context
+        # Optionally fetch rolling summary to embed in user message content
+        summary_text: Optional[str] = None
+        if conversation_id:
+            try:
+                from src.database.models.conversation import (
+                    Conversation as ConversationModel,
+                )
+
+                convo = await ConversationModel.find_by_id(conversation_id)
+                if convo and getattr(convo, "summary", None):
+                    summary_text = convo.summary or None
+            except Exception:
+                # Non-critical: proceed without summary if retrieval fails
+                summary_text = None
+
+        # Build user message including optional summary and raw RAG context (when available)
+        user_parts: List[str] = []
+        if summary_text:
+            user_parts.append(f"Conversation summary up to now:\n{summary_text}")
+        user_parts.append(request.query)
         if is_rag and context:
-            ctx_summary = _summarize_context_with_runpod(context)
-            if ctx_summary:
-                if SystemMessage:
-                    messages_for_turn.append(
-                        SystemMessage(content=f"Context summary:\n{ctx_summary}")
-                    )
-                else:
-                    messages_for_turn.append(
-                        {
-                            "role": "system",
-                            "content": f"Context summary:\n{ctx_summary}",
-                        }
-                    )
+            user_parts.append(f"Context:\n{context}")
+        user_content = "\n\n".join(user_parts)
 
         # Append the user message
-        if HumanMessage:
-            messages_for_turn.append(HumanMessage(content=request.query))
-        else:
-            messages_for_turn.append({"role": "user", "content": request.query})
+        messages_for_turn.append(_make_message("user", user_content))
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
@@ -397,9 +386,13 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if total_turns == 0 or total_turns % summary_every != 0:
             return
 
-        # Build transcript from stored messages (input/output pairs)
+        # Build transcript from the last `summary_every` turns (each Message is one turn)
+        skip = max(0, total_turns - summary_every)
         messages = await MessageModel.find_all(
-            filter_dict={"conversation_id": conversation_id}, sort=[("timestamp", 1)]
+            filter_dict={"conversation_id": conversation_id},
+            sort=[("timestamp", 1)],
+            skip=skip,
+            limit=summary_every,
         )
         transcript_parts: List[str] = []
         for m in messages:
@@ -409,11 +402,42 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 transcript_parts.append(f"Assistant: {m.output}")
         transcript = "\n".join(transcript_parts)
 
-        summary_text = _summarize_history_with_runpod(transcript)
+        # Include existing rolling summary if available
+        try:
+            from src.database.models.conversation import (
+                Conversation as ConversationModel,
+            )
+        except Exception:
+            ConversationModel = None  # type: ignore
+
+        prior_summary: str = ""
+        if ConversationModel is not None:
+            convo = await ConversationModel.find_by_id(conversation_id)
+            if convo and getattr(convo, "summary", None):
+                prior_summary = convo.summary or ""
+
+        summarizer_input = (
+            f"Current summary (may be empty):\n{prior_summary}\n\nRecent turns:\n{transcript}"
+            if prior_summary
+            else f"Recent turns:\n{transcript}"
+        )
+
+        summary_text = _summarize_history_with_runpod(summarizer_input)
         if not summary_text:
             return
 
-        # Reset LangGraph memory for this thread and seed with the summary as a system message
+        # Persist the new rolling summary on the Conversation document
+        if ConversationModel is not None:
+            if convo is None:
+                convo = await ConversationModel.find_by_id(conversation_id)
+            if convo is not None:
+                convo.summary = summary_text
+                try:
+                    await convo.save()
+                except Exception:
+                    pass
+
+        # Reset LangGraph memory for this thread and seed with the summary as an assistant message
         if _langgraph_available:
             # Prefer the shared Mongo checkpointer when available; otherwise best-effort local context
             try:
@@ -425,7 +449,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                         pass
                 else:
                     try:
-                        uri = _build_mongodb_uri()
+                        uri = get_mongodb_uri()
                         async with AsyncMongoDBSaver.from_conn_string(
                             uri
                         ) as checkpointer:
@@ -434,15 +458,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                         pass
             except Exception:
                 pass
-            await _ainvoke_with_langgraph(
-                [
-                    {
-                        "role": "system",
-                        "content": f"Conversation summary up to now:\n{summary_text}",
-                    }
-                ],
-                conversation_id,
-            )
+            # We now inject the summary at generation time as a system message instead of seeding here
     except Exception:
         # Non-critical path; ignore errors
         return
