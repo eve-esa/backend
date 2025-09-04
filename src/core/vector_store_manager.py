@@ -509,43 +509,6 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
-    def _get_unique_source_documents(
-        self, scored_points_list: List[Any], min_docs: int = 2
-    ) -> List[Any]:
-        """
-        Filter search results to keep only one document per source.
-
-        Args:
-            scored_points_list: List of search results with scores
-            min_docs: Minimum number of unique documents to return
-
-        Returns:
-            List[Any]: List of unique documents ordered by relevance score
-        """
-        # Sort results by score (highest first)
-        sorted_results = sorted(scored_points_list, key=lambda x: x.score, reverse=True)
-        unique_source_items = OrderedDict()
-
-        # Keep only one document per source, prioritizing higher scores
-        for item in sorted_results:
-            try:
-                # Derive a stable source identifier even if the expected key is missing.
-                source = (
-                    item.payload.get("title")
-                    or item.payload.get("metadata", {}).get("filename")
-                    or item.payload.get("metadata", {}).get("source_name")
-                    or str(item.id)
-                )
-                if source not in unique_source_items:
-                    unique_source_items[source] = item
-                if len(unique_source_items) >= min_docs:
-                    break
-            except (KeyError, TypeError) as e:
-                logger.warning(f"Skipping item with malformed metadata: {e}")
-                continue
-
-        return list(unique_source_items.values())
-
     async def generate_query_vector(
         self, query: str, embeddings_model: str
     ) -> List[float]:
@@ -601,7 +564,6 @@ class VectorStoreManager:
         query: str,
         k: int = 5,
         score_threshold: float = 0.7,
-        get_unique_docs: bool = True,
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Any]:
@@ -615,7 +577,6 @@ class VectorStoreManager:
             keywords: List of keywords to filter by title.
             k: Number of documents to retrieve
             score_threshold: Minimum similarity score (0-1)
-            get_unique_docs: Whether to filter for unique source documents
             embeddings_model: Optional custom embedding model to use
                               (defaults to the model used at initialization)
 
@@ -632,40 +593,21 @@ class VectorStoreManager:
             query_vector = await self.generate_query_vector(query, model)
             query_filter = Filter(**filters) if filters else None
 
-            if not get_unique_docs:
-                # Search across multiple collections with limit k
-                all_results = self._search_across_collections(
-                    collection_names=collection_names,
-                    query_vector=query_vector,
-                    score_threshold=score_threshold,
-                    query_filter=query_filter,
-                    limit_per_collection=k,
-                )
-
-                # Sort all results by score and take top k
-                final_results = self._sort_by_score_desc(all_results)[:k]
-
-                logger.info(
-                    f"Retrieved {len(final_results)} documents from {len(collection_names)} collections"
-                )
-                return final_results
-
-            # Get more results to allow filtering for unique sources
+            # Get more results to allow filtering for documents that match the query
             all_results = self._search_across_collections(
                 collection_names=collection_names,
                 query_vector=query_vector,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
                 limit_per_collection=k
-                * 10,  # Get more per-collection results for uniqueness filtering
+                * 10,  # Get more per-collection results for filtering
             )
 
-            unique_results = self._get_unique_source_documents(all_results, min_docs=k)
             logger.info(
-                f"Retrieved {len(unique_results)} unique documents from {len(collection_names)} collections "
+                f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
                 f"(filtered from {len(all_results)} total matches)"
             )
-            return unique_results
+            return all_results
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
@@ -679,7 +621,6 @@ class VectorStoreManager:
         query: str,
         k: int = 5,
         score_threshold: float = 0.7,
-        get_unique_docs: bool = True,
         embeddings_model: Optional[str] = None,
     ) -> List[Any]:
         """
@@ -693,7 +634,6 @@ class VectorStoreManager:
                 query=query,
                 k=k,
                 score_threshold=score_threshold,
-                get_unique_docs=get_unique_docs,
                 embeddings_model=embeddings_model,
             )
         )
