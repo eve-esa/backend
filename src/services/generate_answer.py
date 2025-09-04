@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    filters: Optional[Dict[str, Any]] = None
     collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    get_unique_docs: bool = DEFAULT_GET_UNIQUE_DOCS  # Fixed typo
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
 
@@ -243,11 +243,12 @@ async def get_rag_context(
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
         # todo extend support for multiple collections
-        collection_name=request.collection_ids[0],
+        collection_names=request.collection_ids,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
         get_unique_docs=request.get_unique_docs,
         k=request.k,
+        filters=request.filters,
     )
 
     if not results:
@@ -437,28 +438,6 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 except Exception:
                     pass
 
-        # Reset LangGraph memory for this thread and seed with the summary as an assistant message
-        if _langgraph_available:
-            # Prefer the shared Mongo checkpointer when available; otherwise best-effort local context
-            try:
-                graph, mode = await _get_or_create_compiled_graph()
-                if mode == "mongo" and _mongo_checkpointer is not None:
-                    try:
-                        await _mongo_checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        uri = get_mongodb_uri()
-                        async with AsyncMongoDBSaver.from_conn_string(
-                            uri
-                        ) as checkpointer:
-                            await checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            # We now inject the summary at generation time as a system message instead of seeding here
     except Exception:
         # Non-critical path; ignore errors
         return
