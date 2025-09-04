@@ -463,7 +463,6 @@ async def get_rag_context(
         collection_names=request.collection_ids,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
-        get_unique_docs=request.get_unique_docs,
         k=request.k,
         filters=request.filters,
     )

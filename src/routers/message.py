@@ -1,5 +1,5 @@
 from src.core.vector_store_manager import VectorStoreManager
-from src.schemas.message import MessageUpdate
+from src.schemas.message import MessageUpdate, CreateMessageResponse
 from src.services.generate_answer import (
     GenerationRequest,
     generate_answer,
@@ -11,7 +11,7 @@ from src.database.models.collection import Collection as CollectionModel
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 router = APIRouter()
 
@@ -40,8 +40,13 @@ def _to_float(value: Any) -> Any:
 def _extract_document_data(result: Any) -> Dict[str, Any]:
     result_id = _field(result, "id")
     result_version = _to_int(_field(result, "version"))
-    result_score = _to_float(_field(result, "score"))
-    result_payload = _field(result, "payload", {}) or {}
+    result_score = _to_float(_field(result, "score") or _field(result, "distance"))
+    result_payload = (
+        _field(result, "payload", {}) or _field(result, "document", {}) or {}
+    )
+    # if result_payload has key "content" and doesn't have key "text", set "text" with "content"
+    if "content" in result_payload and "text" not in result_payload:
+        result_payload["text"] = result_payload["content"]
     result_text = _field(result, "text", "") or ""
     result_metadata = _field(result, "metadata", {}) or {}
 
@@ -61,7 +66,50 @@ def _extract_document_data(result: Any) -> Dict[str, Any]:
     }
 
 
-@router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
+def _extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
+    """Extract [start_year, end_year] from request.filters structure.
+
+    Expected shape:
+      {
+        "must": [
+          {"key": "year", "range": {"gte": <start>, "lte": <end>}},
+          ...
+        ]
+      }
+    Returns None if not found or values are invalid.
+    """
+    try:
+        if not isinstance(filters, dict):
+            return None
+        conditions = filters.get("must") or []
+        if not isinstance(conditions, list):
+            return None
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if cond.get("key") != "year":
+                continue
+            rng = cond.get("range") or {}
+            if not isinstance(rng, dict):
+                continue
+            start = _to_int(rng.get("gte"))
+            end = _to_int(rng.get("lte"))
+            if start is None and end is None:
+                return None
+            if start is not None and end is not None:
+                return [start, end]
+            if start is not None:
+                return [start, start]
+            if end is not None:
+                return [end, end]
+        return None
+    except Exception:
+        return None
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse
+)
 async def create_message(
     request: GenerationRequest,
     conversation_id: str,
@@ -79,7 +127,10 @@ async def create_message(
             )
 
         # All public collections are used by default
-        public_collections, _ = await VectorStoreManager().list_public_collections()
+        public_collections = []
+        if request.use_public_collections:
+            public_collections, _ = await VectorStoreManager().list_public_collections()
+
         if len(public_collections) > 0:
             request.collection_ids = [c["name"] for c in public_collections]
 
@@ -93,12 +144,15 @@ async def create_message(
                 c.id for c in user_collections
             ]
 
+        # Extract year range from filters for MCP usage
         try:
-            answer, results, is_rag = await generate_answer(
-                request, conversation_id=conversation_id
-            )
-        except TypeError:
-            answer, results, is_rag = await generate_answer(request)
+            request.year = _extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        answer, results, is_rag, loop_result, latencies = await generate_answer(
+            request, conversation_id=conversation_id
+        )
 
         documents_data = []
         if results:
@@ -110,6 +164,9 @@ async def create_message(
             output=answer,
             documents=documents_data,
             use_rag=is_rag,
+            metadata={
+                "latencies": latencies,
+            },
         )
 
         # Every-N-turn rolling summary and memory reset
@@ -125,6 +182,10 @@ async def create_message(
             "documents": documents_data,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
+            "loop_result": loop_result,
+            "metadata": {
+                "latencies": latencies,
+            },
         }
 
     except HTTPException:
@@ -165,6 +226,9 @@ async def update_message(
 
         if request.was_copied is not None:
             message.was_copied = request.was_copied
+
+        if request.feedback_reason is not None:
+            message.feedback_reason = request.feedback_reason
 
         await message.save()
 
