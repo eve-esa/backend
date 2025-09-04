@@ -254,17 +254,71 @@ def _extract_candidate_texts(results: List[Any]) -> List[str]:
     return texts
 
 
-def _build_context(texts: List[str]) -> str:
-    """Join non-empty texts into a single context string."""
-    return "\n".join([t for t in texts if t])
+def _build_context(items: List[Any]) -> str:
+    """Build a context string from items that may be strings or {text, metadata} dicts.
+
+    - If items are strings, join non-empty with newlines (backward compatible).
+    - If items are dicts with keys 'text' and optional 'metadata', format as:
+
+      Document metadata\n
+      Key: value\n
+      ...\n
+      Content:\n
+      {text}\n
+    """
+    if not items:
+        return ""
+
+    # Detect structured items
+    try:
+        if isinstance(items[0], dict):
+            parts: List[str] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    # Mixed types; fall back to string rendering
+                    text_val = str(item)
+                    if text_val:
+                        parts.append(text_val)
+                    continue
+
+                text_val = (
+                    item.get("text")
+                    or item.get("document")
+                    or item.get("content")
+                    or ""
+                )
+                metadata_val = item.get("metadata") or {}
+
+                # Render metadata block if present
+                if isinstance(metadata_val, dict) and metadata_val:
+                    parts.append("Document metadata")
+                    # Stable key order for deterministic output
+                    for key in sorted(metadata_val.keys()):
+                        value = metadata_val.get(key)
+                        parts.append(f"{key}: {value}")
+                else:
+                    # Still include a header for consistency when no metadata
+                    parts.append("Document metadata")
+
+                parts.append("Content:")
+                if text_val:
+                    parts.append(str(text_val))
+                # Blank line between documents
+                parts.append("")
+
+            return "\n".join([p for p in parts if p is not None])
+    except Exception:
+        # On any error, fall back to simple join of strings
+        pass
+
+    # Default: treat as list of strings
+    return "\n".join([str(t) for t in items if str(t)])
 
 
-async def _maybe_rerank(
-    candidate_texts: List[str], query: str, k: int
-) -> List[dict] | None:
-    """Call reranker if configured and if reranking is useful (more candidates than k)."""
+async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | None:
+    """Call reranker if configured."""
     endpoint_id = config.get_reranker_id()
-    if not (endpoint_id and len(candidate_texts) > k):
+    if not (endpoint_id):
         return None
 
     try:
@@ -360,7 +414,7 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
     # Prepare candidate texts for optional reranking
     candidate_texts = [item["text"] for item in simplified_all]
 
-    reranked = await _maybe_rerank(candidate_texts, request.query, request.k)
+    reranked = await _maybe_rerank(candidate_texts, request.query)
     if isinstance(reranked, list) and reranked:
         try:
             reranked_sorted = sorted(
@@ -422,7 +476,7 @@ async def get_rag_context(
     candidate_texts = _extract_candidate_texts(results)
 
     # Optionally rerank and build context directly from reranker documents
-    reranked = await _maybe_rerank(candidate_texts, request.query, request.k)
+    reranked = await _maybe_rerank(candidate_texts, request.query)
     if isinstance(reranked, list) and reranked:
         try:
             reranked_sorted = sorted(
