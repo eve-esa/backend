@@ -345,7 +345,8 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
         "threshold": request.score_threshold,
     }
     if isinstance(request.year, list) and len(request.year) >= 2:
-        args["filters"] = {"start_year": request.year[0], "end_year": request.year[1]}
+        args["start_year"] = request.year[0]
+        args["end_year"] = request.year[1]
 
     # Call tool
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
