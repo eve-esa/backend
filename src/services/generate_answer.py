@@ -548,6 +548,9 @@ async def setup_rag_and_context(request: GenerationRequest):
     if is_rag:
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+            rag_lat: Dict[str, Optional[float]] = {}
+            mcp_lat: Dict[str, Optional[float]] = {}
+
             context, results, rag_lat = await get_rag_context(vector_store, request)
             mcp_context, mcp_results, mcp_lat = await get_mcp_context(request)
 
@@ -561,7 +564,15 @@ async def setup_rag_and_context(request: GenerationRequest):
         except Exception as e:
             logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
             context, results = "", []
-            latencies = {**rag_lat, **mcp_lat}
+            # rag_lat and mcp_lat may not be defined if the error occurred early; merge safely
+            try:
+                latencies.update(rag_lat if isinstance(rag_lat, dict) else {})
+            except Exception:
+                pass
+            try:
+                latencies.update(mcp_lat if isinstance(mcp_lat, dict) else {})
+            except Exception:
+                pass
             is_rag = False
     else:
         context, results = "", []
