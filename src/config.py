@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import runpod
 import logging
 import sys
+from typing import Dict, Any
 
 load_dotenv(override=True)
 
@@ -46,6 +47,8 @@ CORS_ALLOWED_ORIGINS = [
 FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
     os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
 )
+
+WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 
 runpod.api_key = RUNPOD_API_KEY
 
@@ -107,3 +110,52 @@ class Config:
 
     def get_mistral_timeout(self):
         return self.get("mistral", "timeout")
+
+    # MCP
+    def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:
+        """Get dictionary of configured MCP servers for MultiServerMCPClient."""
+        servers = self.get("mcp", "servers", default={})
+        if not servers:
+            # Fallback to legacy single server configuration
+            legacy_url = self.get("mcp", "server_url")
+            legacy_headers = self.get("mcp", "headers", default={})
+            if legacy_url:
+                return {
+                    "legacy-server": {
+                        "url": legacy_url,
+                        "transport": "streamable_http",
+                        "headers": legacy_headers,
+                        "enabled": True,
+                    }
+                }
+        return servers
+
+    def get_mcp_server_url(self):
+        """Legacy method for backward compatibility."""
+        servers = self.get_mcp_servers()
+        if servers:
+            # Get the first server's URL
+            first_server = next(iter(servers.values()))
+            return first_server.get("url")
+        return None
+
+    def get_mcp_headers(self):
+        """Legacy method for backward compatibility."""
+        servers = self.get_mcp_servers()
+        if servers:
+            # Get the first server's headers
+            first_server = next(iter(servers.values()))
+            return first_server.get("headers", {})
+        return {}
+
+    def get_reranker_id(self):
+        return self.get("runpod", "reranker", "id")
+
+    def get_reranker_timeout(self):
+        return self.get("runpod", "reranker", "timeout")
+
+
+# Expose a module-level config instance for convenient imports
+# Allow overriding the config file location via EVE_CONFIG_PATH
+CONFIG_PATH = os.getenv("EVE_CONFIG_PATH", "config.yaml")
+config = Config(CONFIG_PATH)

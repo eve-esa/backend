@@ -13,15 +13,18 @@ from src.database.models.collection import Collection
 from src.core.llm_manager import LLMManager
 from src.constants import (
     DEFAULT_QUERY,
-    DEFAULT_COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_LLM,
     DEFAULT_K,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
+    RERANKER_MODEL,
 )
 from src.utils.helpers import get_mongodb_uri
+from src.utils.runpod_utils import get_reranked_documents_from_runpod
+from src.services.mcp_client_service import MultiServerMCPClientService
+from src.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +34,13 @@ logger = logging.getLogger(__name__)
 
 class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
+    year: Optional[List[int]] = None
+    filters: Optional[Dict[str, Any]] = None
     collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    get_unique_docs: bool = DEFAULT_GET_UNIQUE_DOCS  # Fixed typo
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
 
@@ -114,6 +118,21 @@ except Exception:
     HumanMessage = None  # type: ignore
     SystemMessage = None  # type: ignore
     AIMessage = None  # type: ignore
+
+
+# Unified message factory to avoid branching at call sites
+def _make_message(role: str, content: str) -> Any:
+    """Create a message compatible with LangChain if available, else dict style."""
+    try:
+        if role == "system" and SystemMessage:
+            return SystemMessage(content=content)
+        if role == "user" and HumanMessage:
+            return HumanMessage(content=content)
+        if role == "assistant" and AIMessage:
+            return AIMessage(content=content)
+    except Exception:
+        pass
+    return {"role": role, "content": content}
 
 
 # --- Lazy singletons for compiled LangGraph and checkpointers ---
@@ -199,56 +218,239 @@ async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _summarize_context_with_runpod(context: str, max_tokens: int = 600) -> str:
-    """Summarize retrieved documents into a compact system message using Runpod ChatOpenAI."""
-    if not context:
-        return ""
-    llm = LLMManager().get_langchain_chat_llm()
-    system = (
-        "Summarize the following retrieved passages into a concise, factual brief. "
-        "Preserve key entities, numbers, and references. Maximize information density."
-    )
-    if SystemMessage and HumanMessage:
-        messages = [
-            SystemMessage(content=system),
-            HumanMessage(content=f"Retrieved context to summarize:\n{context}"),
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Retrieved context to summarize:\n{context}"},
-        ]
-    try:
-        resp = llm.bind(max_tokens=max_tokens).invoke(messages)
-        return getattr(resp, "content", str(resp))
-    except Exception:
-        return ""
-
-
-def _summarize_history_with_runpod(transcript: str, max_tokens: int = 400) -> str:
+def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> str:
     """Summarize entire conversation history."""
     if not transcript:
         return ""
     llm = LLMManager().get_langchain_chat_llm()
     system = (
-        "Create a rolling summary of the dialogue capturing goals, constraints, "
-        "named entities, preferences, and decisions. Keep it compact and actionable."
+        "You are an AI assistant specialized in summarizing chat histories. "
+        "Your role is to read a transcript of a conversation and produce a clear, "
+        "concise, and neutral summary of the main points."
     )
-    if SystemMessage and HumanMessage:
-        messages = [
-            SystemMessage(content=system),
-            HumanMessage(content=f"Conversation transcript:\n{transcript}"),
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
-        ]
+    messages = [
+        _make_message("system", system),
+        _make_message("user", f"Conversation transcript:\n{transcript}"),
+    ]
     try:
         resp = llm.bind(max_tokens=max_tokens).invoke(messages)
         return getattr(resp, "content", str(resp))
     except Exception:
         return ""
+
+
+def _extract_candidate_texts(results: List[Any]) -> List[str]:
+    """Extract plain text strings from vector-store results payloads."""
+    texts: List[str] = []
+    for item in results:
+        payload = getattr(item, "payload", {}) or {}
+        text = (
+            payload.get("page_content")
+            or payload.get("text")
+            or payload.get("metadata", {}).get("page_content")
+            or ""
+        )
+        texts.append(text)
+    return texts
+
+
+def _build_context(items: List[Any]) -> str:
+    """Build a context string from items that may be strings or {text, metadata} dicts.
+
+    - If items are strings, join non-empty with newlines (backward compatible).
+    - If items are dicts with keys 'text' and optional 'metadata', format as:
+
+      Document metadata\n
+      Key: value\n
+      ...\n
+      Content:\n
+      {text}\n
+    """
+    if not items:
+        return ""
+
+    # Detect structured items
+    try:
+        if isinstance(items[0], dict):
+            parts: List[str] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    # Mixed types; fall back to string rendering
+                    text_val = str(item)
+                    if text_val:
+                        parts.append(text_val)
+                    continue
+
+                text_val = (
+                    item.get("text")
+                    or item.get("document")
+                    or item.get("content")
+                    or ""
+                )
+                metadata_val = item.get("metadata") or {}
+
+                # Render metadata block if present
+                if isinstance(metadata_val, dict) and metadata_val:
+                    parts.append("Document metadata")
+                    # Stable key order for deterministic output
+                    for key in sorted(metadata_val.keys()):
+                        value = metadata_val.get(key)
+                        parts.append(f"{key}: {value}")
+                else:
+                    # Still include a header for consistency when no metadata
+                    parts.append("Document metadata")
+
+                parts.append("Content:")
+                if text_val:
+                    parts.append(str(text_val))
+                # Blank line between documents
+                parts.append("")
+
+            return "\n".join([p for p in parts if p is not None])
+    except Exception:
+        # On any error, fall back to simple join of strings
+        pass
+
+    # Default: treat as list of strings
+    return "\n".join([str(t) for t in items if str(t)])
+
+
+async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | None:
+    """Call reranker if configured."""
+    endpoint_id = config.get_reranker_id()
+    if not (endpoint_id):
+        return None
+
+    try:
+        return await get_reranked_documents_from_runpod(
+            endpoint_id=endpoint_id,
+            docs=candidate_texts,
+            query=query,
+            model=RERANKER_MODEL or "BAAI/bge-reranker-large",
+            timeout=config.get_reranker_timeout(),
+        )
+    except Exception as e:
+        logger.warning(f"Reranker failed, using vector similarity order: {e}")
+        return None
+
+
+async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
+    """Call MCP semantic search and return (context, results) like get_rag_context."""
+    mcp_client = MultiServerMCPClientService.get_shared()
+
+    # Build tool arguments
+    args: Dict[str, Any] = {
+        "query": request.query,
+        "topN": request.k,
+        "threshold": request.score_threshold,
+    }
+    if isinstance(request.year, list) and len(request.year) >= 2:
+        args["start_year"] = request.year[0]
+        args["end_year"] = request.year[1]
+
+    # Call tool
+    raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
+
+    # Normalize response payload
+    content_items = raw.get("content", []) if isinstance(raw, dict) else []
+
+    def _ensure_list(obj: Any) -> List[Any]:
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return obj
+        return [obj]
+
+    # Extract result items from various possible shapes
+    extracted: List[Dict[str, Any]] = []
+    for item in content_items:
+        data = item
+        if isinstance(item, dict) and "text" in item:
+            data = item["text"]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                # treat as plain text record
+                data = {"text": data}
+
+        # common wrappers
+        if isinstance(data, dict):
+            for key in ("results", "documents", "items", "data"):
+                if isinstance(data.get(key), list):
+                    extracted.extend(_ensure_list(data[key]))
+                    break
+            else:
+                extracted.extend(_ensure_list(data))
+        elif isinstance(data, list):
+            extracted.extend(data)
+
+    # Fallback if nothing extracted
+    if not extracted:
+        extracted = _ensure_list(raw)
+
+    # Helper to extract displayable text
+    def _extract_text(obj: Dict[str, Any]) -> str:
+        if not isinstance(obj, dict):
+            return str(obj)
+        return (
+            obj.get("document")
+            or obj.get("content")
+            or obj.get("text")
+            or obj.get("snippet")
+            or obj.get("abstract")
+            or obj.get("page_content")
+            or ""
+        )
+
+    # Reduce to {text, metadata}
+    simplified_all: List[Dict[str, Any]] = []
+    for r in extracted:
+        text_val = _extract_text(r)
+        metadata_val: Dict[str, Any] = {}
+        if isinstance(r, dict):
+            metadata_val = r.get("metadata") or r.get("meta") or {}
+        simplified_all.append({"text": text_val, "metadata": metadata_val})
+
+    # Prepare candidate texts for optional reranking
+    candidate_texts = [item["text"] for item in simplified_all]
+
+    reranked = await _maybe_rerank(candidate_texts, request.query)
+    if isinstance(reranked, list) and reranked:
+        try:
+            reranked_sorted = sorted(
+                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )
+            top_reranked = reranked_sorted[: request.k]
+
+            # Map reranked documents back to original items to preserve metadata
+            from collections import defaultdict
+
+            text_to_indices: Dict[str, List[int]] = defaultdict(list)
+            for idx, item in enumerate(simplified_all):
+                text_to_indices[item["text"]].append(idx)
+
+            mapped_results: List[Dict[str, Any]] = []
+            for r in top_reranked:
+                doc_text = r.get("document", "")
+                indices = text_to_indices.get(doc_text, [])
+                if indices:
+                    mapped_idx = indices.pop(0)
+                    mapped_results.append(simplified_all[mapped_idx])
+                else:
+                    mapped_results.append({"text": doc_text, "metadata": {}})
+
+            context = _build_context([item["text"] for item in mapped_results])
+            return context, mapped_results
+        except Exception as e:
+            logger.warning(
+                f"Failed to process reranker output for MCP, using original order: {e}"
+            )
+
+    # Fallback: use the first k results as-is
+    trimmed = simplified_all[: request.k]
+    context = _build_context([item["text"] for item in trimmed])
+    return context, trimmed
 
 
 async def get_rag_context(
@@ -259,23 +461,39 @@ async def get_rag_context(
     results = await vector_store.retrieve_documents_from_query(
         query=request.query,
         # todo extend support for multiple collections
-        collection_name=request.collection_ids[0],
+        collection_names=request.collection_ids,
         embeddings_model=request.embeddings_model,
         score_threshold=request.score_threshold,
-        get_unique_docs=request.get_unique_docs,
         k=request.k,
+        filters=request.filters,
     )
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
         return "", []
 
-    retrieved_documents = [
-        result.payload.get("page_content") or result.payload.get("text") or ""
-        for result in results
-    ]
-    context = "\n".join(retrieved_documents)
-    return context, results
+    # Extract plain text for reranker input (support both 'page_content' and 'text')
+    candidate_texts = _extract_candidate_texts(results)
+
+    # Optionally rerank and build context directly from reranker documents
+    reranked = await _maybe_rerank(candidate_texts, request.query)
+    if isinstance(reranked, list) and reranked:
+        try:
+            reranked_sorted = sorted(
+                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
+            )
+            top_reranked = reranked_sorted[: request.k]
+            context = _build_context([r.get("document", "") for r in top_reranked])
+            return context, top_reranked
+        except Exception as e:
+            logger.warning(
+                f"Failed to process reranker output, using vector similarity order: {e}"
+            )
+
+    # Fallback: use the first k results (already sorted by vector score upstream)
+    trimmed = results[: request.k]
+    trimmed_texts = _extract_candidate_texts(trimmed)
+    return _build_context(trimmed_texts), trimmed
 
 
 async def setup_rag_and_context(request: GenerationRequest):
@@ -289,8 +507,20 @@ async def setup_rag_and_context(request: GenerationRequest):
 
     # Get context if using RAG
     if is_rag:
-        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-        context, results = await get_rag_context(vector_store, request)
+        try:
+            vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+            context, results = await get_rag_context(vector_store, request)
+            mcp_context, mcp_results = await get_mcp_context(request)
+
+            # Merge RAG and MCP contexts and results
+            if mcp_context:
+                context = f"{context}\n{mcp_context}" if context else mcp_context
+            if isinstance(results, list) and isinstance(mcp_results, list):
+                results = results + mcp_results
+        except Exception as e:
+            logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
+            context, results = "", []
+            is_rag = False
     else:
         context, results = "", []
 
@@ -310,27 +540,32 @@ async def generate_answer(
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
-        # If RAG was used and we have context, add a system summary of the context
+        # Optionally fetch rolling summary to embed in user message content
+        summary_text: Optional[str] = None
+        if conversation_id:
+            try:
+                from src.database.models.conversation import (
+                    Conversation as ConversationModel,
+                )
+
+                convo = await ConversationModel.find_by_id(conversation_id)
+                if convo and getattr(convo, "summary", None):
+                    summary_text = convo.summary or None
+            except Exception:
+                # Non-critical: proceed without summary if retrieval fails
+                summary_text = None
+
+        # Build user message including optional summary and raw RAG context (when available)
+        user_parts: List[str] = []
+        if summary_text:
+            user_parts.append(f"Conversation summary up to now:\n{summary_text}")
+        user_parts.append(request.query)
         if is_rag and context:
-            ctx_summary = _summarize_context_with_runpod(context)
-            if ctx_summary:
-                if SystemMessage:
-                    messages_for_turn.append(
-                        SystemMessage(content=f"Context summary:\n{ctx_summary}")
-                    )
-                else:
-                    messages_for_turn.append(
-                        {
-                            "role": "system",
-                            "content": f"Context summary:\n{ctx_summary}",
-                        }
-                    )
+            user_parts.append(f"Context:\n{context}")
+        user_content = "\n\n".join(user_parts)
 
         # Append the user message
-        if HumanMessage:
-            messages_for_turn.append(HumanMessage(content=request.query))
-        else:
-            messages_for_turn.append({"role": "user", "content": request.query})
+        messages_for_turn.append(_make_message("user", user_content))
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
@@ -397,9 +632,13 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if total_turns == 0 or total_turns % summary_every != 0:
             return
 
-        # Build transcript from stored messages (input/output pairs)
+        # Build transcript from the last `summary_every` turns (each Message is one turn)
+        skip = max(0, total_turns - summary_every)
         messages = await MessageModel.find_all(
-            filter_dict={"conversation_id": conversation_id}, sort=[("timestamp", 1)]
+            filter_dict={"conversation_id": conversation_id},
+            sort=[("timestamp", 1)],
+            skip=skip,
+            limit=summary_every,
         )
         transcript_parts: List[str] = []
         for m in messages:
@@ -409,40 +648,41 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 transcript_parts.append(f"Assistant: {m.output}")
         transcript = "\n".join(transcript_parts)
 
-        summary_text = _summarize_history_with_runpod(transcript)
+        # Include existing rolling summary if available
+        try:
+            from src.database.models.conversation import (
+                Conversation as ConversationModel,
+            )
+        except Exception:
+            ConversationModel = None  # type: ignore
+
+        prior_summary: str = ""
+        if ConversationModel is not None:
+            convo = await ConversationModel.find_by_id(conversation_id)
+            if convo and getattr(convo, "summary", None):
+                prior_summary = convo.summary or ""
+
+        summarizer_input = (
+            f"Current summary (may be empty):\n{prior_summary}\n\nRecent turns:\n{transcript}"
+            if prior_summary
+            else f"Recent turns:\n{transcript}"
+        )
+
+        summary_text = _summarize_history_with_runpod(summarizer_input)
         if not summary_text:
             return
 
-        # Reset LangGraph memory for this thread and seed with the summary as a system message
-        if _langgraph_available:
-            # Prefer the shared Mongo checkpointer when available; otherwise best-effort local context
-            try:
-                graph, mode = await _get_or_create_compiled_graph()
-                if mode == "mongo" and _mongo_checkpointer is not None:
-                    try:
-                        await _mongo_checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        uri = _build_mongodb_uri()
-                        async with AsyncMongoDBSaver.from_conn_string(
-                            uri
-                        ) as checkpointer:
-                            await checkpointer.delete_thread(conversation_id)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            await _ainvoke_with_langgraph(
-                [
-                    {
-                        "role": "system",
-                        "content": f"Conversation summary up to now:\n{summary_text}",
-                    }
-                ],
-                conversation_id,
-            )
+        # Persist the new rolling summary on the Conversation document
+        if ConversationModel is not None:
+            if convo is None:
+                convo = await ConversationModel.find_by_id(conversation_id)
+            if convo is not None:
+                convo.summary = summary_text
+                try:
+                    await convo.save()
+                except Exception:
+                    pass
+
     except Exception:
         # Non-critical path; ignore errors
         return

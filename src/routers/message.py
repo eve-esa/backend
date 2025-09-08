@@ -11,9 +11,95 @@ from src.database.models.collection import Collection as CollectionModel
 from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 router = APIRouter()
+
+
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    """Return value for key from dict-like or attribute-like object."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_int(value: Any) -> Any:
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _to_float(value: Any) -> Any:
+    try:
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _extract_document_data(result: Any) -> Dict[str, Any]:
+    result_id = _field(result, "id")
+    result_version = _to_int(_field(result, "version"))
+    result_score = _to_float(_field(result, "score"))
+    result_payload = _field(result, "payload", {}) or {}
+    result_text = _field(result, "text", "") or ""
+    result_metadata = _field(result, "metadata", {}) or {}
+
+    # Fallbacks from payload
+    if not result_text and isinstance(result_payload, dict):
+        result_text = result_payload.get("text", "") or ""
+    if not result_metadata and isinstance(result_payload, dict):
+        result_metadata = result_payload.get("metadata", {}) or {}
+
+    return {
+        "id": str(result_id) if result_id is not None else None,
+        "version": result_version,
+        "score": result_score,
+        "payload": result_payload,
+        "text": result_text,
+        "metadata": result_metadata,
+    }
+
+
+def _extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
+    """Extract [start_year, end_year] from request.filters structure.
+
+    Expected shape:
+      {
+        "must": [
+          {"key": "year", "range": {"gte": <start>, "lte": <end>}},
+          ...
+        ]
+      }
+    Returns None if not found or values are invalid.
+    """
+    try:
+        if not isinstance(filters, dict):
+            return None
+        conditions = filters.get("must") or []
+        if not isinstance(conditions, list):
+            return None
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if cond.get("key") != "year":
+                continue
+            rng = cond.get("range") or {}
+            if not isinstance(rng, dict):
+                continue
+            start = _to_int(rng.get("gte"))
+            end = _to_int(rng.get("lte"))
+            if start is None and end is None:
+                return None
+            if start is not None and end is not None:
+                return [start, end]
+            if start is not None:
+                return [start, start]
+            if end is not None:
+                return [end, end]
+        return None
+    except Exception:
+        return None
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
@@ -48,25 +134,19 @@ async def create_message(
                 c.id for c in user_collections
             ]
 
+        # Extract year range from filters for MCP usage
         try:
-            answer, results, is_rag = await generate_answer(
-                request, conversation_id=conversation_id
-            )
-        except TypeError:
-            answer, results, is_rag = await generate_answer(request)
+            request.year = _extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        answer, results, is_rag = await generate_answer(
+            request, conversation_id=conversation_id
+        )
 
         documents_data = []
         if results:
-            for result in results:
-                doc_data = {
-                    "id": (str(result.id) if hasattr(result, "id") else None),
-                    "version": (
-                        int(result.version) if hasattr(result, "version") else None
-                    ),
-                    "score": float(result.score) if hasattr(result, "score") else None,
-                    "payload": result.payload if hasattr(result, "payload") else {},
-                }
-                documents_data.append(doc_data)
+            documents_data = [_extract_document_data(result) for result in results]
 
         message = await Message.create(
             conversation_id=conversation_id,

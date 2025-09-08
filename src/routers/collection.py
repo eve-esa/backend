@@ -1,9 +1,10 @@
 import logging
 import anyio
+import asyncio
 
 from src.constants import DEFAULT_EMBEDDING_MODEL
 from src.schemas.common import Pagination
-from src.schemas.collection import CollectionRequest, CollectionUpdate
+from src.schemas.collection import CollectionRequest, CollectionUpdate, CollectionOut
 from src.database.models.document import Document
 from fastapi import APIRouter, HTTPException, Depends
 
@@ -17,6 +18,36 @@ logger = logging.getLogger(__name__)
 vector_store = VectorStoreManager()
 
 router = APIRouter()
+
+
+async def _count_points_for_collection(collection_name: str) -> int:
+    """Count Qdrant points for a collection name in a worker thread."""
+
+    def _count() -> int:
+        try:
+            result = vector_store.client.count(
+                collection_name=collection_name,
+                count_filter=None,
+                exact=True,
+            )
+            return int(getattr(result, "count", 0) or 0)
+        except Exception as e:
+            logger.warning(
+                f"Failed to count Qdrant points for collection {collection_name}: {e}"
+            )
+            return 0
+
+    return await anyio.to_thread.run_sync(_count)
+
+
+async def _get_counts_for_id(collection_id: str):
+    """Return (documents_count, points_count) for a single collection id."""
+    documents_count_coro = Document.count_documents({"collection_id": collection_id})
+    points_count_coro = _count_points_for_collection(collection_id)
+    documents_count, points_count = await asyncio.gather(
+        documents_count_coro, points_count_coro
+    )
+    return documents_count, points_count
 
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
@@ -53,6 +84,21 @@ async def list_collections(
         filter_dict={"user_id": request_user.id},
         sort=[("timestamp", -1)],
     )
+
+
+@router.get("/collections/{collection_id}")
+async def get_collection(collection_id: str):
+    collection = await Collection.find_by_id(collection_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+    documents_count, points_count = await _get_counts_for_id(collection_id)
+
+    return {
+        **collection.dict(),
+        "documents_count": documents_count,
+        "points_count": points_count,
+    }
 
 
 @router.post("/collections", response_model=Collection)
