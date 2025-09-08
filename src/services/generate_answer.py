@@ -3,6 +3,7 @@
 import json
 import logging
 import asyncio
+import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
@@ -334,7 +335,9 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
         return None
 
 
-async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
+async def get_mcp_context(
+    request: GenerationRequest,
+) -> tuple[str, list, Dict[str, Optional[float]]]:
     """Call MCP semantic search and return (context, results) like get_rag_context."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
@@ -348,8 +351,10 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
         args["start_year"] = request.year[0]
         args["end_year"] = request.year[1]
 
-    # Call tool
+    # Call tool with latency measurement
+    mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
+    mcp_retrieval_latency = time.perf_counter() - mcp_start
 
     # Normalize response payload
     content_items = raw.get("content", []) if isinstance(raw, dict) else []
@@ -415,8 +420,11 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
     # Prepare candidate texts for optional reranking
     candidate_texts = [item["text"] for item in simplified_all]
 
+    mcp_rerank_latency: Optional[float] = None
+    rerank_start = time.perf_counter()
     reranked = await _maybe_rerank(candidate_texts, request.query)
     if isinstance(reranked, list) and reranked:
+        mcp_rerank_latency = time.perf_counter() - rerank_start
         try:
             reranked_sorted = sorted(
                 reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
@@ -441,7 +449,14 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
                     mapped_results.append({"text": doc_text, "metadata": {}})
 
             context = _build_context([item["text"] for item in mapped_results])
-            return context, mapped_results
+            return (
+                context,
+                mapped_results,
+                {
+                    "mcp_retrieval": mcp_retrieval_latency,
+                    "mcp_docs_reranking": mcp_rerank_latency,
+                },
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to process reranker output for MCP, using original order: {e}"
@@ -450,41 +465,57 @@ async def get_mcp_context(request: GenerationRequest) -> tuple[str, list]:
     # Fallback: use the first k results as-is
     trimmed = simplified_all[: request.k]
     context = _build_context([item["text"] for item in trimmed])
-    return context, trimmed
+    return (
+        context,
+        trimmed,
+        {
+            "mcp_retrieval": mcp_retrieval_latency,
+            "mcp_docs_reranking": mcp_rerank_latency,
+        },
+    )
 
 
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple[str, list]:
+) -> tuple[str, list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
-    # Remove duplicate vector_store initialization
-    results = await vector_store.retrieve_documents_from_query(
-        query=request.query,
-        # todo extend support for multiple collections
+    # Retrieve with latency measurements
+    results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
         collection_names=request.collection_ids,
-        embeddings_model=request.embeddings_model,
-        score_threshold=request.score_threshold,
+        query=request.query,
         k=request.k,
+        score_threshold=request.score_threshold,
+        embeddings_model=request.embeddings_model,
         filters=request.filters,
     )
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
-        return "", []
+        return "", [], {**(vs_latencies or {}), "qdrant_docs_reranking": None}
 
     # Extract plain text for reranker input (support both 'page_content' and 'text')
     candidate_texts = _extract_candidate_texts(results)
 
     # Optionally rerank and build context directly from reranker documents
+    qdrant_rerank_latency: Optional[float] = None
+    rerank_start = time.perf_counter()
     reranked = await _maybe_rerank(candidate_texts, request.query)
     if isinstance(reranked, list) and reranked:
+        qdrant_rerank_latency = time.perf_counter() - rerank_start
         try:
             reranked_sorted = sorted(
                 reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
             )
             top_reranked = reranked_sorted[: request.k]
             context = _build_context([r.get("document", "") for r in top_reranked])
-            return context, top_reranked
+            return (
+                context,
+                top_reranked,
+                {
+                    **vs_latencies,
+                    "qdrant_docs_reranking": qdrant_rerank_latency,
+                },
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to process reranker output, using vector similarity order: {e}"
@@ -493,7 +524,14 @@ async def get_rag_context(
     # Fallback: use the first k results (already sorted by vector score upstream)
     trimmed = results[: request.k]
     trimmed_texts = _extract_candidate_texts(trimmed)
-    return _build_context(trimmed_texts), trimmed
+    return (
+        _build_context(trimmed_texts),
+        trimmed,
+        {
+            **vs_latencies,
+            "qdrant_docs_reranking": qdrant_rerank_latency,
+        },
+    )
 
 
 async def setup_rag_and_context(request: GenerationRequest):
@@ -506,36 +544,41 @@ async def setup_rag_and_context(request: GenerationRequest):
         is_rag = False
 
     # Get context if using RAG
+    latencies: Dict[str, Optional[float]] = {}
     if is_rag:
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-            context, results = await get_rag_context(vector_store, request)
-            mcp_context, mcp_results = await get_mcp_context(request)
+            context, results, rag_lat = await get_rag_context(vector_store, request)
+            mcp_context, mcp_results, mcp_lat = await get_mcp_context(request)
 
             # Merge RAG and MCP contexts and results
             if mcp_context:
                 context = f"{context}\n{mcp_context}" if context else mcp_context
             if isinstance(results, list) and isinstance(mcp_results, list):
                 results = results + mcp_results
+            latencies.update(rag_lat or {})
+            latencies.update(mcp_lat or {})
         except Exception as e:
             logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
             context, results = "", []
+            latencies = {**rag_lat, **mcp_lat}
             is_rag = False
     else:
         context, results = "", []
 
-    return context, results, is_rag
+    return context, results, is_rag, latencies
 
 
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
-) -> tuple[str, list, bool]:
+) -> tuple[str, list, bool, Dict[str, Optional[float]]]:
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
     try:
-        context, results, is_rag = await setup_rag_and_context(request)
+        total_start = time.perf_counter()
+        context, results, is_rag, latencies = await setup_rag_and_context(request)
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
@@ -569,50 +612,65 @@ async def generate_answer(
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
+        gen_latency: Optional[float] = None
         if _langgraph_available and conversation_id:
             try:
                 # Single invoke to append assistant response to memory (async)
+                gen_start = time.perf_counter()
                 result = await _ainvoke_with_langgraph(
                     messages_for_turn, conversation_id
                 )
+                gen_latency = time.perf_counter() - gen_start
                 # result should contain {"messages": List[BaseMessage]} or similar
                 try:
                     messages_out = result.get("messages")
                     final_answer = _extract_final_assistant_content(messages_out) or ""
                 except Exception:
                     # Fallback to direct generation if unexpected structure
+                    gen_start = time.perf_counter()
                     final_answer = llm_manager.generate_answer(
                         query=request.query,
                         context=context,
                         llm=request.llm,
                         max_new_tokens=request.max_new_tokens,
                     )
+                    gen_latency = time.perf_counter() - gen_start
             except Exception as e:
                 # If LangGraph/Runpod path fails, fallback to direct generation (with internal Mistral fallback)
                 logger.warning(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
+                gen_start = time.perf_counter()
                 final_answer = llm_manager.generate_answer(
                     query=request.query,
                     context=context,
                     llm=request.llm,
                     max_new_tokens=request.max_new_tokens,
                 )
+                gen_latency = time.perf_counter() - gen_start
         else:
             # Fallback: use existing direct generation path without memory persistence
+            gen_start = time.perf_counter()
             final_answer = llm_manager.generate_answer(
                 query=request.query,
                 context=context,
                 llm=request.llm,
                 max_new_tokens=request.max_new_tokens,
             )
+            gen_latency = time.perf_counter() - gen_start
 
         answer = _normalize_ai_output(final_answer or "")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return answer, results, is_rag
+    total_latency = time.perf_counter() - total_start
+    latencies = {
+        **(latencies or {}),
+        "generation": gen_latency,
+        "total": total_latency,
+    }
+    return answer, results, is_rag, latencies
 
 
 async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
@@ -695,7 +753,7 @@ async def generate_answer_stream_generator_helper(
     llm_manager = LLMManager()
 
     try:
-        context, results, is_rag = await setup_rag_and_context(request)
+        context, results, is_rag, _ = await setup_rag_and_context(request)
 
         # Send initial metadata for JSON format
         if output_format == "json":
