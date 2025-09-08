@@ -562,18 +562,9 @@ async def setup_rag_and_context(request: GenerationRequest):
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
-            logger.warning(f"Failed to get RAG context, falling back to no RAG: {e}")
-            context, results = "", []
-            # rag_lat and mcp_lat may not be defined if the error occurred early; merge safely
-            try:
-                latencies.update(rag_lat if isinstance(rag_lat, dict) else {})
-            except Exception:
-                pass
-            try:
-                latencies.update(mcp_lat if isinstance(mcp_lat, dict) else {})
-            except Exception:
-                pass
-            is_rag = False
+            logger.warning(
+                f"Failed to get RAG context and MCP context and merge them: {e}"
+            )
     else:
         context, results = "", []
 
