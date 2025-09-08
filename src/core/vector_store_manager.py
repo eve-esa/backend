@@ -615,6 +615,62 @@ class VectorStoreManager:
 
     # RAG decision moved to LLMManager.should_use_rag
 
+    async def retrieve_documents_with_latencies(
+        self,
+        collection_names: List[str],
+        query: str,
+        k: int = 5,
+        score_threshold: float = 0.7,
+        embeddings_model: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> tuple[List[Any], Dict[str, Optional[float]]]:
+        """
+        Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
+
+        Returns a tuple of (results, latencies)
+        where latencies contains keys: "query_embedding", "qdrant_retrieval".
+        """
+        import time
+
+        model = embeddings_model or self.embeddings_model
+
+        embedding_latency: Optional[float] = None
+        retrieval_latency: Optional[float] = None
+
+        try:
+            # Generate embedding vector for the query
+            t0 = time.perf_counter()
+            query_vector = await self.generate_query_vector(query, model)
+            embedding_latency = time.perf_counter() - t0
+
+            query_filter = Filter(**filters) if filters else None
+
+            # Search across collections
+            t1 = time.perf_counter()
+            all_results = self._search_across_collections(
+                collection_names=collection_names,
+                query_vector=query_vector,
+                score_threshold=score_threshold,
+                query_filter=query_filter,
+                limit_per_collection=k * 10,
+            )
+            retrieval_latency = time.perf_counter() - t1
+
+            logger.info(
+                f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
+                f"(filtered from {len(all_results)} total matches)"
+            )
+
+            latencies: Dict[str, Optional[float]] = {
+                "query_embedding": embedding_latency,
+                "qdrant_retrieval": retrieval_latency,
+            }
+            return all_results, latencies
+
+        except Exception as e:
+            logger.error(f"Failed to retrieve documents: {e}")
+            raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
+
     def sync_retrieve_documents_from_query(
         self,
         collection_name: str,
