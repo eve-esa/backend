@@ -628,7 +628,7 @@ class VectorStoreManager:
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
 
         Returns a tuple of (results, latencies)
-        where latencies contains keys: "query_embedding", "qdrant_retrieval".
+        where latencies contains keys: "query_embedding_latency", "qdrant_retrieval_latency".
         """
         import time
 
@@ -662,8 +662,8 @@ class VectorStoreManager:
             )
 
             latencies: Dict[str, Optional[float]] = {
-                "query_embedding": embedding_latency,
-                "qdrant_retrieval": retrieval_latency,
+                "query_embedding_latency": embedding_latency,
+                "qdrant_retrieval_latency": retrieval_latency,
             }
             return all_results, latencies
 

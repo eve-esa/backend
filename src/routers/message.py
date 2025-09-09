@@ -173,7 +173,9 @@ async def create_message(
             "documents": documents_data,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
-            "latencies": latencies,
+            "metadata": {
+                "latencies": latencies,
+            },
         }
 
     except HTTPException:
