@@ -319,7 +319,7 @@ def _build_context(items: List[Any]) -> str:
 async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | None:
     """Call reranker if configured."""
     endpoint_id = config.get_reranker_id()
-    if not (endpoint_id):
+    if not (endpoint_id) or candidate_texts is None or len(candidate_texts) == 0:
         return None
 
     try:
@@ -389,10 +389,6 @@ async def get_mcp_context(
                 extracted.extend(_ensure_list(data))
         elif isinstance(data, list):
             extracted.extend(data)
-
-    # Fallback if nothing extracted
-    if not extracted:
-        extracted = _ensure_list(raw)
 
     # Helper to extract displayable text
     def _extract_text(obj: Dict[str, Any]) -> str:
@@ -507,10 +503,11 @@ async def get_rag_context(
                 reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
             )
             top_reranked = reranked_sorted[: request.k]
+            trimmed = results[: request.k]
             context = _build_context([r.get("document", "") for r in top_reranked])
             return (
                 context,
-                top_reranked,
+                trimmed,
                 {
                     **vs_latencies,
                     "qdrant_docs_reranking": qdrant_rerank_latency,
