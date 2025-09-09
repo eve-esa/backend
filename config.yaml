@@ -1,13 +1,13 @@
 runpod:
   instruct_llm:
     id: "gt96iviaoxovi0"
-    timeout: 100 # seconds in ChatOpenAI
+    timeout: 60 # seconds in ChatOpenAI
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
-    timeout: 1000
+    timeout: 60
   reranker:
     id: "4947q1tk0d2lle"
-    timeout: 1000
+    timeout: 60
 
 mistral:
   model: "mistral-small-latest"

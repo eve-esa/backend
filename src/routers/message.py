@@ -40,8 +40,12 @@ def _to_float(value: Any) -> Any:
 def _extract_document_data(result: Any) -> Dict[str, Any]:
     result_id = _field(result, "id")
     result_version = _to_int(_field(result, "version"))
-    result_score = _to_float(_field(result, "score"))
-    result_payload = _field(result, "payload", {}) or {}
+    result_score = _to_float(
+        _field(result, "score") or _field(result, "relevance_score")
+    )
+    result_payload = (
+        _field(result, "payload", {}) or _field(result, "document", {}) or {}
+    )
     result_text = _field(result, "text", "") or ""
     result_metadata = _field(result, "metadata", {}) or {}
 
@@ -140,7 +144,7 @@ async def create_message(
         except Exception:
             request.year = None
 
-        answer, results, is_rag = await generate_answer(
+        answer, results, is_rag, latencies = await generate_answer(
             request, conversation_id=conversation_id
         )
 
@@ -169,6 +173,9 @@ async def create_message(
             "documents": documents_data,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
+            "metadata": {
+                "latencies": latencies,
+            },
         }
 
     except HTTPException:
