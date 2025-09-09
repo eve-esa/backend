@@ -449,8 +449,8 @@ async def get_mcp_context(
                 context,
                 mapped_results,
                 {
-                    "mcp_retrieval": mcp_retrieval_latency,
-                    "mcp_docs_reranking": mcp_rerank_latency,
+                    "mcp_retrieval_latency": mcp_retrieval_latency,
+                    "mcp_docs_reranking_latency": mcp_rerank_latency,
                 },
             )
         except Exception as e:
@@ -465,8 +465,8 @@ async def get_mcp_context(
         context,
         trimmed,
         {
-            "mcp_retrieval": mcp_retrieval_latency,
-            "mcp_docs_reranking": mcp_rerank_latency,
+            "mcp_retrieval_latency": mcp_retrieval_latency,
+            "mcp_docs_reranking_latency": mcp_rerank_latency,
         },
     )
 
@@ -487,7 +487,7 @@ async def get_rag_context(
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
-        return "", [], {**(vs_latencies or {}), "qdrant_docs_reranking": None}
+        return "", [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
 
     # Extract plain text for reranker input (support both 'page_content' and 'text')
     candidate_texts = _extract_candidate_texts(results)
@@ -510,7 +510,7 @@ async def get_rag_context(
                 trimmed,
                 {
                     **vs_latencies,
-                    "qdrant_docs_reranking": qdrant_rerank_latency,
+                    "qdrant_docs_reranking_latency": qdrant_rerank_latency,
                 },
             )
         except Exception as e:
@@ -526,7 +526,7 @@ async def get_rag_context(
         trimmed,
         {
             **vs_latencies,
-            "qdrant_docs_reranking": qdrant_rerank_latency,
+            "qdrant_docs_reranking_latency": qdrant_rerank_latency,
         },
     )
 
@@ -666,8 +666,8 @@ async def generate_answer(
     total_latency = time.perf_counter() - total_start
     latencies = {
         **(latencies or {}),
-        "generation": gen_latency,
-        "total": total_latency,
+        "generation_latency": gen_latency,
+        "total_latency": total_latency,
     }
     return answer, results, is_rag, latencies
 
