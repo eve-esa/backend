@@ -8,10 +8,11 @@ document storage, and similarity search operations.
 
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 import asyncio
 
+from src.database.models.collection import Collection
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
@@ -28,7 +29,7 @@ from qdrant_client.http.models import (
 
 from src.core.llm_manager import LLMManager
 
-from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
+from src.constants import DEFAULT_EMBEDDING_MODEL
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
@@ -121,26 +122,39 @@ class VectorStoreManager:
         """
         return self.client.get_collections()
 
-    def list_public_collections(
+    async def list_public_collections(
         self, page: int = 1, limit: int = 10
-    ) -> List[Dict[str, str]]:
+    ) -> Tuple[List[Dict[str, str]], int]:
         """
         Get all public collections from the vector store.
 
         Returns:
             Dict[str, str]: Dictionary of collection names and descriptions
+            int: Total number of public collections for pagination
         """
+        existing_user_collections = await Collection.find_all(
+            filter_dict={"user_id": {"$ne": None}}
+        )
+
         collections = self.client.get_collections()
+
         start = (page - 1) * limit
         end = start + limit
-        return [
+
+        public_collections = [
             {
                 "name": collection.name,
-                "description": PUBLIC_COLLECTIONS[collection.name],
+                # Qdrant does not provide a description for its collections so we use a placeholder "Public Collection from ESA"
+                "description": collection.model_dump().get(
+                    "description", "Public Collection from ESA"
+                ),
             }
             for collection in collections.collections
-            if collection.name in PUBLIC_COLLECTIONS.keys()
+            if collection.name
+            not in [collection.name for collection in existing_user_collections]
         ][start:end]
+
+        return public_collections, len(collections.collections)
 
     def list_collections_names(self) -> List[str]:
         """

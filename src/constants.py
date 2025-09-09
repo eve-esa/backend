@@ -11,11 +11,6 @@ DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
 DEFAULT_EMBEDDING_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
 NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
 
-# List of collections that are public and can be used by anyone
-PUBLIC_COLLECTIONS = {
-    "esa-nasa-workshop": "ESA NASA Workshop Collection",
-}
-
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 

@@ -124,7 +124,7 @@ async def create_message(
             )
 
         # All public collections are used by default
-        public_collections = VectorStoreManager().list_public_collections()
+        public_collections, _ = await VectorStoreManager().list_public_collections()
         if len(public_collections) > 0:
             request.collection_ids = [c["name"] for c in public_collections]
 

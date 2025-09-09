@@ -25,7 +25,7 @@ async def test_update_user_names(async_client):
     payload = {"first_name": "Patched", "last_name": "User"}
     try:
         response = await async_client.patch(
-            "/users/", json=payload, headers={"Authorization": f"Bearer {token}"}
+            "/users", json=payload, headers={"Authorization": f"Bearer {token}"}
         )
 
         assert response.status_code == 200
