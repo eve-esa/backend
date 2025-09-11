@@ -170,7 +170,7 @@ async def _get_or_create_compiled_graph():
             return _inmemory_compiled_graph, _compiled_graph_mode
 
         # Build the simple one-node graph
-        llm = LLMManager().get_langchain_chat_llm()
+        llm = LLMManager().get_model()
 
         async def call_model(state: "MessagesState"):
             response = await llm.ainvoke(state["messages"])  # returns an AIMessage
@@ -226,7 +226,7 @@ def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> 
     """Summarize entire conversation history."""
     if not transcript:
         return ""
-    llm = LLMManager().get_langchain_chat_llm()
+    llm = LLMManager().get_model()
     system = (
         "You are an AI assistant specialized in summarizing chat histories. "
         "Your role is to read a transcript of a conversation and produce a clear, "
@@ -654,7 +654,7 @@ async def generate_answer(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    model = LLMManager().get_langchain_chat_llm()
+    model = llm_manager.get_model()
     generation_response = generation_schema(question=request.query, answer=answer)
     hallu_latency: Optional[float] = None
     hallu_start = time.perf_counter()

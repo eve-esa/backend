@@ -1,32 +1,29 @@
+from typing import List
 from .generator import generate_answer
 from .hallucination import detect_hallucination
 from .rewritting import rewrite_query
 from .reflection import regenerate_answer
 from .ranking import rank_output
-from .loader import deepseek_replicate
 from .utils import filter_docs, vector_db_retrieve_context
+from src.core.llm_manager import LLMManager
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
 class Pipeline:
-    def __init__(
-        self, rag, hallucination: bool = True, per_span_reprompting: bool = True
-    ):
+    def __init__(self, hallucination: bool = True, per_span_reprompting: bool = True):
         """
         Args:
-            rag: Retrieval system (e.g., Qdrant)
             hallucination (bool): Whether to perform hallucination detection and correction
             per_span_reprompting (bool): If True, reprocess each hallucinated span individually;
                                          if False, reprocess all at once
         """
-        self.rag = rag
-        self.model = deepseek_replicate()
+        self.model = LLMManager().get_model()
         self.hallucination = hallucination
         self.per_span_reprompting = per_span_reprompting
 
-    def run(self, question: str) -> dict:
+    async def run(self, question: str, collection_ids: List[str]) -> dict:
         """
         Run the QA pipeline for a single question.
 
@@ -37,7 +34,7 @@ class Pipeline:
             dict: Output of each stage in the pipeline
         """
         # Initial retrieval
-        docs = self.rag.query(question)
+        docs = await vector_db_retrieve_context(question, collection_ids=collection_ids)
 
         # Generation step
         print("Generating answer...")
@@ -97,8 +94,8 @@ class Pipeline:
 
                 # Retrieve again using vector DB instead of rag.query
                 print("Retrieving more documents via vector DB...")
-                new_docs = vector_db_retrieve_context(
-                    rewritten_response.rewritten_question
+                new_docs = await vector_db_retrieve_context(
+                    rewritten_response.rewritten_question, collection_ids=collection_ids
                 )
                 docs = filter_docs(docs, new_docs)
         else:
@@ -108,7 +105,9 @@ class Pipeline:
 
             # Retrieve using combined rewritten query via vector DB
             print("Retrieving more documents via vector DB...")
-            new_docs = vector_db_retrieve_context(rewritten_response.rewritten_question)
+            new_docs = await vector_db_retrieve_context(
+                rewritten_response.rewritten_question, collection_ids=collection_ids
+            )
             docs = filter_docs(docs, new_docs)
 
         # Self-reflection / regeneration stage
