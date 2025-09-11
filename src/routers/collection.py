@@ -4,7 +4,7 @@ import asyncio
 
 from src.constants import DEFAULT_EMBEDDING_MODEL
 from src.schemas.common import Pagination
-from src.schemas.collection import CollectionRequest, CollectionUpdate, CollectionOut
+from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
 from fastapi import APIRouter, HTTPException, Depends
 
