@@ -126,7 +126,7 @@ class LLMManager:
             )
         return self._mistral_chat_openai
 
-    def get_langchain_chat_llm(self) -> ChatOpenAI:
+    def get_model(self) -> ChatOpenAI:
         """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
         try:
             return self._get_runpod_llm()
@@ -160,7 +160,7 @@ class LLMManager:
             Query: {query}
             """
 
-            base_llm = self.get_langchain_chat_llm()
+            base_llm = self.get_model()
             structured_llm = base_llm.bind(temperature=0).with_structured_output(
                 ShouldUseRagDecision
             )
