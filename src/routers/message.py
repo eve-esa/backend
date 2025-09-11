@@ -144,7 +144,7 @@ async def create_message(
         except Exception:
             request.year = None
 
-        answer, results, is_rag, latencies = await generate_answer(
+        answer, results, is_rag, loop_result, latencies = await generate_answer(
             request, conversation_id=conversation_id
         )
 
@@ -173,6 +173,7 @@ async def create_message(
             "documents": documents_data,
             "use_rag": is_rag,
             "conversation_id": conversation_id,
+            "loop_result": loop_result,
             "metadata": {
                 "latencies": latencies,
             },

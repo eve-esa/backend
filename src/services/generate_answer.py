@@ -26,6 +26,8 @@ from src.utils.helpers import get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import config
+from src.hallucination_pipeline.loop import run_hallucination_loop
+from src.hallucination_pipeline.schemas import generation_schema
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ class GenerationRequest(BaseModel):
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
+    hallucination_loop_flag: bool = True  # For testing purposes
 
 
 # -------- Output normalization helpers --------
@@ -167,7 +170,7 @@ async def _get_or_create_compiled_graph():
             return _inmemory_compiled_graph, _compiled_graph_mode
 
         # Build the simple one-node graph
-        llm = LLMManager().get_langchain_chat_llm()
+        llm = LLMManager().get_model()
 
         async def call_model(state: "MessagesState"):
             response = await llm.ainvoke(state["messages"])  # returns an AIMessage
@@ -223,7 +226,7 @@ def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> 
     """Summarize entire conversation history."""
     if not transcript:
         return ""
-    llm = LLMManager().get_langchain_chat_llm()
+    llm = LLMManager().get_model()
     system = (
         "You are an AI assistant specialized in summarizing chat histories. "
         "Your role is to read a transcript of a conversation and produce a clear, "
@@ -571,7 +574,7 @@ async def setup_rag_and_context(request: GenerationRequest):
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
-) -> tuple[str, list, bool, Dict[str, Optional[float]]]:
+) -> tuple[str, list, bool, dict, Dict[str, Optional[float]]]:
     """Generate an answer using RAG and LLM."""
     llm_manager = LLMManager()
 
@@ -620,20 +623,8 @@ async def generate_answer(
                     messages_for_turn, conversation_id
                 )
                 gen_latency = time.perf_counter() - gen_start
-                # result should contain {"messages": List[BaseMessage]} or similar
-                try:
-                    messages_out = result.get("messages")
-                    final_answer = _extract_final_assistant_content(messages_out) or ""
-                except Exception:
-                    # Fallback to direct generation if unexpected structure
-                    gen_start = time.perf_counter()
-                    final_answer = llm_manager.generate_answer(
-                        query=request.query,
-                        context=context,
-                        llm=request.llm,
-                        max_new_tokens=request.max_new_tokens,
-                    )
-                    gen_latency = time.perf_counter() - gen_start
+                messages_out = result.get("messages")
+                final_answer = _extract_final_assistant_content(messages_out) or ""
             except Exception as e:
                 # If LangGraph/Runpod path fails, fallback to direct generation (with internal Mistral fallback)
                 logger.warning(
@@ -663,13 +654,32 @@ async def generate_answer(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    model = llm_manager.get_model()
+    generation_response = generation_schema(question=request.query, answer=answer)
+    loop_result: Optional[dict] = None
+    hallucination_latency: Optional[dict] = None
+    for attempt in range(5):
+        try:
+            if context is not None and request.hallucination_loop_flag:
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model,
+                    context,
+                    generation_response,
+                    request.collection_ids,
+                )
+                answer = loop_result["final_answer"]
+                break
+        except Exception as e:
+            print(f"[Attempt {attempt+1}] Parsing failed: {e}\n")
+
     total_latency = time.perf_counter() - total_start
     latencies = {
         **(latencies or {}),
         "generation_latency": gen_latency,
+        "hallucination_latency": hallucination_latency,
         "total_latency": total_latency,
     }
-    return answer, results, is_rag, latencies
+    return answer, results, is_rag, loop_result, latencies
 
 
 async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
