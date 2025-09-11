@@ -656,13 +656,12 @@ async def generate_answer(
 
     model = llm_manager.get_model()
     generation_response = generation_schema(question=request.query, answer=answer)
-    hallu_latency: Optional[float] = None
-    hallu_start = time.perf_counter()
     loop_result: Optional[dict] = None
+    hallucination_latency: Optional[dict] = None
     for attempt in range(5):
         try:
             if context is not None and request.hallucination_loop_flag:
-                loop_result = await run_hallucination_loop(
+                loop_result, hallucination_latency = await run_hallucination_loop(
                     model,
                     context,
                     generation_response,
@@ -673,13 +672,11 @@ async def generate_answer(
         except Exception as e:
             print(f"[Attempt {attempt+1}] Parsing failed: {e}\n")
 
-    hallu_latency = time.perf_counter() - hallu_start
-
     total_latency = time.perf_counter() - total_start
     latencies = {
         **(latencies or {}),
         "generation_latency": gen_latency,
-        "hallucination_latency": hallu_latency,
+        "hallucination_latency": hallucination_latency,
         "total_latency": total_latency,
     }
     return answer, results, is_rag, loop_result, latencies
