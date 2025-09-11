@@ -151,10 +151,10 @@ class VectorStoreManager:
             }
             for collection in collections.collections
             if collection.name
-            not in [collection.name for collection in existing_user_collections]
-        ][start:end]
+            not in [collection.id for collection in existing_user_collections]
+        ]
 
-        return public_collections, len(collections.collections)
+        return public_collections[start:end], len(public_collections)
 
     def list_collections_names(self) -> List[str]:
         """
