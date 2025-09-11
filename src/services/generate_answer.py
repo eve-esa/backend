@@ -46,7 +46,7 @@ class GenerationRequest(BaseModel):
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
-    hallucination_loop_flag: bool = False
+    hallucination_loop_flag: bool = True  # For testing purposes
 
 
 # -------- Output normalization helpers --------
