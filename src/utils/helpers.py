@@ -179,4 +179,5 @@ def get_embeddings_model(
 
 def get_mongodb_uri() -> str:
     """Build MongoDB URI from environment, matching src.database.mongo defaults."""
-    return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}?authSource=admin"
+    # return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}?authSource=admin"
+    return f"mongodb://{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}"
