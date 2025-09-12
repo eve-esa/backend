@@ -283,17 +283,21 @@ class LLMManager:
             response = llm.invoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
-            logger.error(
-                f"Eve Instruct API call failed: {str(e)}. Trying Mistral fallback."
-            )
-            try:
-                base_llm = self._get_mistral_llm()
-                llm = base_llm.bind(max_tokens=max_new_tokens)
-                response = llm.invoke(prompt)
-                return getattr(response, "content", str(response))
-            except Exception as e2:
-                logger.error(f"Mistral fallback also failed: {str(e2)}")
-                raise
+            logger.error(f"Eve Instruct Runpod API call failed: {str(e)}")
+            raise
+
+    def _call_eve_instruct_mistral(self, prompt: str, max_new_tokens: int = 150) -> str:
+        """
+        Call the Eve Instruct model via Mistral using LangChain ChatMistralAI.
+        """
+        try:
+            base_llm = self._get_mistral_llm()
+            llm = base_llm.bind(max_tokens=max_new_tokens)
+            response = llm.invoke(prompt)
+            return getattr(response, "content", str(response))
+        except Exception as e:
+            logger.error(f"Mistral model call failed: {str(e)}")
+            raise
 
     def _process_stream_chunk(self, chunk) -> str:
         """
@@ -413,63 +417,72 @@ class LLMManager:
         self,
         query: str,
         context: str,
-        llm: str,
         max_new_tokens: int = 150,
     ) -> str:
         """
-        Generate an answer using the specified language model.
+        Generate an answer using the runpod model.
 
         Args:
             query: The user's question
             context: Contextual information to assist the model
-            llm: Which language model to use (default: "llama-3.1")
             max_new_tokens: Maximum new tokens for the response
 
         Returns:
             The generated answer
 
         Raises:
-            ValueError: If an unsupported LLM type is specified
             Exception: For other errors during generation
         """
         try:
             prompt = self._generate_prompt(query=query, context=context)
+            max_context_len = (1024 - max_new_tokens) * 4
+            if len(context) > max_context_len:
+                logger.info(
+                    f"Truncating context from {len(context)} to {max_context_len} characters"
+                )
+                context = context[:max_context_len]
 
-            if llm == LLMType.OPENAI.value:
-                return self._call_openai(prompt, max_tokens=max_new_tokens)
-
-            elif llm == LLMType.EVE_INSTRUCT.value:
-                # Truncate context if needed
-                if context:
-                    max_context_len = (1024 - max_new_tokens) * 4
-                    if len(context) > max_context_len:
-                        logger.info(
-                            f"Truncating context from {len(context)} to {max_context_len} characters"
-                        )
-                        context = context[:max_context_len]
-
-                try:
-                    return self._call_eve_instruct(
-                        prompt, max_new_tokens=max_new_tokens
-                    )
-                except TypeError as e:
-                    if "coroutine" in str(e).lower():
-                        # If we get a coroutine error, try the async version
-                        logger.info(
-                            "Detected coroutine response, trying async approach"
-                        )
-                        return asyncio.run(
-                            self._call_eve_instruct_async(prompt, max_new_tokens)
-                        )
-                    else:
-                        raise
-
-            else:
-                # Handle other LLM types or raise error
-                raise ValueError(f"Unsupported LLM type: {llm}")
+            return self._call_eve_instruct(prompt, max_new_tokens=max_new_tokens)
 
         except Exception as e:
-            logger.error(f"Failed to generate answer: {str(e)}")
+            logger.error(f"Failed to generate answer using runpod model: {str(e)}")
+            raise
+
+    def generate_answer_mistral(
+        self,
+        query: str,
+        context: str,
+        max_new_tokens: int = 150,
+    ) -> str:
+        """
+        Generate an answer using the mistral model.
+
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            max_new_tokens: Maximum new tokens for the response
+
+        Returns:
+            The generated answer
+
+        Raises:
+            Exception: For other errors during generation
+        """
+        try:
+            prompt = self._generate_prompt(query=query, context=context)
+            max_context_len = (1024 - max_new_tokens) * 4
+            if len(context) > max_context_len:
+                logger.info(
+                    f"Truncating context from {len(context)} to {max_context_len} characters"
+                )
+                context = context[:max_context_len]
+
+            return self._call_eve_instruct_mistral(
+                prompt, max_new_tokens=max_new_tokens
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to generate answer using mistral model: {str(e)}")
             raise
 
     async def generate_answer_stream(
