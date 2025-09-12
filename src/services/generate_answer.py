@@ -360,7 +360,20 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
 
     # Normalize response payload
-    content_items = raw.get("content", []) if isinstance(raw, dict) else []
+    content_items = []
+    is_error = False
+    if isinstance(raw, dict):
+        is_error = bool(raw.get("is_error"))
+        content_items = raw.get("content", []) or []
+    if is_error:
+        return (
+            [],
+            [],
+            {
+                "mcp_retrieval_latency": mcp_retrieval_latency,
+                "mcp_docs_reranking_latency": None,
+            },
+        )
 
     def _ensure_list(obj: Any) -> List[Any]:
         if obj is None:
