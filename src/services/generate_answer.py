@@ -592,7 +592,7 @@ async def generate_answer(
     try:
         total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(request)
-        return
+
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
@@ -642,20 +642,18 @@ async def generate_answer(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
                 gen_start = time.perf_counter()
-                final_answer = llm_manager.generate_answer(
+                final_answer = llm_manager.generate_answer_mistral(
                     query=request.query,
                     context=context,
-                    llm=request.llm,
                     max_new_tokens=request.max_new_tokens,
                 )
                 gen_latency = time.perf_counter() - gen_start
         else:
             # Fallback: use existing direct generation path without memory persistence
             gen_start = time.perf_counter()
-            final_answer = llm_manager.generate_answer(
+            final_answer = llm_manager.generate_answer_mistral(
                 query=request.query,
                 context=context,
-                llm=request.llm,
                 max_new_tokens=request.max_new_tokens,
             )
             gen_latency = time.perf_counter() - gen_start
@@ -669,19 +667,14 @@ async def generate_answer(
     generation_response = generation_schema(question=request.query, answer=answer)
     loop_result: Optional[dict] = None
     hallucination_latency: Optional[dict] = None
-    for attempt in range(5):
-        try:
-            if context is not None and request.hallucination_loop_flag:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                answer = loop_result["final_answer"]
-                break
-        except Exception as e:
-            print(f"[Attempt {attempt+1}] Parsing failed: {e}\n")
+    if context is not None and request.hallucination_loop_flag:
+        loop_result, hallucination_latency = await run_hallucination_loop(
+            model,
+            context,
+            generation_response,
+            request.collection_ids,
+        )
+        answer = loop_result["final_answer"]
 
     total_latency = time.perf_counter() - total_start
     latencies = {
