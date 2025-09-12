@@ -550,11 +550,7 @@ async def get_rag_context(
 async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
     # Check if we need to use RAG using LLMManager
-    try:
-        is_rag = await LLMManager().should_use_rag(request.query)
-    except Exception as e:
-        logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
-        is_rag = False
+    is_rag = await LLMManager().should_use_rag(request.query)
 
     # Get context if using RAG
     latencies: Dict[str, Optional[float]] = {}
@@ -596,7 +592,7 @@ async def generate_answer(
     try:
         total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(request)
-
+        return
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
