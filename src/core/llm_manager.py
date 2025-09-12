@@ -134,6 +134,10 @@ class LLMManager:
             )
             return self._get_mistral_llm()
 
+    def get_mistral_model(self) -> ChatMistralAI:
+        """Public accessor for the Mistral model."""
+        return self._get_mistral_llm()
+
     async def should_use_rag(self, query: str) -> bool:
         """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
 
