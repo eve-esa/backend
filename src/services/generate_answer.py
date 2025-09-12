@@ -340,7 +340,7 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
 
 async def get_mcp_context(
     request: GenerationRequest,
-) -> tuple[str, list, Dict[str, Optional[float]]]:
+) -> tuple[list, list, Dict[str, Optional[float]]]:
     """Call MCP semantic search and return (context, results) like get_rag_context."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
@@ -447,9 +447,9 @@ async def get_mcp_context(
                 else:
                     mapped_results.append({"text": doc_text, "metadata": {}})
 
-            context = _build_context([item["text"] for item in mapped_results])
+            context_list = [item["text"] for item in mapped_results]
             return (
-                context,
+                context_list,
                 mapped_results,
                 {
                     "mcp_retrieval_latency": mcp_retrieval_latency,
@@ -463,9 +463,9 @@ async def get_mcp_context(
 
     # Fallback: use the first k results as-is
     trimmed = simplified_all[: request.k]
-    context = _build_context([item["text"] for item in trimmed])
+    context_list = [item["text"] for item in trimmed]
     return (
-        context,
+        context_list,
         trimmed,
         {
             "mcp_retrieval_latency": mcp_retrieval_latency,
@@ -476,7 +476,7 @@ async def get_mcp_context(
 
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple[str, list, Dict[str, Optional[float]]]:
+) -> tuple[list, list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
     # Retrieve with latency measurements
     results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
@@ -490,7 +490,7 @@ async def get_rag_context(
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
-        return "", [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
+        return [], [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
 
     # Extract plain text for reranker input (support both 'page_content' and 'text')
     candidate_texts = _extract_candidate_texts(results)
@@ -507,9 +507,9 @@ async def get_rag_context(
             )
             top_reranked = reranked_sorted[: request.k]
             trimmed = results[: request.k]
-            context = _build_context([r.get("document", "") for r in top_reranked])
+            context_list = [r.get("document", "") for r in top_reranked]
             return (
-                context,
+                context_list,
                 trimmed,
                 {
                     **vs_latencies,
@@ -525,7 +525,7 @@ async def get_rag_context(
     trimmed = results[: request.k]
     trimmed_texts = _extract_candidate_texts(trimmed)
     return (
-        _build_context(trimmed_texts),
+        trimmed_texts,
         trimmed,
         {
             **vs_latencies,
@@ -545,28 +545,30 @@ async def setup_rag_and_context(request: GenerationRequest):
 
     # Get context if using RAG
     latencies: Dict[str, Optional[float]] = {}
+    context, results = "", []
     if is_rag:
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
             rag_lat: Dict[str, Optional[float]] = {}
             mcp_lat: Dict[str, Optional[float]] = {}
 
-            context, results, rag_lat = await get_rag_context(vector_store, request)
-            mcp_context, mcp_results, mcp_lat = await get_mcp_context(request)
+            context_list, results, rag_lat = await get_rag_context(
+                vector_store, request
+            )
+            mcp_context_list, mcp_results, mcp_lat = await get_mcp_context(request)
 
             # Merge RAG and MCP contexts and results
-            if mcp_context:
-                context = f"{context}\n{mcp_context}" if context else mcp_context
-            if isinstance(results, list) and isinstance(mcp_results, list):
-                results = results + mcp_results
+            context_list = context_list + mcp_context_list
+            # deduplicate context_list
+            context_list = list(set(context_list))
+            context = _build_context(context_list)
+            results = results + mcp_results
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
             logger.warning(
                 f"Failed to get RAG context and MCP context and merge them: {e}"
             )
-    else:
-        context, results = "", []
 
     return context, results, is_rag, latencies
 
