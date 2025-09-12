@@ -667,14 +667,27 @@ async def generate_answer(
     generation_response = generation_schema(question=request.query, answer=answer)
     loop_result: Optional[dict] = None
     hallucination_latency: Optional[dict] = None
-    if context is not None and request.hallucination_loop_flag:
-        loop_result, hallucination_latency = await run_hallucination_loop(
-            model,
-            context,
-            generation_response,
-            request.collection_ids,
-        )
-        answer = loop_result["final_answer"]
+    if len(context.strip()) != 0 and request.hallucination_loop_flag:
+        logger.info("starting to run hallucination loop")
+        try:
+            loop_result, hallucination_latency = await run_hallucination_loop(
+                model,
+                context,
+                generation_response,
+                request.collection_ids,
+            )
+            answer = loop_result["final_answer"]
+        except Exception as e:
+            logger.warning(f"Failed to run hallucination loop: {e}")
+            logger.info("falling back to mistral model for hallucination loop")
+            model = llm_manager.get_mistral_model()
+            loop_result, hallucination_latency = await run_hallucination_loop(
+                model,
+                context,
+                generation_response,
+                request.collection_ids,
+            )
+            answer = loop_result["final_answer"]
 
     total_latency = time.perf_counter() - total_start
     latencies = {
@@ -703,6 +716,9 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if total_turns == 0 or total_turns % summary_every != 0:
             return
 
+        logger.info(
+            "starting to summarize history for conversation id: %s", conversation_id
+        )
         # Build transcript from the last `summary_every` turns (each Message is one turn)
         skip = max(0, total_turns - summary_every)
         messages = await MessageModel.find_all(
