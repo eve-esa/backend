@@ -10,6 +10,7 @@ import os
 
 import openai
 from langchain_openai import ChatOpenAI
+from langchain_mistralai import ChatMistralAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from pydantic import BaseModel, Field
@@ -78,19 +79,19 @@ class LLMManager:
             self._runpod_model_name = None
             self._runpod_chat_openai = None
 
-        # Configure Mistral (OpenAI-compatible) fallback client lazily
+        # Configure Mistral native client lazily
         try:
             # Mistral provides an OpenAI-compatible Chat Completions API
             self._mistral_base_url = os.getenv(
                 "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"
             )
             self._mistral_model_name = self.config.get_mistral_model()
-            self._mistral_chat_openai: ChatOpenAI | None = None
+            self._mistral_chat: ChatMistralAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize Mistral fallback client config: {e}")
             self._mistral_base_url = None
             self._mistral_model_name = None
-            self._mistral_chat_openai = None
+            self._mistral_chat = None
 
     def _get_runpod_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for Runpod."""
@@ -109,22 +110,19 @@ class LLMManager:
             )
         return self._runpod_chat_openai
 
-    def _get_mistral_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for Mistral (fallback)."""
-        if self._mistral_chat_openai is None:
-            if not self._mistral_base_url:
-                raise RuntimeError("Mistral base URL is not configured")
+    def _get_mistral_llm(self) -> ChatMistralAI:
+        """Return a configured ChatMistralAI client for Mistral (fallback)."""
+        if self._mistral_chat is None:
             if not MISTRAL_API_KEY:
                 raise RuntimeError("MISTRAL_API_KEY is not set")
             mistral_timeout = self.config.get_mistral_timeout()
-            self._mistral_chat_openai = ChatOpenAI(
+            self._mistral_chat = ChatMistralAI(
                 api_key=MISTRAL_API_KEY,
-                base_url=self._mistral_base_url,
                 model=self._mistral_model_name or "mistral-small-latest",
                 temperature=0.3,
                 timeout=mistral_timeout,
             )
-        return self._mistral_chat_openai
+        return self._mistral_chat
 
     def get_model(self) -> ChatOpenAI:
         """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
@@ -132,7 +130,7 @@ class LLMManager:
             return self._get_runpod_llm()
         except Exception as e:
             logger.warning(
-                f"Falling back to Mistral ChatOpenAI due to Runpod error: {e}"
+                f"Falling back to Mistral ChatMistralAI due to Runpod error: {e}"
             )
             return self._get_mistral_llm()
 
@@ -165,14 +163,22 @@ class LLMManager:
                 ShouldUseRagDecision
             )
             result = await structured_llm.ainvoke(prompt)
-            logger.info(f"should_use_rag result: {result}")
+            logger.info(f"should_use_rag result from runpod: {result}")
             # with_structured_output returns a Pydantic object matching the schema
             if isinstance(result, ShouldUseRagDecision):
                 return bool(result.use_rag)
             return False
         except Exception as e:
             logger.error(f"Failed to decide should_use_rag: {e}")
-            return True
+            mistral_llm = self._get_mistral_llm()
+            structured_mistral_llm = mistral_llm.bind(
+                temperature=0
+            ).with_structured_output(ShouldUseRagDecision)
+            result = await structured_mistral_llm.ainvoke(prompt)
+            logger.info(f"should_use_rag result from mistral: {result}")
+            if isinstance(result, ShouldUseRagDecision):
+                return bool(result.use_rag)
+            return False
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
