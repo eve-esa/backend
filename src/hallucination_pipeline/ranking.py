@@ -4,7 +4,7 @@ from .config import PROMPTS
 from .utils import safe_prompt_format, call_model
 
 
-def rank_output(model, question, answerA, answerB, docs) -> ranking_schema:
+async def rank_output(model, question, answerA, answerB, docs) -> ranking_schema:
     """
     Score two generated answers to the same EO-related question.
 
@@ -34,7 +34,7 @@ def rank_output(model, question, answerA, answerB, docs) -> ranking_schema:
             },
         )
 
-        response = call_model(model, prompt)
+        response = await call_model(model, prompt)
 
         try:
             parsed_output = parser.parse(response)

@@ -222,7 +222,9 @@ async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> str:
+async def _summarize_history_with_runpod(
+    transcript: str, max_tokens: int = 50000
+) -> str:
     """Summarize entire conversation history."""
     if not transcript:
         return ""
@@ -237,7 +239,7 @@ def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> 
         _make_message("user", f"Conversation transcript:\n{transcript}"),
     ]
     try:
-        resp = llm.bind(max_tokens=max_tokens).invoke(messages)
+        resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
         return getattr(resp, "content", str(resp))
     except Exception:
         return ""
@@ -642,7 +644,7 @@ async def generate_answer(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
                 gen_start = time.perf_counter()
-                final_answer = llm_manager.generate_answer_mistral(
+                final_answer = await llm_manager.generate_answer_mistral(
                     query=request.query,
                     context=context,
                     max_new_tokens=request.max_new_tokens,
@@ -651,7 +653,7 @@ async def generate_answer(
         else:
             # Fallback: use existing direct generation path without memory persistence
             gen_start = time.perf_counter()
-            final_answer = llm_manager.generate_answer_mistral(
+            final_answer = await llm_manager.generate_answer_mistral(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
@@ -755,7 +757,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
-        summary_text = _summarize_history_with_runpod(summarizer_input)
+        summary_text = await _summarize_history_with_runpod(summarizer_input)
         if not summary_text:
             return
 

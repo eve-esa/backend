@@ -4,7 +4,9 @@ from .schemas import hallucination_schema
 from .utils import *
 
 
-def detect_hallucination(model, generation_output, docs: str) -> hallucination_schema:
+async def detect_hallucination(
+    model, generation_output, docs: str
+) -> hallucination_schema:
     """
     Detects hallucinations in a generated output using a Pydantic schema.
     Retries up to 5 times if the output format is invalid.
@@ -31,7 +33,7 @@ def detect_hallucination(model, generation_output, docs: str) -> hallucination_s
             },
         )
 
-        response = call_model(model, prompt)
+        response = await call_model(model, prompt)
 
         try:
             parsed_output = parser.parse(response)
