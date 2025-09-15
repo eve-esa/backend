@@ -290,14 +290,16 @@ class LLMManager:
             logger.error(f"Eve Instruct Runpod API call failed: {str(e)}")
             raise
 
-    def _call_eve_instruct_mistral(self, prompt: str, max_new_tokens: int = 150) -> str:
+    async def _call_eve_instruct_mistral(
+        self, prompt: str, max_new_tokens: int = 150
+    ) -> str:
         """
         Call the Eve Instruct model via Mistral using LangChain ChatMistralAI.
         """
         try:
             base_llm = self._get_mistral_llm()
             llm = base_llm.bind(max_tokens=max_new_tokens)
-            response = llm.invoke(prompt)
+            response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(f"Mistral model call failed: {str(e)}")
@@ -404,20 +406,13 @@ class LLMManager:
             logger.error(
                 f"Eve Instruct async API call failed: {str(e)}. Trying Mistral fallback."
             )
-            try:
-                base_llm = self._get_mistral_llm()
-                llm = base_llm.bind(max_tokens=max_new_tokens)
-                response = await llm.ainvoke(prompt)
-                return getattr(response, "content", str(response))
-            except Exception as e2:
-                logger.error(f"Mistral async fallback also failed: {str(e2)}")
-                raise
+            raise
 
     def _process_eve_response(self, response) -> str:
         """Kept for backward compatibility; now simply returns content if present."""
         return getattr(response, "content", str(response))
 
-    def generate_answer(
+    async def generate_answer(
         self,
         query: str,
         context: str,
@@ -446,13 +441,15 @@ class LLMManager:
                 )
                 context = context[:max_context_len]
 
-            return self._call_eve_instruct(prompt, max_new_tokens=max_new_tokens)
+            return await self._call_eve_instruct_async(
+                prompt, max_new_tokens=max_new_tokens
+            )
 
         except Exception as e:
             logger.error(f"Failed to generate answer using runpod model: {str(e)}")
             raise
 
-    def generate_answer_mistral(
+    async def generate_answer_mistral(
         self,
         query: str,
         context: str,
@@ -481,7 +478,7 @@ class LLMManager:
                 )
                 context = context[:max_context_len]
 
-            return self._call_eve_instruct_mistral(
+            return await self._call_eve_instruct_mistral(
                 prompt, max_new_tokens=max_new_tokens
             )
 

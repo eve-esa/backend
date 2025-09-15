@@ -123,13 +123,13 @@ def filter_docs(docs1_text, docs2_text):
     return "\n\n".join(combined)
 
 
-def call_model(model, prompt: str) -> str:
+async def call_model(model, prompt: str) -> str:
     """Invoke an LLM model that may be a LangChain ChatModel (invoke) or a callable pipeline.
 
     Returns a plain string output.
     """
     try:
-        result = model.invoke(prompt)
+        result = await model.ainvoke(prompt)
         return getattr(result, "content", str(result))
     except Exception as e:
         raise Exception(f"Error calling model: {e}")
