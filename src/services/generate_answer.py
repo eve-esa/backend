@@ -260,6 +260,69 @@ def _extract_candidate_texts(results: List[Any]) -> List[str]:
     return texts
 
 
+def _extract_result_text_for_dedup(item: Any) -> str:
+    """Extract a normalized text key from heterogeneous result items for deduplication.
+
+    Supports objects with `.payload`, plain dicts with `text`/`page_content`/`content`,
+    and falls back to common attributes. Returns a whitespace-collapsed string.
+    """
+    try:
+        # Dict-shaped item
+        if isinstance(item, dict):
+            value = item.get("text") or item.get("page_content") or item.get("content")
+            if not value:
+                payload = item.get("payload") or {}
+                if isinstance(payload, dict):
+                    value = (
+                        payload.get("page_content")
+                        or payload.get("text")
+                        or payload.get("content")
+                        or (payload.get("metadata") or {}).get("page_content")
+                    )
+            if value:
+                return " ".join(str(value).strip().split())
+
+        # Object with `.payload`
+        payload = getattr(item, "payload", None)
+        if isinstance(payload, dict):
+            value = (
+                payload.get("page_content")
+                or payload.get("text")
+                or payload.get("content")
+                or (payload.get("metadata") or {}).get("page_content")
+            )
+            if value:
+                return " ".join(str(value).strip().split())
+
+        # Common attributes as a fallback
+        for attr in ("text", "page_content", "content", "document"):
+            v = getattr(item, attr, None)
+            if v:
+                return " ".join(str(v).strip().split())
+    except Exception:
+        pass
+    return ""
+
+
+def _deduplicate_results(items: List[Any]) -> List[Any]:
+    """Remove duplicate items by comparing their extracted text content key.
+
+    Two items are considered duplicates if their extracted content (from
+    `text`, `payload.page_content`, `page_content`, or `content`) matches
+    after trimming and collapsing whitespace (case-sensitive by default).
+    """
+    seen: set[str] = set()
+    deduped: List[Any] = []
+    for it in items:
+        key = _extract_result_text_for_dedup(it)
+        # Keep at most one empty-key item
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(it)
+    return deduped
+
+
 def _build_context(items: List[Any]) -> str:
     """Build a context string from items that may be strings or {text, metadata} dicts.
 
@@ -573,7 +636,7 @@ async def setup_rag_and_context(request: GenerationRequest):
             # deduplicate context_list
             context_list = list(set(context_list))
             context = _build_context(context_list)
-            results = results + mcp_results
+            results = _deduplicate_results(results + mcp_results)
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
