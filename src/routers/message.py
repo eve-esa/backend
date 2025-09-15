@@ -158,6 +158,9 @@ async def create_message(
             output=answer,
             documents=documents_data,
             use_rag=is_rag,
+            metadata={
+                "latencies": latencies,
+            },
         )
 
         # Every-N-turn rolling summary and memory reset
@@ -217,6 +220,9 @@ async def update_message(
 
         if request.was_copied is not None:
             message.was_copied = request.was_copied
+
+        if request.feedback_reason is not None:
+            message.feedback_reason = request.feedback_reason
 
         await message.save()
 
