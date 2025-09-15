@@ -489,6 +489,8 @@ async def get_mcp_context(
     simplified_all: List[Dict[str, Any]] = []
     for r in extracted:
         text_val = _extract_text(r)
+        if isinstance(text_val, str) and "API call failed:" in text_val:
+            continue
         metadata_val: Dict[str, Any] = {}
         if isinstance(r, dict):
             metadata_val = r.get("metadata") or r.get("meta") or {}
