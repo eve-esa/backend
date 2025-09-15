@@ -409,6 +409,36 @@ async def get_mcp_context(
     """Call MCP semantic search and return (context, results) like get_rag_context."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
+    # If frontend provided filters that include anything other than year,
+    # we must NOT call Wiley MCP. In that case, return empty context/results.
+    def _has_non_year_filters(filters: Any) -> bool:
+        try:
+            if not isinstance(filters, dict) or not filters:
+                return False
+            for top_key, value in filters.items():
+                if top_key != "must" and value:
+                    return True
+            conditions = filters.get("must") or []
+            if not isinstance(conditions, list):
+                return True
+            for cond in conditions:
+                key = cond.get("key")
+                if key != "year":
+                    return True
+            return False
+        except Exception:
+            return True
+
+    if _has_non_year_filters(getattr(request, "filters", None)):
+        return (
+            [],
+            [],
+            {
+                "mcp_retrieval_latency": None,
+                "mcp_docs_reranking_latency": None,
+            },
+        )
+
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
