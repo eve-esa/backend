@@ -662,43 +662,43 @@ async def generate_answer(
 
         answer = _normalize_ai_output(final_answer or "")
 
+        model = llm_manager.get_model()
+        generation_response = generation_schema(question=request.query, answer=answer)
+        loop_result: Optional[dict] = None
+        hallucination_latency: Optional[dict] = None
+        if len(context.strip()) != 0 and request.hallucination_loop_flag:
+            logger.info("starting to run hallucination loop")
+            try:
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model,
+                    context,
+                    generation_response,
+                    request.collection_ids,
+                )
+                answer = loop_result["final_answer"]
+            except Exception as e:
+                logger.warning(f"Failed to run hallucination loop: {e}")
+                logger.info("falling back to mistral model for hallucination loop")
+                model = llm_manager.get_mistral_model()
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model,
+                    context,
+                    generation_response,
+                    request.collection_ids,
+                )
+                answer = loop_result["final_answer"]
+
+        total_latency = time.perf_counter() - total_start
+        latencies = {
+            **(latencies or {}),
+            "generation_latency": gen_latency,
+            "hallucination_latency": hallucination_latency,
+            "total_latency": total_latency,
+        }
+        return answer, results, is_rag, loop_result, latencies
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-    model = llm_manager.get_model()
-    generation_response = generation_schema(question=request.query, answer=answer)
-    loop_result: Optional[dict] = None
-    hallucination_latency: Optional[dict] = None
-    if len(context.strip()) != 0 and request.hallucination_loop_flag:
-        logger.info("starting to run hallucination loop")
-        try:
-            loop_result, hallucination_latency = await run_hallucination_loop(
-                model,
-                context,
-                generation_response,
-                request.collection_ids,
-            )
-            answer = loop_result["final_answer"]
-        except Exception as e:
-            logger.warning(f"Failed to run hallucination loop: {e}")
-            logger.info("falling back to mistral model for hallucination loop")
-            model = llm_manager.get_mistral_model()
-            loop_result, hallucination_latency = await run_hallucination_loop(
-                model,
-                context,
-                generation_response,
-                request.collection_ids,
-            )
-            answer = loop_result["final_answer"]
-
-    total_latency = time.perf_counter() - total_start
-    latencies = {
-        **(latencies or {}),
-        "generation_latency": gen_latency,
-        "hallucination_latency": hallucination_latency,
-        "total_latency": total_latency,
-    }
-    return answer, results, is_rag, loop_result, latencies
 
 
 async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
