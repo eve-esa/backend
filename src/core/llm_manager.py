@@ -15,6 +15,7 @@ from langchain_mistralai import ChatMistralAI
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from pydantic import BaseModel, Field
 from typing import Optional
+from src.constants import MODEL_CONTEXT_SIZE
 
 
 logger = logging.getLogger(__name__)
@@ -434,7 +435,7 @@ class LLMManager:
         """
         try:
             prompt = self._generate_prompt(query=query, context=context)
-            max_context_len = (1024 - max_new_tokens) * 4
+            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
             if len(context) > max_context_len:
                 logger.info(
                     f"Truncating context from {len(context)} to {max_context_len} characters"
@@ -471,7 +472,7 @@ class LLMManager:
         """
         try:
             prompt = self._generate_prompt(query=query, context=context)
-            max_context_len = (1024 - max_new_tokens) * 4
+            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
             if len(context) > max_context_len:
                 logger.info(
                     f"Truncating context from {len(context)} to {max_context_len} characters"
@@ -521,7 +522,7 @@ class LLMManager:
             elif llm == LLMType.EVE_INSTRUCT.value:
                 # Truncate context if needed
                 if context:
-                    max_context_len = (1024 - max_new_tokens) * 4
+                    max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
                     if len(context) > max_context_len:
                         logger.info(
                             f"Truncating context from {len(context)} to {max_context_len} characters"
