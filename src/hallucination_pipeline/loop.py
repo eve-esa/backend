@@ -21,7 +21,9 @@ async def run_hallucination_loop(
 
     # Detection timing
     detection_start = time.perf_counter()
-    hallucination_response = detect_hallucination(model, generation_response, docs)
+    hallucination_response = await detect_hallucination(
+        model, generation_response, docs
+    )
     detection_latency = time.perf_counter() - detection_start
     has_spans = any(
         span.get("prob", 0.0) > prob_threshold
@@ -57,7 +59,7 @@ async def run_hallucination_loop(
                 continue
             response_copy = hallucination_response.model_copy()
             response_copy.soft_labels = [soft]
-            rewritten_response = rewrite_query(model, response_copy)
+            rewritten_response = await rewrite_query(model, response_copy)
             new_docs = await vector_db_retrieve_context(
                 rewritten_response.rewritten_question, collection_ids
             )
@@ -65,7 +67,7 @@ async def run_hallucination_loop(
         span_reprompting_latency = time.perf_counter() - span_loop_start
     else:
         rewrite_start = time.perf_counter()
-        rewritten_response = rewrite_query(model, hallucination_response)
+        rewritten_response = await rewrite_query(model, hallucination_response)
         new_docs = await vector_db_retrieve_context(
             rewritten_response.rewritten_question, collection_ids
         )
@@ -74,9 +76,9 @@ async def run_hallucination_loop(
 
     # Regeneration timing
     regeneration_start = time.perf_counter()
-    reflected_response = regenerate_answer(model, hallucination_response, docs)
+    reflected_response = await regenerate_answer(model, hallucination_response, docs)
     regeneration_latency = time.perf_counter() - regeneration_start
-    ranked_response = rank_output(
+    ranked_response = await rank_output(
         model,
         generation_response.question,
         generation_response.answer,

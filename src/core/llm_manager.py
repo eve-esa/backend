@@ -10,10 +10,12 @@ import os
 
 import openai
 from langchain_openai import ChatOpenAI
+from langchain_mistralai import ChatMistralAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from pydantic import BaseModel, Field
 from typing import Optional
+from src.constants import MODEL_CONTEXT_SIZE
 
 
 logger = logging.getLogger(__name__)
@@ -78,19 +80,19 @@ class LLMManager:
             self._runpod_model_name = None
             self._runpod_chat_openai = None
 
-        # Configure Mistral (OpenAI-compatible) fallback client lazily
+        # Configure Mistral native client lazily
         try:
             # Mistral provides an OpenAI-compatible Chat Completions API
             self._mistral_base_url = os.getenv(
                 "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"
             )
             self._mistral_model_name = self.config.get_mistral_model()
-            self._mistral_chat_openai: ChatOpenAI | None = None
+            self._mistral_chat: ChatMistralAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize Mistral fallback client config: {e}")
             self._mistral_base_url = None
             self._mistral_model_name = None
-            self._mistral_chat_openai = None
+            self._mistral_chat = None
 
     def _get_runpod_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for Runpod."""
@@ -109,22 +111,19 @@ class LLMManager:
             )
         return self._runpod_chat_openai
 
-    def _get_mistral_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for Mistral (fallback)."""
-        if self._mistral_chat_openai is None:
-            if not self._mistral_base_url:
-                raise RuntimeError("Mistral base URL is not configured")
+    def _get_mistral_llm(self) -> ChatMistralAI:
+        """Return a configured ChatMistralAI client for Mistral (fallback)."""
+        if self._mistral_chat is None:
             if not MISTRAL_API_KEY:
                 raise RuntimeError("MISTRAL_API_KEY is not set")
             mistral_timeout = self.config.get_mistral_timeout()
-            self._mistral_chat_openai = ChatOpenAI(
+            self._mistral_chat = ChatMistralAI(
                 api_key=MISTRAL_API_KEY,
-                base_url=self._mistral_base_url,
                 model=self._mistral_model_name or "mistral-small-latest",
                 temperature=0.3,
                 timeout=mistral_timeout,
             )
-        return self._mistral_chat_openai
+        return self._mistral_chat
 
     def get_model(self) -> ChatOpenAI:
         """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
@@ -132,9 +131,13 @@ class LLMManager:
             return self._get_runpod_llm()
         except Exception as e:
             logger.warning(
-                f"Falling back to Mistral ChatOpenAI due to Runpod error: {e}"
+                f"Falling back to Mistral ChatMistralAI due to Runpod error: {e}"
             )
             return self._get_mistral_llm()
+
+    def get_mistral_model(self) -> ChatMistralAI:
+        """Public accessor for the Mistral model."""
+        return self._get_mistral_llm()
 
     async def should_use_rag(self, query: str) -> bool:
         """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
@@ -165,14 +168,22 @@ class LLMManager:
                 ShouldUseRagDecision
             )
             result = await structured_llm.ainvoke(prompt)
-            logger.info(f"should_use_rag result: {result}")
+            logger.info(f"should_use_rag result from runpod: {result}")
             # with_structured_output returns a Pydantic object matching the schema
             if isinstance(result, ShouldUseRagDecision):
                 return bool(result.use_rag)
             return False
         except Exception as e:
             logger.error(f"Failed to decide should_use_rag: {e}")
-            return True
+            mistral_llm = self._get_mistral_llm()
+            structured_mistral_llm = mistral_llm.bind(
+                temperature=0
+            ).with_structured_output(ShouldUseRagDecision)
+            result = await structured_mistral_llm.ainvoke(prompt)
+            logger.info(f"should_use_rag result from mistral: {result}")
+            if isinstance(result, ShouldUseRagDecision):
+                return bool(result.use_rag)
+            return False
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
@@ -277,17 +288,23 @@ class LLMManager:
             response = llm.invoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
-            logger.error(
-                f"Eve Instruct API call failed: {str(e)}. Trying Mistral fallback."
-            )
-            try:
-                base_llm = self._get_mistral_llm()
-                llm = base_llm.bind(max_tokens=max_new_tokens)
-                response = llm.invoke(prompt)
-                return getattr(response, "content", str(response))
-            except Exception as e2:
-                logger.error(f"Mistral fallback also failed: {str(e2)}")
-                raise
+            logger.error(f"Eve Instruct Runpod API call failed: {str(e)}")
+            raise
+
+    async def _call_eve_instruct_mistral(
+        self, prompt: str, max_new_tokens: int = 150
+    ) -> str:
+        """
+        Call the Eve Instruct model via Mistral using LangChain ChatMistralAI.
+        """
+        try:
+            base_llm = self._get_mistral_llm()
+            llm = base_llm.bind(max_tokens=max_new_tokens)
+            response = await llm.ainvoke(prompt)
+            return getattr(response, "content", str(response))
+        except Exception as e:
+            logger.error(f"Mistral model call failed: {str(e)}")
+            raise
 
     def _process_stream_chunk(self, chunk) -> str:
         """
@@ -390,80 +407,84 @@ class LLMManager:
             logger.error(
                 f"Eve Instruct async API call failed: {str(e)}. Trying Mistral fallback."
             )
-            try:
-                base_llm = self._get_mistral_llm()
-                llm = base_llm.bind(max_tokens=max_new_tokens)
-                response = await llm.ainvoke(prompt)
-                return getattr(response, "content", str(response))
-            except Exception as e2:
-                logger.error(f"Mistral async fallback also failed: {str(e2)}")
-                raise
+            raise
 
     def _process_eve_response(self, response) -> str:
         """Kept for backward compatibility; now simply returns content if present."""
         return getattr(response, "content", str(response))
 
-    def generate_answer(
+    async def generate_answer(
         self,
         query: str,
         context: str,
-        llm: str,
         max_new_tokens: int = 150,
     ) -> str:
         """
-        Generate an answer using the specified language model.
+        Generate an answer using the runpod model.
 
         Args:
             query: The user's question
             context: Contextual information to assist the model
-            llm: Which language model to use (default: "llama-3.1")
             max_new_tokens: Maximum new tokens for the response
 
         Returns:
             The generated answer
 
         Raises:
-            ValueError: If an unsupported LLM type is specified
             Exception: For other errors during generation
         """
         try:
             prompt = self._generate_prompt(query=query, context=context)
+            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
+            if len(context) > max_context_len:
+                logger.info(
+                    f"Truncating context from {len(context)} to {max_context_len} characters"
+                )
+                context = context[:max_context_len]
 
-            if llm == LLMType.OPENAI.value:
-                return self._call_openai(prompt, max_tokens=max_new_tokens)
-
-            elif llm == LLMType.EVE_INSTRUCT.value:
-                # Truncate context if needed
-                if context:
-                    max_context_len = (1024 - max_new_tokens) * 4
-                    if len(context) > max_context_len:
-                        logger.info(
-                            f"Truncating context from {len(context)} to {max_context_len} characters"
-                        )
-                        context = context[:max_context_len]
-
-                try:
-                    return self._call_eve_instruct(
-                        prompt, max_new_tokens=max_new_tokens
-                    )
-                except TypeError as e:
-                    if "coroutine" in str(e).lower():
-                        # If we get a coroutine error, try the async version
-                        logger.info(
-                            "Detected coroutine response, trying async approach"
-                        )
-                        return asyncio.run(
-                            self._call_eve_instruct_async(prompt, max_new_tokens)
-                        )
-                    else:
-                        raise
-
-            else:
-                # Handle other LLM types or raise error
-                raise ValueError(f"Unsupported LLM type: {llm}")
+            return await self._call_eve_instruct_async(
+                prompt, max_new_tokens=max_new_tokens
+            )
 
         except Exception as e:
-            logger.error(f"Failed to generate answer: {str(e)}")
+            logger.error(f"Failed to generate answer using runpod model: {str(e)}")
+            raise
+
+    async def generate_answer_mistral(
+        self,
+        query: str,
+        context: str,
+        max_new_tokens: int = 150,
+    ) -> str:
+        """
+        Generate an answer using the mistral model.
+
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            max_new_tokens: Maximum new tokens for the response
+
+        Returns:
+            The generated answer
+
+        Raises:
+            Exception: For other errors during generation
+        """
+        try:
+            prompt = self._generate_prompt(query=query, context=context)
+            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
+            if len(context) > max_context_len:
+                logger.info(
+                    f"Truncating context from {len(context)} to {max_context_len} characters"
+                )
+                context = context[:max_context_len]
+
+            return await self._call_eve_instruct_mistral(
+                prompt, max_new_tokens=max_new_tokens
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to generate answer using mistral model: {str(e)}")
             raise
 
     async def generate_answer_stream(
@@ -501,7 +522,7 @@ class LLMManager:
             elif llm == LLMType.EVE_INSTRUCT.value:
                 # Truncate context if needed
                 if context:
-                    max_context_len = (1024 - max_new_tokens) * 4
+                    max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
                     if len(context) > max_context_len:
                         logger.info(
                             f"Truncating context from {len(context)} to {max_context_len} characters"

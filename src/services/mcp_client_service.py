@@ -179,7 +179,7 @@ class MultiServerMCPClientService:
             return formatted_tools
         except Exception as e:
             logger.error(f"Failed to list tools from server '{server_name}': {e}")
-            raise
+            return []
 
     async def list_tools_from_all_servers(self) -> List[Dict[str, Any]]:
         """List available tools from all enabled MCP servers."""
@@ -212,7 +212,7 @@ class MultiServerMCPClientService:
 
         except Exception as e:
             logger.error(f"Failed to list tools from all servers: {e}")
-            raise
+            return []
 
         return all_tools
 
@@ -238,7 +238,14 @@ class MultiServerMCPClientService:
 
         except Exception as e:
             logger.error(f"Failed to call tool '{name}' on server '{server_name}': {e}")
-            raise
+            return {
+                "content": [],
+                "is_error": True,
+                "server": server_name,
+                "tool_name": name,
+                "arguments": arguments or {},
+                "error": str(e),
+            }
 
     async def _call_tool_with_original_client(
         self, server_name: str, name: str, arguments: Optional[Dict[str, Any]] = None
@@ -259,7 +266,14 @@ class MultiServerMCPClientService:
         elif transport in ["streamable_http", "websocket"]:
             return await self._call_tool_over_network(server_config, name, arguments)
         else:
-            raise ValueError(f"Unsupported transport: {transport}")
+            return {
+                "content": [],
+                "is_error": True,
+                "server": server_name,
+                "tool_name": name,
+                "arguments": arguments or {},
+                "error": f"Unsupported transport: {transport}",
+            }
 
     async def _call_tool_over_stdio(
         self,
@@ -513,7 +527,7 @@ class MultiServerMCPClientService:
                     }
         except Exception as e:
             logger.error(f"Failed to call tool '{name}' on all servers: {e}")
-            raise
+            return {}
 
         return results
 

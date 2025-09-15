@@ -222,7 +222,9 @@ async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) 
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> str:
+async def _summarize_history_with_runpod(
+    transcript: str, max_tokens: int = 50000
+) -> str:
     """Summarize entire conversation history."""
     if not transcript:
         return ""
@@ -237,7 +239,7 @@ def _summarize_history_with_runpod(transcript: str, max_tokens: int = 50000) -> 
         _make_message("user", f"Conversation transcript:\n{transcript}"),
     ]
     try:
-        resp = llm.bind(max_tokens=max_tokens).invoke(messages)
+        resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
         return getattr(resp, "content", str(resp))
     except Exception:
         return ""
@@ -340,7 +342,7 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
 
 async def get_mcp_context(
     request: GenerationRequest,
-) -> tuple[str, list, Dict[str, Optional[float]]]:
+) -> tuple[list, list, Dict[str, Optional[float]]]:
     """Call MCP semantic search and return (context, results) like get_rag_context."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
@@ -360,7 +362,20 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
 
     # Normalize response payload
-    content_items = raw.get("content", []) if isinstance(raw, dict) else []
+    content_items = []
+    is_error = False
+    if isinstance(raw, dict):
+        is_error = bool(raw.get("is_error"))
+        content_items = raw.get("content", []) or []
+    if is_error:
+        return (
+            [],
+            [],
+            {
+                "mcp_retrieval_latency": mcp_retrieval_latency,
+                "mcp_docs_reranking_latency": None,
+            },
+        )
 
     def _ensure_list(obj: Any) -> List[Any]:
         if obj is None:
@@ -447,9 +462,9 @@ async def get_mcp_context(
                 else:
                     mapped_results.append({"text": doc_text, "metadata": {}})
 
-            context = _build_context([item["text"] for item in mapped_results])
+            context_list = [item["text"] for item in mapped_results]
             return (
-                context,
+                context_list,
                 mapped_results,
                 {
                     "mcp_retrieval_latency": mcp_retrieval_latency,
@@ -463,9 +478,9 @@ async def get_mcp_context(
 
     # Fallback: use the first k results as-is
     trimmed = simplified_all[: request.k]
-    context = _build_context([item["text"] for item in trimmed])
+    context_list = [item["text"] for item in trimmed]
     return (
-        context,
+        context_list,
         trimmed,
         {
             "mcp_retrieval_latency": mcp_retrieval_latency,
@@ -476,7 +491,7 @@ async def get_mcp_context(
 
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple[str, list, Dict[str, Optional[float]]]:
+) -> tuple[list, list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
     # Retrieve with latency measurements
     results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
@@ -490,7 +505,7 @@ async def get_rag_context(
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
-        return "", [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
+        return [], [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
 
     # Extract plain text for reranker input (support both 'page_content' and 'text')
     candidate_texts = _extract_candidate_texts(results)
@@ -507,9 +522,9 @@ async def get_rag_context(
             )
             top_reranked = reranked_sorted[: request.k]
             trimmed = results[: request.k]
-            context = _build_context([r.get("document", "") for r in top_reranked])
+            context_list = [r.get("document", "") for r in top_reranked]
             return (
-                context,
+                context_list,
                 trimmed,
                 {
                     **vs_latencies,
@@ -525,7 +540,7 @@ async def get_rag_context(
     trimmed = results[: request.k]
     trimmed_texts = _extract_candidate_texts(trimmed)
     return (
-        _build_context(trimmed_texts),
+        trimmed_texts,
         trimmed,
         {
             **vs_latencies,
@@ -537,36 +552,34 @@ async def get_rag_context(
 async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
     # Check if we need to use RAG using LLMManager
-    try:
-        is_rag = await LLMManager().should_use_rag(request.query)
-    except Exception as e:
-        logger.warning(f"Failed to determine RAG usage, defaulting to no RAG: {e}")
-        is_rag = False
+    is_rag = await LLMManager().should_use_rag(request.query)
 
     # Get context if using RAG
     latencies: Dict[str, Optional[float]] = {}
+    context, results = "", []
     if is_rag:
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
             rag_lat: Dict[str, Optional[float]] = {}
             mcp_lat: Dict[str, Optional[float]] = {}
 
-            context, results, rag_lat = await get_rag_context(vector_store, request)
-            mcp_context, mcp_results, mcp_lat = await get_mcp_context(request)
+            context_list, results, rag_lat = await get_rag_context(
+                vector_store, request
+            )
+            mcp_context_list, mcp_results, mcp_lat = await get_mcp_context(request)
 
             # Merge RAG and MCP contexts and results
-            if mcp_context:
-                context = f"{context}\n{mcp_context}" if context else mcp_context
-            if isinstance(results, list) and isinstance(mcp_results, list):
-                results = results + mcp_results
+            context_list = context_list + mcp_context_list
+            # deduplicate context_list
+            context_list = list(set(context_list))
+            context = _build_context(context_list)
+            results = results + mcp_results
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
             logger.warning(
                 f"Failed to get RAG context and MCP context and merge them: {e}"
             )
-    else:
-        context, results = "", []
 
     return context, results, is_rag, latencies
 
@@ -631,20 +644,18 @@ async def generate_answer(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
                 gen_start = time.perf_counter()
-                final_answer = llm_manager.generate_answer(
+                final_answer = await llm_manager.generate_answer_mistral(
                     query=request.query,
                     context=context,
-                    llm=request.llm,
                     max_new_tokens=request.max_new_tokens,
                 )
                 gen_latency = time.perf_counter() - gen_start
         else:
             # Fallback: use existing direct generation path without memory persistence
             gen_start = time.perf_counter()
-            final_answer = llm_manager.generate_answer(
+            final_answer = await llm_manager.generate_answer_mistral(
                 query=request.query,
                 context=context,
-                llm=request.llm,
                 max_new_tokens=request.max_new_tokens,
             )
             gen_latency = time.perf_counter() - gen_start
@@ -658,19 +669,27 @@ async def generate_answer(
     generation_response = generation_schema(question=request.query, answer=answer)
     loop_result: Optional[dict] = None
     hallucination_latency: Optional[dict] = None
-    for attempt in range(5):
+    if len(context.strip()) != 0 and request.hallucination_loop_flag:
+        logger.info("starting to run hallucination loop")
         try:
-            if context is not None and request.hallucination_loop_flag:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                answer = loop_result["final_answer"]
-                break
+            loop_result, hallucination_latency = await run_hallucination_loop(
+                model,
+                context,
+                generation_response,
+                request.collection_ids,
+            )
+            answer = loop_result["final_answer"]
         except Exception as e:
-            print(f"[Attempt {attempt+1}] Parsing failed: {e}\n")
+            logger.warning(f"Failed to run hallucination loop: {e}")
+            logger.info("falling back to mistral model for hallucination loop")
+            model = llm_manager.get_mistral_model()
+            loop_result, hallucination_latency = await run_hallucination_loop(
+                model,
+                context,
+                generation_response,
+                request.collection_ids,
+            )
+            answer = loop_result["final_answer"]
 
     total_latency = time.perf_counter() - total_start
     latencies = {
@@ -699,6 +718,9 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if total_turns == 0 or total_turns % summary_every != 0:
             return
 
+        logger.info(
+            "starting to summarize history for conversation id: %s", conversation_id
+        )
         # Build transcript from the last `summary_every` turns (each Message is one turn)
         skip = max(0, total_turns - summary_every)
         messages = await MessageModel.find_all(
@@ -735,7 +757,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
-        summary_text = _summarize_history_with_runpod(summarizer_input)
+        summary_text = await _summarize_history_with_runpod(summarizer_input)
         if not summary_text:
             return
 

@@ -4,7 +4,7 @@ from .schemas import self_reflect_schema
 from .utils import *
 
 
-def regenerate_answer(
+async def regenerate_answer(
     model, hallucination_output: dict, docs: str
 ) -> self_reflect_schema:
     """
@@ -44,7 +44,7 @@ def regenerate_answer(
             },
         )
 
-        response = call_model(model, prompt)
+        response = await call_model(model, prompt)
 
         try:
             parsed_output = parser.parse(response)

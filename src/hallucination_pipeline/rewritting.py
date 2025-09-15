@@ -4,7 +4,7 @@ from .schemas import rewrite_schema
 from .utils import *
 
 
-def rewrite_query(model, hallucination_output) -> rewrite_schema:
+async def rewrite_query(model, hallucination_output) -> rewrite_schema:
     """
     Rewrite a user query to improve factuality or context alignment using retrieved documents.
     Retries up to 5 times if output parsing fails.
@@ -40,7 +40,7 @@ def rewrite_query(model, hallucination_output) -> rewrite_schema:
             },
         )
 
-        response = call_model(model, prompt)
+        response = await call_model(model, prompt)
 
         try:
             parsed_output = parser.parse(response)
