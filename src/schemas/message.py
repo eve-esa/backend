@@ -11,3 +11,4 @@ class FeedbackEnum(str, Enum):
 class MessageUpdate(BaseModel):
     was_copied: Optional[bool] = None
     feedback: Optional[FeedbackEnum] = None
+    feedback_reason: Optional[str] = None
