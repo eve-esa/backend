@@ -18,9 +18,9 @@ from src.constants import (
     DEFAULT_LLM,
     DEFAULT_K,
     DEFAULT_SCORE_THRESHOLD,
-    DEFAULT_GET_UNIQUE_DOCS,
     DEFAULT_MAX_NEW_TOKENS,
-    RERANKER_MODEL,
+    POLICY_NOT_ANSWER,
+    POLICY_PROMPT,
 )
 from src.utils.helpers import get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 
 # No direct OpenAI client usage; we use Runpod-backed ChatOpenAI via LLMManager
+
+
+class PolicyCheck(BaseModel):
+    violates_policy: bool = Field(
+        description="Whether the input violates EO policies (True/False)"
+    )
 
 
 class GenerationRequest(BaseModel):
@@ -687,6 +693,17 @@ async def generate_answer(
     llm_manager = LLMManager()
 
     try:
+        # Check if the query violates EO policies
+        policy_prompt = POLICY_PROMPT.format(question=request.query)
+        base_llm = llm_manager.get_model()
+        structured_llm = base_llm.bind(temperature=0).with_structured_output(
+            PolicyCheck
+        )
+        policy_result = await structured_llm.ainvoke(policy_prompt)
+        logger.info(f"policy_result: {policy_result}")
+        if policy_result.violates_policy:
+            return POLICY_NOT_ANSWER, [], False, {}, {}
+
         total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(request)
 
