@@ -11,5 +11,5 @@ def load_yaml(filename: str):
 
 
 # Load YAMLs co-located with this module
-PROMPTS = load_yaml("templetes.yaml")
+PROMPTS = load_yaml("../templates/hallucination.yaml")
 CONFIG = load_yaml("config.yaml")
