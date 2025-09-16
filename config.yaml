@@ -11,7 +11,7 @@ runpod:
 
 mistral:
   model: "mistral-small-latest"
-  timeout: 3 # seconds
+  timeout: 20 # seconds
 
 mcp:
   servers:

@@ -1,5 +1,5 @@
 from src.core.vector_store_manager import VectorStoreManager
-from src.schemas.message import MessageUpdate
+from src.schemas.message import MessageUpdate, CreateMessageResponse
 from src.services.generate_answer import (
     GenerationRequest,
     generate_answer,
@@ -106,7 +106,9 @@ def _extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
         return None
 
 
-@router.post("/conversations/{conversation_id}/messages", response_model=Dict[str, Any])
+@router.post(
+    "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse
+)
 async def create_message(
     request: GenerationRequest,
     conversation_id: str,

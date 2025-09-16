@@ -260,6 +260,69 @@ def _extract_candidate_texts(results: List[Any]) -> List[str]:
     return texts
 
 
+def _extract_result_text_for_dedup(item: Any) -> str:
+    """Extract a normalized text key from heterogeneous result items for deduplication.
+
+    Supports objects with `.payload`, plain dicts with `text`/`page_content`/`content`,
+    and falls back to common attributes. Returns a whitespace-collapsed string.
+    """
+    try:
+        # Dict-shaped item
+        if isinstance(item, dict):
+            value = item.get("text") or item.get("page_content") or item.get("content")
+            if not value:
+                payload = item.get("payload") or {}
+                if isinstance(payload, dict):
+                    value = (
+                        payload.get("page_content")
+                        or payload.get("text")
+                        or payload.get("content")
+                        or (payload.get("metadata") or {}).get("page_content")
+                    )
+            if value:
+                return " ".join(str(value).strip().split())
+
+        # Object with `.payload`
+        payload = getattr(item, "payload", None)
+        if isinstance(payload, dict):
+            value = (
+                payload.get("page_content")
+                or payload.get("text")
+                or payload.get("content")
+                or (payload.get("metadata") or {}).get("page_content")
+            )
+            if value:
+                return " ".join(str(value).strip().split())
+
+        # Common attributes as a fallback
+        for attr in ("text", "page_content", "content", "document"):
+            v = getattr(item, attr, None)
+            if v:
+                return " ".join(str(v).strip().split())
+    except Exception:
+        pass
+    return ""
+
+
+def _deduplicate_results(items: List[Any]) -> List[Any]:
+    """Remove duplicate items by comparing their extracted text content key.
+
+    Two items are considered duplicates if their extracted content (from
+    `text`, `payload.page_content`, `page_content`, or `content`) matches
+    after trimming and collapsing whitespace (case-sensitive by default).
+    """
+    seen: set[str] = set()
+    deduped: List[Any] = []
+    for it in items:
+        key = _extract_result_text_for_dedup(it)
+        # Keep at most one empty-key item
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(it)
+    return deduped
+
+
 def _build_context(items: List[Any]) -> str:
     """Build a context string from items that may be strings or {text, metadata} dicts.
 
@@ -346,6 +409,36 @@ async def get_mcp_context(
     """Call MCP semantic search and return (context, results) like get_rag_context."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
+    # If frontend provided filters that include anything other than year,
+    # we must NOT call Wiley MCP. In that case, return empty context/results.
+    def _has_non_year_filters(filters: Any) -> bool:
+        try:
+            if not isinstance(filters, dict) or not filters:
+                return False
+            for top_key, value in filters.items():
+                if top_key != "must" and value:
+                    return True
+            conditions = filters.get("must") or []
+            if not isinstance(conditions, list):
+                return True
+            for cond in conditions:
+                key = cond.get("key")
+                if key != "year":
+                    return True
+            return False
+        except Exception:
+            return True
+
+    if _has_non_year_filters(getattr(request, "filters", None)):
+        return (
+            [],
+            [],
+            {
+                "mcp_retrieval_latency": None,
+                "mcp_docs_reranking_latency": None,
+            },
+        )
+
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
@@ -426,6 +519,8 @@ async def get_mcp_context(
     simplified_all: List[Dict[str, Any]] = []
     for r in extracted:
         text_val = _extract_text(r)
+        if isinstance(text_val, str) and "API call failed:" in text_val:
+            continue
         metadata_val: Dict[str, Any] = {}
         if isinstance(r, dict):
             metadata_val = r.get("metadata") or r.get("meta") or {}
@@ -573,7 +668,7 @@ async def setup_rag_and_context(request: GenerationRequest):
             # deduplicate context_list
             context_list = list(set(context_list))
             context = _build_context(context_list)
-            results = results + mcp_results
+            results = _deduplicate_results(results + mcp_results)
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
@@ -662,43 +757,43 @@ async def generate_answer(
 
         answer = _normalize_ai_output(final_answer or "")
 
+        model = llm_manager.get_model()
+        generation_response = generation_schema(question=request.query, answer=answer)
+        loop_result: Optional[dict] = None
+        hallucination_latency: Optional[dict] = None
+        if len(context.strip()) != 0 and request.hallucination_loop_flag:
+            logger.info("starting to run hallucination loop")
+            try:
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model,
+                    context,
+                    generation_response,
+                    request.collection_ids,
+                )
+                answer = loop_result["final_answer"]
+            except Exception as e:
+                logger.warning(f"Failed to run hallucination loop: {e}")
+                logger.info("falling back to mistral model for hallucination loop")
+                model = llm_manager.get_mistral_model()
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model,
+                    context,
+                    generation_response,
+                    request.collection_ids,
+                )
+                answer = loop_result["final_answer"]
+
+        total_latency = time.perf_counter() - total_start
+        latencies = {
+            **(latencies or {}),
+            "generation_latency": gen_latency,
+            "hallucination_latency": hallucination_latency,
+            "total_latency": total_latency,
+        }
+        return answer, results, is_rag, loop_result, latencies
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-    model = llm_manager.get_model()
-    generation_response = generation_schema(question=request.query, answer=answer)
-    loop_result: Optional[dict] = None
-    hallucination_latency: Optional[dict] = None
-    if len(context.strip()) != 0 and request.hallucination_loop_flag:
-        logger.info("starting to run hallucination loop")
-        try:
-            loop_result, hallucination_latency = await run_hallucination_loop(
-                model,
-                context,
-                generation_response,
-                request.collection_ids,
-            )
-            answer = loop_result["final_answer"]
-        except Exception as e:
-            logger.warning(f"Failed to run hallucination loop: {e}")
-            logger.info("falling back to mistral model for hallucination loop")
-            model = llm_manager.get_mistral_model()
-            loop_result, hallucination_latency = await run_hallucination_loop(
-                model,
-                context,
-                generation_response,
-                request.collection_ids,
-            )
-            answer = loop_result["final_answer"]
-
-    total_latency = time.perf_counter() - total_start
-    latencies = {
-        **(latencies or {}),
-        "generation_latency": gen_latency,
-        "hallucination_latency": hallucination_latency,
-        "total_latency": total_latency,
-    }
-    return answer, results, is_rag, loop_result, latencies
 
 
 async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
