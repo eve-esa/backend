@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 class PolicyCheck(BaseModel):
     violates_policy: bool = Field(
-        description="Whether the input violates EO policies (True/False)"
+        description="True if the input violates policies otherwise False"
     )
 
 
@@ -695,7 +695,7 @@ async def generate_answer(
     try:
         # Check if the query violates EO policies
         policy_prompt = POLICY_PROMPT.format(question=request.query)
-        base_llm = llm_manager.get_model()
+        base_llm = llm_manager.get_mistral_model()
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
         )

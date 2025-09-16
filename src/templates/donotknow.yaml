@@ -23,4 +23,4 @@ policy_prompt: |
   If the "{question}" is a valid question related to Earth observation or science data, it is appropriate.  
 
   Does the "{question}" violate any of the above policies? 
-  You must always return valid JSON fenced by a markdown code block. Do not return any additional text.
+  You must always return valid JSON. Do not return any additional text.
