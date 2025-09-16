@@ -1,3 +1,6 @@
+from pathlib import Path
+import yaml
+
 DEFAULT_QUERY = "What is ESA?"
 DEFAULT_COLLECTION = "esa-nasa-workshop"
 DEFAULT_LLM = "eve-instruct-v0.1"  # or openai
@@ -29,3 +32,11 @@ Together, this collection provides a comprehensive representation of the Earth a
         "num_documents": 67507,
     },
 ]
+
+
+_BASE_DIR = Path(__file__).parent
+_POLICY_PATH = _BASE_DIR / "templates" / "donotknow.yaml"
+with open(_POLICY_PATH, "r") as _f:
+    POLICY_PROMPT = yaml.safe_load(_f)["policy_prompt"]
+
+POLICY_NOT_ANSWER = """Oops, that's outside my orbit! I'm here to talk about Earth Observation. If you'd like, we can explore satellites, remote sensing, or climate topics instead."""

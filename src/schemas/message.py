@@ -98,13 +98,13 @@ except Exception:  # If module is unavailable at import time, use loose typing f
 
 
 class LoopResult(BaseModel):
-    final_answer: str
-    generation_response: generation_schema
-    hallucination_response: hallucination_schema
+    final_answer: Optional[str] = None
+    generation_response: Optional[generation_schema] = None
+    hallucination_response: Optional[hallucination_schema] = None
     rewrite_response: Optional[rewrite_schema] = None
     reflected_response: Optional[self_reflect_schema] = None
     ranked_output: Optional[ranking_schema] = None
-    docs: str
+    docs: Optional[str] = None
 
 
 class CreateMessageResponse(BaseModel):
