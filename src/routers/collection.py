@@ -63,7 +63,7 @@ async def list_public_collections(pagination: Pagination = Depends()):
         data=[
             Collection(
                 id=collection["name"],
-                name=collection["name"],
+                name=collection.get("alias") or collection["name"],
                 description=collection["description"],
                 user_id=None,
                 embeddings_model=DEFAULT_EMBEDDING_MODEL,

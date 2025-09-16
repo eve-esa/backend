@@ -137,6 +137,16 @@ class VectorStoreManager:
         )
 
         collections = self.client.get_collections()
+        # Build a map of collection_name -> alias_name from Qdrant aliases response
+        aliases_response = self.client.get_aliases()
+        alias_map: Dict[str, str] = {}
+        alias_items = getattr(aliases_response, "aliases", aliases_response)
+        for item in alias_items or []:
+            alias_name = getattr(item, "alias_name", None)
+            collection_name = getattr(item, "collection_name", None)
+            if collection_name and alias_name:
+                # Prefer first seen alias per collection
+                alias_map.setdefault(collection_name, alias_name)
 
         start = (page - 1) * limit
         end = start + limit
@@ -144,6 +154,7 @@ class VectorStoreManager:
         public_collections = [
             {
                 "name": collection.name,
+                "alias": alias_map.get(collection.name) or None,
                 # Qdrant does not provide a description for its collections so we use a placeholder "Public Collection from ESA"
                 "description": collection.model_dump().get(
                     "description", "Public Collection from ESA"
