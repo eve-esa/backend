@@ -286,7 +286,7 @@ def _extract_result_text_for_dedup(item: Any) -> str:
                         or (payload.get("metadata") or {}).get("page_content")
                     )
             if value:
-                return " ".join(str(value).strip().split())
+                return " ".join(str(value).strip())
 
         # Object with `.payload`
         payload = getattr(item, "payload", None)
@@ -298,13 +298,13 @@ def _extract_result_text_for_dedup(item: Any) -> str:
                 or (payload.get("metadata") or {}).get("page_content")
             )
             if value:
-                return " ".join(str(value).strip().split())
+                return " ".join(str(value).strip())
 
         # Common attributes as a fallback
         for attr in ("text", "page_content", "content", "document"):
             v = getattr(item, attr, None)
             if v:
-                return " ".join(str(v).strip().split())
+                return " ".join(str(v).strip())
     except Exception:
         pass
     return ""
