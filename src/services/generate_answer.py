@@ -19,6 +19,7 @@ from src.constants import (
     DEFAULT_K,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_TEMPERATURE,
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
     RERANKER_MODEL,
@@ -50,6 +51,7 @@ class GenerationRequest(BaseModel):
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
+    temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     use_rag: bool = True
@@ -180,7 +182,29 @@ async def _get_or_create_compiled_graph():
         llm = LLMManager().get_model()
 
         async def call_model(state: "MessagesState"):
-            response = await llm.ainvoke(state["messages"])  # returns an AIMessage
+            # Allow per-invocation temperature and max tokens via state
+            bound_llm = llm
+            try:
+                bind_kwargs = {}
+                try:
+                    temperature_val = state.get("temperature")
+                except Exception:
+                    temperature_val = None
+                try:
+                    max_new_tokens_val = state.get("max_new_tokens")
+                except Exception:
+                    max_new_tokens_val = None
+                if temperature_val is not None:
+                    bind_kwargs["temperature"] = temperature_val
+                if max_new_tokens_val is not None:
+                    bind_kwargs["max_tokens"] = max_new_tokens_val
+                if bind_kwargs:
+                    bound_llm = llm.bind(**bind_kwargs)
+            except Exception:
+                bound_llm = llm
+            response = await bound_llm.ainvoke(
+                state["messages"]
+            )  # returns an AIMessage
             return {"messages": response}
 
         builder = StateGraph(MessagesState)
@@ -215,20 +239,6 @@ async def _get_or_create_compiled_graph():
                 return None, None
 
 
-async def _ainvoke_with_langgraph(messages_for_turn: List[Any], thread_id: str) -> Any:
-    """Invoke a minimal LangGraph with Async MongoDB checkpointer and return result dict."""
-    if not _langgraph_available:
-        return None
-    try:
-        graph, mode = await _get_or_create_compiled_graph()
-        if graph is None:
-            return None
-        config = {"configurable": {"thread_id": thread_id}}
-        return await graph.ainvoke({"messages": messages_for_turn}, config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 async def _summarize_history_with_runpod(
     transcript: str, max_tokens: int = 50000
 ) -> str:
@@ -250,21 +260,6 @@ async def _summarize_history_with_runpod(
         return getattr(resp, "content", str(resp))
     except Exception:
         return ""
-
-
-def _extract_candidate_texts(results: List[Any]) -> List[str]:
-    """Extract plain text strings from vector-store results payloads."""
-    texts: List[str] = []
-    for item in results:
-        payload = getattr(item, "payload", {}) or {}
-        text = (
-            payload.get("page_content")
-            or payload.get("text")
-            or payload.get("metadata", {}).get("page_content")
-            or ""
-        )
-        texts.append(text)
-    return texts
 
 
 def _extract_result_text_for_dedup(item: Any) -> str:
@@ -740,9 +735,18 @@ async def generate_answer(
             try:
                 # Single invoke to append assistant response to memory (async)
                 gen_start = time.perf_counter()
-                result = await _ainvoke_with_langgraph(
-                    messages_for_turn, conversation_id
-                )
+                # Pass temperature to the graph via state config
+                graph, mode = await _get_or_create_compiled_graph()
+                if graph is not None:
+                    config = {"configurable": {"thread_id": conversation_id}}
+                    state = {
+                        "messages": messages_for_turn,
+                        "temperature": request.temperature,
+                        "max_new_tokens": request.max_new_tokens,
+                    }
+                    result = await graph.ainvoke(state, config)
+                else:
+                    result = None
                 gen_latency = time.perf_counter() - gen_start
                 messages_out = result.get("messages")
                 final_answer = _extract_final_assistant_content(messages_out) or ""
@@ -756,6 +760,7 @@ async def generate_answer(
                     query=request.query,
                     context=context,
                     max_new_tokens=request.max_new_tokens,
+                    temperature=request.temperature,
                 )
                 gen_latency = time.perf_counter() - gen_start
         else:
@@ -765,6 +770,7 @@ async def generate_answer(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
+                temperature=request.temperature,
             )
             gen_latency = time.perf_counter() - gen_start
 
