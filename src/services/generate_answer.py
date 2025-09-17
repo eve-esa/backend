@@ -458,10 +458,81 @@ async def get_mcp_context(
         args["start_year"] = request.year[0]
         args["end_year"] = request.year[1]
 
-    # Call tool with latency measurement
+    # Call tool with latency measurement (with one retry on auth/session expiry)
+    def _is_auth_error(raw_payload: Any) -> bool:
+        """Detect auth/session expiry messages in MCP tool response.
+
+        Handles both top-level and nested {result: {content: [...]}} payloads and
+        items shaped as {type: 'text', text: '...'} or plain dicts/strings.
+        """
+        try:
+            if not isinstance(raw_payload, dict):
+                return False
+
+            # Support responses wrapped under 'result'
+            payload = (
+                raw_payload["result"]
+                if isinstance(raw_payload.get("result"), dict)
+                else raw_payload
+            )
+            items = payload.get("content") or []
+
+            def _extract_text(item: Any) -> str:
+                if isinstance(item, str):
+                    return item
+                if isinstance(item, dict):
+                    # Prefer explicit text for typed content items
+                    if item.get("type") == "text" and isinstance(item.get("text"), str):
+                        return item["text"]
+                    # Fallbacks commonly seen in various MCP adapters
+                    for key in ("text", "content", "document"):
+                        val = item.get(key)
+                        if isinstance(val, str):
+                            return val
+                return ""
+
+            auth_markers = (
+                "oauth 2.0 token has expired",
+                "unauthorized",
+                "401",
+            )
+
+            for it in items:
+                lower = _extract_text(it).lower()
+                if lower and any(marker in lower for marker in auth_markers):
+                    return True
+        except Exception:
+            return False
+        return False
+
     mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
+
+    # If auth expired, re-establish connection and retry once
+    if _is_auth_error(raw):
+        try:
+            await mcp_client.close()
+        except Exception:
+            pass
+        try:
+            # Reset shared instance to force reconnection with fresh token
+            logger.info(
+                "Resetting shared instance to force reconnection with fresh token"
+            )
+            from src.services.mcp_client_service import (
+                MultiServerMCPClientService as _Svc,
+            )
+
+            _Svc._shared_instance = None
+        except Exception:
+            pass
+        mcp_client = MultiServerMCPClientService.get_shared()
+        mcp_start = time.perf_counter()
+        raw = await mcp_client.call_tool_on_server(
+            "eve-mcp-demo", "semanticSearch", args
+        )
+        mcp_retrieval_latency = time.perf_counter() - mcp_start
 
     # Normalize response payload
     content_items = []
