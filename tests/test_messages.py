@@ -6,8 +6,8 @@ from src.database.models.message import Message
 
 
 # Mock the generate_answer for test speed reasons, remove the mock when actually want to test the answer generation from the LLM
-async def mock_generate_answer(request):
-    return "Test answer", [], False
+async def mock_generate_answer(request, conversation_id=None):
+    return "Test answer", [], False, None, {}
 
 
 @pytest.mark.asyncio
