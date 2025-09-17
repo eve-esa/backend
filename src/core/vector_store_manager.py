@@ -618,14 +618,13 @@ class VectorStoreManager:
             query_vector = await self.generate_query_vector(query, model)
             query_filter = Filter(**filters) if filters else None
 
-            # Get more results to allow filtering for documents that match the query
+            # Retrieve k per collection (caller may further rerank/filter)
             all_results = self._search_across_collections(
                 collection_names=collection_names,
                 query_vector=query_vector,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
-                limit_per_collection=k
-                * 10,  # Get more per-collection results for filtering
+                limit_per_collection=k,
             )
 
             logger.info(
@@ -677,7 +676,7 @@ class VectorStoreManager:
                 query_vector=query_vector,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
-                limit_per_collection=k * 10,
+                limit_per_collection=k,
             )
             retrieval_latency = time.perf_counter() - t1
 
