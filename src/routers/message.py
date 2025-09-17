@@ -146,9 +146,47 @@ async def create_message(
         except Exception:
             request.year = None
 
-        answer, results, is_rag, loop_result, latencies = await generate_answer(
-            request, conversation_id=conversation_id
-        )
+        try:
+            result = await generate_answer(request, conversation_id=conversation_id)
+        except TypeError:
+            result = await generate_answer(request)
+        # Normalize different possible return shapes from generate_answer
+        answer = ""
+        results: List[Any] = []
+        is_rag = False
+        loop_result: Optional[Dict[str, Any]] = None
+        latencies: Dict[str, Any] = {}
+        try:
+            if isinstance(result, (list, tuple)):
+                if len(result) >= 5:
+                    answer, results, is_rag, loop_result, latencies = result[:5]
+                elif len(result) == 4:
+                    answer, results, is_rag, fourth = result
+                    # Heuristic: treat dict with timing-like keys as latencies
+                    if isinstance(fourth, dict) and (
+                        any(k.endswith("latency") for k in fourth.keys())
+                        or "total_latency" in fourth
+                        or "generation_latency" in fourth
+                    ):
+                        latencies = fourth
+                    else:
+                        loop_result = fourth  # type: ignore[assignment]
+                elif len(result) == 3:
+                    answer, results, is_rag = result
+                else:
+                    # Unexpected shape; attempt best-effort mapping
+                    if len(result) >= 1:
+                        answer = result[0]
+                    if len(result) >= 2:
+                        results = result[1]
+                    if len(result) >= 3:
+                        is_rag = bool(result[2])
+            else:
+                # If a single value returned, treat it as the answer
+                answer = str(result)
+        except Exception:
+            # Fallback to defaults if unpacking fails
+            answer = str(result) if result is not None else ""
 
         documents_data = []
         if results:
