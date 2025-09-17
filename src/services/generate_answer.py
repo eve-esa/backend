@@ -21,6 +21,7 @@ from src.constants import (
     DEFAULT_MAX_NEW_TOKENS,
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
+    RERANKER_MODEL,
 )
 from src.utils.helpers import get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
@@ -397,13 +398,16 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
         return None
 
     try:
-        return await get_reranked_documents_from_runpod(
+        results = await get_reranked_documents_from_runpod(
             endpoint_id=endpoint_id,
             docs=candidate_texts,
             query=query,
             model=RERANKER_MODEL or "BAAI/bge-reranker-large",
             timeout=config.get_reranker_timeout(),
         )
+        # sort results by relevance_score
+        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return results
     except Exception as e:
         logger.warning(f"Reranker failed, using vector similarity order: {e}")
         return None
@@ -411,8 +415,8 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
 
 async def get_mcp_context(
     request: GenerationRequest,
-) -> tuple[list, list, Dict[str, Optional[float]]]:
-    """Call MCP semantic search and return (context, results) like get_rag_context."""
+) -> tuple[list, Dict[str, Optional[float]]]:
+    """Call MCP semantic search and return (results, latencies)."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
     # If frontend provided filters that include anything other than year,
@@ -437,7 +441,6 @@ async def get_mcp_context(
 
     if _has_non_year_filters(getattr(request, "filters", None)):
         return (
-            [],
             [],
             {
                 "mcp_retrieval_latency": None,
@@ -469,10 +472,8 @@ async def get_mcp_context(
     if is_error:
         return (
             [],
-            [],
             {
                 "mcp_retrieval_latency": mcp_retrieval_latency,
-                "mcp_docs_reranking_latency": None,
             },
         )
 
@@ -507,87 +508,11 @@ async def get_mcp_context(
         elif isinstance(data, list):
             extracted.extend(data)
 
-    # Helper to extract displayable text
-    def _extract_text(obj: Dict[str, Any]) -> str:
-        if not isinstance(obj, dict):
-            return str(obj)
-        return (
-            obj.get("document")
-            or obj.get("content")
-            or obj.get("text")
-            or obj.get("snippet")
-            or obj.get("abstract")
-            or obj.get("page_content")
-            or ""
-        )
+    latencies: Dict[str, Optional[float]] = {
+        "mcp_retrieval_latency": mcp_retrieval_latency,
+    }
 
-    # Reduce to {text, metadata}
-    simplified_all: List[Dict[str, Any]] = []
-    for r in extracted:
-        text_val = _extract_text(r)
-        if isinstance(text_val, str) and "API call failed:" in text_val:
-            continue
-        metadata_val: Dict[str, Any] = {}
-        if isinstance(r, dict):
-            metadata_val = r.get("metadata") or r.get("meta") or {}
-        simplified_all.append({"text": text_val, "metadata": metadata_val})
-
-    # Prepare candidate texts for optional reranking
-    candidate_texts = [item["text"] for item in simplified_all]
-
-    mcp_rerank_latency: Optional[float] = None
-    rerank_start = time.perf_counter()
-    reranked = await _maybe_rerank(candidate_texts, request.query)
-    if isinstance(reranked, list) and reranked:
-        mcp_rerank_latency = time.perf_counter() - rerank_start
-        try:
-            reranked_sorted = sorted(
-                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
-            )
-            top_reranked = reranked_sorted[: request.k]
-
-            # Map reranked documents back to original items to preserve metadata
-            from collections import defaultdict
-
-            text_to_indices: Dict[str, List[int]] = defaultdict(list)
-            for idx, item in enumerate(simplified_all):
-                text_to_indices[item["text"]].append(idx)
-
-            mapped_results: List[Dict[str, Any]] = []
-            for r in top_reranked:
-                doc_text = r.get("document", "")
-                indices = text_to_indices.get(doc_text, [])
-                if indices:
-                    mapped_idx = indices.pop(0)
-                    mapped_results.append(simplified_all[mapped_idx])
-                else:
-                    mapped_results.append({"text": doc_text, "metadata": {}})
-
-            context_list = [item["text"] for item in mapped_results]
-            return (
-                context_list,
-                mapped_results,
-                {
-                    "mcp_retrieval_latency": mcp_retrieval_latency,
-                    "mcp_docs_reranking_latency": mcp_rerank_latency,
-                },
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to process reranker output for MCP, using original order: {e}"
-            )
-
-    # Fallback: use the first k results as-is
-    trimmed = simplified_all[: request.k]
-    context_list = [item["text"] for item in trimmed]
-    return (
-        context_list,
-        trimmed,
-        {
-            "mcp_retrieval_latency": mcp_retrieval_latency,
-            "mcp_docs_reranking_latency": mcp_rerank_latency,
-        },
-    )
+    return extracted, latencies
 
 
 async def get_rag_context(
@@ -606,48 +531,8 @@ async def get_rag_context(
 
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
-        return [], [], {**(vs_latencies or {}), "qdrant_docs_reranking_latency": None}
 
-    # Extract plain text for reranker input (support both 'page_content' and 'text')
-    candidate_texts = _extract_candidate_texts(results)
-
-    # Optionally rerank and build context directly from reranker documents
-    qdrant_rerank_latency: Optional[float] = None
-    rerank_start = time.perf_counter()
-    reranked = await _maybe_rerank(candidate_texts, request.query)
-    if isinstance(reranked, list) and reranked:
-        qdrant_rerank_latency = time.perf_counter() - rerank_start
-        try:
-            reranked_sorted = sorted(
-                reranked, key=lambda x: x.get("relevance_score", 0), reverse=True
-            )
-            top_reranked = reranked_sorted[: request.k]
-            trimmed = results[: request.k]
-            context_list = [r.get("document", "") for r in top_reranked]
-            return (
-                context_list,
-                trimmed,
-                {
-                    **vs_latencies,
-                    "qdrant_docs_reranking_latency": qdrant_rerank_latency,
-                },
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to process reranker output, using vector similarity order: {e}"
-            )
-
-    # Fallback: use the first k results (already sorted by vector score upstream)
-    trimmed = results[: request.k]
-    trimmed_texts = _extract_candidate_texts(trimmed)
-    return (
-        trimmed_texts,
-        trimmed,
-        {
-            **vs_latencies,
-            "qdrant_docs_reranking_latency": qdrant_rerank_latency,
-        },
-    )
+    return results, vs_latencies
 
 
 async def setup_rag_and_context(request: GenerationRequest):
@@ -664,17 +549,57 @@ async def setup_rag_and_context(request: GenerationRequest):
             rag_lat: Dict[str, Optional[float]] = {}
             mcp_lat: Dict[str, Optional[float]] = {}
 
-            context_list, results, rag_lat = await get_rag_context(
-                vector_store, request
-            )
-            mcp_context_list, mcp_results, mcp_lat = await get_mcp_context(request)
+            results, rag_lat = await get_rag_context(vector_store, request)
+            mcp_results, mcp_lat = await get_mcp_context(request)
 
-            # Merge RAG and MCP contexts and results
-            context_list = context_list + mcp_context_list
-            # deduplicate context_list
+            merged_results = list(results) + list(mcp_results)
+            # Build candidate texts with mapping to original indices
+            candidate_texts: List[str] = []
+            candidate_indices: List[int] = []
+            index_to_text: Dict[int, str] = {}
+            for idx, res in enumerate(merged_results):
+                text_val: Optional[str] = None
+                try:
+                    payload = getattr(res, "payload", None)
+                    if isinstance(payload, dict):
+                        text_val = payload.get("text") or payload.get("content")
+                    elif isinstance(res, dict):
+                        text_val = res.get("text")
+                except Exception:
+                    text_val = None
+
+                if text_val:
+                    text_str = str(text_val).strip()
+                    if text_str and "API call failed" not in text_str:
+                        candidate_indices.append(idx)
+                        candidate_texts.append(text_str)
+                        index_to_text[idx] = text_str
+
+            # Rerank candidates if configured; otherwise keep original order
+            reranked = await _maybe_rerank(candidate_texts, request.query)
+            if reranked:
+                # Map reranked indices (relative to candidate_texts) back to merged_results indices
+                ordered_indices = [
+                    candidate_indices[item.get("index", i)]
+                    for i, item in enumerate(reranked)
+                    if isinstance(item, dict)
+                ]
+            else:
+                ordered_indices = list(candidate_indices)
+
+            # Trim to top-k
+            top_k = int(getattr(request, "k", 5) or 5)
+            selected_indices = ordered_indices[:top_k]
+
+            # Build context and filter original results to the selected set
+            context_list = [
+                index_to_text[i] for i in selected_indices if i in index_to_text
+            ]
             context_list = list(set(context_list))
             context = _build_context(context_list)
-            results = _deduplicate_results(results + mcp_results)
+            results = [merged_results[i] for i in selected_indices]
+            results = _deduplicate_results(results)
+
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
