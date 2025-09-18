@@ -446,7 +446,7 @@ async def get_mcp_context(
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
-        "topN": request.k,
+        "topN": request.k * 2,
         "threshold": request.score_threshold,
     }
     if isinstance(request.year, list) and len(request.year) >= 2:
@@ -589,7 +589,7 @@ async def get_rag_context(
     results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
         collection_names=request.collection_ids,
         query=request.query,
-        k=request.k,
+        k=request.k * 2,
         score_threshold=request.score_threshold,
         embeddings_model=request.embeddings_model,
         filters=request.filters,
