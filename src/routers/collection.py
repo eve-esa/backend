@@ -2,7 +2,7 @@ import logging
 import anyio
 import asyncio
 
-from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
+from src.constants import DEFAULT_EMBEDDING_MODEL, WILEY_PUBLIC_COLLECTIONS
 from src.schemas.common import Pagination
 from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
@@ -56,8 +56,8 @@ async def list_public_collections(pagination: Pagination = Depends()):
         page=pagination.page, limit=pagination.limit
     )
 
-    public_collections = PUBLIC_COLLECTIONS + public_collections
-    total_count = total_count + len(PUBLIC_COLLECTIONS)
+    public_collections = WILEY_PUBLIC_COLLECTIONS + public_collections
+    total_count = total_count + len(WILEY_PUBLIC_COLLECTIONS)
     # Pagination must be done manually since Qdrant doesn't support collection pagination
     return PaginatedResponse(
         data=[

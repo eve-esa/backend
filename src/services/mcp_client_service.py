@@ -7,31 +7,12 @@ from urllib.parse import urlparse
 
 from src.config import Config, WILEY_AUTH_TOKEN
 
-# Import MultiServerMCPClient from langchain_mcp_adapters
-try:
-    from langchain_mcp_adapters.client import MultiServerMCPClient
-
-    MULTI_SERVER_MCP_AVAILABLE = True
-except ImportError:
-    MULTI_SERVER_MCP_AVAILABLE = False
-    MultiServerMCPClient = None
-
-# Import original MCP client libraries for actual tool execution
-try:
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp.client.websocket import websocket_client
-    from mcp.client.session import ClientSession
-    from urllib.parse import quote
-    from contextlib import AsyncExitStack
-
-    ORIGINAL_MCP_AVAILABLE = True
-except ImportError:
-    ORIGINAL_MCP_AVAILABLE = False
-    streamablehttp_client = None
-    websocket_client = None
-    ClientSession = None
-    quote = None
-    AsyncExitStack = None
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.websocket import websocket_client
+from mcp.client.session import ClientSession
+from urllib.parse import quote
+from contextlib import AsyncExitStack
 
 
 logger = logging.getLogger(__name__)
@@ -48,11 +29,6 @@ class MultiServerMCPClientService:
     def __init__(self, config: Optional[Config] = None) -> None:
         self._config = config or Config()
         self._client: Optional[MultiServerMCPClient] = None
-
-        if not MULTI_SERVER_MCP_AVAILABLE:
-            raise ImportError(
-                "MultiServerMCPClient from langchain_mcp_adapters is not available"
-            )
 
         # Load server configurations
         self._load_server_configs()
@@ -224,14 +200,6 @@ class MultiServerMCPClientService:
             raise RuntimeError("MultiServerMCPClient not initialized")
 
         try:
-            # Since MultiServerMCPClient doesn't provide actual connection objects,
-            # we'll use the fallback approach directly
-            if not ORIGINAL_MCP_AVAILABLE:
-                raise RuntimeError(
-                    "Original MCP client libraries not available for tool execution"
-                )
-
-            logger.info(f"Using fallback MCP client for server '{server_name}'")
             return await self._call_tool_with_original_client(
                 server_name, name, arguments
             )
@@ -250,7 +218,7 @@ class MultiServerMCPClientService:
     async def _call_tool_with_original_client(
         self, server_name: str, name: str, arguments: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Fallback method using original MCP client libraries."""
+        """Call tool over HTTP or WebSocket transport."""
         server_configs = self._config.get_mcp_servers()
         if server_name not in server_configs:
             raise ValueError(f"Server '{server_name}' not found in configuration")

@@ -29,7 +29,7 @@ from qdrant_client.http.models import (
 
 from src.core.llm_manager import LLMManager
 
-from src.constants import DEFAULT_EMBEDDING_MODEL
+from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
@@ -151,12 +151,26 @@ class VectorStoreManager:
         start = (page - 1) * limit
         end = start + limit
 
+        # Build a map of collection name -> description from PUBLIC_COLLECTIONS constant
+        desc_map: Dict[str, Optional[str]] = {}
+        try:
+            if isinstance(PUBLIC_COLLECTIONS, dict):
+                desc_map = PUBLIC_COLLECTIONS
+            elif isinstance(PUBLIC_COLLECTIONS, list):
+                for item in PUBLIC_COLLECTIONS:
+                    if isinstance(item, dict) and item.get("name"):
+                        desc_map[item["name"]] = item.get("description")
+        except Exception:
+            desc_map = {}
+
         public_collections = [
             {
                 "name": collection.name,
                 "alias": alias_map.get(collection.name) or None,
                 # Qdrant does not provide a description for its collections so we use a placeholder "Public Collection from ESA"
-                "description": collection.model_dump().get(
+                # if collection.name is known in config, use that description
+                "description": desc_map.get(collection.name)
+                or collection.model_dump().get(
                     "description", "Public Collection from ESA"
                 ),
             }
@@ -618,14 +632,13 @@ class VectorStoreManager:
             query_vector = await self.generate_query_vector(query, model)
             query_filter = Filter(**filters) if filters else None
 
-            # Get more results to allow filtering for documents that match the query
+            # Retrieve k per collection (caller may further rerank/filter)
             all_results = self._search_across_collections(
                 collection_names=collection_names,
                 query_vector=query_vector,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
-                limit_per_collection=k
-                * 10,  # Get more per-collection results for filtering
+                limit_per_collection=k,
             )
 
             logger.info(
@@ -677,7 +690,7 @@ class VectorStoreManager:
                 query_vector=query_vector,
                 score_threshold=score_threshold,
                 query_filter=query_filter,
-                limit_per_collection=k * 10,
+                limit_per_collection=k,
             )
             retrieval_latency = time.perf_counter() - t1
 

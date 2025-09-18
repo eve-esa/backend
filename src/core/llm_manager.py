@@ -292,14 +292,17 @@ class LLMManager:
             raise
 
     async def _call_eve_instruct_mistral(
-        self, prompt: str, max_new_tokens: int = 150
+        self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
     ) -> str:
         """
         Call the Eve Instruct model via Mistral using LangChain ChatMistralAI.
         """
         try:
             base_llm = self._get_mistral_llm()
-            llm = base_llm.bind(max_tokens=max_new_tokens)
+            bind_kwargs = {"max_tokens": max_new_tokens}
+            if temperature is not None:
+                bind_kwargs["temperature"] = temperature
+            llm = base_llm.bind(**bind_kwargs)
             response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
@@ -395,12 +398,15 @@ class LLMManager:
                 raise
 
     async def _call_eve_instruct_async(
-        self, prompt: str, max_new_tokens: int = 150
+        self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
     ) -> str:
         """Async version using LangChain ChatOpenAI."""
         try:
             base_llm = self._get_runpod_llm()
-            llm = base_llm.bind(max_tokens=max_new_tokens)
+            bind_kwargs = {"max_tokens": max_new_tokens}
+            if temperature is not None:
+                bind_kwargs["temperature"] = temperature
+            llm = base_llm.bind(**bind_kwargs)
             response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
@@ -418,6 +424,7 @@ class LLMManager:
         query: str,
         context: str,
         max_new_tokens: int = 150,
+        temperature: float | None = None,
     ) -> str:
         """
         Generate an answer using the runpod model.
@@ -443,7 +450,7 @@ class LLMManager:
                 context = context[:max_context_len]
 
             return await self._call_eve_instruct_async(
-                prompt, max_new_tokens=max_new_tokens
+                prompt, max_new_tokens=max_new_tokens, temperature=temperature
             )
 
         except Exception as e:
@@ -455,6 +462,7 @@ class LLMManager:
         query: str,
         context: str,
         max_new_tokens: int = 150,
+        temperature: float | None = None,
     ) -> str:
         """
         Generate an answer using the mistral model.
@@ -480,7 +488,7 @@ class LLMManager:
                 context = context[:max_context_len]
 
             return await self._call_eve_instruct_mistral(
-                prompt, max_new_tokens=max_new_tokens
+                prompt, max_new_tokens=max_new_tokens, temperature=temperature
             )
 
         except Exception as e:

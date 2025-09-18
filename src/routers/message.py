@@ -40,12 +40,13 @@ def _to_float(value: Any) -> Any:
 def _extract_document_data(result: Any) -> Dict[str, Any]:
     result_id = _field(result, "id")
     result_version = _to_int(_field(result, "version"))
-    result_score = _to_float(
-        _field(result, "score") or _field(result, "relevance_score")
-    )
+    result_score = _to_float(_field(result, "score") or _field(result, "distance"))
     result_payload = (
         _field(result, "payload", {}) or _field(result, "document", {}) or {}
     )
+    # if result_payload has key "content" and doesn't have key "text", set "text" with "content"
+    if "content" in result_payload and "text" not in result_payload:
+        result_payload["text"] = result_payload["content"]
     result_text = _field(result, "text", "") or ""
     result_metadata = _field(result, "metadata", {}) or {}
 
