@@ -642,7 +642,11 @@ async def setup_rag_and_context(request: GenerationRequest):
                         index_to_text[idx] = text_str
 
             # Rerank candidates if configured; otherwise keep original order
+            latencies["reranking_latency"] = time.perf_counter()
             reranked = await _maybe_rerank(candidate_texts, request.query)
+            latencies["reranking_latency"] = (
+                time.perf_counter() - latencies["reranking_latency"]
+            )
             if reranked:
                 # Map reranked indices (relative to candidate_texts) back to merged_results indices
                 ordered_indices = [

@@ -52,15 +52,13 @@ class Latencies(BaseModel):
     qdrant_retrieval_latency: Optional[float] = Field(
         default=None, description="Time to retrieve documents from Qdrant"
     )
-    qdrant_docs_reranking_latency: Optional[float] = Field(
-        default=None, description="Time to re-rank retrieved documents"
-    )
 
     # MCP latencies
     mcp_retrieval_latency: Optional[float] = Field(
         default=None, description="Time to retrieve documents via MCP"
     )
-    mcp_docs_reranking_latency: Optional[float] = Field(
+
+    reranking_latency: Optional[float] = Field(
         default=None, description="Time to re-rank MCP documents"
     )
 
