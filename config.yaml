@@ -1,7 +1,7 @@
 runpod:
   instruct_llm:
     id: "gt96iviaoxovi0"
-    timeout: 20 # seconds in ChatOpenAI
+    timeout: 40 # seconds in ChatOpenAI
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
     timeout: 20
