@@ -17,7 +17,7 @@ from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_qdrant.qdrant import QdrantVectorStoreError
 
-from qdrant_client import QdrantClient
+from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.models import (
     Distance,
@@ -428,6 +428,13 @@ class VectorStoreManager:
                     limit=limit_per_collection,
                     score_threshold=score_threshold,
                     query_filter=query_filter,
+                    search_params=models.SearchParams(
+                        quantization=models.QuantizationSearchParams(
+                            ignore=False,
+                            rescore=True,
+                            oversampling=2.0,
+                        )
+                    ),
                 )
                 aggregated_results.extend(results)
             except Exception as e:
