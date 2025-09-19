@@ -6,11 +6,10 @@ import asyncio
 import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from pydantic import BaseModel, Field
 
 from src.core.vector_store_manager import VectorStoreManager
-from src.database.models.collection import Collection
 from src.core.llm_manager import LLMManager
 from src.constants import (
     DEFAULT_QUERY,
@@ -118,6 +117,7 @@ _langgraph_available = False
 try:  # type: ignore
     from langgraph.graph import StateGraph, MessagesState, START  # noqa: F401
     from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver  # noqa: F401
+    from langgraph.graph.message import add_messages  # noqa: F401
 
     _langgraph_available = True
 except Exception:
@@ -181,7 +181,13 @@ async def _get_or_create_compiled_graph():
         # Build the simple one-node graph
         llm = LLMManager().get_model()
 
-        async def call_model(state: "MessagesState"):
+        # Define a custom state so we can carry sampling params alongside messages
+        class GenerationState(TypedDict):
+            messages: MessagesState
+            temperature: Optional[float]
+            max_tokens: Optional[int]
+
+        async def call_model(state: "GenerationState"):
             # Allow per-invocation temperature and max tokens via state
             bound_llm = llm
             try:
@@ -191,13 +197,19 @@ async def _get_or_create_compiled_graph():
                 except Exception:
                     temperature_val = None
                 try:
-                    max_new_tokens_val = state.get("max_new_tokens")
+                    max_tokens_val = state.get("max_tokens")
                 except Exception:
-                    max_new_tokens_val = None
+                    max_tokens_val = None
+
+                sampling_params = {}
                 if temperature_val is not None:
                     bind_kwargs["temperature"] = temperature_val
-                if max_new_tokens_val is not None:
-                    bind_kwargs["max_tokens"] = max_new_tokens_val
+                    sampling_params["temperature"] = temperature_val
+                if max_tokens_val is not None:
+                    bind_kwargs["max_tokens"] = max_tokens_val
+                    sampling_params["max_tokens"] = max_tokens_val
+                if sampling_params:
+                    bind_kwargs["extra_body"] = {"sampling_params": sampling_params}
                 if bind_kwargs:
                     bound_llm = llm.bind(**bind_kwargs)
             except Exception:
@@ -207,7 +219,7 @@ async def _get_or_create_compiled_graph():
             )  # returns an AIMessage
             return {"messages": response}
 
-        builder = StateGraph(MessagesState)
+        builder = StateGraph(GenerationState)
         builder.add_node(call_model)
         builder.add_edge(START, "call_model")
 
@@ -747,7 +759,7 @@ async def generate_answer(
                     state = {
                         "messages": messages_for_turn,
                         "temperature": request.temperature,
-                        "max_new_tokens": request.max_new_tokens,
+                        "max_tokens": request.max_new_tokens,
                     }
                     result = await graph.ainvoke(state, config)
                 else:

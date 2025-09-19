@@ -108,6 +108,7 @@ class LLMManager:
                 model=self._runpod_model_name or "",
                 temperature=0.3,
                 timeout=instruct_llm_timeout,
+                max_retries=1,
             )
         return self._runpod_chat_openai
 
@@ -404,8 +405,11 @@ class LLMManager:
         try:
             base_llm = self._get_runpod_llm()
             bind_kwargs = {"max_tokens": max_new_tokens}
+            sampling_params = {"max_tokens": max_new_tokens}
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
+                sampling_params["temperature"] = temperature
+            bind_kwargs["extra_body"] = {"sampling_params": sampling_params}
             llm = base_llm.bind(**bind_kwargs)
             response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
