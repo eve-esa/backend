@@ -734,7 +734,8 @@ async def generate_answer(
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
-        gen_latency: Optional[float] = None
+        base_gen_latency: Optional[float] = None
+        mistral_gen_latency: Optional[float] = None
         if _langgraph_available and conversation_id:
             try:
                 # Single invoke to append assistant response to memory (async)
@@ -751,7 +752,7 @@ async def generate_answer(
                     result = await graph.ainvoke(state, config)
                 else:
                     result = None
-                gen_latency = time.perf_counter() - gen_start
+                base_gen_latency = time.perf_counter() - gen_start
                 messages_out = result.get("messages")
                 final_answer = _extract_final_assistant_content(messages_out) or ""
             except Exception as e:
@@ -766,7 +767,7 @@ async def generate_answer(
                     max_new_tokens=request.max_new_tokens,
                     temperature=request.temperature,
                 )
-                gen_latency = time.perf_counter() - gen_start
+                mistral_gen_latency = time.perf_counter() - gen_start
         else:
             # Fallback: use existing direct generation path without memory persistence
             gen_start = time.perf_counter()
@@ -776,7 +777,7 @@ async def generate_answer(
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
             )
-            gen_latency = time.perf_counter() - gen_start
+            mistral_gen_latency = time.perf_counter() - gen_start
 
         answer = _normalize_ai_output(final_answer or "")
 
@@ -809,7 +810,8 @@ async def generate_answer(
         total_latency = time.perf_counter() - total_start
         latencies = {
             **(latencies or {}),
-            "generation_latency": gen_latency,
+            "base_generation_latency": base_gen_latency,
+            "mistral_generation_latency": mistral_gen_latency,
             "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }
