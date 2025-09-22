@@ -201,15 +201,10 @@ async def _get_or_create_compiled_graph():
                 except Exception:
                     max_tokens_val = None
 
-                sampling_params = {}
                 if temperature_val is not None:
                     bind_kwargs["temperature"] = temperature_val
-                    sampling_params["temperature"] = temperature_val
                 if max_tokens_val is not None:
                     bind_kwargs["max_tokens"] = max_tokens_val
-                    sampling_params["max_tokens"] = max_tokens_val
-                if sampling_params:
-                    bind_kwargs["extra_body"] = {"sampling_params": sampling_params}
                 if bind_kwargs:
                     bound_llm = llm.bind(**bind_kwargs)
             except Exception:
