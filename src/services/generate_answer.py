@@ -818,7 +818,7 @@ async def generate_answer(
         latencies = {
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
-            "mistral_generation_latency": mistral_gen_latency,
+            "fallback_latency": mistral_gen_latency,
             "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }

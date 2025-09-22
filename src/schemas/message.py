@@ -67,7 +67,7 @@ class Latencies(BaseModel):
         default=None,
         description="Time taken by the Base LLM to generate the answer (Runpod)",
     )
-    mistral_generation_latency: Optional[float] = Field(
+    fallback_latency: Optional[float] = Field(
         default=None,
         description="Time taken by the Mistral LLM to generate the answer (fallback)",
     )
