@@ -108,6 +108,7 @@ class LLMManager:
                 model=self._runpod_model_name or "",
                 temperature=0.3,
                 timeout=instruct_llm_timeout,
+                max_retries=1,
             )
         return self._runpod_chat_openai
 

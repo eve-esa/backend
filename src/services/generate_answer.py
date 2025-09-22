@@ -6,11 +6,10 @@ import asyncio
 import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from pydantic import BaseModel, Field
 
 from src.core.vector_store_manager import VectorStoreManager
-from src.database.models.collection import Collection
 from src.core.llm_manager import LLMManager
 from src.constants import (
     DEFAULT_QUERY,
@@ -118,6 +117,7 @@ _langgraph_available = False
 try:  # type: ignore
     from langgraph.graph import StateGraph, MessagesState, START  # noqa: F401
     from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver  # noqa: F401
+    from langgraph.graph.message import add_messages  # noqa: F401
 
     _langgraph_available = True
 except Exception:
@@ -181,7 +181,13 @@ async def _get_or_create_compiled_graph():
         # Build the simple one-node graph
         llm = LLMManager().get_model()
 
-        async def call_model(state: "MessagesState"):
+        # Define a custom state so we can carry sampling params alongside messages
+        class GenerationState(TypedDict):
+            messages: MessagesState
+            temperature: Optional[float]
+            max_tokens: Optional[int]
+
+        async def call_model(state: "GenerationState"):
             # Allow per-invocation temperature and max tokens via state
             bound_llm = llm
             try:
@@ -191,13 +197,14 @@ async def _get_or_create_compiled_graph():
                 except Exception:
                     temperature_val = None
                 try:
-                    max_new_tokens_val = state.get("max_new_tokens")
+                    max_tokens_val = state.get("max_tokens")
                 except Exception:
-                    max_new_tokens_val = None
+                    max_tokens_val = None
+
                 if temperature_val is not None:
                     bind_kwargs["temperature"] = temperature_val
-                if max_new_tokens_val is not None:
-                    bind_kwargs["max_tokens"] = max_new_tokens_val
+                if max_tokens_val is not None:
+                    bind_kwargs["max_tokens"] = max_tokens_val
                 if bind_kwargs:
                     bound_llm = llm.bind(**bind_kwargs)
             except Exception:
@@ -207,7 +214,7 @@ async def _get_or_create_compiled_graph():
             )  # returns an AIMessage
             return {"messages": response}
 
-        builder = StateGraph(MessagesState)
+        builder = StateGraph(GenerationState)
         builder.add_node(call_model)
         builder.add_edge(START, "call_model")
 
@@ -734,7 +741,8 @@ async def generate_answer(
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
-        gen_latency: Optional[float] = None
+        base_gen_latency: Optional[float] = None
+        mistral_gen_latency: Optional[float] = None
         if _langgraph_available and conversation_id:
             try:
                 # Single invoke to append assistant response to memory (async)
@@ -746,12 +754,12 @@ async def generate_answer(
                     state = {
                         "messages": messages_for_turn,
                         "temperature": request.temperature,
-                        "max_new_tokens": request.max_new_tokens,
+                        "max_tokens": request.max_new_tokens,
                     }
                     result = await graph.ainvoke(state, config)
                 else:
                     result = None
-                gen_latency = time.perf_counter() - gen_start
+                base_gen_latency = time.perf_counter() - gen_start
                 messages_out = result.get("messages")
                 final_answer = _extract_final_assistant_content(messages_out) or ""
             except Exception as e:
@@ -766,7 +774,7 @@ async def generate_answer(
                     max_new_tokens=request.max_new_tokens,
                     temperature=request.temperature,
                 )
-                gen_latency = time.perf_counter() - gen_start
+                mistral_gen_latency = time.perf_counter() - gen_start
         else:
             # Fallback: use existing direct generation path without memory persistence
             gen_start = time.perf_counter()
@@ -776,7 +784,7 @@ async def generate_answer(
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
             )
-            gen_latency = time.perf_counter() - gen_start
+            mistral_gen_latency = time.perf_counter() - gen_start
 
         answer = _normalize_ai_output(final_answer or "")
 
@@ -809,7 +817,8 @@ async def generate_answer(
         total_latency = time.perf_counter() - total_start
         latencies = {
             **(latencies or {}),
-            "generation_latency": gen_latency,
+            "base_generation_latency": base_gen_latency,
+            "fallback_latency": mistral_gen_latency,
             "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }

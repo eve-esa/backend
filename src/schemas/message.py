@@ -63,8 +63,13 @@ class Latencies(BaseModel):
     )
 
     # Generation and total
-    generation_latency: Optional[float] = Field(
-        default=None, description="Time taken by the LLM to generate the answer"
+    base_generation_latency: Optional[float] = Field(
+        default=None,
+        description="Time taken by the Base LLM to generate the answer (Runpod)",
+    )
+    fallback_latency: Optional[float] = Field(
+        default=None,
+        description="Time taken by the Mistral LLM to generate the answer (fallback)",
     )
     hallucination_latency: Optional[HallucinationLatencies] = Field(
         default=None, description="Detailed latencies within hallucination loop"
