@@ -53,8 +53,9 @@ class GenerationRequest(BaseModel):
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
-    use_public_collections: bool = Field(
-        default=True, description="Whether to use public collections"
+    public_collections: List[str] = Field(
+        default=[],
+        description="List of public collection names to include in the search",
     )
     hallucination_loop_flag: bool = False  # For testing purposes
 
