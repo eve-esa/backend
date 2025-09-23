@@ -185,12 +185,11 @@ async def _get_or_create_compiled_graph():
         llm = LLMManager().get_model()
 
         # Define a custom state so we can carry sampling params alongside messages
-        class GenerationState(TypedDict):
-            messages: MessagesState
+        class GenerationState(MessagesState):
             temperature: Optional[float]
             max_tokens: Optional[int]
 
-        async def call_model(state: "GenerationState"):
+        async def call_model(state: GenerationState):
             # Allow per-invocation temperature and max tokens via state
             bound_llm = llm
             try:
@@ -212,10 +211,11 @@ async def _get_or_create_compiled_graph():
                     bound_llm = llm.bind(**bind_kwargs)
             except Exception:
                 bound_llm = llm
+
             response = await bound_llm.ainvoke(
                 state["messages"]
             )  # returns an AIMessage
-            return {"messages": response}
+            return {"messages": [response]}
 
         builder = StateGraph(GenerationState)
         builder.add_node(call_model)
@@ -755,7 +755,7 @@ async def generate_answer(
                 if graph is not None:
                     config = {"configurable": {"thread_id": conversation_id}}
                     state = {
-                        "messages": messages_for_turn,
+                        "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
                         "max_tokens": request.max_new_tokens,
                     }
