@@ -5,7 +5,7 @@ LLM Manager module that handles different language model interactions.
 import logging
 from enum import Enum
 import asyncio
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Any
 import os
 
 import openai
@@ -16,6 +16,7 @@ from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from pydantic import BaseModel, Field
 from typing import Optional
 from src.constants import MODEL_CONTEXT_SIZE
+from src.utils.template_loader import format_template
 
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,7 @@ class LLMManager:
 
     def _generate_prompt(self, query: str, context: str) -> str:
         """
-        Generate a prompt for the language model.
+        Generate a prompt for the language model using template.
 
         Args:
             query: The user's question
@@ -201,14 +202,72 @@ class LLMManager:
         Returns:
             A formatted prompt string
         """
-        return f"""
-        You are a helpful assistant named Eve developed by ESA and PiSchool that helps researchers and students understand topics regarding Earth Observation.
-        Given the following context: {context}.
-        
-        Please reply in a precise and accurate manner to this query: {query}
-        
-        Answer:
+        return format_template("basic_prompt", query=query, context=context)
+
+    def _build_conversation_context(
+        self, conversation_history: List[Any], summary: Optional[str] = None
+    ) -> str:
         """
+        Build conversation context from message history and optional summary.
+
+        Args:
+            conversation_history: List of previous messages
+            summary: Optional conversation summary
+
+        Returns:
+            Formatted conversation context string
+        """
+        context_parts = []
+
+        # Add summary if available
+        if summary and summary.strip():
+            context_parts.append(f"Conversation Summary: {summary}")
+            context_parts.append("")  # Empty line for separation
+
+        # Add recent message history
+        if conversation_history:
+            for msg in conversation_history:
+                try:
+                    # Handle LangChain message objects
+                    if hasattr(msg, "content") and hasattr(msg, "__class__"):
+                        role = (
+                            "User" if "Human" in msg.__class__.__name__ else "Assistant"
+                        )
+                        content = msg.content
+                    # Handle dict-style messages
+                    elif isinstance(msg, dict):
+                        role = msg.get("role", "User").title()
+                        content = msg.get("content", "")
+                    else:
+                        continue
+
+                    if content.strip():
+                        context_parts.append(f"{role}: {content}")
+                except Exception:
+                    continue
+
+        return "\n".join(context_parts)
+
+    def _generate_prompt_with_history(
+        self, query: str, context: str, conversation_context: str
+    ) -> str:
+        """
+        Generate a prompt with conversation history for multi-turn context using template.
+
+        Args:
+            query: The user's question
+            context: Contextual information to assist the model
+            conversation_context: Previous conversation messages
+
+        Returns:
+            A formatted prompt string with conversation history
+        """
+        return format_template(
+            "conversation_prompt",
+            query=query,
+            context=context,
+            conversation_context=conversation_context,
+        )
 
     def _call_openai(self, prompt: str, max_tokens: int = 500) -> str:
         """
@@ -464,6 +523,8 @@ class LLMManager:
         context: str,
         max_new_tokens: int = 150,
         temperature: float | None = None,
+        conversation_history: Optional[List[Any]] = None,
+        conversation_summary: Optional[str] = None,
     ) -> str:
         """
         Generate an answer using the mistral model.
@@ -472,6 +533,9 @@ class LLMManager:
             query: The user's question
             context: Contextual information to assist the model
             max_new_tokens: Maximum new tokens for the response
+            temperature: Temperature for generation
+            conversation_history: Previous conversation messages for context
+            conversation_summary: Optional conversation summary for context
 
         Returns:
             The generated answer
@@ -480,7 +544,19 @@ class LLMManager:
             Exception: For other errors during generation
         """
         try:
-            prompt = self._generate_prompt(query=query, context=context)
+            # If conversation history or summary is provided, use it for multi-turn context
+            if conversation_history or conversation_summary:
+                conversation_context = self._build_conversation_context(
+                    conversation_history or [], conversation_summary
+                )
+                prompt = self._generate_prompt_with_history(
+                    query=query,
+                    context=context,
+                    conversation_context=conversation_context,
+                )
+            else:
+                prompt = self._generate_prompt(query=query, context=context)
+
             max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
             if len(context) > max_context_len:
                 logger.info(

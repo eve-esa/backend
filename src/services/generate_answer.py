@@ -249,6 +249,43 @@ async def _get_or_create_compiled_graph():
                 return None, None
 
 
+async def _get_conversation_history_from_db(
+    conversation_id: str,
+) -> tuple[List[Any], Optional[str]]:
+    """Get conversation history and summary from database for fallback when LangGraph is not available."""
+    try:
+        from src.database.models.message import Message as MessageModel
+        from src.database.models.conversation import Conversation as ConversationModel
+
+        summary = None
+        try:
+            conversation = await ConversationModel.find_by_id(conversation_id)
+            if conversation and getattr(conversation, "summary", None):
+                summary = conversation.summary
+        except Exception:
+            summary = None
+
+        # Get recent messages from the conversation (limit to last 10 for context)
+        messages = await MessageModel.find_all(
+            filter_dict={"conversation_id": conversation_id},
+            sort=[("timestamp", -1)],
+            limit=10,
+        )
+
+        # Convert to LangChain-compatible message format
+        history = []
+        for msg in messages:
+            if getattr(msg, "input", None):
+                history.append(_make_message("user", msg.input))
+            if getattr(msg, "output", None):
+                history.append(_make_message("assistant", msg.output))
+
+        return history, summary
+    except Exception as e:
+        logger.warning(f"Failed to get conversation history from database: {e}")
+        return [], None
+
+
 async def _summarize_history_with_runpod(
     transcript: str, max_tokens: int = 50000
 ) -> str:
@@ -766,26 +803,42 @@ async def generate_answer(
                 messages_out = result.get("messages")
                 final_answer = _extract_final_assistant_content(messages_out) or ""
             except Exception as e:
-                # If LangGraph/Runpod path fails, fallback to direct generation (with internal Mistral fallback)
+                # If LangGraph/Runpod path fails, fallback to direct generation with conversation history
                 logger.warning(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
                 gen_start = time.perf_counter()
+                # Get conversation history and summary for multi-turn context
+                conversation_history, conversation_summary = (
+                    await _get_conversation_history_from_db(conversation_id)
+                    if conversation_id
+                    else (None, None)
+                )
                 final_answer = await llm_manager.generate_answer_mistral(
                     query=request.query,
                     context=context,
                     max_new_tokens=request.max_new_tokens,
                     temperature=request.temperature,
+                    conversation_history=conversation_history,
+                    conversation_summary=conversation_summary,
                 )
                 mistral_gen_latency = time.perf_counter() - gen_start
         else:
-            # Fallback: use existing direct generation path without memory persistence
+            # Fallback: use existing direct generation path with conversation history
             gen_start = time.perf_counter()
+            # Get conversation history and summary for multi-turn context
+            conversation_history, conversation_summary = (
+                await _get_conversation_history_from_db(conversation_id)
+                if conversation_id
+                else (None, None)
+            )
             final_answer = await llm_manager.generate_answer_mistral(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
+                conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
             )
             mistral_gen_latency = time.perf_counter() - gen_start
 
