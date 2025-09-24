@@ -30,6 +30,7 @@ from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import config
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
+from src.utils.deepinfra_reranker import DeepInfraReranker
 
 logger = logging.getLogger(__name__)
 
@@ -530,8 +531,14 @@ def _build_context(items: List[Any]) -> str:
     return "\n".join([str(t) for t in items if str(t)])
 
 
-async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | None:
-    """Call reranker if configured."""
+async def _maybe_rerank_runpod(
+    candidate_texts: List[str], query: str
+) -> List[dict] | None:
+    """Call RunPod reranker if configured.
+
+    Returns results with 'relevance_score' and 'index' fields.
+    Use _sort_runpod_reranked_results() to process these results.
+    """
     endpoint_id = config.get_reranker_id()
     if not (endpoint_id) or candidate_texts is None or len(candidate_texts) == 0:
         return None
@@ -549,6 +556,59 @@ async def _maybe_rerank(candidate_texts: List[str], query: str) -> List[dict] | 
         return results
     except Exception as e:
         logger.warning(f"Reranker failed, using vector similarity order: {e}")
+        return None
+
+
+def _sort_runpod_reranked_results(
+    reranked: List[dict], candidate_indices: List[int]
+) -> List[int]:
+    """Sort results from RunPod reranker.
+
+    RunPod returns results with 'relevance_score' and 'index' fields.
+    Results are already sorted by relevance_score in descending order.
+    """
+    ordered_indices = [
+        candidate_indices[item.get("index", i)]
+        for i, item in enumerate(reranked)
+        if isinstance(item, dict)
+    ]
+    return ordered_indices
+
+
+def _sort_deepinfra_reranked_results(
+    reranked: dict, candidate_indices: List[int]
+) -> List[int]:
+    """Sort results from DeepInfra reranker.
+
+    DeepInfra returns results with 'scores' array where each score corresponds
+    to the relevance of the document at that index.
+    """
+    if not isinstance(reranked, dict) or "scores" not in reranked:
+        return list(candidate_indices)
+
+    scores = reranked["scores"]
+    if not isinstance(scores, list) or len(scores) != len(candidate_indices):
+        return list(candidate_indices)
+
+    # Create list of (score, original_index) pairs and sort by score descending
+    scored_indices = [(scores[i], candidate_indices[i]) for i in range(len(scores))]
+    scored_indices.sort(key=lambda x: x[0], reverse=True)
+
+    # Extract the ordered indices
+    ordered_indices = [idx for _, idx in scored_indices]
+    return ordered_indices
+
+
+async def _maybe_rerank_deepinfra(
+    candidate_texts: List[str], query: str
+) -> dict | None:
+    """Call DeepInfra reranker if configured."""
+    try:
+        reranker = DeepInfraReranker("QaxPlUkWPvm9HvnItBGCm2R4e92UYnMJ")
+        results = reranker.rerank([query], candidate_texts)
+        return results
+    except Exception as e:
+        logger.warning(f"DeepInfra reranker failed: {e}")
         return None
 
 
@@ -785,26 +845,23 @@ async def setup_rag_and_context(request: GenerationRequest):
                         candidate_texts.append(text_str)
                         index_to_text[idx] = text_str
 
-            # Rerank candidates if configured; otherwise keep original order
+            # Rerank candidates using DeepInfra reranker
             latencies["reranking_latency"] = time.perf_counter()
-            reranked = await _maybe_rerank(candidate_texts, request.query)
+            reranked = await _maybe_rerank_deepinfra(candidate_texts, request.query)
             latencies["reranking_latency"] = (
                 time.perf_counter() - latencies["reranking_latency"]
             )
             if reranked:
-                # Map reranked indices (relative to candidate_texts) back to merged_results indices
-                ordered_indices = [
-                    candidate_indices[item.get("index", i)]
-                    for i, item in enumerate(reranked)
-                    if isinstance(item, dict)
-                ]
+                ordered_indices = _sort_deepinfra_reranked_results(
+                    reranked, candidate_indices
+                )
             else:
                 ordered_indices = list(candidate_indices)
 
             # Trim to top-k
             top_k = int(getattr(request, "k", 5) or 5)
             selected_indices = ordered_indices[:top_k]
-
+            logger.info(f"selected_indices: {selected_indices}")
             # Build context and filter original results to the selected set
             context_list = [
                 index_to_text[i] for i in selected_indices if i in index_to_text

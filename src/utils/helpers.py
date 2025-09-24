@@ -6,20 +6,20 @@ getting embedding models based on model names, and making API requests
 to RunPod for embeddings generation.
 """
 
-import asyncio
 import logging
 import tempfile
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Tuple, Union
 
-import runpod
 from fastapi import UploadFile
 
 from langchain_core.embeddings import Embeddings, FakeEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.embeddings import DeepInfraEmbeddings
+from langchain_community.embeddings import (
+    HuggingFaceEmbeddings,
+    DeepInfraEmbeddings,
+)
 
 from src.utils.embeddings import RunPodEmbeddings
 from src.config import (
