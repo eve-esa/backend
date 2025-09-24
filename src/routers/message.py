@@ -12,6 +12,9 @@ from fastapi import APIRouter, HTTPException, Depends
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from typing import Dict, Any, Optional, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -138,6 +141,8 @@ async def create_message(
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
+
+        logger.info(f"Collection IDs: {request.collection_ids}")
 
         # Extract year range from filters for MCP usage
         try:
