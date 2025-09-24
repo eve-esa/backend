@@ -999,7 +999,7 @@ async def generate_answer(
             )
             mistral_gen_latency = time.perf_counter() - gen_start
 
-        answer = _normalize_ai_output(final_answer or "")
+        answer = final_answer
 
         model = llm_manager.get_model()
         generation_response = generation_schema(question=request.query, answer=answer)
