@@ -27,7 +27,7 @@ from src.constants import (
 from src.utils.helpers import get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import config
+from src.config import DEEPINFRA_API_TOKEN, config
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -604,7 +604,12 @@ async def _maybe_rerank_deepinfra(
 ) -> dict | None:
     """Call DeepInfra reranker if configured."""
     try:
-        reranker = DeepInfraReranker("QaxPlUkWPvm9HvnItBGCm2R4e92UYnMJ")
+        api_token = DEEPINFRA_API_TOKEN
+        if not api_token:
+            logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
+            return None
+
+        reranker = DeepInfraReranker(api_token)
         results = reranker.rerank([query], candidate_texts)
         return results
     except Exception as e:
@@ -861,7 +866,6 @@ async def setup_rag_and_context(request: GenerationRequest):
             # Trim to top-k
             top_k = int(getattr(request, "k", 5) or 5)
             selected_indices = ordered_indices[:top_k]
-            logger.info(f"selected_indices: {selected_indices}")
             # Build context and filter original results to the selected set
             context_list = [
                 index_to_text[i] for i in selected_indices if i in index_to_text

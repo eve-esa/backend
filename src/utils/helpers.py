@@ -30,6 +30,7 @@ from src.config import (
     MONGO_USERNAME,
     MONGO_PASSWORD,
     MONGO_DATABASE,
+    DEEPINFRA_API_TOKEN,
 )
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
@@ -121,9 +122,14 @@ def get_embeddings_model(
     model = model_name
     if model == DEFAULT_EMBEDDING_MODEL:
         logger.info(f"Using DeepInfra for Qwen 3.4B embedding model: {model}")
+        api_token = DEEPINFRA_API_TOKEN
+        if not api_token:
+            logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
+            return None
+
         embeddings = DeepInfraEmbeddings(
             model_id=model,
-            deepinfra_api_token="QaxPlUkWPvm9HvnItBGCm2R4e92UYnMJ",
+            deepinfra_api_token=api_token,
         )
         embeddings_size = 2560
 
