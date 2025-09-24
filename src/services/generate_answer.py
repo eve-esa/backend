@@ -894,15 +894,15 @@ async def generate_answer(
 
     try:
         # Check if the query violates EO policies
-        policy_prompt = POLICY_PROMPT.format(question=request.query)
-        base_llm = llm_manager.get_model()
-        structured_llm = base_llm.bind(temperature=0).with_structured_output(
-            PolicyCheck
-        )
-        policy_result = await structured_llm.ainvoke(policy_prompt)
-        logger.info(f"policy_result: {policy_result}")
-        if policy_result.violates_policy:
-            return POLICY_NOT_ANSWER, [], False, {}, {}
+        # policy_prompt = POLICY_PROMPT.format(question=request.query)
+        # base_llm = llm_manager.get_model()
+        # structured_llm = base_llm.bind(temperature=0).with_structured_output(
+        #     PolicyCheck
+        # )
+        # policy_result = await structured_llm.ainvoke(policy_prompt)
+        # logger.info(f"policy_result: {policy_result}")
+        # if policy_result.violates_policy:
+        #     return POLICY_NOT_ANSWER, [], False, {}, {}
 
         total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(request)
