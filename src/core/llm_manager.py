@@ -70,7 +70,7 @@ class LLMManager:
 
             # Model name can be provided via env RUNPOD_MODEL_NAME, else rely on worker override
             self._runpod_model_name = os.getenv(
-                "RUNPOD_MODEL_NAME", "eve-esa/eve-lora-merged"
+                "RUNPOD_MODEL_NAME", "eve-esa/mistral_small_v1"
             )
 
             # Lazily initialized; create on first use to avoid unnecessary startup cost
@@ -106,7 +106,7 @@ class LLMManager:
             self._runpod_chat_openai = ChatOpenAI(
                 api_key=RUNPOD_API_KEY,
                 base_url=self._runpod_base_url,
-                model=self._runpod_model_name or "",
+                model="eve-esa/mistral_small_v1",
                 temperature=0.3,
                 timeout=instruct_llm_timeout,
                 max_retries=0,

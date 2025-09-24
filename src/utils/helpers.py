@@ -6,19 +6,20 @@ getting embedding models based on model names, and making API requests
 to RunPod for embeddings generation.
 """
 
-import asyncio
 import logging
 import tempfile
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Tuple, Union
 
-import runpod
 from fastapi import UploadFile
 
 from langchain_core.embeddings import Embeddings, FakeEmbeddings
 from langchain_mistralai import MistralAIEmbeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import (
+    HuggingFaceEmbeddings,
+    DeepInfraEmbeddings,
+)
 
 from src.utils.embeddings import RunPodEmbeddings
 from src.config import (
@@ -29,6 +30,7 @@ from src.config import (
     MONGO_USERNAME,
     MONGO_PASSWORD,
     MONGO_DATABASE,
+    DEEPINFRA_API_TOKEN,
 )
 from src.constants import DEFAULT_EMBEDDING_MODEL
 
@@ -44,7 +46,8 @@ class EmbeddingModelType(Enum):
     OPENAI_ADA = "text-embedding-ada-002"
     OPENAI_SMALL = "text-embedding-3-small"
     OPENAI_LARGE = "text-embedding-3-large"
-    NASA = DEFAULT_EMBEDDING_MODEL
+    QWEN_3_4B = "Qwen/Qwen3-Embedding-4B"
+    NASA = "nasa-impact/nasa-smd-ibm-st-v2"
 
     # Popular Hugging Face embedding models
     ALL_MINILM_L6_V2 = "sentence-transformers/all-MiniLM-L6-v2"
@@ -118,9 +121,17 @@ def get_embeddings_model(
     # Handle NASA model specially to prevent local loading
     model = model_name
     if model == DEFAULT_EMBEDDING_MODEL:
-        logger.info(f"Using RunPod proxy for NASA embedding model: {model}")
-        embeddings = RunPodEmbeddings(model_name=model, embedding_size=768)
-        embeddings_size = embeddings.embedding_size
+        logger.info(f"Using DeepInfra for Qwen 3.4B embedding model: {model}")
+        api_token = DEEPINFRA_API_TOKEN
+        if not api_token:
+            logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
+            return None
+
+        embeddings = DeepInfraEmbeddings(
+            model_id=model,
+            deepinfra_api_token=api_token,
+        )
+        embeddings_size = 2560
 
     # Handle fake embeddings (for testing)
     elif model == EmbeddingModelType.FAKE.value:
@@ -133,6 +144,11 @@ def get_embeddings_model(
         logger.info("Using Mistral embeddings")
         embeddings = MistralAIEmbeddings(model=model, api_key=MISTRAL_API_KEY)
         embeddings_size = 1024
+
+    elif model == EmbeddingModelType.NASA.value:
+        logger.info(f"Using RunPod proxy for NASA embedding model: {model}")
+        embeddings = RunPodEmbeddings(model_name=model, embedding_size=768)
+        embeddings_size = embeddings.embedding_size
 
     # Handle OpenAI embeddings
     elif model in OPENAI_EMBEDDING_DIMENSIONS:
