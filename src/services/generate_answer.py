@@ -48,7 +48,7 @@ class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
     year: Optional[List[int]] = None
     filters: Optional[Dict[str, Any]] = None
-    collection_ids: List[str] = Field(default_factory=lambda: [], exclude=True)
+    collection_ids: List[str] = Field(default_factory=list, exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
@@ -56,7 +56,7 @@ class GenerationRequest(BaseModel):
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
     public_collections: List[str] = Field(
-        default=[],
+        default_factory=list,
         description="List of public collection names to include in the search",
     )
     hallucination_loop_flag: bool = False  # For testing purposes
