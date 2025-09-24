@@ -834,7 +834,7 @@ async def generate_answer(
     try:
         # Check if the query violates EO policies
         policy_prompt = POLICY_PROMPT.format(question=request.query)
-        base_llm = llm_manager.get_mistral_model()
+        base_llm = llm_manager.get_model()
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
         )

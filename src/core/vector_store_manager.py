@@ -572,28 +572,6 @@ class VectorStoreManager:
             RuntimeError: If embedding generation fails
         """
         try:
-            # Special handling for NASA model which uses RunPod API
-            if embeddings_model == DEFAULT_EMBEDDING_MODEL:
-                logger.info("Using RunPod API for embedding generation")
-
-                # Call the remote API to generate embeddings
-                query_vector = await get_embedding_from_runpod(
-                    endpoint_id=config.get_indus_embedder_id(),
-                    model=embeddings_model,
-                    user_input=query,
-                    use_retries=False,
-                )
-                logger.debug(query_vector)
-                # Validate the received vector
-                if not query_vector or not isinstance(query_vector, list):
-                    logger.error(f"Invalid embedding vector received: {query_vector}")
-                    raise RuntimeError(
-                        "Invalid embedding vector received from RunPod API"
-                    )
-
-                return query_vector
-
-            # Standard local embedding generation for other models
             embeddings = get_embeddings_model(embeddings_model)
             if hasattr(embeddings, "embed_query_async"):
                 return await embeddings.embed_query_async(query)
