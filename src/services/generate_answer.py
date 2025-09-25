@@ -6,8 +6,8 @@ import asyncio
 import time
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Dict, Any, List, Optional, TypedDict
-from pydantic import BaseModel, Field
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field, PrivateAttr
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.core.llm_manager import LLMManager
@@ -48,7 +48,6 @@ class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
     year: Optional[List[int]] = None
     filters: Optional[Dict[str, Any]] = None
-    collection_ids: List[str] = Field(default_factory=list, exclude=True)
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = DEFAULT_K
@@ -60,6 +59,16 @@ class GenerationRequest(BaseModel):
         description="List of public collection names to include in the search",
     )
     hallucination_loop_flag: bool = False  # For testing purposes
+
+    _collection_ids: List[str] = PrivateAttr(default_factory=list)
+
+    @property
+    def collection_ids(self) -> List[str]:
+        return self._collection_ids
+
+    @collection_ids.setter
+    def collection_ids(self, value: List[str]) -> None:
+        self._collection_ids = list(value) if value else []
 
 
 # -------- Output normalization helpers --------
