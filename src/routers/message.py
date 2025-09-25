@@ -133,6 +133,7 @@ async def create_message(
         other_users_collections = await CollectionModel.find_all(
             filter_dict={
                 "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
             }
         )
 

@@ -3,6 +3,9 @@ from pydantic import Field
 from src.services.generate_answer import GenerationRequest
 from src.database.mongo_model import MongoModel
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Message(MongoModel):
@@ -51,7 +54,8 @@ class Message(MongoModel):
                     list(collection_ids) if collection_ids else []
                 )
                 doc["request_input"] = request_input_dict
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error serializing request_input: {e}")
             pass
         return doc
 
@@ -71,8 +75,10 @@ class Message(MongoModel):
                 ):
                     try:
                         instance.request_input.collection_ids = list(collection_ids)
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Error deserializing request_input: {e}")
                         pass
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error deserializing request_input: {e}")
             pass
         return instance
