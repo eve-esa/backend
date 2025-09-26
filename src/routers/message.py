@@ -129,7 +129,20 @@ async def create_message(
                 detail="You are not allowed to add a message to this conversation",
             )
 
-        # All public collections are used by default
+        # lookup query to check if some of the collection ids from other users are in the request.collection_ids
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
         request.collection_ids = request.collection_ids + request.public_collections
 
         # All user collections are used by default
@@ -150,6 +163,16 @@ async def create_message(
         except Exception:
             request.year = None
 
+        message = await Message.create(
+            conversation_id=conversation_id,
+            input=request.query,
+            output="",
+            documents=[],
+            use_rag=False,
+            request_input=request,
+            metadata={},
+        )
+
         answer, results, is_rag, loop_result, latencies = await generate_answer(
             request, conversation_id=conversation_id
         )
@@ -158,16 +181,13 @@ async def create_message(
         if results:
             documents_data = [_extract_document_data(result) for result in results]
 
-        message = await Message.create(
-            conversation_id=conversation_id,
-            input=request.query,
-            output=answer,
-            documents=documents_data,
-            use_rag=is_rag,
-            metadata={
-                "latencies": latencies,
-            },
-        )
+        message.output = answer
+        message.documents = documents_data
+        message.use_rag = is_rag
+        message.metadata = {
+            "latencies": latencies,
+        }
+        await message.save()
 
         # Every-N-turn rolling summary and memory reset
         try:
@@ -183,11 +203,78 @@ async def create_message(
             "use_rag": is_rag,
             "conversation_id": conversation_id,
             "loop_result": loop_result,
+            "collection_ids": request.collection_ids,
             "metadata": {
                 "latencies": latencies,
             },
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/retry")
+async def retry(
+    conversation_id: str,
+    message_id: str,
+    requesting_user: User = Depends(get_current_user),
+):
+    try:
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        if conversation.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to add a message to this conversation",
+            )
+
+        message = await Message.find_by_id(message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        if message.conversation_id != conversation_id:
+            raise HTTPException(
+                status_code=404, detail="Message not found in this conversation"
+            )
+
+        answer, results, is_rag, loop_result, latencies = await generate_answer(
+            message.request_input, conversation_id=conversation_id
+        )
+
+        documents_data = []
+        if results:
+            documents_data = [_extract_document_data(result) for result in results]
+
+        message.output = answer
+        message.documents = documents_data
+        message.use_rag = is_rag
+        message.metadata = {
+            "latencies": latencies,
+        }
+        await message.save()
+
+        # Every-N-turn rolling summary and memory reset
+        try:
+            await maybe_rollup_and_trim_history(conversation_id)
+        except Exception:
+            pass
+
+        return {
+            "id": message.id,
+            "query": message.input,
+            "answer": answer,
+            "documents": documents_data,
+            "use_rag": is_rag,
+            "conversation_id": conversation_id,
+            "loop_result": loop_result,
+            "collection_ids": message.request_input.collection_ids,
+            "metadata": {
+                "latencies": latencies,
+            },
+        }
     except HTTPException:
         raise
     except Exception as e:

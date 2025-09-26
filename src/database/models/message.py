@@ -1,7 +1,11 @@
 from typing import Any, ClassVar, Dict
 from pydantic import Field
+from src.services.generate_answer import GenerationRequest
 from src.database.mongo_model import MongoModel
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Message(MongoModel):
@@ -26,8 +30,55 @@ class Message(MongoModel):
         default=False,
         description="Whether the message was copied from the previous message",
     )
+    request_input: GenerationRequest = Field(
+        description="Request input for the message generation",
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default=None, description="Metadata for the message"
     )
 
     collection_name: ClassVar[str] = "messages"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert Message to a Mongo-storable dict, persisting private attrs.
+
+        Pydantic PrivateAttr fields on nested models (e.g., GenerationRequest.collection_ids)
+        are not serialized by default. We inject them here so they are available on retry.
+        """
+        doc = super().to_dict()
+        try:
+            request_input_dict = doc.get("request_input")
+            if isinstance(request_input_dict, dict):
+                collection_ids = getattr(self.request_input, "collection_ids", [])
+                request_input_dict["collection_ids"] = (
+                    list(collection_ids) if collection_ids else []
+                )
+                doc["request_input"] = request_input_dict
+        except Exception as e:
+            logger.error(f"Error serializing request_input: {e}")
+            pass
+        return doc
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Message":
+        """Rehydrate Message from Mongo dict and restore private attrs on nested models."""
+        instance = super().from_dict(data)
+        try:
+            request_input_dict = (
+                data.get("request_input") if isinstance(data, dict) else None
+            )
+            if isinstance(request_input_dict, dict):
+                collection_ids = request_input_dict.get("collection_ids") or []
+                if (
+                    hasattr(instance, "request_input")
+                    and instance.request_input is not None
+                ):
+                    try:
+                        instance.request_input.collection_ids = list(collection_ids)
+                    except Exception as e:
+                        logger.error(f"Error deserializing request_input: {e}")
+                        pass
+        except Exception as e:
+            logger.error(f"Error deserializing request_input: {e}")
+            pass
+        return instance
