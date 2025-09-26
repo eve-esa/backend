@@ -240,6 +240,12 @@ async def retry(
                 status_code=404, detail="Message not found in this conversation"
             )
 
+        if not message.request_input:
+            raise HTTPException(
+                status_code=400,
+                detail="This message cannot be retried",
+            )
+
         answer, results, is_rag, loop_result, latencies = await generate_answer(
             message.request_input, conversation_id=conversation_id
         )

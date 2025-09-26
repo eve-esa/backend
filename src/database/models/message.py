@@ -30,7 +30,8 @@ class Message(MongoModel):
         default=False,
         description="Whether the message was copied from the previous message",
     )
-    request_input: GenerationRequest = Field(
+    request_input: Optional[GenerationRequest] = Field(
+        default=None,
         description="Request input for the message generation",
     )
     metadata: Optional[Dict[str, Any]] = Field(
