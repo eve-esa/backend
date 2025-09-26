@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from fastapi import UploadFile
+from anyio import to_thread
 from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
@@ -142,8 +143,9 @@ class DocumentService:
                 # Save and parse file
                 temp_path = await save_upload_file_to_temp(file)
                 temp_files.append(temp_path)
-                extension = os.path.splitext(file.filename)[1].lower()
-                documents = await self.file_parser(temp_path, extension)
+                filename = file.filename or ""
+                extension = os.path.splitext(filename)[1].lower()
+                documents = await self.file_parser.parse_file(temp_path, extension)
 
                 if not documents:
                     logger.warning(f"No documents parsed from {file.filename}")
@@ -181,8 +183,10 @@ class DocumentService:
                 )
 
             if valid_documents:
-                vector_store.add_document_list(
-                    collection_name=collection_name, document_list=valid_documents
+                await to_thread.run_sync(
+                    vector_store.add_document_list,
+                    collection_name,
+                    valid_documents,
                 )
 
                 return DocumentResult(
@@ -234,11 +238,11 @@ class DocumentService:
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
             results = await vector_store.retrieve_documents_from_query(
+                collection_names=[collection_name],
                 query=request.query,
-                embeddings_model=request.embeddings_model,
-                collection_name=collection_name,
                 k=request.k,
                 score_threshold=request.score_threshold,
+                embeddings_model=request.embeddings_model,
             )
 
             if not results:

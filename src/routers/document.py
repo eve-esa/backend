@@ -102,7 +102,9 @@ async def upload_documents(
     requesting_user: User = Depends(get_current_user),
 ):
     """Upload documents to a collection."""
-    await get_collection_and_validate_ownership(collection_id, requesting_user)
+    collection = await get_collection_and_validate_ownership(
+        collection_id, requesting_user
+    )
 
     logger.info(
         f"Received {len(files)} files for processing in collection {collection_id}"
@@ -116,17 +118,17 @@ async def upload_documents(
             filename=file.filename,
             file_type=os.path.splitext(file.filename)[1].lstrip("."),
             source_url=metadata_urls[i] if metadata_urls else None,
-            source_name=metadata_names[i] if metadata_names else None,
         )
         for i, file in enumerate(files)
     ]
 
     try:
+        effective_model = collection.embeddings_model or embeddings_model
         result = await document_service.add_documents(
             collection_name=collection_id,
             files=files,
             request=AddDocumentRequest(
-                embeddings_model=embeddings_model,
+                embeddings_model=effective_model,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
                 metadata_urls=metadata_urls,

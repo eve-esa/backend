@@ -117,11 +117,14 @@ async def create_collection(
         name=request.name,
         user_id=requesting_user.id,
         description=request.description,
+        embeddings_model=request.embeddings_model,
     )
     await collection.save()
 
     try:
-        vector_store.create_collection(collection.id)
+        VectorStoreManager(embeddings_model=request.embeddings_model).create_collection(
+            collection.id
+        )
     except HTTPException as e:
         raise e
     except Exception as e:
