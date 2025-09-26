@@ -202,7 +202,7 @@ async def _get_or_create_compiled_graph():
             return _inmemory_compiled_graph, _compiled_graph_mode
 
         # Build the simple one-node graph
-        llm = LLMManager().get_model()
+        llm = LLMManager().get_mistral_model()
 
         # Define a custom state so we can carry sampling params alongside messages
         class GenerationState(MessagesState):

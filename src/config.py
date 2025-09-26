@@ -23,6 +23,7 @@ MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
 MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "").strip()
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "").strip()
+MONGO_PARAMS = os.getenv("MONGO_PARAMS", "?authSource=admin").strip()
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY").strip()
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()

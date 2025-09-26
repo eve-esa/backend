@@ -30,6 +30,7 @@ from src.config import (
     MONGO_USERNAME,
     MONGO_PASSWORD,
     MONGO_DATABASE,
+    MONGO_PARAMS,
     DEEPINFRA_API_TOKEN,
 )
 from src.constants import DEFAULT_EMBEDDING_MODEL
@@ -194,5 +195,8 @@ def get_embeddings_model(
 
 
 def get_mongodb_uri() -> str:
-    """Build MongoDB URI from environment, matching src.database.mongo defaults."""
-    return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}?authSource=admin"
+    """Build MongoDB URI from environment, appending MONGO_PARAMS if provided."""
+    params = MONGO_PARAMS or ""
+    if params and not params.startswith("?"):
+        params = f"?{params}"
+    return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}{params}"
