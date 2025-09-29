@@ -1,6 +1,7 @@
 from pathlib import Path
 import yaml
 
+# Default values for LLM and RAG
 DEFAULT_QUERY = "What is ESA?"
 DEFAULT_COLLECTION = "esa-nasa-workshop"
 DEFAULT_LLM = "eve-instruct-v0.1"  # or openai
@@ -10,7 +11,7 @@ DEFAULT_K = 3
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_SCORE_THRESHOLD = 0.7
 DEFAULT_MAX_NEW_TOKENS = 100_000
-DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
+DEFAULT_GET_UNIQUE_DOCS = True
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
 NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
@@ -22,6 +23,7 @@ FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 
 RERANKER_MODEL = "BAAI/bge-reranker-large"
 
+# Wiley public collections (If not using Wiley, leave empty)
 WILEY_PUBLIC_COLLECTIONS = [
     {
         "name": "Wiley AI Gateway",
@@ -34,7 +36,8 @@ Together, this collection provides a comprehensive representation of the Earth a
     },
 ]
 
-PUBLIC_COLLECTIONS = [
+# Map of collection names to descriptions that will be used when listing public collections from Qdrant
+PUBLIC_COLLECTIONS_DESCRIPTION_MAP = [
     {
         "name": "eve-esa-data",
         "description": "Open-access collection of Earth Observation materials sourced from publishers and platforms such as MDPI, Springer, IOPscience, SagePub, EOGE, EOS, ISPRS,  and others. The dataset spans a wide range of content types, including research papers, journal articles, blog posts, and web pages. Alongside the documents, metadata has been systematically extracted to facilitate search and downstream analysis. All collected resources are compliant with current legislation regarding data use and accessibility.",

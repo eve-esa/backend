@@ -40,6 +40,6 @@ async def rank_output(model, question, answerA, answerB, docs) -> ranking_schema
             parsed_output = parser.parse(response)
             return parsed_output
         except Exception as e:
-            print(f"[Ranking Attempt {attempt+1}] Parsing failed: {e}\n")
+            print(f"[Ranking Attempt {attempt + 1}] Parsing failed: {e}\n")
 
     raise ValueError("Failed to produce valid scoring output after 5 attempts.")

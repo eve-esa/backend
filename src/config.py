@@ -32,12 +32,12 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7
 JWT_AUDIENCE_ACCESS = os.getenv("JWT_AUDIENCE_ACCESS", "access").strip()
 JWT_AUDIENCE_REFRESH = os.getenv("JWT_AUDIENCE_REFRESH", "refresh").strip()
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_HOST = os.getenv("SMTP_HOST").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "noreply@eve-ai.com").strip()
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "EVE AI").strip()
+EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS").strip()
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME").strip()
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
 

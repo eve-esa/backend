@@ -1,39 +1,89 @@
-# EVE APIs
+# EVE - Earth Virtual Expert
 
-A FastAPI-based backend service for document management and AI-powered operations.
+EVE (Earth Virtual Expert) is an AI-powered Digital Assistant designed to democratize access to Earth Observation and Earth Science knowledge. This open-source Large Language Model is specifically focused on Earth Observation, providing users with comprehensive access to EO data, insights, and expertise through conversational AI.
 
-## Docker Setup
+## About EVE
 
-- In order to run the project with docker, you need to have docker and docker compose installed.
+EVE is funded by ESA Φ-lab and developed by Pi School in collaboration with Imperative Space. The project aims to contribute to the development of a new generation of AI-powered 'Digital Assistant' interfaces for Earth Observation and Earth Science textual information.
 
-### Configure Environment Variables
+### Project Objectives
 
-Create a `.env` file with the required variables. Refer to the `env.example` file for the complete list of environment variables.
+- **Harness Earth Observation Knowledge** - Comprehensive access to EO data and insights
+- **Launch Open-source LLM for EO** - Specialized language model focused on Earth Observation
+- **Release Earth Observation Virtual Expert** - AI-powered assistant for EO professionals and enthusiasts
+- **Equip Users with EO Knowledge** - Make Earth Science accessible to everyone
+- **Compliant AI Development** - Responsible and ethical AI development practices
 
-### Build and run the Containers
+### Consortium
 
-```bash
-docker compose build
-docker compose up -d
-```
+EVE is a collaborative effort between:
+- **ESA Φ-lab** - European Space Agency's innovation lab (Funding)
+- **Pi School** - AI education and research institute (Development)
+- **Imperative Space** - Space technology company (Collaboration)
 
-### Access API Documentation
+### Use Cases
 
-Once the container is running, visit [http://localhost:8000/docs](http://localhost:8000/docs) to view the available endpoints.
+EVE serves multiple user scenarios:
 
+- **Beginner EO Concepts** - Understanding basic Earth Observation terms and concepts
+- **Advanced EO Concepts** - Explanations of complex Earth Observation methodologies
+- **EO Data Sources and Access** - Guidance on accessing and downloading Earth Observation data
+- **Scientific Summarizations** - Automated summarization of Earth Observation scientific literature
+- **Quick EO Insights** - Rapid access to Earth Science insights and critical information
+- **General Conversational QA** - Wide variety of Earth Science and general questions
 
-### Access the backend container
+---
+
+# EVE Backend Application
+
+This repository contains the **backend application** for the EVE project.
+
+- Getting Started
+  - [Docker Setup](#docker-setup)
+    - [Requirements](#requirements)
+    - [Steps](#steps)
+    - [Access API Documentation](#access-api-documentation)
+    - [Access the backend container](#access-the-backend-container)
+  - [Create User](#create-user)
+  - [Run Tests](#run-tests)
+  - [Format Code](#format-code)
+  - [Code of Conduct](#code-of-conduct)
+  - [Contributing](#contributing)
+  - [License](#license)
+
+## Getting Started
+
+### Docker Setup
+
+#### Requirements
+- Docker
+- Docker Compose
+
+#### Steps
+
+1. Clone the repository
+2. Setup the environment variables `.env` [from the example](.env.example)
+3. Adjust constant values in [constants.py](src/constants.py) if needed
+4. Run `docker compose build`
+5. Run `docker compose up -d`
+6. You can now access the API at `http://localhost:8080`
+
+#### Access API Documentation
+
+Once the container is running, visit [http://localhost:8080/docs](http://localhost:8080/docs) to view the available endpoints.
+
+#### Access the backend container
 
 ```bash
 docker compose exec backend /bin/bash
 ```
 
-### Create a new user
+### Create User
 
-Inside the container, run the following command:
+1. Inside the container, run the following command:
 
 ```bash
-python -m src.commands.create_user test@gmail.com test
+bash create_user.sh <email> <password>
 ```
 
 ### Run Tests
@@ -44,36 +94,22 @@ To run the tests, run the following command inside the container:
 bash test.sh
 ```
 
-## Local Development Setup without Docker
+### Format Code
 
-To run the server locally, ensure you have a MongoDB instance running and configure the `.env` file with the appropriate variables.
-
-### Create python virtual environment
+To format the code, run the following command inside the container:
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+bash format.sh
 ```
 
+### Code of Conduct
 
-### Install Dependencies
+You can find the code of conduct [here](CODE_OF_CONDUCT.md).
 
-```bash
-pip install -r requirements.txt
-```
+### Contributing
 
-### Start the Server
+You can find the contributing guidelines [here](CONTRIBUTING.md).
 
-```bash
-chmod +x start.sh
-./start.sh
-```
+### License
 
-### Run Tests
-
-```bash
-chmod +x test.sh
-./test.sh
-```
-
-The server will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+You can find the license [here](LICENSE).

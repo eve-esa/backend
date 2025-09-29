@@ -126,7 +126,7 @@ class RunPodEmbeddings(Embeddings):
             for i in range(0, len(texts), self.batch_size):
                 batch_texts = texts[i : i + self.batch_size]
                 logger.info(
-                    f"Processing batch {i//self.batch_size + 1}/{(len(texts) + self.batch_size - 1)//self.batch_size} ({len(batch_texts)} texts)"
+                    f"Processing batch {i // self.batch_size + 1}/{(len(texts) + self.batch_size - 1) // self.batch_size} ({len(batch_texts)} texts)"
                 )
 
                 batch_embeddings = await get_batch_embeddings_from_runpod(

@@ -29,7 +29,7 @@ from qdrant_client.http.models import (
 
 from src.core.llm_manager import LLMManager
 
-from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
+from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS_DESCRIPTION_MAP
 from src.utils.helpers import get_embeddings_model
 from src.config import (
     Config,
@@ -151,13 +151,13 @@ class VectorStoreManager:
         start = (page - 1) * limit
         end = start + limit
 
-        # Build a map of collection name -> description from PUBLIC_COLLECTIONS constant
+        # Build a map of collection name -> description from PUBLIC_COLLECTIONS_DESCRIPTION_MAP constant
         desc_map: Dict[str, Optional[str]] = {}
         try:
-            if isinstance(PUBLIC_COLLECTIONS, dict):
-                desc_map = PUBLIC_COLLECTIONS
-            elif isinstance(PUBLIC_COLLECTIONS, list):
-                for item in PUBLIC_COLLECTIONS:
+            if isinstance(PUBLIC_COLLECTIONS_DESCRIPTION_MAP, dict):
+                desc_map = PUBLIC_COLLECTIONS_DESCRIPTION_MAP
+            elif isinstance(PUBLIC_COLLECTIONS_DESCRIPTION_MAP, list):
+                for item in PUBLIC_COLLECTIONS_DESCRIPTION_MAP:
                     if isinstance(item, dict) and item.get("name"):
                         desc_map[item["name"]] = item.get("description")
         except Exception:

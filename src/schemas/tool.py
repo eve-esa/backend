@@ -48,4 +48,3 @@ class ToolUpdate(BaseModel):
     enabled: Optional[bool] = None
     environment: Optional[List[str]] = None
     config: Optional[ToolConfigRequest] = None
-

@@ -50,6 +50,6 @@ async def regenerate_answer(
             parsed_output = parser.parse(response)
             return parsed_output
         except Exception as e:
-            print(f"[Regenerating Answer Attempt {attempt+1}] Parsing failed: {e}\n")
+            print(f"[Regenerating Answer Attempt {attempt + 1}] Parsing failed: {e}\n")
 
     raise ValueError("Failed to produce valid self-reflection output after 5 attempts.")

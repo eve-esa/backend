@@ -34,3 +34,5 @@ accelerate
 bitsandbytes
 huggingface_hub
 replicate
+black==24.1.0
+ruff==0.13.2

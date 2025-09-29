@@ -9,7 +9,8 @@ class ForgotPassword(MongoModel):
     email: EmailStr
     code: str
     expires_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc) + timedelta(minutes=FORGOT_PASSWORD_CODE_EXPIRE_MINUTES)
+        default_factory=lambda: datetime.now(timezone.utc)
+        + timedelta(minutes=FORGOT_PASSWORD_CODE_EXPIRE_MINUTES)
     )
 
     collection_name: ClassVar[str] = "forgot_passwords"

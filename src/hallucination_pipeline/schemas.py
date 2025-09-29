@@ -1,5 +1,5 @@
 from typing import List
-from pydantic import BaseModel,Field
+from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 
@@ -14,10 +14,14 @@ class SoftLabelDict(TypedDict):
     prob: float
     reason: str
 
+
 class hallucination_schema(BaseModel):
     question: str = Field(..., description="Question asked by the user.")
     answer: str = Field(..., description="Answer to the question.")
-    soft_labels: List[SoftLabelDict] = Field(..., description="List of soft label spans.")
+    soft_labels: List[SoftLabelDict] = Field(
+        ..., description="List of soft label spans."
+    )
+
 
 """
 class hallucination_schema(BaseModel):
@@ -27,13 +31,18 @@ class hallucination_schema(BaseModel):
     #hard_labels: Optional[List[List[int]]] = Field(None, description="Hard labeled spans: [[start, end], ...]")
 """
 
+
 class rewrite_schema(BaseModel):
     question: str = Field(..., description="Original user question.")
-    rewritten_question: str = Field(..., description="Rewritten question for factual accuracy.")
+    rewritten_question: str = Field(
+        ..., description="Rewritten question for factual accuracy."
+    )
+
 
 class self_reflect_schema(BaseModel):
-    question: str= Field(..., description="Question asked by the user.")
+    question: str = Field(..., description="Question asked by the user.")
     answer: str = Field(..., description="Answer after self reflection")
+
 
 class ranking_schema(BaseModel):
     answer_a_score: int = Field(..., ge=0, le=10)

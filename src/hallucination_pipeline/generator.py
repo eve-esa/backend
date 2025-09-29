@@ -37,6 +37,6 @@ def generate_answer(model, question: str, docs: str) -> generation_schema:
             parsed_output = parser.parse(response)
             return parsed_output
         except Exception as e:
-            print(f"[Attempt {attempt+1}] Parsing failed: {e}\n")
+            print(f"[Attempt {attempt + 1}] Parsing failed: {e}\n")
 
     raise ValueError("Failed to produce valid generation output after 5 attempts.")

@@ -67,7 +67,7 @@ async def list_public_collections(pagination: Pagination = Depends()):
                 "description": "ESA data with Qwen-1024 for testing",
             }
         ]
-        total_count = total_count + len(WILEY_PUBLIC_COLLECTIONS)
+        total_count = total_count + len(WILEY_PUBLIC_COLLECTIONS) + 1
     # Pagination must be done manually since Qdrant doesn't support collection pagination
     return PaginatedResponse(
         data=[

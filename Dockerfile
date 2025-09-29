@@ -21,8 +21,8 @@ WORKDIR /code
 COPY --from=builder /opt/venv /opt/venv
 
 COPY *.py ./
-COPY config.yaml start.sh create_user.sh ./
-RUN chmod +x start.sh create_user.sh
+COPY config.yaml start.sh create_user.sh format.sh test.sh ./
+RUN chmod +x start.sh create_user.sh format.sh test.sh
 COPY src/ ./src/
 COPY templates/ ./templates/
 

@@ -3,7 +3,7 @@ from .documents import (
     RetrieveRequest,
     DeleteRequest,
     AddDocumentRequest,
-    UpdateDocumentRequest
+    UpdateDocumentRequest,
 )
 
 __all__ = [
@@ -11,5 +11,5 @@ __all__ = [
     "RetrieveRequest",
     "DeleteRequest",
     "AddDocumentRequest",
-    "UpdateDocumentRequest"
+    "UpdateDocumentRequest",
 ]

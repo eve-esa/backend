@@ -46,6 +46,6 @@ async def rewrite_query(model, hallucination_output) -> rewrite_schema:
             parsed_output = parser.parse(response)
             return parsed_output
         except Exception as e:
-            print(f"[Rewriting Attempt {attempt+1}] Parsing failed: {e}\n")
+            print(f"[Rewriting Attempt {attempt + 1}] Parsing failed: {e}\n")
 
     raise ValueError("Failed to produce valid rewritten query output after 5 attempts.")

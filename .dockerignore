@@ -1,0 +1,44 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Git
+.git
+.gitignore
+
+# Python venv
+venv/
+.venv/
+
+# Local env and secrets
+.env
+.env.*
+!env.example
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+
+# Tests, docs, and tooling not needed in runtime image
+tests/
+README.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+LICENSE
+.gitleaks*
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+

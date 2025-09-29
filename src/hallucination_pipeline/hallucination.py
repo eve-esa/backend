@@ -41,7 +41,7 @@ async def detect_hallucination(
 
         except Exception as e:
             print(
-                f"[Detecting Hallucination Attempt {attempt+1}] Parsing failed: {e}\n"
+                f"[Detecting Hallucination Attempt {attempt + 1}] Parsing failed: {e}\n"
             )
 
     raise ValueError(
