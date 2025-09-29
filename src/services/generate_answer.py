@@ -53,7 +53,7 @@ class GenerationRequest(BaseModel):
     k: int = DEFAULT_K
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=8192)
+    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
     public_collections: List[str] = Field(
         default_factory=list,
         description="List of public collection names to include in the search",
