@@ -831,10 +831,12 @@ async def setup_rag_and_context(request: GenerationRequest):
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
             rag_lat: Dict[str, Optional[float]] = {}
+            mcp_results: List[Any] = []
             mcp_lat: Dict[str, Optional[float]] = {}
 
             results, rag_lat = await get_rag_context(vector_store, request)
-            mcp_results, mcp_lat = await get_mcp_context(request)
+            if "Wiley AI Gateway" in request.public_collections:
+                mcp_results, mcp_lat = await get_mcp_context(request)
 
             merged_results = list(results) + list(mcp_results)
             # Build candidate texts with mapping to original indices
@@ -903,15 +905,15 @@ async def generate_answer(
 
     try:
         # Check if the query violates EO policies
-        # policy_prompt = POLICY_PROMPT.format(question=request.query)
-        # base_llm = llm_manager.get_model()
-        # structured_llm = base_llm.bind(temperature=0).with_structured_output(
-        #     PolicyCheck
-        # )
-        # policy_result = await structured_llm.ainvoke(policy_prompt)
-        # logger.info(f"policy_result: {policy_result}")
-        # if policy_result.violates_policy:
-        #     return POLICY_NOT_ANSWER, [], False, {}, {}
+        policy_prompt = POLICY_PROMPT.format(question=request.query)
+        base_llm = llm_manager.get_model()
+        structured_llm = base_llm.bind(temperature=0).with_structured_output(
+            PolicyCheck
+        )
+        policy_result = await structured_llm.ainvoke(policy_prompt)
+        logger.info(f"policy_result: {policy_result}")
+        if policy_result.violates_policy:
+            return POLICY_NOT_ANSWER, [], False, {}, {}
 
         total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(request)

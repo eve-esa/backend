@@ -25,6 +25,9 @@ class DocumentReference(BaseModel):
     score: Optional[float] = Field(
         default=None, description="Similarity or relevance score if present"
     )
+    collection_name: Optional[str] = Field(
+        default=None, description="Source collection name of the retrieved document"
+    )
     payload: Dict[str, Any] = Field(
         default_factory=dict, description="Raw payload from vector store or MCP"
     )
