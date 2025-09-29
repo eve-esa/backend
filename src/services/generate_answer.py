@@ -831,10 +831,12 @@ async def setup_rag_and_context(request: GenerationRequest):
         try:
             vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
             rag_lat: Dict[str, Optional[float]] = {}
+            mcp_results: List[Any] = []
             mcp_lat: Dict[str, Optional[float]] = {}
 
             results, rag_lat = await get_rag_context(vector_store, request)
-            mcp_results, mcp_lat = await get_mcp_context(request)
+            if "Wiley AI Gateway" in request.public_collections:
+                mcp_results, mcp_lat = await get_mcp_context(request)
 
             merged_results = list(results) + list(mcp_results)
             # Build candidate texts with mapping to original indices
