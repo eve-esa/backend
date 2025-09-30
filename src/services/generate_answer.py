@@ -39,9 +39,10 @@ logger = logging.getLogger(__name__)
 
 
 class PolicyCheck(BaseModel):
-    violates_policy: bool = Field(
+    violation: bool = Field(
         description="True if the input violates policies otherwise False"
     )
+    reason: str = Field(description="Reason for the violation")
 
 
 class GenerationRequest(BaseModel):
@@ -912,7 +913,7 @@ async def generate_answer(
         )
         policy_result = await structured_llm.ainvoke(policy_prompt)
         logger.info(f"policy_result: {policy_result}")
-        if policy_result.violates_policy:
+        if policy_result.violation:
             return POLICY_NOT_ANSWER, [], False, {}, {}
 
         total_start = time.perf_counter()
