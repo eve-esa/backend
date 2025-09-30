@@ -1004,7 +1004,7 @@ async def generate_answer(
         # Append the user message
         messages_for_turn.append(_make_message("user", user_content))
 
-        input_len = str_token_counter(request.query)
+        input_len = tiktoken_counter(messages_for_turn)
         dynamic_max_tokens = max(1, MODEL_CONTEXT_SIZE - input_len)
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available

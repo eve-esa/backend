@@ -15,7 +15,7 @@ DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
 NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
 
-MODEL_CONTEXT_SIZE = 128_000
+MODEL_CONTEXT_SIZE = 100_000
 
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback

@@ -498,7 +498,7 @@ class LLMManager:
             else:
                 prompt = self._generate_prompt(query=query, context=context)
 
-            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
+            max_context_len = max_new_tokens
             if len(context) > max_context_len:
                 logger.info(
                     f"Truncating context from {len(context)} to {max_context_len} characters"
