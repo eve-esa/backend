@@ -4,7 +4,6 @@ LLM Manager module that handles different language model interactions.
 
 import logging
 from enum import Enum
-import asyncio
 from typing import AsyncGenerator, List, Any
 import os
 
@@ -13,7 +12,6 @@ from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
-from pydantic import BaseModel, Field
 from typing import Optional
 from src.constants import MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
@@ -28,17 +26,6 @@ class LLMType(Enum):
     OPENAI = "openai"
     EVE_INSTRUCT = "eve-instruct-v0.1"
     LLAMA = "llama-3.1"
-
-
-class ShouldUseRagDecision(BaseModel):
-    """Schema for deciding whether to use RAG."""
-
-    use_rag: bool = Field(
-        description="True if the query should use RAG; False for casual/generic queries."
-    )
-    reason: Optional[str] = Field(
-        default=None, description="Optional brief justification for the decision."
-    )
 
 
 class LLMManager:
@@ -140,52 +127,6 @@ class LLMManager:
     def get_mistral_model(self) -> ChatMistralAI:
         """Public accessor for the Mistral model."""
         return self._get_mistral_llm()
-
-    async def should_use_rag(self, query: str) -> bool:
-        """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
-
-        Returns True for scientific/technical queries; False for casual/generic ones.
-        Defaults to True on uncertainty/errors.
-        """
-        try:
-            prompt = f"""
-            You are an AI assistant specialized in deciding whether a user query requires 
-            retrieval-augmented generation (RAG) or can be answered directly without external retrieval. 
-            Follow these rules:
-            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
-              "hello", "how are you", "what can you do", or "tell me a joke".
-            - USE RAG for queries related to earth science, space science, climate,
-              space agencies, or similar scientific topics.
-            - USE RAG for specific technical or scientific questions, even if the topic is unclear
-              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
-            - If unsure whether RAG is needed, default to USING RAG.
-
-            Only return a value that conforms to the provided schema.
-
-            Query: {query}
-            """
-
-            base_llm = self.get_model()
-            structured_llm = base_llm.bind(temperature=0).with_structured_output(
-                ShouldUseRagDecision
-            )
-            result = await structured_llm.ainvoke(prompt)
-            logger.info(f"should_use_rag result from runpod: {result}")
-            # with_structured_output returns a Pydantic object matching the schema
-            if isinstance(result, ShouldUseRagDecision):
-                return bool(result.use_rag)
-            return False
-        except Exception as e:
-            logger.error(f"Failed to decide should_use_rag: {e}")
-            mistral_llm = self._get_mistral_llm()
-            structured_mistral_llm = mistral_llm.bind(
-                temperature=0
-            ).with_structured_output(ShouldUseRagDecision)
-            result = await structured_mistral_llm.ainvoke(prompt)
-            logger.info(f"should_use_rag result from mistral: {result}")
-            if isinstance(result, ShouldUseRagDecision):
-                return bool(result.use_rag)
-            return False
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""

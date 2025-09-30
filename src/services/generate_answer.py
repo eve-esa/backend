@@ -38,6 +38,17 @@ logger = logging.getLogger(__name__)
 # No direct OpenAI client usage; we use Runpod-backed ChatOpenAI via LLMManager
 
 
+class ShouldUseRagDecision(BaseModel):
+    """Schema for deciding whether to use RAG."""
+
+    use_rag: bool = Field(
+        description="True if the query should use RAG; False for casual/generic queries."
+    )
+    reason: Optional[str] = Field(
+        default=None, description="Optional brief justification for the decision."
+    )
+
+
 class PolicyCheck(BaseModel):
     violation: bool = Field(
         description="True if the input violates policies otherwise False"
@@ -70,28 +81,6 @@ class GenerationRequest(BaseModel):
     @collection_ids.setter
     def collection_ids(self, value: List[str]) -> None:
         self._collection_ids = list(value) if value else []
-
-
-# -------- Output normalization helpers --------
-import re
-
-
-def _normalize_ai_output(text: str) -> str:
-    """Clean AI output for end-user display.
-
-    - Collapse multiple newlines to a single space
-    - Remove leading ordered-list markers like "1." or "1)" at line starts
-    - Collapse excessive whitespace
-    """
-    if not text:
-        return text
-    s = text.replace("\r\n", "\n")
-    # Remove ordered list markers at the start of lines
-    lines = [re.sub(r"^\s*(?:\d+\.|\d+\))\s+", "", ln) for ln in s.splitlines()]
-    s = " ".join(lines)
-    # Collapse multiple spaces
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
 
 
 def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
@@ -800,6 +789,53 @@ async def get_mcp_context(
     return extracted, latencies
 
 
+async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
+    """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
+
+    Returns True for scientific/technical queries; False for casual/generic ones.
+    Defaults to True on uncertainty/errors.
+    """
+    try:
+        prompt = f"""
+            You are an AI assistant specialized in deciding whether a user query requires 
+            retrieval-augmented generation (RAG) or can be answered directly without external retrieval. 
+            Follow these rules:
+            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
+              "hello", "how are you", "what can you do", or "tell me a joke".
+            - USE RAG for queries related to earth science, space science, climate,
+              space agencies, or similar scientific topics.
+            - USE RAG for specific technical or scientific questions, even if the topic is unclear
+              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
+            - If unsure whether RAG is needed, default to USING RAG.
+
+            Only return a value that conforms to the provided schema.
+
+            Query: {query}
+            """
+
+        base_llm = llm_manager.get_model()
+        structured_llm = base_llm.bind(temperature=0).with_structured_output(
+            ShouldUseRagDecision
+        )
+        result = await structured_llm.ainvoke(prompt)
+        logger.info(f"should_use_rag result from runpod: {result}")
+        # with_structured_output returns a Pydantic object matching the schema
+        if isinstance(result, ShouldUseRagDecision):
+            return bool(result.use_rag)
+        return False
+    except Exception as e:
+        logger.error(f"Failed to decide should_use_rag: {e}")
+        mistral_llm = llm_manager.get_mistral_model()
+        structured_mistral_llm = mistral_llm.bind(temperature=0).with_structured_output(
+            ShouldUseRagDecision
+        )
+        result = await structured_mistral_llm.ainvoke(prompt)
+        logger.info(f"should_use_rag result from mistral: {result}")
+        if isinstance(result, ShouldUseRagDecision):
+            return bool(result.use_rag)
+        return False
+
+
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> tuple[list, list, Dict[str, Optional[float]]]:
@@ -820,10 +856,10 @@ async def get_rag_context(
     return results, vs_latencies
 
 
-async def setup_rag_and_context(request: GenerationRequest):
+async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMManager):
     """Setup RAG and get context for the request."""
     # Check if we need to use RAG using LLMManager
-    is_rag = await LLMManager().should_use_rag(request.query)
+    is_rag = await should_use_rag(llm_manager, request.query)
 
     # Get context if using RAG
     latencies: Dict[str, Optional[float]] = {}
@@ -897,6 +933,30 @@ async def setup_rag_and_context(request: GenerationRequest):
     return context, results, is_rag, latencies
 
 
+async def check_policy(
+    request: GenerationRequest, llm_manager: LLMManager
+) -> PolicyCheck:
+    """Check if the query violates EO policies."""
+    policy_prompt = POLICY_PROMPT.format(question=request.query)
+    try:
+        base_llm = llm_manager.get_model()
+        structured_llm = base_llm.bind(temperature=0).with_structured_output(
+            PolicyCheck
+        )
+        policy_result = await structured_llm.ainvoke(policy_prompt)
+        logger.info(f"policy_result from runpod: {policy_result}")
+        return policy_result
+    except Exception as e:
+        logger.warning(f"Failed to check policy with runpod model: {e}")
+        base_llm = llm_manager.get_mistral_model()
+        structured_llm = base_llm.bind(temperature=0).with_structured_output(
+            PolicyCheck
+        )
+        policy_result = await structured_llm.ainvoke(policy_prompt)
+        logger.info(f"policy_result from mistral: {policy_result}")
+        return policy_result
+
+
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
@@ -906,18 +966,14 @@ async def generate_answer(
 
     try:
         # Check if the query violates EO policies
-        policy_prompt = POLICY_PROMPT.format(question=request.query)
-        base_llm = llm_manager.get_model()
-        structured_llm = base_llm.bind(temperature=0).with_structured_output(
-            PolicyCheck
-        )
-        policy_result = await structured_llm.ainvoke(policy_prompt)
-        logger.info(f"policy_result: {policy_result}")
+        policy_result = await check_policy(request, llm_manager)
         if policy_result.violation:
             return POLICY_NOT_ANSWER, [], False, {}, {}
 
         total_start = time.perf_counter()
-        context, results, is_rag, latencies = await setup_rag_and_context(request)
+        context, results, is_rag, latencies = await setup_rag_and_context(
+            request, llm_manager
+        )
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
