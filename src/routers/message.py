@@ -47,6 +47,11 @@ def _extract_document_data(result: Any) -> Dict[str, Any]:
     result_payload = (
         _field(result, "payload", {}) or _field(result, "document", {}) or {}
     )
+    collection_name = _field(result, "collection_name")
+    if not collection_name and isinstance(result_payload, dict):
+        collection_name = result_payload.get("collection_name") or (
+            result_payload.get("metadata") or {}
+        ).get("collection_name")
     # if result_payload has key "content" and doesn't have key "text", set "text" with "content"
     if "content" in result_payload and "text" not in result_payload:
         result_payload["text"] = result_payload["content"]
@@ -63,6 +68,7 @@ def _extract_document_data(result: Any) -> Dict[str, Any]:
         "id": str(result_id) if result_id is not None else None,
         "version": result_version,
         "score": result_score,
+        "collection_name": collection_name,
         "payload": result_payload,
         "text": result_text,
         "metadata": result_metadata,
@@ -154,7 +160,10 @@ async def create_message(
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
-
+        # remove "Wiley AI Gateway" from collection_ids
+        request.collection_ids = [
+            c for c in request.collection_ids if c != "Wiley AI Gateway"
+        ]
         logger.info(f"Collection IDs: {request.collection_ids}")
 
         # Extract year range from filters for MCP usage

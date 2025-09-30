@@ -9,6 +9,7 @@ document storage, and similarity search operations.
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
+from types import SimpleNamespace
 from uuid import uuid4
 import asyncio
 
@@ -398,6 +399,44 @@ class VectorStoreManager:
             ]
         )
 
+    @staticmethod
+    def _to_generic_result(result: Any, collection_name: str) -> Optional[Any]:
+        """
+        Convert a Qdrant result (e.g., ScoredPoint) into a simple object with
+        stable attributes consumed downstream, including collection_name.
+
+        Returns None if conversion fails.
+        """
+        try:
+            rid = getattr(result, "id", None)
+            score = getattr(result, "score", None) or getattr(result, "distance", None)
+            payload = (
+                getattr(result, "payload", None)
+                or getattr(result, "document", None)
+                or {}
+            )
+            text = getattr(result, "text", None)
+            metadata = getattr(result, "metadata", None)
+
+            if text is None and isinstance(payload, dict):
+                text = payload.get("text") or payload.get("content")
+            if metadata is None and isinstance(payload, dict):
+                metadata = payload.get("metadata")
+
+            version = getattr(result, "version", None)
+
+            return SimpleNamespace(
+                id=rid,
+                version=version,
+                score=score,
+                payload=payload if isinstance(payload, dict) else {},
+                text=text or "",
+                metadata=metadata if isinstance(metadata, dict) else {},
+                collection_name=collection_name,
+            )
+        except Exception:
+            return None
+
     def _search_across_collections(
         self,
         collection_names: List[str],
@@ -436,7 +475,14 @@ class VectorStoreManager:
                         )
                     ),
                 )
-                aggregated_results.extend(results)
+                # Convert to generic objects and attach collection_name without mutating ScoredPoint
+                converted_results: List[Any] = []
+                for r in results or []:
+                    conv = self._to_generic_result(r, collection_name)
+                    if conv is not None:
+                        converted_results.append(conv)
+
+                aggregated_results.extend(converted_results)
             except Exception as e:
                 logger.warning(f"Failed to search collection '{collection_name}': {e}")
                 continue
