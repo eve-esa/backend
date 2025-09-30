@@ -44,9 +44,7 @@ class ShouldUseRagDecision(BaseModel):
     use_rag: bool = Field(
         description="True if the query should use RAG; False for casual/generic queries."
     )
-    reason: Optional[str] = Field(
-        default=None, description="Optional brief justification for the decision."
-    )
+    reason: str = Field(description="Brief justification for the decision.")
 
 
 class PolicyCheck(BaseModel):
@@ -603,6 +601,8 @@ async def _maybe_rerank_deepinfra(
 ) -> dict | None:
     """Call DeepInfra reranker if configured."""
     try:
+        if len(candidate_texts) == 0:
+            return None
         api_token = DEEPINFRA_API_TOKEN
         if not api_token:
             logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
@@ -858,11 +858,13 @@ async def get_rag_context(
 
 async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMManager):
     """Setup RAG and get context for the request."""
+    latencies: Dict[str, Optional[float]] = {}
     # Check if we need to use RAG using LLMManager
+    latency = time.perf_counter()
     is_rag = await should_use_rag(llm_manager, request.query)
+    latencies["rag_decision_latency"] = time.perf_counter() - latency
 
     # Get context if using RAG
-    latencies: Dict[str, Optional[float]] = {}
     context, results = "", []
     if is_rag:
         try:
@@ -899,11 +901,9 @@ async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMMana
                         index_to_text[idx] = text_str
 
             # Rerank candidates using DeepInfra reranker
-            latencies["reranking_latency"] = time.perf_counter()
+            latency = time.perf_counter()
             reranked = await _maybe_rerank_deepinfra(candidate_texts, request.query)
-            latencies["reranking_latency"] = (
-                time.perf_counter() - latencies["reranking_latency"]
-            )
+            latencies["reranking_latency"] = time.perf_counter() - latency
             if reranked:
                 ordered_indices = _sort_deepinfra_reranked_results(
                     reranked, candidate_indices
@@ -966,11 +966,12 @@ async def generate_answer(
 
     try:
         # Check if the query violates EO policies
+        total_start = time.perf_counter()
         policy_result = await check_policy(request, llm_manager)
+        guardrail_latency = time.perf_counter() - total_start
         if policy_result.violation:
             return POLICY_NOT_ANSWER, [], False, {}, {}
 
-        total_start = time.perf_counter()
         context, results, is_rag, latencies = await setup_rag_and_context(
             request, llm_manager
         )
@@ -1097,6 +1098,7 @@ async def generate_answer(
 
         total_latency = time.perf_counter() - total_start
         latencies = {
+            "guardrail_latency": guardrail_latency,
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,

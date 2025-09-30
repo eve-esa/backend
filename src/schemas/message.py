@@ -48,6 +48,12 @@ class HallucinationLatencies(BaseModel):
 
 
 class Latencies(BaseModel):
+    guardrail_latency: Optional[float] = Field(
+        default=None, description="Time to check if the query violates EO policies"
+    )
+    rag_decision_latency: Optional[float] = Field(
+        default=None, description="Time to decide if the query should use RAG"
+    )
     # Vector store latencies
     query_embedding_latency: Optional[float] = Field(
         default=None, description="Time to embed the query"
