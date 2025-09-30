@@ -63,7 +63,7 @@ class GenerationRequest(BaseModel):
     k: int = DEFAULT_K
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
+    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=128_000)
     public_collections: List[str] = Field(
         default_factory=list,
         description="List of public collection names to include in the search",
@@ -168,6 +168,40 @@ _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
 _graph_init_lock = asyncio.Lock()
 
 
+def str_token_counter(text: str) -> int:
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def tiktoken_counter(messages: List[BaseMessage]) -> int:
+    """Custom token counter for messages using tiktoken."""
+    num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
+    tokens_per_message = 3
+    tokens_per_name = 1
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            raise ValueError(f"Unsupported messages type {msg.__class__}")
+        num_tokens += (
+            tokens_per_message
+            + str_token_counter(role)
+            + str_token_counter(msg.content)
+        )
+        if hasattr(msg, "name") and msg.name:
+            num_tokens += tokens_per_name + str_token_counter(msg.name)
+    return num_tokens
+
+
 async def _get_or_create_compiled_graph():
     """Lazily compile LangGraph once and reuse across calls.
 
@@ -198,40 +232,9 @@ async def _get_or_create_compiled_graph():
             max_tokens: Optional[int]
             conversation_summary: Optional[str]
 
-        def str_token_counter(text: str) -> int:
-            try:
-                enc = tiktoken.get_encoding("cl100k_base")
-                return len(enc.encode(text))
-            except Exception:
-                return len(text) // 4
-
-        def tiktoken_counter(messages: List[BaseMessage]) -> int:
-            """Custom token counter for messages using tiktoken."""
-            num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
-            tokens_per_message = 3
-            tokens_per_name = 1
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    role = "user"
-                elif isinstance(msg, AIMessage):
-                    role = "assistant"
-                elif isinstance(msg, ToolMessage):
-                    role = "tool"
-                elif isinstance(msg, SystemMessage):
-                    role = "system"
-                else:
-                    raise ValueError(f"Unsupported messages type {msg.__class__}")
-                num_tokens += (
-                    tokens_per_message
-                    + str_token_counter(role)
-                    + str_token_counter(msg.content)
-                )
-                if hasattr(msg, "name") and msg.name:
-                    num_tokens += tokens_per_name + str_token_counter(msg.name)
-            return num_tokens
-
         async def call_model(state: GenerationState):
             bound_llm = llm
+            max_tokens_val = MODEL_CONTEXT_SIZE
             try:
                 bind_kwargs = {}
                 try:
@@ -256,13 +259,6 @@ async def _get_or_create_compiled_graph():
             conversation_summary = state.get("conversation_summary")
             all_messages = state["messages"]
 
-            # Reserve tokens for response generation
-            max_tokens_val = state.get("max_tokens") or DEFAULT_MAX_NEW_TOKENS
-            reserved_tokens = (
-                max_tokens_val + 1000
-            )  # Reserve extra 1k tokens for safety
-            available_tokens = MODEL_CONTEXT_SIZE - reserved_tokens
-
             if conversation_summary:
                 summary_context = f"""Previous conversation summary: {conversation_summary}
 
@@ -275,7 +271,7 @@ Please continue the conversation using this summary as context for understanding
                 try:
                     trimmed_messages = trim_messages(
                         messages_with_summary,
-                        max_tokens=available_tokens,
+                        max_tokens=max_tokens_val,
                         strategy="last",
                         token_counter=tiktoken_counter,
                         include_system=True,
@@ -296,7 +292,7 @@ Please continue the conversation using this summary as context for understanding
                 try:
                     context_messages = trim_messages(
                         all_messages,
-                        max_tokens=available_tokens,
+                        max_tokens=max_tokens_val,
                         strategy="last",
                         token_counter=tiktoken_counter,
                         include_system=True,
@@ -1008,6 +1004,9 @@ async def generate_answer(
         # Append the user message
         messages_for_turn.append(_make_message("user", user_content))
 
+        input_len = str_token_counter(request.query)
+        dynamic_max_tokens = max(1, MODEL_CONTEXT_SIZE - input_len)
+
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
         base_gen_latency: Optional[float] = None
@@ -1023,7 +1022,7 @@ async def generate_answer(
                     state = {
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
-                        "max_tokens": request.max_new_tokens,
+                        "max_tokens": dynamic_max_tokens,
                         "conversation_summary": summary_text,
                     }
                     result = await graph.ainvoke(state, config)
@@ -1047,7 +1046,7 @@ async def generate_answer(
                 final_answer = await llm_manager.generate_answer_mistral(
                     query=request.query,
                     context=context,
-                    max_new_tokens=request.max_new_tokens,
+                    max_new_tokens=dynamic_max_tokens,
                     temperature=request.temperature,
                     conversation_history=conversation_history,
                     conversation_summary=conversation_summary,
@@ -1065,7 +1064,7 @@ async def generate_answer(
             final_answer = await llm_manager.generate_answer_mistral(
                 query=request.query,
                 context=context,
-                max_new_tokens=request.max_new_tokens,
+                max_new_tokens=dynamic_max_tokens,
                 temperature=request.temperature,
                 conversation_history=conversation_history,
                 conversation_summary=conversation_summary,
