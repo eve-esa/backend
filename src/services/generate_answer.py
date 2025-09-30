@@ -782,6 +782,10 @@ async def get_mcp_context(
         elif isinstance(data, list):
             extracted.extend(data)
 
+    for it in extracted:
+        if isinstance(it, dict):
+            it["collection_name"] = "Wiley AI Gateway"
+
     latencies: Dict[str, Optional[float]] = {
         "mcp_retrieval_latency": mcp_retrieval_latency,
     }
