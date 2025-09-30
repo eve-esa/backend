@@ -38,6 +38,14 @@ EVE serves multiple user scenarios:
 
 This repository contains the **backend application** for the EVE project.
 
+## Stack
+
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [MongoDB](https://www.mongodb.com/)
+- [Qdrant](https://qdrant.tech/)
+- [RunPod](https://runpod.io/)
+
+
 - Getting Started
   - [Docker Setup](#docker-setup)
     - [Requirements](#requirements)
