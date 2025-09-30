@@ -3,7 +3,11 @@ import anyio
 import asyncio
 
 from src.config import IS_PROD
-from src.constants import DEFAULT_EMBEDDING_MODEL, WILEY_PUBLIC_COLLECTIONS
+from src.constants import (
+    DEFAULT_EMBEDDING_MODEL,
+    WILEY_PUBLIC_COLLECTIONS,
+    STAGING_PUBLIC_COLLECTIONS,
+)
 from src.schemas.common import Pagination
 from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.database.models.document import Document
@@ -61,13 +65,8 @@ async def list_public_collections(pagination: Pagination = Depends()):
         public_collections = WILEY_PUBLIC_COLLECTIONS + public_collections
         total_count = total_count + len(WILEY_PUBLIC_COLLECTIONS)
     else:
-        public_collections = WILEY_PUBLIC_COLLECTIONS + [
-            {
-                "name": "esa-data-qwen-1024",
-                "description": "ESA data with Qwen-1024 for testing",
-            }
-        ]
-        total_count = total_count + len(WILEY_PUBLIC_COLLECTIONS)
+        public_collections = WILEY_PUBLIC_COLLECTIONS + STAGING_PUBLIC_COLLECTIONS
+        total_count = len(public_collections)
     # Pagination must be done manually since Qdrant doesn't support collection pagination
     return PaginatedResponse(
         data=[
