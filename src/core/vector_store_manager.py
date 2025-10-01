@@ -415,6 +415,8 @@ class VectorStoreManager:
                 or getattr(result, "document", None)
                 or {}
             )
+            if payload.get("title") == "None":
+                payload["title"] = None
             text = getattr(result, "text", None)
             metadata = getattr(result, "metadata", None)
 
@@ -444,6 +446,7 @@ class VectorStoreManager:
         score_threshold: float,
         query_filter: Optional[Filter],
         limit_per_collection: int,
+        private_collections_map: Optional[Dict[str, str]] = None,
     ) -> List[Any]:
         """
         Perform a search against multiple collections and aggregate results.
@@ -458,6 +461,16 @@ class VectorStoreManager:
         Returns:
             Aggregated list of search results from all collections
         """
+        logger.info(f"private_collections_map: {private_collections_map}")
+        aliases_response = self.client.get_aliases()
+        alias_map: Dict[str, str] = {}
+        alias_items = getattr(aliases_response, "aliases", aliases_response)
+        for item in alias_items or []:
+            alias_name = getattr(item, "alias_name", None)
+            collection_name = getattr(item, "collection_name", None)
+            if collection_name and alias_name:
+                alias_map.setdefault(collection_name, alias_name)
+
         aggregated_results: List[Any] = []
         for collection_name in collection_names:
             try:
@@ -478,6 +491,10 @@ class VectorStoreManager:
                 # Convert to generic objects and attach collection_name without mutating ScoredPoint
                 converted_results: List[Any] = []
                 for r in results or []:
+                    alias_name = alias_map.get(collection_name, collection_name)
+                    collection_name = private_collections_map.get(
+                        alias_name, alias_name
+                    )
                     conv = self._to_generic_result(r, collection_name)
                     if conv is not None:
                         converted_results.append(conv)
@@ -692,6 +709,7 @@ class VectorStoreManager:
         score_threshold: float = 0.7,
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
+        private_collections_map: Optional[Dict[str, str]] = None,
     ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
@@ -722,6 +740,7 @@ class VectorStoreManager:
                 score_threshold=score_threshold,
                 query_filter=query_filter,
                 limit_per_collection=k,
+                private_collections_map=private_collections_map,
             )
             retrieval_latency = time.perf_counter() - t1
 
