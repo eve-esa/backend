@@ -51,8 +51,22 @@ PUBLIC_COLLECTIONS = [
         "name": "EVE open-access",
         "description": "Open-access collection of Earth Observation materials sourced from publishers and platforms such as MDPI, Springer, IOPscience, SagePub, EOGE, EOS, ISPRS,  and others. The dataset spans a wide range of content types, including research papers, journal articles, blog posts, and web pages. Alongside the documents, metadata has been systematically extracted to facilitate search and downstream analysis. All collected resources are compliant with current legislation regarding data use and accessibility. This collection contains about 250.00 documents.",
     },
+    {
+        "name": "wikipedia_eo_dump",
+        "description": "This collection brings together Wikipedia articles related to Earth Observation (EO). The content is intended to provide accessible, introductory information about EO concepts, technologies, and organizations active in the field. Please note that these articles are not peer-reviewed scientific publications. Instead, they are written for a general audience and aim to give broad overviews rather than in-depth, expert analyses. Users should treat this collection as a starting point for understanding EO, and complement it with specialized, peer-reviewed sources when deeper or technical knowledge is required. This collection contains about 2000 documents.",
+    },
 ]
 
+STAGING_PUBLIC_COLLECTIONS = [
+    {
+        "name": "esa-data-qwen-1024",
+        "description": "ESA data with Qwen-1024 for testing",
+    },
+    {
+        "name": "Wikipedia EO",
+        "description": "This collection brings together Wikipedia articles related to Earth Observation (EO). The content is intended to provide accessible, introductory information about EO concepts, technologies, and organizations active in the field. Please note that these articles are not peer-reviewed scientific publications. Instead, they are written for a general audience and aim to give broad overviews rather than in-depth, expert analyses. Users should treat this collection as a starting point for understanding EO, and complement it with specialized, peer-reviewed sources when deeper or technical knowledge is required. This collection contains about 2000 documents.",
+    },
+]
 
 _BASE_DIR = Path(__file__).parent
 _POLICY_PATH = _BASE_DIR / "templates" / "donotknow.yaml"
