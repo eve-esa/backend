@@ -156,6 +156,7 @@ async def create_message(
             filter_dict={"user_id": requesting_user.id}
         )
 
+        request.private_collections_map = {c.id: c.name for c in user_collections}
         if len(user_collections) > 0:
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections

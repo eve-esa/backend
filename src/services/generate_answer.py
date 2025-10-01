@@ -71,6 +71,7 @@ class GenerationRequest(BaseModel):
     hallucination_loop_flag: bool = False  # For testing purposes
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
+    _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
 
     @property
     def collection_ids(self) -> List[str]:
@@ -79,6 +80,14 @@ class GenerationRequest(BaseModel):
     @collection_ids.setter
     def collection_ids(self, value: List[str]) -> None:
         self._collection_ids = list(value) if value else []
+
+    @property
+    def private_collections_map(self) -> Dict[str, str]:
+        return self._private_collections_map
+
+    @private_collections_map.setter
+    def private_collections_map(self, value: Dict[str, str]) -> None:
+        self._private_collections_map = value
 
 
 def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
@@ -852,6 +861,7 @@ async def get_rag_context(
         score_threshold=request.score_threshold,
         embeddings_model=request.embeddings_model,
         filters=request.filters,
+        private_collections_map=request.private_collections_map,
     )
 
     if not results:
