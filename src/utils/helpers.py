@@ -20,6 +20,14 @@ from langchain_community.embeddings import (
     HuggingFaceEmbeddings,
     DeepInfraEmbeddings,
 )
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    ToolMessage,
+)
+import tiktoken
 
 from src.utils.embeddings import RunPodEmbeddings
 from src.config import (
@@ -304,6 +312,53 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         "text": result_text,
         "metadata": result_metadata,
     }
+
+
+def str_token_counter(text: str) -> int:
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def tiktoken_counter(messages: List[BaseMessage]) -> int:
+    """Custom token counter for messages using tiktoken."""
+    num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
+    tokens_per_message = 3
+    tokens_per_name = 1
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            raise ValueError(f"Unsupported messages type {msg.__class__}")
+        num_tokens += (
+            tokens_per_message
+            + str_token_counter(role)
+            + str_token_counter(msg.content)
+        )
+        if hasattr(msg, "name") and msg.name:
+            num_tokens += tokens_per_name + str_token_counter(msg.name)
+    return num_tokens
+
+
+def trim_text_to_token_limit(text: str, max_tokens: int) -> str:
+    """Trim text to be at most max_tokens using tiktoken, with a char fallback."""
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        toks = enc.encode(text)
+        if len(toks) <= max_tokens:
+            return text
+        return enc.decode(toks[:max_tokens])
+    except Exception:
+        est_chars = max(0, max_tokens * 4)
+        return text[:est_chars]
 
 
 def get_mongodb_uri() -> str:

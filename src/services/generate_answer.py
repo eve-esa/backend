@@ -22,7 +22,6 @@ from src.constants import (
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
     RERANKER_MODEL,
-    MODEL_CONTEXT_SIZE,
 )
 from src.utils.helpers import extract_document_data, get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
@@ -32,6 +31,11 @@ from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.siliconflow_reranker import SiliconFlowReranker
+from src.utils.helpers import (
+    get_mongodb_uri,
+    tiktoken_counter,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +136,10 @@ try:  # type: ignore
     from langgraph.graph.message import add_messages  # noqa: F401
     from langchain_core.messages import (
         trim_messages,
-        BaseMessage,
         HumanMessage,
         AIMessage,
         SystemMessage,
-        ToolMessage,
     )
-    import tiktoken
 
     _langgraph_available = True
 except Exception:
@@ -208,79 +209,39 @@ async def _get_or_create_compiled_graph():
             max_tokens: Optional[int]
             conversation_summary: Optional[str]
 
-        def str_token_counter(text: str) -> int:
-            try:
-                enc = tiktoken.get_encoding("cl100k_base")
-                return len(enc.encode(text))
-            except Exception:
-                return len(text) // 4
-
-        def tiktoken_counter(messages: List[BaseMessage]) -> int:
-            """Custom token counter for messages using tiktoken."""
-            num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
-            tokens_per_message = 3
-            tokens_per_name = 1
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    role = "user"
-                elif isinstance(msg, AIMessage):
-                    role = "assistant"
-                elif isinstance(msg, ToolMessage):
-                    role = "tool"
-                elif isinstance(msg, SystemMessage):
-                    role = "system"
-                else:
-                    raise ValueError(f"Unsupported messages type {msg.__class__}")
-                num_tokens += (
-                    tokens_per_message
-                    + str_token_counter(role)
-                    + str_token_counter(msg.content)
-                )
-                if hasattr(msg, "name") and msg.name:
-                    num_tokens += tokens_per_name + str_token_counter(msg.name)
-            return num_tokens
-
         async def call_model(state: GenerationState):
             bound_llm = llm
+            bind_kwargs = {}
             try:
-                bind_kwargs = {}
-                try:
-                    temperature_val = state.get("temperature")
-                except Exception:
-                    temperature_val = None
-                try:
-                    max_tokens_val = state.get("max_tokens")
-                except Exception:
-                    max_tokens_val = None
-
-                if temperature_val is not None:
-                    bind_kwargs["temperature"] = temperature_val
-                if max_tokens_val is not None:
-                    bind_kwargs["max_tokens"] = max_tokens_val
-
-                # Optimize for streaming performance
-                bind_kwargs.update(
-                    {
-                        "stream": True,  # Enable streaming
-                        "stream_options": {"include_usage": False},  # Reduce overhead
-                    }
-                )
-
-                if bind_kwargs:
-                    bound_llm = llm.bind(**bind_kwargs)
+                temperature_val = state.get("temperature")
             except Exception:
-                bound_llm = llm
+                temperature_val = None
+            try:
+                max_tokens_val = state.get("max_tokens")
+            except Exception:
+                max_tokens_val = None
+
+            if temperature_val is not None:
+                bind_kwargs["temperature"] = temperature_val
+            if max_tokens_val is not None:
+                bind_kwargs["max_tokens"] = max_tokens_val
+
+            # Optimize for streaming performance
+            bind_kwargs.update(
+                {
+                    "stream": True,  # Enable streaming
+                    "stream_options": {"include_usage": False},  # Reduce overhead
+                }
+            )
+
+            if bind_kwargs:
+                bound_llm = llm.bind(**bind_kwargs)
 
             # Get conversation summary and all messages
             conversation_summary = state.get("conversation_summary")
             all_messages = state["messages"]
 
-            # Reserve tokens for response generation
-            max_tokens_val = state.get("max_tokens") or DEFAULT_MAX_NEW_TOKENS
-            reserved_tokens = (
-                max_tokens_val + 1000
-            )  # Reserve extra 1k tokens for safety
-            available_tokens = MODEL_CONTEXT_SIZE - reserved_tokens
+            available_tokens = DEFAULT_MAX_NEW_TOKENS
 
             if conversation_summary:
                 summary_context = f"""Previous conversation summary: {conversation_summary}
@@ -353,7 +314,7 @@ async def _get_conversation_history_from_db(
         messages = await MessageModel.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", -1)],
-            limit=10,
+            limit=5,
         )
 
         # Convert to LangChain-compatible message format
@@ -368,29 +329,6 @@ async def _get_conversation_history_from_db(
     except Exception as e:
         logger.warning(f"Failed to get conversation history from database: {e}")
         return [], None
-
-
-async def _summarize_history_with_runpod(
-    transcript: str, max_tokens: int = 50000
-) -> str:
-    """Summarize entire conversation history."""
-    if not transcript:
-        return ""
-    llm = LLMManager().get_model()
-    system = (
-        "You are an AI assistant specialized in summarizing chat histories. "
-        "Your role is to read a transcript of a conversation and produce a clear, "
-        "concise, and neutral summary of the main points."
-    )
-    messages = [
-        _make_message("system", system),
-        _make_message("user", f"Conversation transcript:\n{transcript}"),
-    ]
-    try:
-        resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
-        return getattr(resp, "content", str(resp))
-    except Exception:
-        return ""
 
 
 def _extract_result_text_for_dedup(item: Any) -> str:
@@ -658,7 +596,7 @@ async def get_mcp_context(
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
-        "topN": request.k * 2,
+        "topN": min(20, request.k * 2),
         "threshold": request.score_threshold,
     }
     if isinstance(request.year, list) and len(request.year) >= 2:
@@ -1018,9 +956,18 @@ async def generate_answer(
 
         # Build user message with query and RAG context (summary handled separately in call_model)
         user_parts: List[str] = []
-        user_parts.append(request.query)
+        available_tokens = DEFAULT_MAX_NEW_TOKENS - request.max_new_tokens - 1000
+        summarized_query = await llm_manager.summarize_context_with_map_reduce(
+            request.query,
+            max_tokens=available_tokens // 2,
+        )
+        user_parts.append(summarized_query)
         if is_rag and context:
-            user_parts.append(f"Context:\n{context}")
+            summarized_context = await llm_manager.summarize_context_with_map_reduce(
+                context,
+                max_tokens=available_tokens // 2,
+            )
+            user_parts.append(f"Context:\n{summarized_context}")
         user_content = "\n\n".join(user_parts)
 
         # Append the user message
@@ -1030,6 +977,7 @@ async def generate_answer(
         final_answer: Optional[str] = None
         base_gen_latency: Optional[float] = None
         mistral_gen_latency: Optional[float] = None
+        _langgraph_available = False
         if _langgraph_available and conversation_id:
             try:
                 # Single invoke to append assistant response to memory (async)
@@ -1063,8 +1011,8 @@ async def generate_answer(
                     else (None, None)
                 )
                 final_answer = await llm_manager.generate_answer_mistral(
-                    query=request.query,
-                    context=context,
+                    query=summarized_query,
+                    context=summarized_context,
                     max_new_tokens=request.max_new_tokens,
                     temperature=request.temperature,
                     conversation_history=conversation_history,
@@ -1081,8 +1029,8 @@ async def generate_answer(
                 else (None, None)
             )
             final_answer = await llm_manager.generate_answer_mistral(
-                query=request.query,
-                context=context,
+                query=summarized_query,
+                context=summarized_context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
                 conversation_history=conversation_history,
@@ -1133,7 +1081,7 @@ async def generate_answer(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
+async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 5):
     """Every N turns, summarize entire history and reset short-term memory to only the summary.
 
     Note: We derive the turn count from the number of Message documents in this conversation.
@@ -1189,7 +1137,9 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
-        summary_text = await _summarize_history_with_runpod(summarizer_input)
+        summary_text = await LLMManager().summarize_context_in_all(
+            summarizer_input, max_tokens=50000, is_force=True
+        )
         if not summary_text:
             return
 

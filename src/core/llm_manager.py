@@ -14,6 +14,11 @@ from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from typing import Optional
 from src.constants import MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
+from src.utils.helpers import str_token_counter, trim_text_to_token_limit
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain.chains.summarize import load_summarize_chain
+from langchain_core.messages import SystemMessage, HumanMessage
 
 
 logger = logging.getLogger(__name__)
@@ -274,6 +279,67 @@ class LLMManager:
         """Kept for backward compatibility; now simply returns content if present."""
         return getattr(response, "content", str(response))
 
+    async def summarize_context_in_all(
+        self, transcript: str, max_tokens: int = 50000, is_force: bool = False
+    ) -> str:
+        """Summarize entire conversation history."""
+        if not transcript:
+            return ""
+        if is_force is False and str_token_counter(transcript) <= max_tokens:
+            return transcript
+
+        system = (
+            "You are an AI assistant specialized in summarizing chat histories. "
+            "Your role is to read a transcript of a conversation and produce a clear, "
+            "concise, and neutral summary of the main points."
+        )
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=f"Conversation transcript:\n{transcript}"),
+        ]
+        try:
+            llm = self.get_model()
+            resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
+            return getattr(resp, "content", str(resp))
+        except Exception:
+            llm = self.get_mistral_model()
+            resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
+            return getattr(resp, "content", str(resp))
+
+    async def summarize_context_with_map_reduce(
+        self, context: str, max_tokens: int
+    ) -> str:
+        """Summarize RAG/MCP context using LangChain where possible, respecting max_tokens.
+
+        Uses LangChain's RecursiveCharacterTextSplitter, Document, and load_summarize_chain
+        with the Runpod-backed ChatOpenAI from LLMManager. Falls back to a manual
+        map-reduce approach if LangChain summarization utilities are unavailable.
+        """
+        if str_token_counter(context) <= max_tokens:
+            return context
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=400_000, chunk_overlap=0
+        )
+        docs = [Document(page_content=t) for t in text_splitter.split_text(context)]
+
+        try:
+            llm = self.get_model()
+            chain = load_summarize_chain(llm, chain_type="map_reduce")
+
+            summary = chain.invoke(docs)
+            trimmed_context = trim_text_to_token_limit(
+                summary["output_text"], max_tokens
+            )
+            return trimmed_context
+        except Exception:
+            llm = self.get_mistral_model()
+            chain = load_summarize_chain(llm, chain_type="map_reduce")
+            summary = chain.invoke(docs)
+            trimmed_context = trim_text_to_token_limit(
+                summary["output_text"], max_tokens
+            )
+            return trimmed_context
+
     async def generate_answer(
         self,
         query: str,
@@ -344,6 +410,11 @@ class LLMManager:
                 conversation_context = self._build_conversation_context(
                     conversation_history or [], conversation_summary
                 )
+                available_tokens = (MODEL_CONTEXT_SIZE - max_new_tokens) // 2
+                if str_token_counter(conversation_context) > available_tokens:
+                    conversation_context = await self.summarize_context_with_map_reduce(
+                        context=conversation_context, max_tokens=available_tokens
+                    )
                 prompt = self._generate_prompt_with_history(
                     query=query,
                     context=context,
@@ -351,13 +422,6 @@ class LLMManager:
                 )
             else:
                 prompt = self._generate_prompt(query=query, context=context)
-
-            max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
-            if len(context) > max_context_len:
-                logger.info(
-                    f"Truncating context from {len(context)} to {max_context_len} characters"
-                )
-                context = context[:max_context_len]
 
             return await self._call_eve_instruct_mistral(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
