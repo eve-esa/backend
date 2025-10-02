@@ -956,6 +956,7 @@ async def generate_answer(
 
         # Build user message with query and RAG context (summary handled separately in call_model)
         user_parts: List[str] = []
+        summarized_context: Optional[str] = None
         available_tokens = DEFAULT_MAX_NEW_TOKENS - request.max_new_tokens - 1000
         summarized_query = await llm_manager.summarize_context_with_map_reduce(
             request.query,
