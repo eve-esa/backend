@@ -31,6 +31,7 @@ from src.config import DEEPINFRA_API_TOKEN, config
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
+from src.utils.template_loader import format_template
 
 logger = logging.getLogger(__name__)
 
@@ -276,47 +277,17 @@ async def _get_or_create_compiled_graph():
                 summary_context = f"""Previous conversation summary: {conversation_summary}
 
 Please continue the conversation using this summary as context for understanding the conversation history."""
+                all_messages = [_make_message("user", summary_context)] + all_messages
 
-                messages_with_summary = [
-                    _make_message("user", summary_context)
-                ] + all_messages
-
-                try:
-                    trimmed_messages = trim_messages(
-                        messages_with_summary,
-                        max_tokens=available_tokens,
-                        strategy="last",
-                        token_counter=tiktoken_counter,
-                        include_system=True,
-                        start_on="human",
-                        end_on=("human", "tool"),
-                    )
-                    logger.debug(
-                        f"Trimmed messages: {len(messages_with_summary)} -> {len(trimmed_messages)} messages"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"trim_messages failed, using original messages: {e}"
-                    )
-                    trimmed_messages = messages_with_summary
-
-                context_messages = trimmed_messages
-            else:
-                try:
-                    context_messages = trim_messages(
-                        all_messages,
-                        max_tokens=available_tokens,
-                        strategy="last",
-                        token_counter=tiktoken_counter,
-                        include_system=True,
-                        start_on="human",
-                        end_on=("human", "tool"),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"trim_messages failed, using original messages: {e}"
-                    )
-                    context_messages = all_messages
+            context_messages = trim_messages(
+                all_messages,
+                max_tokens=available_tokens,
+                strategy="last",
+                token_counter=tiktoken_counter,
+                include_system=True,
+                start_on="human",
+                end_on=("human", "tool"),
+            )
 
             response = await bound_llm.ainvoke(context_messages)
             return {"messages": [response]}
