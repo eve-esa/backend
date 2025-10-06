@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 import logging
-from src.services.generate_answer import generate_answer_stream_generator
+from src.services.generate_answer import generate_answer_json_stream_generator
 from src.utils.helpers import extract_document_data, extract_year_range_from_filters
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ async def retry(
 
         documents_data = []
         if results:
-            documents_data = [_extract_document_data(result) for result in results]
+            documents_data = [extract_document_data(result) for result in results]
 
         message.output = answer
         message.documents = documents_data
@@ -316,8 +316,10 @@ async def create_message_stream(
         )
 
         return StreamingResponse(
-            generate_answer_stream_generator(
-                request, conversation_id=conversation_id, message_id=message.id
+            generate_answer_json_stream_generator(
+                request,
+                conversation_id=conversation_id,
+                message_id=message.id,
             ),
             media_type="text/event-stream",
         )
