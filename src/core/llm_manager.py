@@ -7,7 +7,6 @@ from enum import Enum
 from typing import AsyncGenerator, List, Any
 import os
 
-import openai
 from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
 
@@ -210,64 +209,6 @@ class LLMManager:
             conversation_context=conversation_context,
         )
 
-    def _call_openai(self, prompt: str, max_tokens: int = 500) -> str:
-        """
-        Call the OpenAI API with the given prompt.
-
-        Args:
-            prompt: The formatted prompt to send
-            max_tokens: Maximum tokens for the response
-
-        Returns:
-            The generated response
-
-        Raises:
-            Exception: If the API call fails
-        """
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            response = openai.chat.completions.create(
-                messages=messages,
-                model="gpt-4",
-                temperature=0.3,
-                max_tokens=max_tokens,
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"OpenAI API call failed: {str(e)}")
-            raise
-
-    async def _stream_openai(
-        self, prompt: str, max_tokens: int = 500
-    ) -> AsyncGenerator[str, None]:
-        """
-        Stream response from OpenAI API.
-
-        Args:
-            prompt: The formatted prompt to send
-            max_tokens: Maximum tokens for the response
-
-        Yields:
-            Chunks of the generated response
-        """
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            stream = openai.chat.completions.create(
-                messages=messages,
-                model="gpt-4",
-                temperature=0.3,
-                max_tokens=max_tokens,
-                stream=True,
-            )
-
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    yield chunk.choices[0].delta.content
-
-        except Exception as e:
-            logger.error(f"OpenAI streaming API call failed: {str(e)}")
-            raise
-
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
         """
         Call the Eve Instruct model via Runpod using LangChain ChatOpenAI (OpenAI-compatible API).
@@ -309,94 +250,6 @@ class LLMManager:
         except Exception as e:
             logger.error(f"Mistral model call failed: {str(e)}")
             raise
-
-    def _process_stream_chunk(self, chunk) -> str:
-        """
-        Process a single stream chunk and extract text content.
-
-        Args:
-            chunk: The stream chunk to process
-
-        Returns:
-            str: The extracted text content
-        """
-        if isinstance(chunk, dict):
-            if "output" in chunk:
-                output = chunk["output"]
-                if isinstance(output, str):
-                    return output
-                elif isinstance(output, dict) and "text" in output:
-                    return output["text"]
-                elif isinstance(output, list) and len(output) > 0:
-                    texts = []
-                    for item in output:
-                        if isinstance(item, dict):
-                            if "text" in item:
-                                texts.append(item["text"])
-                            elif "tokens" in item:
-                                tokens = item["tokens"]
-                                if isinstance(tokens, list):
-                                    texts.append(
-                                        " ".join(str(token) for token in tokens)
-                                    )
-                                else:
-                                    texts.append(str(tokens))
-                        else:
-                            texts.append(str(item))
-                    return " ".join(texts)
-            elif "text" in chunk:
-                return chunk["text"]
-            elif "choices" in chunk and len(chunk["choices"]) > 0:
-                choice = chunk["choices"][0]
-                if "text" in choice:
-                    return choice["text"]
-                elif "message" in choice:
-                    return choice["message"]["content"]
-                elif "tokens" in choice:
-                    tokens = choice["tokens"]
-                    if isinstance(tokens, list):
-                        return " ".join(str(token) for token in tokens)
-                    else:
-                        return str(tokens)
-        elif isinstance(chunk, str):
-            return chunk
-        else:
-            return str(chunk)
-
-    async def _stream_eve_instruct(
-        self, prompt: str, max_new_tokens: int = 150
-    ) -> AsyncGenerator[str, None]:
-        """
-        Stream response from Eve Instruct model via Runpod OpenAI-compatible API using LangChain.
-
-        Args:
-            prompt: The formatted prompt
-            max_new_tokens: Maximum new tokens for the response
-
-        Yields:
-            Chunks of the generated response
-        """
-        try:
-            base_llm = self._get_runpod_llm()
-            llm = base_llm.bind(max_tokens=max_new_tokens)
-            async for chunk in llm.astream(prompt):
-                content = getattr(chunk, "content", None)
-                if content:
-                    yield content
-        except Exception as e:
-            logger.error(
-                f"Eve Instruct streaming API call failed: {str(e)}. Trying Mistral fallback."
-            )
-            try:
-                base_llm = self._get_mistral_llm()
-                llm = base_llm.bind(max_tokens=max_new_tokens)
-                async for chunk in llm.astream(prompt):
-                    content = getattr(chunk, "content", None)
-                    if content:
-                        yield content
-            except Exception as e2:
-                logger.error(f"Mistral streaming fallback also failed: {str(e2)}")
-                raise
 
     async def _call_eve_instruct_async(
         self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
@@ -513,57 +366,58 @@ class LLMManager:
             logger.error(f"Failed to generate answer using mistral model: {str(e)}")
             raise
 
-    async def generate_answer_stream(
+    async def generate_answer_mistral_stream(
         self,
         query: str,
         context: str,
-        llm: str = "llama-3.1",
         max_new_tokens: int = 150,
+        temperature: float | None = None,
+        conversation_history: Optional[List[Any]] = None,
+        conversation_summary: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """
-        Generate an answer stream using the specified language model.
-
-        Args:
-            query: The user's question
-            context: Contextual information to assist the model
-            llm: Which language model to use (default: "llama-3.1")
-            max_new_tokens: Maximum new tokens for the response
-
-        Yields:
-            Chunks of the generated answer
-
-        Raises:
-            ValueError: If an unsupported LLM type is specified
-            Exception: For other errors during generation
-        """
+        """Generate an answer using the mistral model, streaming tokens."""
         try:
-            prompt = self._generate_prompt(query=query, context=context)
-
-            if llm == LLMType.OPENAI.value:
-                async for chunk in self._stream_openai(
-                    prompt, max_tokens=max_new_tokens
-                ):
-                    yield chunk
-
-            elif llm == LLMType.EVE_INSTRUCT.value:
-                # Truncate context if needed
-                if context:
-                    max_context_len = MODEL_CONTEXT_SIZE - max_new_tokens
-                    if len(context) > max_context_len:
-                        logger.info(
-                            f"Truncating context from {len(context)} to {max_context_len} characters"
-                        )
-                        context = context[:max_context_len]
-
-                async for chunk in self._stream_eve_instruct(
-                    prompt, max_new_tokens=max_new_tokens
-                ):
-                    yield chunk
-
+            if conversation_history or conversation_summary:
+                conversation_context = self._build_conversation_context(
+                    conversation_history or [], conversation_summary
+                )
+                prompt = self._generate_prompt_with_history(
+                    query=query,
+                    context=context,
+                    conversation_context=conversation_context,
+                )
             else:
-                # Handle other LLM types or raise error
-                raise ValueError(f"Unsupported LLM type: {llm}")
+                prompt = self._generate_prompt(query=query, context=context)
 
+            async for chunk in self._call_eve_instruct_mistral_stream(
+                prompt, max_new_tokens=max_new_tokens, temperature=temperature
+            ):
+                yield chunk
         except Exception as e:
-            logger.error(f"Failed to generate answer stream: {str(e)}")
+            logger.error(f"Failed to generate answer using mistral model: {str(e)}")
+            raise
+
+    async def _call_eve_instruct_mistral_stream(
+        self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
+    ) -> AsyncGenerator[str, None]:
+        """Stream tokens from the Mistral model via LangChain ChatMistralAI."""
+        try:
+            base_llm = self._get_mistral_llm()
+            bind_kwargs = {"max_tokens": max_new_tokens}
+            if temperature is not None:
+                bind_kwargs["temperature"] = temperature
+            llm = base_llm.bind(**bind_kwargs)
+
+            # Prefer astream which yields message chunks with `.content`
+            async for event in llm.astream(prompt):
+                try:
+                    text = getattr(event, "content", None)
+                    if not text and isinstance(event, dict):
+                        text = event.get("content")
+                    if text:
+                        yield str(text)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"Mistral streaming call failed: {str(e)}")
             raise

@@ -24,7 +24,7 @@ from src.constants import (
     RERANKER_MODEL,
     MODEL_CONTEXT_SIZE,
 )
-from src.utils.helpers import get_mongodb_uri
+from src.utils.helpers import extract_document_data, get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import DEEPINFRA_API_TOKEN, config
@@ -1173,71 +1173,204 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
 
 
 async def generate_answer_stream_generator_helper(
-    request: GenerationRequest, output_format: str = "plain"
+    request: GenerationRequest,
+    conversation_id: str,
+    message_id: str,
+    output_format: str = "plain",
 ):
-    """Helper function to generate streaming answer with different output formats."""
+    """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = LLMManager()
 
     try:
-        context, results, is_rag, _ = await setup_rag_and_context(request)
+        # Guardrail check
+        total_start = time.perf_counter()
+        policy_result = await check_policy(request, llm_manager)
+        guardrail_latency = time.perf_counter() - total_start
+        if policy_result.violation:
+            yield f"data: {json.dumps({'type': 'error', 'message': POLICY_NOT_ANSWER})}\n\n"
+            return
 
-        # Send initial metadata for JSON format
+        # Setup RAG
+        context, results, is_rag, latencies = await setup_rag_and_context(
+            request, llm_manager
+        )
+
+        # Prepare conversation summary if any
+        summary_text: Optional[str] = None
+        if conversation_id:
+            try:
+                from src.database.models.conversation import (
+                    Conversation as ConversationModel,
+                )
+
+                convo = await ConversationModel.find_by_id(conversation_id)
+                if convo and getattr(convo, "summary", None):
+                    summary_text = convo.summary or None
+            except Exception:
+                summary_text = None
+
+        # Prepare conversation history for fallback path
+        conversation_history, conversation_summary = (
+            await _get_conversation_history_from_db(conversation_id)
+            if conversation_id
+            else (None, None)
+        )
+
+        # Stream generation
+        accumulated = []
+
+        # Choose streaming source (LangGraph memory if available → fallback mistral stream)
+        mistral_gen_latency: Optional[float] = None
+        base_gen_latency: Optional[float] = None
+
+        used_stream = False
+        if _langgraph_available and conversation_id:
+            try:
+                gen_start = time.perf_counter()
+                graph, mode = await _get_or_create_compiled_graph()
+                if graph is not None:
+                    config = {"configurable": {"thread_id": conversation_id}}
+                    user_parts: List[str] = [request.query]
+                    if is_rag and context:
+                        user_parts.append(f"Context:\n{context}")
+                    user_content = "\n\n".join(user_parts)
+                    state = {
+                        "messages": add_messages(
+                            [], [_make_message("user", user_content)]
+                        ),
+                        "temperature": request.temperature,
+                        "max_tokens": request.max_new_tokens,
+                        "conversation_summary": summary_text,
+                    }
+
+                    # Stream graph events; events may contain partial AIMessage deltas
+                    async for event in graph.astream_events(
+                        state, config=config, version="v2"
+                    ):
+                        try:
+                            if not isinstance(event, dict):
+                                continue
+                            if event.get("event") == "on_chat_model_stream":
+                                data = event.get("data") or {}
+                                chunk = data.get("chunk")
+                                text = (
+                                    getattr(chunk, "content", None)
+                                    if chunk is not None
+                                    else None
+                                )
+                                if text:
+                                    if output_format == "json":
+                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                    else:
+                                        yield f"data: {text}\n\n"
+                                    accumulated.append(str(text))
+                        except Exception:
+                            continue
+
+                    base_gen_latency = time.perf_counter() - gen_start
+                    used_stream = True
+            except Exception as e:
+                logger.warning(f"LangGraph streaming failed, falling back: {e}")
+
+        if not used_stream:
+            gen_start = time.perf_counter()
+            async for token in llm_manager.generate_answer_mistral_stream(
+                query=request.query,
+                context=context,
+                max_new_tokens=request.max_new_tokens,
+                temperature=request.temperature,
+                conversation_history=conversation_history,
+                conversation_summary=conversation_summary,
+            ):
+                # forward token
+                if output_format == "json":
+                    yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
+                else:
+                    yield f"data: {token}\n\n"
+                accumulated.append(str(token))
+            mistral_gen_latency = time.perf_counter() - gen_start
+
+        answer = "".join(accumulated)
+
+        # Optional hallucination loop after stream completes
+        model = llm_manager.get_model()
+        generation_response = generation_schema(question=request.query, answer=answer)
+        loop_result: Optional[dict] = None
+        hallucination_latency: Optional[dict] = None
+        if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
+            try:
+                loop_result, hallucination_latency = await run_hallucination_loop(
+                    model, context, generation_response, request.collection_ids
+                )
+                answer = loop_result.get("final_answer", answer)
+            except Exception as e:
+                logger.warning(f"Hallucination loop failed: {e}")
+
+        total_latency = time.perf_counter() - total_start
+        latencies = {
+            "guardrail_latency": guardrail_latency,
+            **(latencies or {}),
+            "base_generation_latency": base_gen_latency,
+            "fallback_latency": mistral_gen_latency,
+            "hallucination_latency": hallucination_latency,
+            "total_latency": total_latency,
+        }
+
+        # Persist results to MongoDB Message entry created by the router
+        try:
+            from src.database.models.message import Message as MessageModel
+
+            # Find message by id
+            message = await MessageModel.find_by_id(message_id)
+            if message is not None:
+                documents_data = [extract_document_data(r) for r in (results or [])]
+
+                message.output = answer
+                message.documents = documents_data
+                message.use_rag = bool(is_rag)
+                message.metadata = {"latencies": latencies}
+                await message.save()
+        except Exception as e:
+            logger.warning(f"Failed to persist streamed message: {e}")
+
+        # Trigger rollup
+        await maybe_rollup_and_trim_history(conversation_id)
+
+        # Final event
         if output_format == "json":
-            yield f"data: {json.dumps({'type': 'start', 'use_rag': is_rag, 'documents_count': len(results)})}\n\n"
-
-        # Generate streaming answer
-        full_answer = ""
-        async for chunk in llm_manager.generate_answer_stream(
-            query=request.query,
-            context=context,
-            llm=request.llm,
-            max_new_tokens=request.max_new_tokens,
-        ):
-            if output_format == "json":
-                full_answer += chunk
-                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
-            else:
-                yield f"data: {chunk}\n\n"
-
-        # Send final metadata for JSON format
-        if output_format == "json":
-            yield f"data: {json.dumps({'type': 'end', 'full_answer': full_answer})}\n\n"
+            final_payload = {
+                "type": "final",
+                "answer": answer,
+                "latencies": latencies,
+            }
+            yield f"data: {json.dumps(final_payload)}\n\n"
+        else:
+            yield f"data: [DONE]\n\n"
 
     except Exception as e:
-        error_msg = (
-            f"data: Error: {str(e)}\n\n"
-            if output_format == "plain"
-            else f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
-        )
-        yield error_msg
+        err_payload = {"type": "error", "message": str(e)}
+        yield f"data: {json.dumps(err_payload)}\n\n"
 
 
 async def generate_answer_stream_generator(
     request: GenerationRequest,
+    conversation_id: str,
+    message_id: str,
 ):
     """Generate streaming answer using RAG and LLM."""
-    async for chunk in generate_answer_stream_generator_helper(request, "plain"):
+    async for chunk in generate_answer_stream_generator_helper(
+        request, conversation_id, message_id, "plain"
+    ):
         yield chunk
 
 
 async def generate_answer_json_stream_generator(
     request: GenerationRequest,
+    conversation_id: str,
+    message_id: str,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
-    async for chunk in generate_answer_stream_generator_helper(request, "json"):
+    async for chunk in generate_answer_stream_generator_helper(
+        request, conversation_id, message_id, "json"
+    ):
         yield chunk
-
-
-async def generate_answer_stream_json(
-    request: GenerationRequest,
-) -> StreamingResponse:
-    """Generate a streaming answer using RAG and LLM with JSON format."""
-    return StreamingResponse(
-        generate_answer_json_stream_generator(request),
-        media_type="application/json",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Content-Type": "text/event-stream",
-        },
-    )

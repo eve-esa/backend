@@ -9,7 +9,7 @@ to RunPod for embeddings generation.
 import logging
 import tempfile
 from enum import Enum
-from typing import Tuple, Union
+from typing import Any, Optional, Tuple, Union, List, Dict
 
 from fastapi import UploadFile
 
@@ -192,6 +192,103 @@ def get_embeddings_model(
     if return_embeddings_size:
         return embeddings, embeddings_size
     return embeddings
+
+
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    """Return value for key from dict-like or attribute-like object."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _to_int(value: Any) -> Any:
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _to_float(value: Any) -> Any:
+    try:
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
+    """Extract [start_year, end_year] from request.filters structure.
+
+    Expected shape:
+      {
+        "must": [
+          {"key": "year", "range": {"gte": <start>, "lte": <end>}},
+          ...
+        ]
+      }
+    Returns None if not found or values are invalid.
+    """
+    try:
+        if not isinstance(filters, dict):
+            return None
+        conditions = filters.get("must") or []
+        if not isinstance(conditions, list):
+            return None
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if cond.get("key") != "year":
+                continue
+            rng = cond.get("range") or {}
+            if not isinstance(rng, dict):
+                continue
+            start = _to_int(rng.get("gte"))
+            end = _to_int(rng.get("lte"))
+            if start is None and end is None:
+                return None
+            if start is not None and end is not None:
+                return [start, end]
+            if start is not None:
+                return [start, start]
+            if end is not None:
+                return [end, end]
+        return None
+    except Exception:
+        return None
+
+
+def extract_document_data(result: Any) -> Dict[str, Any]:
+    result_id = _field(result, "id")
+    result_version = _to_int(_field(result, "version"))
+    result_score = _to_float(_field(result, "score") or _field(result, "distance"))
+    result_payload = (
+        _field(result, "payload", {}) or _field(result, "document", {}) or {}
+    )
+    collection_name = _field(result, "collection_name")
+    if not collection_name and isinstance(result_payload, dict):
+        collection_name = result_payload.get("collection_name") or (
+            result_payload.get("metadata") or {}
+        ).get("collection_name")
+    # if result_payload has key "content" and doesn't have key "text", set "text" with "content"
+    if "content" in result_payload and "text" not in result_payload:
+        result_payload["text"] = result_payload["content"]
+    result_text = _field(result, "text", "") or ""
+    result_metadata = _field(result, "metadata", {}) or {}
+
+    # Fallbacks from payload
+    if not result_text and isinstance(result_payload, dict):
+        result_text = result_payload.get("text", "") or ""
+    if not result_metadata and isinstance(result_payload, dict):
+        result_metadata = result_payload.get("metadata", {}) or {}
+
+    return {
+        "id": str(result_id) if result_id is not None else None,
+        "version": result_version,
+        "score": result_score,
+        "collection_name": collection_name,
+        "payload": result_payload,
+        "text": result_text,
+        "metadata": result_metadata,
+    }
 
 
 def get_mongodb_uri() -> str:
