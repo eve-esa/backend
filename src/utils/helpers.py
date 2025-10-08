@@ -23,6 +23,7 @@ from langchain_community.embeddings import (
 
 from src.utils.embeddings import RunPodEmbeddings
 from src.config import (
+    INFERENCE_API_KEY,
     MISTRAL_API_KEY,
     OPENAI_API_KEY,
     MONGO_HOST,
@@ -48,6 +49,7 @@ class EmbeddingModelType(Enum):
     OPENAI_SMALL = "text-embedding-3-small"
     OPENAI_LARGE = "text-embedding-3-large"
     QWEN_3_4B = "Qwen/Qwen3-Embedding-4B"
+    QWEN_3_4B_INFERENCE = "qwen/qwen3-embedding-4b"
     NASA = "nasa-impact/nasa-smd-ibm-st-v2"
 
     # Popular Hugging Face embedding models
@@ -131,6 +133,19 @@ def get_embeddings_model(
         embeddings = DeepInfraEmbeddings(
             model_id=model,
             deepinfra_api_token=api_token,
+        )
+        embeddings_size = 2560
+
+    elif model == EmbeddingModelType.QWEN_3_4B_INFERENCE.value:
+        logger.info(f"Using Inference for Qwen 3.4B embedding model: {model}")
+        api_token = INFERENCE_API_KEY
+        if not api_token:
+            logger.warning("INFERENCE_API_KEY environment variable not set")
+            return None
+        embeddings = OpenAIEmbeddings(
+            base_url="https://api.inference.net/v1",
+            model=model,
+            api_key=api_token,
         )
         embeddings_size = 2560
 

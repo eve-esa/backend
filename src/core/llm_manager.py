@@ -110,6 +110,7 @@ class LLMManager:
                 model=self._mistral_model_name or "mistral-small-latest",
                 temperature=0.3,
                 timeout=mistral_timeout,
+                streaming=True,
             )
         return self._mistral_chat
 
