@@ -31,7 +31,7 @@ from qdrant_client.http.models import (
 from src.core.llm_manager import LLMManager
 
 from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
-from src.utils.helpers import get_embeddings_model
+from src.utils.helpers import EmbeddingModelType, get_embeddings_model
 from src.config import (
     Config,
     QDRANT_URL,
@@ -636,14 +636,26 @@ class VectorStoreManager:
         """
         try:
             embeddings = get_embeddings_model(embeddings_model)
-            if hasattr(embeddings, "embed_query_async"):
-                return await embeddings.embed_query_async(query)
+            if hasattr(embeddings, "aembed_query"):
+                logger.info(f"Get embedding from async")
+                result = await asyncio.wait_for(
+                    embeddings.aembed_query(query), timeout=5  # seconds
+                )
+                return result
             else:
                 return embeddings.embed_query(query)
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")
-            raise RuntimeError(f"Failed to generate embedding: {str(e)}") from e
+            embeddings = get_embeddings_model("qwen/qwen3-embedding-4b")
+            if hasattr(embeddings, "aembed_query"):
+                logger.info(f"Get embedding from async")
+                result = await asyncio.wait_for(
+                    embeddings.aembed_query(query), timeout=5  # seconds
+                )
+                return result
+            else:
+                return embeddings.embed_query(query)
 
     async def retrieve_documents_from_query(
         self,
