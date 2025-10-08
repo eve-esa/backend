@@ -257,6 +257,15 @@ async def _get_or_create_compiled_graph():
                     bind_kwargs["temperature"] = temperature_val
                 if max_tokens_val is not None:
                     bind_kwargs["max_tokens"] = max_tokens_val
+
+                # Optimize for streaming performance
+                bind_kwargs.update(
+                    {
+                        "stream": True,  # Enable streaming
+                        "stream_options": {"include_usage": False},  # Reduce overhead
+                    }
+                )
+
                 if bind_kwargs:
                     bound_llm = llm.bind(**bind_kwargs)
             except Exception:
@@ -1224,11 +1233,17 @@ async def generate_answer_stream_generator_helper(
         base_gen_latency: Optional[float] = None
 
         used_stream = False
+        tokens_yielded = 0
+
+        # Try optimized LangGraph streaming first
         if _langgraph_available and conversation_id:
             try:
                 gen_start = time.perf_counter()
                 graph, mode = await _get_or_create_compiled_graph()
                 if graph is not None:
+                    logger.info(
+                        f"Using optimized LangGraph streaming with mode: {mode}"
+                    )
                     config = {"configurable": {"thread_id": conversation_id}}
                     user_parts: List[str] = [request.query]
                     if is_rag and context:
@@ -1243,37 +1258,95 @@ async def generate_answer_stream_generator_helper(
                         "conversation_summary": summary_text,
                     }
 
-                    # Stream graph events; events may contain partial AIMessage deltas
-                    async for event in graph.astream_events(
-                        state, config=config, version="v2"
-                    ):
-                        try:
-                            if not isinstance(event, dict):
+                    # Try astream first for better performance, fallback to astream_events
+                    try:
+                        async for chunk in graph.astream(state, config=config):
+                            logger.debug(f"LangGraph astream chunk: {chunk}")
+                            if isinstance(chunk, dict) and "messages" in chunk:
+                                messages = chunk["messages"]
+                                for message in messages:
+                                    if hasattr(message, "content") and message.content:
+                                        text = str(message.content)
+                                        if text and text not in accumulated:
+                                            if output_format == "json":
+                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                            else:
+                                                yield f"data: {text}\n\n"
+                                            accumulated.append(text)
+                                            tokens_yielded += 1
+                    except Exception as e:
+                        logger.warning(f"astream failed, trying astream_events: {e}")
+                        # Fallback to astream_events
+                        async for event in graph.astream_events(
+                            state, config=config, version="v2"
+                        ):
+                            try:
+                                if not isinstance(event, dict):
+                                    continue
+
+                                event_type = event.get("event")
+
+                                # Handle streaming events more efficiently
+                                if event_type == "on_chat_model_stream":
+                                    data = event.get("data", {})
+                                    chunk = data.get("chunk")
+                                    if (
+                                        chunk
+                                        and hasattr(chunk, "content")
+                                        and chunk.content
+                                    ):
+                                        text = str(chunk.content)
+                                        if text:
+                                            if output_format == "json":
+                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                            else:
+                                                yield f"data: {text}\n\n"
+                                            accumulated.append(text)
+                                            tokens_yielded += 1
+
+                                # Also handle final messages in case streaming doesn't work
+                                elif event_type in ["on_chain_end", "on_llm_end"]:
+                                    output = event.get("data", {}).get("output", {})
+                                    if (
+                                        isinstance(output, dict)
+                                        and "messages" in output
+                                    ):
+                                        messages = output["messages"]
+                                        for message in messages:
+                                            if (
+                                                hasattr(message, "content")
+                                                and message.content
+                                            ):
+                                                text = str(message.content)
+                                                if text and text not in accumulated:
+                                                    if output_format == "json":
+                                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                                    else:
+                                                        yield f"data: {text}\n\n"
+                                                    accumulated.append(text)
+                                                    tokens_yielded += 1
+                            except Exception as e:
+                                logger.warning(f"Error processing LangGraph event: {e}")
                                 continue
-                            if event.get("event") == "on_chat_model_stream":
-                                data = event.get("data") or {}
-                                chunk = data.get("chunk")
-                                text = (
-                                    getattr(chunk, "content", None)
-                                    if chunk is not None
-                                    else None
-                                )
-                                if text:
-                                    if output_format == "json":
-                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                    else:
-                                        yield f"data: {text}\n\n"
-                                    accumulated.append(str(text))
-                        except Exception:
-                            continue
 
                     base_gen_latency = time.perf_counter() - gen_start
+                    logger.info(
+                        f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
+                    )
                     used_stream = True
+                else:
+                    logger.warning(
+                        "LangGraph graph is None, falling back to Mistral streaming"
+                    )
             except Exception as e:
-                logger.warning(f"LangGraph streaming failed, falling back: {e}")
+                logger.warning(
+                    f"Optimized LangGraph streaming failed, falling back: {e}"
+                )
 
-        if not used_stream:
+        # Fallback to Mistral streaming if LangGraph didn't work or yielded no tokens
+        if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
+            logger.info(f"Using Mistral streaming fallback")
             async for token in llm_manager.generate_answer_mistral_stream(
                 query=request.query,
                 context=context,
@@ -1289,6 +1362,7 @@ async def generate_answer_stream_generator_helper(
                     yield f"data: {token}\n\n"
                 accumulated.append(str(token))
             mistral_gen_latency = time.perf_counter() - gen_start
+            used_stream = True
 
         answer = "".join(accumulated)
 
