@@ -34,3 +34,4 @@ accelerate
 bitsandbytes
 huggingface_hub
 replicate
+tiktoken
