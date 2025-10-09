@@ -27,7 +27,7 @@ from src.constants import (
 from src.utils.helpers import extract_document_data, get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import DEEPINFRA_API_TOKEN, config
+from src.config import DEEPINFRA_API_TOKEN, IS_PROD, config
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -805,13 +805,18 @@ async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
 
             Query: {query}
             """
+        if IS_PROD:
+            base_llm = llm_manager.get_mistral_model()
+            logger.info("deciding should_use_rag with mistral model")
+        else:
+            base_llm = llm_manager.get_model()
+            logger.info("deciding should_use_rag with runpod model")
 
-        base_llm = llm_manager.get_model()
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             ShouldUseRagDecision
         )
         result = await structured_llm.ainvoke(prompt)
-        logger.info(f"should_use_rag result from runpod: {result}")
+        logger.info(f"should_use_rag result: {result}")
         # with_structured_output returns a Pydantic object matching the schema
         if isinstance(result, ShouldUseRagDecision):
             return bool(result.use_rag)
@@ -933,15 +938,21 @@ async def check_policy(
     """Check if the query violates EO policies."""
     policy_prompt = POLICY_PROMPT.format(question=request.query)
     try:
-        base_llm = llm_manager.get_model()
+        if IS_PROD:
+            base_llm = llm_manager.get_mistral_model()
+            logger.info("checking policy with mistral model")
+        else:
+            base_llm = llm_manager.get_model()
+            logger.info("checking policy with runpod model")
+
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
         )
         policy_result = await structured_llm.ainvoke(policy_prompt)
-        logger.info(f"policy_result from runpod: {policy_result}")
+        logger.info(f"policy_result: {policy_result}")
         return policy_result
     except Exception as e:
-        logger.warning(f"Failed to check policy with runpod model: {e}")
+        logger.warning(f"Failed to check policy with main model: {e}")
         base_llm = llm_manager.get_mistral_model()
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
@@ -966,9 +977,11 @@ async def generate_answer(
         if policy_result.violation:
             return POLICY_NOT_ANSWER, [], False, {}, {}
 
-        context, results, is_rag, latencies = await setup_rag_and_context(
-            request, llm_manager
-        )
+        context, results, is_rag, latencies = "", [], False, {}
+        if len(request.collection_ids) > 0 and request.k > 0:
+            context, results, is_rag, latencies = await setup_rag_and_context(
+                request, llm_manager
+            )
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
@@ -1200,9 +1213,11 @@ async def generate_answer_stream_generator_helper(
             return
 
         # Setup RAG
-        context, results, is_rag, latencies = await setup_rag_and_context(
-            request, llm_manager
-        )
+        context, results, is_rag, latencies = "", [], False, {}
+        if len(request.collection_ids) > 0 and request.k > 0:
+            context, results, is_rag, latencies = await setup_rag_and_context(
+                request, llm_manager
+            )
 
         # Prepare conversation summary if any
         summary_text: Optional[str] = None
