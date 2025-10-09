@@ -1214,76 +1214,38 @@ async def generate_answer_stream_generator_helper(
                         "conversation_summary": summary_text,
                     }
 
-                    # Try astream first for better performance, fallback to astream_events
-                    try:
-                        async for chunk in graph.astream(state, config=config):
-                            logger.info(f"LangGraph astream chunk: {chunk}")
-                            if isinstance(chunk, dict) and "messages" in chunk:
-                                messages = chunk["messages"]
-                                for message in messages:
-                                    if hasattr(message, "content") and message.content:
-                                        text = str(message.content)
-                                        if text and text not in accumulated:
-                                            if output_format == "json":
-                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                            else:
-                                                yield f"data: {text}\n\n"
-                                            accumulated.append(text)
-                                            tokens_yielded += 1
-                    except Exception as e:
-                        logger.warning(f"astream failed, trying astream_events: {e}")
-                        # Fallback to astream_events
-                        async for event in graph.astream_events(
-                            state, config=config, version="v2"
-                        ):
-                            try:
-                                if not isinstance(event, dict):
-                                    continue
-
-                                event_type = event.get("event")
-
-                                # Handle streaming events more efficiently
-                                if event_type == "on_chat_model_stream":
-                                    data = event.get("data", {})
-                                    chunk = data.get("chunk")
-                                    if (
-                                        chunk
-                                        and hasattr(chunk, "content")
-                                        and chunk.content
-                                    ):
-                                        text = str(chunk.content)
-                                        if text:
-                                            if output_format == "json":
-                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                            else:
-                                                yield f"data: {text}\n\n"
-                                            accumulated.append(text)
-                                            tokens_yielded += 1
-
-                                # Also handle final messages in case streaming doesn't work
-                                elif event_type in ["on_chain_end", "on_llm_end"]:
-                                    output = event.get("data", {}).get("output", {})
-                                    if (
-                                        isinstance(output, dict)
-                                        and "messages" in output
-                                    ):
-                                        messages = output["messages"]
-                                        for message in messages:
-                                            if (
-                                                hasattr(message, "content")
-                                                and message.content
-                                            ):
-                                                text = str(message.content)
-                                                if text and text not in accumulated:
-                                                    if output_format == "json":
-                                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                                    else:
-                                                        yield f"data: {text}\n\n"
-                                                    accumulated.append(text)
-                                                    tokens_yielded += 1
-                            except Exception as e:
-                                logger.warning(f"Error processing LangGraph event: {e}")
+                    # Use astream_events for proper streaming
+                    logger.info("Using LangGraph astream_events for streaming")
+                    async for event in graph.astream_events(
+                        state, config=config, version="v2"
+                    ):
+                        try:
+                            if not isinstance(event, dict):
                                 continue
+
+                            event_type = event.get("event")
+
+                            # Handle streaming events more efficiently
+                            if event_type == "on_chat_model_stream":
+                                data = event.get("data", {})
+                                chunk = data.get("chunk")
+                                if (
+                                    chunk
+                                    and hasattr(chunk, "content")
+                                    and chunk.content
+                                ):
+                                    text = str(chunk.content)
+                                    if text:
+                                        if output_format == "json":
+                                            yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                        else:
+                                            yield f"data: {text}\n\n"
+                                        accumulated.append(text)
+                                        tokens_yielded += 1
+
+                        except Exception as e:
+                            logger.warning(f"Error processing LangGraph event: {e}")
+                            continue
 
                     base_gen_latency = time.perf_counter() - gen_start
                     logger.info(
