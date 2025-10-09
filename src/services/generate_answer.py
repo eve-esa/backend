@@ -65,7 +65,7 @@ class GenerationRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
-    k: int = DEFAULT_K
+    k: int = Field(DEFAULT_K, ge=0, le=10)
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
