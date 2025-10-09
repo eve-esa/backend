@@ -12,7 +12,7 @@ from langchain_mistralai import ChatMistralAI
 
 from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from typing import Optional
-from src.constants import MODEL_CONTEXT_SIZE
+from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
 from src.utils.helpers import str_token_counter, trim_text_to_token_limit
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -280,7 +280,7 @@ class LLMManager:
         return getattr(response, "content", str(response))
 
     async def summarize_context_in_all(
-        self, transcript: str, max_tokens: int = 50000, is_force: bool = False
+        self, transcript: str, max_tokens: int = 5000, is_force: bool = False
     ) -> str:
         """Summarize entire conversation history."""
         if not transcript:
@@ -410,10 +410,10 @@ class LLMManager:
                 conversation_context = self._build_conversation_context(
                     conversation_history or [], conversation_summary
                 )
-                available_tokens = (MODEL_CONTEXT_SIZE - max_new_tokens) // 2
+                available_tokens = DEFAULT_MAX_NEW_TOKENS
                 if str_token_counter(conversation_context) > available_tokens:
-                    conversation_context = await self.summarize_context_with_map_reduce(
-                        context=conversation_context, max_tokens=available_tokens
+                    conversation_context = trim_text_to_token_limit(
+                        text=conversation_context, max_tokens=available_tokens
                     )
                 prompt = self._generate_prompt_with_history(
                     query=query,
@@ -423,6 +423,7 @@ class LLMManager:
             else:
                 prompt = self._generate_prompt(query=query, context=context)
 
+            max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
             return await self._call_eve_instruct_mistral(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             )
@@ -446,6 +447,11 @@ class LLMManager:
                 conversation_context = self._build_conversation_context(
                     conversation_history or [], conversation_summary
                 )
+                available_tokens = DEFAULT_MAX_NEW_TOKENS
+                if str_token_counter(conversation_context) > available_tokens:
+                    conversation_context = trim_text_to_token_limit(
+                        text=conversation_context, max_tokens=available_tokens
+                    )
                 prompt = self._generate_prompt_with_history(
                     query=query,
                     context=context,
@@ -454,6 +460,7 @@ class LLMManager:
             else:
                 prompt = self._generate_prompt(query=query, context=context)
 
+            max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
             async for chunk in self._call_eve_instruct_mistral_stream(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             ):
