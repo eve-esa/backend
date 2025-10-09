@@ -916,7 +916,7 @@ async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMMana
 
             # Rerank candidates using DeepInfra reranker
             latency = time.perf_counter()
-            reranked = await _maybe_rerank_deepinfra(candidate_texts, request.query)
+            reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
             latencies["reranking_latency"] = time.perf_counter() - latency
             if reranked:
                 ordered_indices = _sort_deepinfra_reranked_results(
