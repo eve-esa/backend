@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 import asyncio
 
+from openai import OpenAI
+from urllib3 import response
+
 from src.database.models.collection import Collection
 from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
@@ -33,6 +36,7 @@ from src.core.llm_manager import LLMManager
 from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
 from src.utils.helpers import EmbeddingModelType, get_embeddings_model
 from src.config import (
+    INFERENCE_API_KEY,
     Config,
     QDRANT_URL,
     QDRANT_API_KEY,
@@ -647,15 +651,22 @@ class VectorStoreManager:
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")
-            embeddings = get_embeddings_model("qwen/qwen3-embedding-4b")
-            if hasattr(embeddings, "aembed_query"):
-                logger.info(f"Get embedding from async")
-                result = await asyncio.wait_for(
-                    embeddings.aembed_query(query), timeout=5  # seconds
-                )
-                return result
-            else:
-                return embeddings.embed_query(query)
+            # embeddings = get_embeddings_model("qwen/qwen3-embedding-4b")
+            # if hasattr(embeddings, "aembed_query"):
+            #     logger.info(f"Get embedding from async")
+            #     result = await asyncio.wait_for(
+            #         embeddings.aembed_query(query), timeout=5  # seconds
+            #     )
+            #     return result
+            # else:
+            #     return embeddings.embed_query(query)
+            client = OpenAI(
+                api_key=INFERENCE_API_KEY, base_url="https://api.inference.net/v1"
+            )
+            response = client.embeddings.create(
+                input=query, model="qwen/qwen3-embedding-4b"
+            )
+            return response.data[0].embedding
 
     async def retrieve_documents_from_query(
         self,

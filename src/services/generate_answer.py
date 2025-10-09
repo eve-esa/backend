@@ -4,8 +4,8 @@ import json
 import logging
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -27,11 +27,11 @@ from src.constants import (
 from src.utils.helpers import extract_document_data, get_mongodb_uri
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import DEEPINFRA_API_TOKEN, IS_PROD, config
+from src.config import DEEPINFRA_API_TOKEN, IS_PROD, SILICONFLOW_API_TOKEN, config
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
-from src.utils.template_loader import format_template
+from src.utils.siliconflow_reranker import SiliconFlowReranker
 
 logger = logging.getLogger(__name__)
 
@@ -585,10 +585,10 @@ def _sort_deepinfra_reranked_results(
     return ordered_indices
 
 
-async def _maybe_rerank_deepinfra(
-    candidate_texts: List[str], query: str
+def _maybe_rerank_deepinfra(
+    candidate_texts: List[str], query: str, timeout: int = 5
 ) -> dict | None:
-    """Call DeepInfra reranker if configured."""
+    """Call DeepInfra reranker if configured with timeout."""
     try:
         if len(candidate_texts) == 0:
             return None
@@ -598,11 +598,26 @@ async def _maybe_rerank_deepinfra(
             return None
 
         reranker = DeepInfraReranker(api_token)
-        results = reranker.rerank([query], candidate_texts)
-        return results
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            logger.info("Using DeepInfra reranker")
+            future = executor.submit(reranker.rerank, [query], candidate_texts)
+            try:
+                results = future.result(timeout=timeout)
+                return results
+            except FutureTimeoutError:
+                raise RuntimeError(
+                    f"DeepInfra reranker timed out after {timeout} seconds"
+                )
     except Exception as e:
         logger.warning(f"DeepInfra reranker failed: {e}")
-        return None
+        logger.info("Using SiliconFlow reranker")
+        api_token = SILICONFLOW_API_TOKEN
+        if not api_token:
+            logger.warning("SILICONFLOW_API_TOKEN environment variable not set")
+            return None
+        reranker = SiliconFlowReranker(api_token)
+        results = reranker.rerank([query], candidate_texts)
+        return {"scores": results}
 
 
 async def get_mcp_context(
@@ -836,7 +851,7 @@ async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
 
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
-) -> tuple[list, list, Dict[str, Optional[float]]]:
+) -> tuple[list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
     # Retrieve with latency measurements
     results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
