@@ -20,6 +20,14 @@ from langchain_community.embeddings import (
     HuggingFaceEmbeddings,
     DeepInfraEmbeddings,
 )
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    AIMessage,
+    SystemMessage,
+    ToolMessage,
+)
+import tiktoken
 
 from src.utils.embeddings import RunPodEmbeddings
 from src.config import (
@@ -304,6 +312,85 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         "text": result_text,
         "metadata": result_metadata,
     }
+
+
+def str_token_counter(text: str) -> int:
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 4
+
+
+def tiktoken_counter(messages: List[BaseMessage]) -> int:
+    """Custom token counter for messages using tiktoken."""
+    num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
+    tokens_per_message = 3
+    tokens_per_name = 1
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        elif isinstance(msg, SystemMessage):
+            role = "system"
+        else:
+            raise ValueError(f"Unsupported messages type {msg.__class__}")
+        num_tokens += (
+            tokens_per_message
+            + str_token_counter(role)
+            + str_token_counter(msg.content)
+        )
+        if hasattr(msg, "name") and msg.name:
+            num_tokens += tokens_per_name + str_token_counter(msg.name)
+    return num_tokens
+
+
+def trim_text_to_token_limit(text: str, max_tokens: int) -> str:
+    """Trim text to be at most max_tokens using tiktoken, with a char fallback."""
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        toks = enc.encode(text)
+        if len(toks) <= max_tokens:
+            return text
+        return enc.decode(toks[:max_tokens])
+    except Exception:
+        est_chars = max(0, max_tokens * 4)
+        return text[:est_chars]
+
+
+def trim_context_to_token_limit(parts: List[str], max_tokens: int = 7000) -> str:
+    """
+    Trim context by removing entire documents (parts) when token limit is exceeded.
+
+    This function ensures that we don't show trimmed documents to users by removing
+    entire documents from the context rather than truncating individual documents.
+
+    Args:
+        parts: List of context parts (documents) to join
+        max_tokens: Maximum number of tokens allowed (default: 7000)
+
+    Returns:
+        str: Trimmed context string that fits within the token limit
+    """
+    if not parts:
+        return ""
+
+    # Filter out None parts and join
+    context = "\n".join([p for p in parts if p is not None])
+    context_len = str_token_counter(context)
+
+    # Check if the context goes beyond the limit
+    # If so remove an entire document from the context, we do not want to show to the user trimmed docs
+    while context_len > max_tokens and len(parts) > 1:
+        # We are assuming that parts are ordered from most relevant to least
+        parts.pop()
+        context = "\n".join([p for p in parts if p is not None])
+        context_len = str_token_counter(context)
+
+    return context
 
 
 def get_mongodb_uri() -> str:

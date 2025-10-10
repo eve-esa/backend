@@ -7,7 +7,7 @@ from src.services.generate_answer import (
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
@@ -26,6 +26,7 @@ router = APIRouter()
 async def create_message(
     request: GenerationRequest,
     conversation_id: str,
+    background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ):
     try:
@@ -103,11 +104,8 @@ async def create_message(
         }
         await message.save()
 
-        # Every-N-turn rolling summary and memory reset
-        try:
-            await maybe_rollup_and_trim_history(conversation_id)
-        except Exception:
-            pass
+        # Schedule rollup as background task to avoid blocking response
+        background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
 
         return {
             "id": message.id,
@@ -132,6 +130,7 @@ async def create_message(
 async def retry(
     conversation_id: str,
     message_id: str,
+    background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ):
     try:
@@ -176,11 +175,8 @@ async def retry(
         }
         await message.save()
 
-        # Every-N-turn rolling summary and memory reset
-        try:
-            await maybe_rollup_and_trim_history(conversation_id)
-        except Exception:
-            pass
+        # Schedule rollup as background task to avoid blocking response
+        background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
 
         return {
             "id": message.id,
@@ -254,6 +250,7 @@ async def update_message(
 async def create_message_stream(
     request: GenerationRequest,
     conversation_id: str,
+    background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ):
     try:
@@ -320,6 +317,7 @@ async def create_message_stream(
                 request,
                 conversation_id=conversation_id,
                 message_id=message.id,
+                background_tasks=background_tasks,
             ),
             media_type="text/event-stream",
         )

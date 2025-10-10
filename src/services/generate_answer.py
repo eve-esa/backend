@@ -5,7 +5,7 @@ import logging
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -19,12 +19,18 @@ from src.constants import (
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_TEMPERATURE,
+    MCP_MAX_TOP_N,
+    MODEL_CONTEXT_SIZE,
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
     RERANKER_MODEL,
-    MODEL_CONTEXT_SIZE,
+    TOKEN_OVERFLOW_LIMIT,
 )
-from src.utils.helpers import extract_document_data, get_mongodb_uri
+from src.utils.helpers import (
+    extract_document_data,
+    get_mongodb_uri,
+    trim_context_to_token_limit,
+)
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import DEEPINFRA_API_TOKEN, IS_PROD, SILICONFLOW_API_TOKEN, config
@@ -32,6 +38,11 @@ from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.siliconflow_reranker import SiliconFlowReranker
+from src.utils.helpers import (
+    get_mongodb_uri,
+    tiktoken_counter,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +72,7 @@ class GenerationRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     llm: str = DEFAULT_LLM  # or openai
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
-    k: int = DEFAULT_K
+    k: int = Field(DEFAULT_K, ge=0, le=10)
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
     score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
     max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
@@ -132,13 +143,10 @@ try:  # type: ignore
     from langgraph.graph.message import add_messages  # noqa: F401
     from langchain_core.messages import (
         trim_messages,
-        BaseMessage,
         HumanMessage,
         AIMessage,
         SystemMessage,
-        ToolMessage,
     )
-    import tiktoken
 
     _langgraph_available = True
 except Exception:
@@ -208,79 +216,12 @@ async def _get_or_create_compiled_graph():
             max_tokens: Optional[int]
             conversation_summary: Optional[str]
 
-        def str_token_counter(text: str) -> int:
-            try:
-                enc = tiktoken.get_encoding("cl100k_base")
-                return len(enc.encode(text))
-            except Exception:
-                return len(text) // 4
-
-        def tiktoken_counter(messages: List[BaseMessage]) -> int:
-            """Custom token counter for messages using tiktoken."""
-            num_tokens = 3  # every reply is primed with <|start|>assistant<|message|>
-            tokens_per_message = 3
-            tokens_per_name = 1
-            for msg in messages:
-                if isinstance(msg, HumanMessage):
-                    role = "user"
-                elif isinstance(msg, AIMessage):
-                    role = "assistant"
-                elif isinstance(msg, ToolMessage):
-                    role = "tool"
-                elif isinstance(msg, SystemMessage):
-                    role = "system"
-                else:
-                    raise ValueError(f"Unsupported messages type {msg.__class__}")
-                num_tokens += (
-                    tokens_per_message
-                    + str_token_counter(role)
-                    + str_token_counter(msg.content)
-                )
-                if hasattr(msg, "name") and msg.name:
-                    num_tokens += tokens_per_name + str_token_counter(msg.name)
-            return num_tokens
-
         async def call_model(state: GenerationState):
-            bound_llm = llm
-            try:
-                bind_kwargs = {}
-                try:
-                    temperature_val = state.get("temperature")
-                except Exception:
-                    temperature_val = None
-                try:
-                    max_tokens_val = state.get("max_tokens")
-                except Exception:
-                    max_tokens_val = None
-
-                if temperature_val is not None:
-                    bind_kwargs["temperature"] = temperature_val
-                if max_tokens_val is not None:
-                    bind_kwargs["max_tokens"] = max_tokens_val
-
-                # Optimize for streaming performance
-                bind_kwargs.update(
-                    {
-                        "stream": True,  # Enable streaming
-                        "stream_options": {"include_usage": False},  # Reduce overhead
-                    }
-                )
-
-                if bind_kwargs:
-                    bound_llm = llm.bind(**bind_kwargs)
-            except Exception:
-                bound_llm = llm
-
             # Get conversation summary and all messages
             conversation_summary = state.get("conversation_summary")
             all_messages = state["messages"]
 
-            # Reserve tokens for response generation
-            max_tokens_val = state.get("max_tokens") or DEFAULT_MAX_NEW_TOKENS
-            reserved_tokens = (
-                max_tokens_val + 1000
-            )  # Reserve extra 1k tokens for safety
-            available_tokens = MODEL_CONTEXT_SIZE - reserved_tokens
+            available_tokens = DEFAULT_MAX_NEW_TOKENS
 
             if conversation_summary:
                 summary_context = f"""Previous conversation summary: {conversation_summary}
@@ -297,6 +238,23 @@ Please continue the conversation using this summary as context for understanding
                 start_on="human",
                 end_on=("human", "tool"),
             )
+            bind_kwargs = {}
+            try:
+                temperature_val = state.get("temperature")
+                bind_kwargs["temperature"] = temperature_val
+            except Exception:
+                pass
+
+            # Optimize for streaming performance
+            bind_kwargs.update(
+                {
+                    "stream": True,  # Enable streaming
+                    "stream_options": {"include_usage": False},  # Reduce overhead
+                    "max_tokens": MODEL_CONTEXT_SIZE
+                    - tiktoken_counter(context_messages),
+                }
+            )
+            bound_llm = llm.bind(**bind_kwargs)
 
             response = await bound_llm.ainvoke(context_messages)
             return {"messages": [response]}
@@ -353,7 +311,7 @@ async def _get_conversation_history_from_db(
         messages = await MessageModel.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", -1)],
-            limit=10,
+            limit=5,
         )
 
         # Convert to LangChain-compatible message format
@@ -368,29 +326,6 @@ async def _get_conversation_history_from_db(
     except Exception as e:
         logger.warning(f"Failed to get conversation history from database: {e}")
         return [], None
-
-
-async def _summarize_history_with_runpod(
-    transcript: str, max_tokens: int = 50000
-) -> str:
-    """Summarize entire conversation history."""
-    if not transcript:
-        return ""
-    llm = LLMManager().get_model()
-    system = (
-        "You are an AI assistant specialized in summarizing chat histories. "
-        "Your role is to read a transcript of a conversation and produce a clear, "
-        "concise, and neutral summary of the main points."
-    )
-    messages = [
-        _make_message("system", system),
-        _make_message("user", f"Conversation transcript:\n{transcript}"),
-    ]
-    try:
-        resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
-        return getattr(resp, "content", str(resp))
-    except Exception:
-        return ""
 
 
 def _extract_result_text_for_dedup(item: Any) -> str:
@@ -507,14 +442,13 @@ def _build_context(items: List[Any]) -> str:
                     parts.append(str(text_val))
                 # Blank line between documents
                 parts.append("")
-
-            return "\n".join([p for p in parts if p is not None])
+            return trim_context_to_token_limit(parts, TOKEN_OVERFLOW_LIMIT)
     except Exception:
         # On any error, fall back to simple join of strings
         pass
 
     # Default: treat as list of strings
-    return "\n".join([str(t) for t in items if str(t)])
+    return trim_context_to_token_limit(items, TOKEN_OVERFLOW_LIMIT)
 
 
 async def _maybe_rerank_runpod(
@@ -658,7 +592,7 @@ async def get_mcp_context(
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
-        "topN": request.k * 2,
+        "topN": min(MCP_MAX_TOP_N, request.k * 2),
         "threshold": request.score_threshold,
     }
     if isinstance(request.year, list) and len(request.year) >= 2:
@@ -1030,6 +964,7 @@ async def generate_answer(
         final_answer: Optional[str] = None
         base_gen_latency: Optional[float] = None
         mistral_gen_latency: Optional[float] = None
+        use_langgraph = False
         if _langgraph_available and conversation_id:
             try:
                 # Single invoke to append assistant response to memory (async)
@@ -1050,29 +985,15 @@ async def generate_answer(
                 base_gen_latency = time.perf_counter() - gen_start
                 messages_out = result.get("messages")
                 final_answer = _extract_final_assistant_content(messages_out) or ""
+                use_langgraph = True
             except Exception as e:
                 # If LangGraph/Runpod path fails, fallback to direct generation with conversation history
                 logger.warning(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
-                gen_start = time.perf_counter()
-                # Get conversation history and summary for multi-turn context
-                conversation_history, conversation_summary = (
-                    await _get_conversation_history_from_db(conversation_id)
-                    if conversation_id
-                    else (None, None)
-                )
-                final_answer = await llm_manager.generate_answer_mistral(
-                    query=request.query,
-                    context=context,
-                    max_new_tokens=request.max_new_tokens,
-                    temperature=request.temperature,
-                    conversation_history=conversation_history,
-                    conversation_summary=conversation_summary,
-                )
-                mistral_gen_latency = time.perf_counter() - gen_start
-        else:
-            # Fallback: use existing direct generation path with conversation history
+                use_langgraph = False
+        if not use_langgraph:
+            logger.info("falling back to direct generation with conversation history")
             gen_start = time.perf_counter()
             # Get conversation history and summary for multi-turn context
             conversation_history, conversation_summary = (
@@ -1133,7 +1054,7 @@ async def generate_answer(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 10):
+async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int = 2):
     """Every N turns, summarize entire history and reset short-term memory to only the summary.
 
     Note: We derive the turn count from the number of Message documents in this conversation.
@@ -1189,7 +1110,9 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
-        summary_text = await _summarize_history_with_runpod(summarizer_input)
+        summary_text = await LLMManager().summarize_context_in_all(
+            transcript=summarizer_input, is_force=True
+        )
         if not summary_text:
             return
 
@@ -1214,6 +1137,7 @@ async def generate_answer_stream_generator_helper(
     conversation_id: str,
     message_id: str,
     output_format: str = "plain",
+    background_tasks: BackgroundTasks = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = LLMManager()
@@ -1288,76 +1212,38 @@ async def generate_answer_stream_generator_helper(
                         "conversation_summary": summary_text,
                     }
 
-                    # Try astream first for better performance, fallback to astream_events
-                    try:
-                        async for chunk in graph.astream(state, config=config):
-                            logger.debug(f"LangGraph astream chunk: {chunk}")
-                            if isinstance(chunk, dict) and "messages" in chunk:
-                                messages = chunk["messages"]
-                                for message in messages:
-                                    if hasattr(message, "content") and message.content:
-                                        text = str(message.content)
-                                        if text and text not in accumulated:
-                                            if output_format == "json":
-                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                            else:
-                                                yield f"data: {text}\n\n"
-                                            accumulated.append(text)
-                                            tokens_yielded += 1
-                    except Exception as e:
-                        logger.warning(f"astream failed, trying astream_events: {e}")
-                        # Fallback to astream_events
-                        async for event in graph.astream_events(
-                            state, config=config, version="v2"
-                        ):
-                            try:
-                                if not isinstance(event, dict):
-                                    continue
-
-                                event_type = event.get("event")
-
-                                # Handle streaming events more efficiently
-                                if event_type == "on_chat_model_stream":
-                                    data = event.get("data", {})
-                                    chunk = data.get("chunk")
-                                    if (
-                                        chunk
-                                        and hasattr(chunk, "content")
-                                        and chunk.content
-                                    ):
-                                        text = str(chunk.content)
-                                        if text:
-                                            if output_format == "json":
-                                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                            else:
-                                                yield f"data: {text}\n\n"
-                                            accumulated.append(text)
-                                            tokens_yielded += 1
-
-                                # Also handle final messages in case streaming doesn't work
-                                elif event_type in ["on_chain_end", "on_llm_end"]:
-                                    output = event.get("data", {}).get("output", {})
-                                    if (
-                                        isinstance(output, dict)
-                                        and "messages" in output
-                                    ):
-                                        messages = output["messages"]
-                                        for message in messages:
-                                            if (
-                                                hasattr(message, "content")
-                                                and message.content
-                                            ):
-                                                text = str(message.content)
-                                                if text and text not in accumulated:
-                                                    if output_format == "json":
-                                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                                    else:
-                                                        yield f"data: {text}\n\n"
-                                                    accumulated.append(text)
-                                                    tokens_yielded += 1
-                            except Exception as e:
-                                logger.warning(f"Error processing LangGraph event: {e}")
+                    # Use astream_events for proper streaming
+                    logger.info("Using LangGraph astream_events for streaming")
+                    async for event in graph.astream_events(
+                        state, config=config, version="v2"
+                    ):
+                        try:
+                            if not isinstance(event, dict):
                                 continue
+
+                            event_type = event.get("event")
+
+                            # Handle streaming events more efficiently
+                            if event_type == "on_chat_model_stream":
+                                data = event.get("data", {})
+                                chunk = data.get("chunk")
+                                if (
+                                    chunk
+                                    and hasattr(chunk, "content")
+                                    and chunk.content
+                                ):
+                                    text = str(chunk.content)
+                                    if text:
+                                        if output_format == "json":
+                                            yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                        else:
+                                            yield f"data: {text}\n\n"
+                                        accumulated.append(text)
+                                        tokens_yielded += 1
+
+                        except Exception as e:
+                            logger.warning(f"Error processing LangGraph event: {e}")
+                            continue
 
                     base_gen_latency = time.perf_counter() - gen_start
                     logger.info(
@@ -1437,8 +1323,10 @@ async def generate_answer_stream_generator_helper(
         except Exception as e:
             logger.warning(f"Failed to persist streamed message: {e}")
 
-        # Trigger rollup
-        await maybe_rollup_and_trim_history(conversation_id)
+        if background_tasks:
+            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+        else:
+            asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
         # Final event
         if output_format == "json":
@@ -1460,10 +1348,11 @@ async def generate_answer_stream_generator(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    background_tasks: BackgroundTasks = None,
 ):
     """Generate streaming answer using RAG and LLM."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "plain"
+        request, conversation_id, message_id, "plain", background_tasks
     ):
         yield chunk
 
@@ -1472,9 +1361,10 @@ async def generate_answer_json_stream_generator(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    background_tasks: BackgroundTasks = None,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "json"
+        request, conversation_id, message_id, "json", background_tasks
     ):
         yield chunk
