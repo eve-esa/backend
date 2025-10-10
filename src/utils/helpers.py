@@ -361,6 +361,38 @@ def trim_text_to_token_limit(text: str, max_tokens: int) -> str:
         return text[:est_chars]
 
 
+def trim_context_to_token_limit(parts: List[str], max_tokens: int = 7000) -> str:
+    """
+    Trim context by removing entire documents (parts) when token limit is exceeded.
+
+    This function ensures that we don't show trimmed documents to users by removing
+    entire documents from the context rather than truncating individual documents.
+
+    Args:
+        parts: List of context parts (documents) to join
+        max_tokens: Maximum number of tokens allowed (default: 7000)
+
+    Returns:
+        str: Trimmed context string that fits within the token limit
+    """
+    if not parts:
+        return ""
+
+    # Filter out None parts and join
+    context = "\n".join([p for p in parts if p is not None])
+    context_len = str_token_counter(context)
+
+    # Check if the context goes beyond the limit
+    # If so remove an entire document from the context, we do not want to show to the user trimmed docs
+    while context_len > max_tokens and len(parts) > 1:
+        # We are assuming that parts are ordered from most relevant to least
+        parts.pop()
+        context = "\n".join([p for p in parts if p is not None])
+        context_len = str_token_counter(context)
+
+    return context
+
+
 def get_mongodb_uri() -> str:
     """Build MongoDB URI from environment, appending MONGO_PARAMS if provided."""
     params = MONGO_PARAMS or ""

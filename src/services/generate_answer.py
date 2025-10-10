@@ -28,8 +28,7 @@ from src.constants import (
 from src.utils.helpers import (
     extract_document_data,
     get_mongodb_uri,
-    str_token_counter,
-    trim_text_to_token_limit,
+    trim_context_to_token_limit,
 )
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
@@ -442,15 +441,13 @@ def _build_context(items: List[Any]) -> str:
                     parts.append(str(text_val))
                 # Blank line between documents
                 parts.append("")
-            context = "\n".join([p for p in parts if p is not None])
-            return trim_text_to_token_limit(context, TOKEN_OVERFLOW_LIMIT)
+            return trim_context_to_token_limit(parts, TOKEN_OVERFLOW_LIMIT)
     except Exception:
         # On any error, fall back to simple join of strings
         pass
 
     # Default: treat as list of strings
-    context = "\n".join([str(t) for t in items if str(t)])
-    return trim_text_to_token_limit(context, TOKEN_OVERFLOW_LIMIT)
+    return trim_context_to_token_limit(items, TOKEN_OVERFLOW_LIMIT)
 
 
 async def _maybe_rerank_runpod(
