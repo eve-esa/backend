@@ -258,9 +258,6 @@ Please continue the conversation using this summary as context for understanding
                     bind_kwargs.update(
                         {
                             "stream": True,  # Enable streaming
-                            "stream_options": {
-                                "include_usage": False
-                            },  # Reduce overhead
                         }
                     )
             except Exception:

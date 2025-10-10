@@ -33,7 +33,11 @@ from qdrant_client.http.models import (
 
 from src.core.llm_manager import LLMManager
 
-from src.constants import DEFAULT_EMBEDDING_MODEL, PUBLIC_COLLECTIONS
+from src.constants import (
+    DEFAULT_EMBEDDING_MODEL,
+    EVE_PUBLIC_COLLECTION_NAME,
+    PUBLIC_COLLECTIONS,
+)
 from src.utils.helpers import EmbeddingModelType, get_embeddings_model
 from src.config import (
     INFERENCE_API_KEY,
@@ -477,13 +481,17 @@ class VectorStoreManager:
 
         aggregated_results: List[Any] = []
         for collection_name in collection_names:
+            if collection_name != EVE_PUBLIC_COLLECTION_NAME:
+                collection_query_filter = None
+            else:
+                collection_query_filter = query_filter
             try:
                 results = self.client.search(
                     collection_name=collection_name,
                     query_vector=query_vector,
                     limit=limit_per_collection,
                     score_threshold=score_threshold,
-                    query_filter=query_filter,
+                    query_filter=collection_query_filter,
                     search_params=models.SearchParams(
                         quantization=models.QuantizationSearchParams(
                             ignore=False,
