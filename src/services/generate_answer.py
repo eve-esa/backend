@@ -208,13 +208,17 @@ async def _get_or_create_compiled_graph():
             return _inmemory_compiled_graph, _compiled_graph_mode
 
         # Build the simple one-node graph
-        llm = LLMManager().get_mistral_model()
+        if IS_PROD:
+            llm = LLMManager().get_mistral_model()
+        else:
+            llm = LLMManager().get_model()
 
         # Define a custom state so we can carry sampling params alongside messages
         class GenerationState(MessagesState):
             temperature: Optional[float]
             max_tokens: Optional[int]
             conversation_summary: Optional[str]
+            is_streaming: Optional[bool]
 
         async def call_model(state: GenerationState):
             # Get conversation summary and all messages
@@ -238,7 +242,9 @@ Please continue the conversation using this summary as context for understanding
                 start_on="human",
                 end_on=("human", "tool"),
             )
-            bind_kwargs = {}
+            bind_kwargs = {
+                "max_tokens": MODEL_CONTEXT_SIZE - tiktoken_counter(context_messages)
+            }
             try:
                 temperature_val = state.get("temperature")
                 bind_kwargs["temperature"] = temperature_val
@@ -246,14 +252,21 @@ Please continue the conversation using this summary as context for understanding
                 pass
 
             # Optimize for streaming performance
-            bind_kwargs.update(
-                {
-                    "stream": True,  # Enable streaming
-                    "stream_options": {"include_usage": False},  # Reduce overhead
-                    "max_tokens": MODEL_CONTEXT_SIZE
-                    - tiktoken_counter(context_messages),
-                }
-            )
+            try:
+                is_streaming = state.get("is_streaming")
+                if is_streaming:
+                    bind_kwargs.update(
+                        {
+                            "stream": True,  # Enable streaming
+                            "stream_options": {
+                                "include_usage": False
+                            },  # Reduce overhead
+                        }
+                    )
+            except Exception:
+                pass
+
+            logger.info(f"bind_kwargs: {bind_kwargs}")
             bound_llm = llm.bind(**bind_kwargs)
 
             response = await bound_llm.ainvoke(context_messages)
@@ -1210,6 +1223,7 @@ async def generate_answer_stream_generator_helper(
                         "temperature": request.temperature,
                         "max_tokens": request.max_new_tokens,
                         "conversation_summary": summary_text,
+                        "is_streaming": True,
                     }
 
                     # Use astream_events for proper streaming

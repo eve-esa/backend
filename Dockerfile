@@ -1,4 +1,4 @@
-FROM python:3.10-slim-bookworm AS builder
+FROM python:3.12-slim-bookworm AS builder
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
@@ -10,7 +10,7 @@ RUN python -m venv $VIRTUAL_ENV
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-FROM python:3.10-slim-bookworm AS prod
+FROM python:3.12-slim-bookworm AS prod
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
