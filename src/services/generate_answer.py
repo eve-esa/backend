@@ -19,6 +19,7 @@ from src.constants import (
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_TEMPERATURE,
+    MCP_MAX_TOP_N,
     MODEL_CONTEXT_SIZE,
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
@@ -591,7 +592,7 @@ async def get_mcp_context(
     # Build tool arguments
     args: Dict[str, Any] = {
         "query": request.query,
-        "topN": min(20, request.k * 2),
+        "topN": min(MCP_MAX_TOP_N, request.k * 2),
         "threshold": request.score_threshold,
     }
     if isinstance(request.year, list) and len(request.year) >= 2:

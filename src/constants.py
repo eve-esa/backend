@@ -18,6 +18,8 @@ NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
 MODEL_CONTEXT_SIZE = 128_000
 TOKEN_OVERFLOW_LIMIT = 7_000
 
+MCP_MAX_TOP_N = 20
+
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 
