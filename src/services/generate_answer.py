@@ -1016,6 +1016,7 @@ async def generate_answer(
                         "temperature": request.temperature,
                         "max_tokens": request.max_new_tokens,
                         "conversation_summary": summary_text,
+                        "is_streaming": False,
                     }
                     result = await graph.ainvoke(state, config)
                 else:
@@ -1031,7 +1032,7 @@ async def generate_answer(
                 )
                 use_langgraph = False
         if not use_langgraph:
-            logger.info("falling back to direct generation with conversation history")
+            logger.info("starting to fallback to streaming using mistral model")
             gen_start = time.perf_counter()
             # Get conversation history and summary for multi-turn context
             conversation_history, conversation_summary = (

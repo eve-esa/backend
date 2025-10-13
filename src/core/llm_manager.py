@@ -68,9 +68,7 @@ class LLMManager:
             )
 
             # Model name can be provided via env RUNPOD_MODEL_NAME, else rely on worker override
-            self._runpod_model_name = os.getenv(
-                "RUNPOD_MODEL_NAME", "eve-esa/mistral_small_v1"
-            )
+            self._runpod_model_name = os.getenv("RUNPOD_MODEL_NAME", "eve-esa/eve_v0.1")
 
             # Lazily initialized; create on first use to avoid unnecessary startup cost
             self._runpod_chat_openai: ChatOpenAI | None = None
@@ -105,7 +103,7 @@ class LLMManager:
             self._runpod_chat_openai = ChatOpenAI(
                 api_key=RUNPOD_API_KEY,
                 base_url=self._runpod_base_url,
-                model="eve-esa/mistral_small_v1",
+                model=self._runpod_model_name,
                 temperature=0.3,
                 timeout=instruct_llm_timeout,
                 max_retries=0,
@@ -219,7 +217,7 @@ class LLMManager:
             "conversation_prompt",
             query=query,
             context=context,
-            conversation_context=conversation_context,
+            conversation=conversation_context,
         )
 
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
