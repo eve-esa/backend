@@ -42,7 +42,7 @@ from src.utils.helpers import (
     get_mongodb_uri,
     tiktoken_counter,
 )
-
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -1224,30 +1224,36 @@ async def generate_answer_stream_generator_helper(
                     }
 
                     logger.info("Using LangGraph astream for streaming")
-                    async for chunk, metadata in graph.astream(
-                        state, config=config, stream_mode="messages"
-                    ):
-                        try:
-                            text = getattr(chunk, "content", None)
-                            if not text:
-                                continue
-                            if output_format == "json":
-                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                            else:
-                                yield f"data: {text}\n\n"
-                            accumulated.append(text)
-                            tokens_yielded += 1
-                        except Exception as e:
-                            logger.warning(
-                                f"Error processing LangGraph stream token: {e}"
-                            )
-                            continue
+                    llm_instruct_timeout = llm_manager.config.get_instruct_llm_timeout()
+                    try:
+                        async with asyncio.timeout(llm_instruct_timeout):
+                            async for chunk, metadata in graph.astream(
+                                state, config=config, stream_mode="messages"
+                            ):
+                                text = getattr(chunk, "content", None)
+                                if not text:
+                                    continue
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                else:
+                                    yield f"data: {text}\n\n"
+                                accumulated.append(text)
+                                tokens_yielded += 1
 
-                    base_gen_latency = time.perf_counter() - gen_start
-                    logger.info(
-                        f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
-                    )
-                    used_stream = True
+                            base_gen_latency = time.perf_counter() - gen_start
+                            logger.info(
+                                f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
+                            )
+                            used_stream = True
+                    except TimeoutError:
+                        logger.warning(
+                            f"LangGraph streaming timed out, falling back to Mistral streaming"
+                        )
+                        used_stream = False
+                    finally:
+                        # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
+                        with contextlib.suppress(Exception):
+                            await graph.aclose()
                 else:
                     logger.warning(
                         "LangGraph graph is None, falling back to Mistral streaming"
