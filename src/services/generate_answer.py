@@ -243,7 +243,7 @@ Please continue the conversation using this summary as context for understanding
                 end_on=("human", "tool"),
             )
             bind_kwargs = {
-                "max_tokens": MODEL_CONTEXT_SIZE - tiktoken_counter(context_messages)
+                # "max_tokens": MODEL_CONTEXT_SIZE - tiktoken_counter(context_messages)
             }
             try:
                 temperature_val = state.get("temperature")

@@ -246,7 +246,8 @@ class LLMManager:
         """
         try:
             base_llm = self._get_mistral_llm()
-            bind_kwargs = {"max_tokens": max_new_tokens}
+            bind_kwargs = {}
+            # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
@@ -262,7 +263,8 @@ class LLMManager:
         """Async version using LangChain ChatOpenAI."""
         try:
             base_llm = self._get_runpod_llm()
-            bind_kwargs = {"max_tokens": max_new_tokens}
+            bind_kwargs = {}
+            # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
@@ -474,7 +476,8 @@ class LLMManager:
         """Stream tokens from the Mistral model via LangChain ChatMistralAI."""
         try:
             base_llm = self._get_mistral_llm()
-            bind_kwargs = {"max_tokens": max_new_tokens}
+            bind_kwargs = {}
+            # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
