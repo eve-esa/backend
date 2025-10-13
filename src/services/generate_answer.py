@@ -283,7 +283,7 @@ Please continue the conversation using this summary as context for understanding
                 final_messages = [_make_message("system", _SYSTEM_PROMPT)] + list(
                     context_messages
                 )
-            logger.info(f"final_messages: {final_messages}")
+
             response = await bound_llm.ainvoke(final_messages)
             return {"messages": [response]}
 
@@ -978,14 +978,24 @@ async def generate_answer(
                 # Non-critical: proceed without summary if retrieval fails
                 summary_text = None
 
-        # Build user message with query and RAG context (summary handled separately in call_model)
-        user_parts: List[str] = []
-        user_parts.append(request.query)
-        if is_rag and context:
-            user_parts.append(f"Context:\n{context}")
-        user_content = "\n\n".join(user_parts)
+        # Build user message using template conversation_prompt_with_context
+        try:
+            tmpl = get_template(
+                "conversation_prompt_with_context", filename="prompts.yaml"
+            )
+            user_content = tmpl.format(
+                conversation=summary_text or "",
+                context=context or "",
+                query=request.query or "",
+            )
+        except Exception:
+            # Fallback to simple formatting
+            user_parts: List[str] = [request.query]
+            if is_rag and context:
+                user_parts.append(f"Context:\n{context}")
+            user_content = "\n\n".join(user_parts)
 
-        # Append the user message
+        # Append the templated user message
         messages_for_turn.append(_make_message("user", user_content))
 
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
@@ -1227,10 +1237,21 @@ async def generate_answer_stream_generator_helper(
                         f"Using optimized LangGraph streaming with mode: {mode}"
                     )
                     config = {"configurable": {"thread_id": conversation_id}}
-                    user_parts: List[str] = [request.query]
-                    if is_rag and context:
-                        user_parts.append(f"Context:\n{context}")
-                    user_content = "\n\n".join(user_parts)
+                    try:
+                        tmpl = get_template(
+                            "conversation_prompt_with_context", filename="prompts.yaml"
+                        )
+                        user_content = tmpl.format(
+                            conversation=summary_text or "",
+                            context=context or "",
+                            query=request.query or "",
+                        )
+                    except Exception:
+                        parts = [request.query]
+                        if is_rag and context:
+                            parts.append(f"Context:\n{context}")
+                        user_content = "\n\n".join(parts)
+
                     state = {
                         "messages": add_messages(
                             [], [_make_message("user", user_content)]
