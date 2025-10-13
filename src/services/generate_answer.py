@@ -44,6 +44,7 @@ from src.utils.helpers import (
     tiktoken_counter,
 )
 import contextlib
+from concurrent import futures as cf
 
 logger = logging.getLogger(__name__)
 
@@ -550,36 +551,44 @@ def _sort_deepinfra_reranked_results(
 def _maybe_rerank_deepinfra(
     candidate_texts: List[str], query: str, timeout: int = 5
 ) -> dict | None:
-    """Call DeepInfra reranker if configured with timeout."""
-    try:
-        if len(candidate_texts) == 0:
-            return None
-        api_token = DEEPINFRA_API_TOKEN
-        if not api_token:
-            logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
-            return None
+    """Call DeepInfra reranker if configured with timeout, else fall back to SiliconFlow."""
+    if not candidate_texts:
+        return None
 
+    # --- Try DeepInfra first ---
+    api_token = DEEPINFRA_API_TOKEN
+    if not api_token:
+        logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
+    else:
         reranker = DeepInfraReranker(api_token)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            logger.info("Using DeepInfra reranker")
-            future = executor.submit(reranker.rerank, [query], candidate_texts)
-            try:
-                results = future.result(timeout=timeout)
-                return results
-            except FutureTimeoutError:
-                raise RuntimeError(
-                    f"DeepInfra reranker timed out after {timeout} seconds"
-                )
-    except Exception as e:
-        logger.warning(f"DeepInfra reranker failed: {e}")
-        logger.info("Using SiliconFlow reranker")
-        api_token = SILICONFLOW_API_TOKEN
-        if not api_token:
-            logger.warning("SILICONFLOW_API_TOKEN environment variable not set")
-            return None
+        executor = cf.ThreadPoolExecutor(max_workers=1)
+        logger.info("Using DeepInfra reranker")
+        future = executor.submit(reranker.rerank, [query], candidate_texts)
+        try:
+            results = future.result(timeout=timeout)
+            return results
+        except cf.TimeoutError:
+            logger.warning("DeepInfra reranker timed out after %s seconds", timeout)
+            future.cancel()
+        except Exception:
+            logger.warning("DeepInfra reranker failed", exc_info=True)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    # --- Fallback: SiliconFlow ---
+    logger.info("Using SiliconFlow reranker")
+    api_token = SILICONFLOW_API_TOKEN
+    if not api_token:
+        logger.warning("SILICONFLOW_API_TOKEN environment variable not set")
+        return None
+
+    try:
         reranker = SiliconFlowReranker(api_token)
         results = reranker.rerank([query], candidate_texts)
-        return {"scores": results}
+        return {"scores": results} if not isinstance(results, dict) else results
+    except Exception:
+        logger.warning("SiliconFlow reranker failed", exc_info=True)
+        return None
 
 
 async def get_mcp_context(
@@ -1032,7 +1041,7 @@ async def generate_answer(
                 )
                 use_langgraph = False
         if not use_langgraph:
-            logger.info("starting to fallback to streaming using mistral model")
+            logger.info("starting to fallback using mistral model")
             gen_start = time.perf_counter()
             # Get conversation history and summary for multi-turn context
             conversation_history, conversation_summary = (
