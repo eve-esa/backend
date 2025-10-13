@@ -33,7 +33,13 @@ from src.utils.helpers import (
 )
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import DEEPINFRA_API_TOKEN, IS_PROD, SILICONFLOW_API_TOKEN, config
+from src.config import (
+    DEEPINFRA_API_TOKEN,
+    IS_PROD,
+    SCRAPING_DOG_API_KEY,
+    SILICONFLOW_API_TOKEN,
+    config,
+)
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -45,6 +51,11 @@ from src.utils.helpers import (
 )
 import contextlib
 from concurrent import futures as cf
+
+from src.utils.scraping_dog_crawler import (
+    ScrapingDogCrawler,
+    all_urls as SCRAPING_DOG_ALL_URLS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -911,9 +922,9 @@ async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMMana
             latencies.update(rag_lat or {})
             latencies.update(mcp_lat or {})
         except Exception as e:
-            logger.warning(
+            raise Exception(
                 f"Failed to get RAG context and MCP context and merge them: {e}"
-            )
+            ) from e
 
     return context, results, is_rag, latencies
 
@@ -965,9 +976,21 @@ async def generate_answer(
 
         context, results, is_rag, latencies = "", [], False, {}
         if len(request.collection_ids) > 0 and request.k > 0:
-            context, results, is_rag, latencies = await setup_rag_and_context(
-                request, llm_manager
-            )
+            try:
+                context, results, is_rag, latencies = await setup_rag_and_context(
+                    request, llm_manager
+                )
+            except Exception as e:
+                logger.warning(f"Failed to setup RAG and context: {e}")
+                scraping_dog_crawler = ScrapingDogCrawler(
+                    all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
+                )
+                results = scraping_dog_crawler.run(request.query, request.k)
+                context = "\n".join([r.text for r in results])
+                is_rag = True
+                latencies = {
+                    "scraping_dog_latency": time.perf_counter() - total_start,
+                }
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
