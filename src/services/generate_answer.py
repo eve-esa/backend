@@ -37,6 +37,7 @@ from src.config import DEEPINFRA_API_TOKEN, IS_PROD, SILICONFLOW_API_TOKEN, conf
 from src.hallucination_pipeline.loop import run_hallucination_loop
 from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
+from src.utils.template_loader import get_template
 from src.utils.siliconflow_reranker import SiliconFlowReranker
 from src.utils.helpers import (
     get_mongodb_uri,
@@ -185,6 +186,14 @@ _mongo_checkpointer = None  # active AsyncMongoDBSaver obtained from __aenter__
 _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
 _graph_init_lock = asyncio.Lock()
 
+# Load system prompt from templates (optional)
+try:
+    _SYSTEM_PROMPT: Optional[str] = get_template(
+        "system_prompt", filename="system.yaml"
+    )
+except Exception:
+    _SYSTEM_PROMPT = None
+
 
 async def _get_or_create_compiled_graph():
     """Lazily compile LangGraph once and reuse across calls.
@@ -227,6 +236,9 @@ async def _get_or_create_compiled_graph():
 
             available_tokens = DEFAULT_MAX_NEW_TOKENS
 
+            if _SYSTEM_PROMPT:
+                all_messages = [_make_message("system", _SYSTEM_PROMPT)] + all_messages
+
             if conversation_summary:
                 summary_context = f"""Previous conversation summary: {conversation_summary}
 
@@ -238,7 +250,7 @@ Please continue the conversation using this summary as context for understanding
                 max_tokens=available_tokens,
                 strategy="last",
                 token_counter=tiktoken_counter,
-                include_system=True,
+                include_system=False,
                 start_on="human",
                 end_on=("human", "tool"),
             )
@@ -266,7 +278,13 @@ Please continue the conversation using this summary as context for understanding
             logger.info(f"bind_kwargs: {bind_kwargs}")
             bound_llm = llm.bind(**bind_kwargs)
 
-            response = await bound_llm.ainvoke(context_messages)
+            final_messages = context_messages
+            if _SYSTEM_PROMPT:
+                final_messages = [_make_message("system", _SYSTEM_PROMPT)] + list(
+                    context_messages
+                )
+            logger.info(f"final_messages: {final_messages}")
+            response = await bound_llm.ainvoke(final_messages)
             return {"messages": [response]}
 
         builder = StateGraph(GenerationState)

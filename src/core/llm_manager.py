@@ -14,6 +14,7 @@ from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
+from src.utils.template_loader import get_template
 from src.utils.helpers import str_token_counter, trim_text_to_token_limit
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
@@ -40,6 +41,13 @@ class LLMManager:
         self.config = Config()
         self._setup_api_keys()
         self._init_langchain_clients()
+        # Load system prompt once
+        try:
+            self._system_prompt: Optional[str] = get_template(
+                "system_prompt", filename="system.yaml"
+            )
+        except Exception:
+            self._system_prompt = None
 
     def _setup_api_keys(self):
         """Set up API keys for different LLM providers."""
@@ -232,7 +240,10 @@ class LLMManager:
         try:
             base_llm = self._get_runpod_llm()
             llm = base_llm.bind(max_tokens=max_new_tokens)
-            response = llm.invoke(prompt)
+            system_and_prompt = prompt
+            if self._system_prompt:
+                system_and_prompt = f"System:\n{self._system_prompt}\n\nUser:\n{prompt}"
+            response = llm.invoke(system_and_prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(f"Eve Instruct Runpod API call failed: {str(e)}")
@@ -251,7 +262,14 @@ class LLMManager:
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
-            response = await llm.ainvoke(prompt)
+            if self._system_prompt:
+                messages = [
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=prompt),
+                ]
+                response = await llm.ainvoke(messages)
+            else:
+                response = await llm.ainvoke(prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(f"Mistral model call failed: {str(e)}")
@@ -268,7 +286,10 @@ class LLMManager:
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
-            response = await llm.ainvoke(prompt)
+            system_and_prompt = prompt
+            if self._system_prompt:
+                system_and_prompt = f"System:\n{self._system_prompt}\n\nUser:\n{prompt}"
+            response = await llm.ainvoke(system_and_prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
             logger.error(
@@ -483,7 +504,15 @@ class LLMManager:
             llm = base_llm.bind(**bind_kwargs)
 
             # Prefer astream which yields message chunks with `.content`
-            async for event in llm.astream(prompt):
+            if self._system_prompt:
+                input_payload = [
+                    SystemMessage(content=self._system_prompt),
+                    HumanMessage(content=prompt),
+                ]
+            else:
+                input_payload = prompt
+
+            async for event in llm.astream(input_payload):
                 try:
                     text = getattr(event, "content", None)
                     if not text and isinstance(event, dict):
