@@ -1223,37 +1223,24 @@ async def generate_answer_stream_generator_helper(
                         "is_streaming": True,
                     }
 
-                    # Use astream_events for proper streaming
-                    logger.info("Using LangGraph astream_events for streaming")
-                    async for event in graph.astream_events(
-                        state, config=config, version="v2"
+                    logger.info("Using LangGraph astream for streaming")
+                    async for chunk, metadata in graph.astream(
+                        state, config=config, stream_mode="messages"
                     ):
                         try:
-                            if not isinstance(event, dict):
+                            text = getattr(chunk, "content", None)
+                            if not text:
                                 continue
-
-                            event_type = event.get("event")
-
-                            # Handle streaming events more efficiently
-                            if event_type == "on_chat_model_stream":
-                                data = event.get("data", {})
-                                chunk = data.get("chunk")
-                                if (
-                                    chunk
-                                    and hasattr(chunk, "content")
-                                    and chunk.content
-                                ):
-                                    text = str(chunk.content)
-                                    if text:
-                                        if output_format == "json":
-                                            yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                        else:
-                                            yield f"data: {text}\n\n"
-                                        accumulated.append(text)
-                                        tokens_yielded += 1
-
+                            if output_format == "json":
+                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                            else:
+                                yield f"data: {text}\n\n"
+                            accumulated.append(text)
+                            tokens_yielded += 1
                         except Exception as e:
-                            logger.warning(f"Error processing LangGraph event: {e}")
+                            logger.warning(
+                                f"Error processing LangGraph stream token: {e}"
+                            )
                             continue
 
                     base_gen_latency = time.perf_counter() - gen_start

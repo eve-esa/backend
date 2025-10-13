@@ -312,7 +312,7 @@ async def create_message_stream(
             metadata={},
         )
 
-        return StreamingResponse(
+        response = StreamingResponse(
             generate_answer_json_stream_generator(
                 request,
                 conversation_id=conversation_id,
@@ -321,6 +321,11 @@ async def create_message_stream(
             ),
             media_type="text/event-stream",
         )
+        # Set SSE-friendly headers to prevent proxy/client reconnect loops
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Connection"] = "keep-alive"
+        response.headers["X-Accel-Buffering"] = "no"  # Nginx buffering off if present
+        return response
     except HTTPException:
         raise
     except Exception as e:
