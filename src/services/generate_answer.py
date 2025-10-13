@@ -50,7 +50,6 @@ from src.utils.helpers import (
     tiktoken_counter,
 )
 import contextlib
-from concurrent import futures as cf
 
 from src.utils.scraping_dog_crawler import (
     ScrapingDogCrawler,
@@ -572,13 +571,13 @@ def _maybe_rerank_deepinfra(
         logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
     else:
         reranker = DeepInfraReranker(api_token)
-        executor = cf.ThreadPoolExecutor(max_workers=1)
+        executor = ThreadPoolExecutor(max_workers=1)
         logger.info("Using DeepInfra reranker")
         future = executor.submit(reranker.rerank, [query], candidate_texts)
         try:
             results = future.result(timeout=timeout)
             return results
-        except cf.TimeoutError:
+        except FutureTimeoutError:
             logger.warning("DeepInfra reranker timed out after %s seconds", timeout)
             future.cancel()
         except Exception:
