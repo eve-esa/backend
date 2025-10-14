@@ -15,7 +15,10 @@ from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
 from src.utils.template_loader import get_template
-from src.utils.helpers import str_token_counter, trim_text_to_token_limit
+from src.utils.helpers import (
+    str_token_counter,
+    trim_text_to_token_limit,
+)
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain.chains.summarize import load_summarize_chain
@@ -155,50 +158,6 @@ class LLMManager:
         """
         return format_template("basic_prompt", query=query, context=context)
 
-    def _build_conversation_context(
-        self, conversation_history: List[Any], summary: Optional[str] = None
-    ) -> str:
-        """
-        Build conversation context from message history and optional summary.
-
-        Args:
-            conversation_history: List of previous messages
-            summary: Optional conversation summary
-
-        Returns:
-            Formatted conversation context string
-        """
-        context_parts = []
-
-        # Add summary if available
-        if summary and summary.strip():
-            context_parts.append(f"Conversation Summary: {summary}")
-            context_parts.append("")  # Empty line for separation
-
-        # Add recent message history
-        if conversation_history:
-            for msg in conversation_history:
-                try:
-                    # Handle LangChain message objects
-                    if hasattr(msg, "content") and hasattr(msg, "__class__"):
-                        role = (
-                            "User" if "Human" in msg.__class__.__name__ else "Assistant"
-                        )
-                        content = msg.content
-                    # Handle dict-style messages
-                    elif isinstance(msg, dict):
-                        role = msg.get("role", "User").title()
-                        content = msg.get("content", "")
-                    else:
-                        continue
-
-                    if content.strip():
-                        context_parts.append(f"{role}: {content}")
-                except Exception:
-                    continue
-
-        return "\n".join(context_parts)
-
     def _generate_prompt_with_history(
         self, query: str, context: str, conversation_context: str
     ) -> str:
@@ -213,12 +172,19 @@ class LLMManager:
         Returns:
             A formatted prompt string with conversation history
         """
-        return format_template(
-            "conversation_prompt",
-            query=query,
-            context=context,
-            conversation=conversation_context,
-        )
+        if context:
+            return format_template(
+                "rag_prompt",
+                query=query,
+                context=context,
+                conversation=conversation_context,
+            )
+        else:
+            return format_template(
+                "no_rag_prompt",
+                query=query,
+                conversation=conversation_context,
+            )
 
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
         """
@@ -404,8 +370,7 @@ class LLMManager:
         context: str,
         max_new_tokens: int = 150,
         temperature: float | None = None,
-        conversation_history: Optional[List[Any]] = None,
-        conversation_summary: Optional[str] = None,
+        conversation_context: str = "",
     ) -> str:
         """
         Generate an answer using the mistral model.
@@ -415,8 +380,7 @@ class LLMManager:
             context: Contextual information to assist the model
             max_new_tokens: Maximum new tokens for the response
             temperature: Temperature for generation
-            conversation_history: Previous conversation messages for context
-            conversation_summary: Optional conversation summary for context
+            conversation_context: Previous conversation messages for context
 
         Returns:
             The generated answer
@@ -426,10 +390,7 @@ class LLMManager:
         """
         try:
             # If conversation history or summary is provided, use it for multi-turn context
-            if conversation_history or conversation_summary:
-                conversation_context = self._build_conversation_context(
-                    conversation_history or [], conversation_summary
-                )
+            if conversation_context:
                 available_tokens = DEFAULT_MAX_NEW_TOKENS
                 if str_token_counter(conversation_context) > available_tokens:
                     conversation_context = trim_text_to_token_limit(
@@ -458,15 +419,11 @@ class LLMManager:
         context: str,
         max_new_tokens: int = 150,
         temperature: float | None = None,
-        conversation_history: Optional[List[Any]] = None,
-        conversation_summary: Optional[str] = None,
+        conversation_context: str = "",
     ) -> AsyncGenerator[str, None]:
         """Generate an answer using the mistral model, streaming tokens."""
         try:
-            if conversation_history or conversation_summary:
-                conversation_context = self._build_conversation_context(
-                    conversation_history or [], conversation_summary
-                )
+            if conversation_context:
                 available_tokens = DEFAULT_MAX_NEW_TOKENS
                 if str_token_counter(conversation_context) > available_tokens:
                     conversation_context = trim_text_to_token_limit(
