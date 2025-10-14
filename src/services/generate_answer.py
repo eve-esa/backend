@@ -983,7 +983,7 @@ async def generate_answer(
                 scraping_dog_crawler = ScrapingDogCrawler(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
-                results = scraping_dog_crawler.run(request.query, request.k)
+                results = await scraping_dog_crawler.run(request.query, request.k)
                 context = "\n".join([r.text for r in results])
                 is_rag = True
                 latencies = {

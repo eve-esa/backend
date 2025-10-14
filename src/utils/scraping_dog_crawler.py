@@ -1,9 +1,9 @@
+import asyncio
 import requests
 from typing import List, Tuple
 from urllib.parse import urlparse
 import trafilatura
 import httpx
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,16 +37,15 @@ class ScrapingDogCrawler:
             if r.get("title") and r.get("link")
         ]
         print(f"ScrapingDog returned {len(urls)} URLs")
-        return urls[
-            :top_k
-        ]  # because in the api params, it returns the whole page and not top k results
+        return urls[:top_k]
 
-    def _extract_single(self, title_url):
-        """Helper for parallel extraction"""
+    async def _extract_single(
+        self, client: httpx.AsyncClient, title_url: Tuple[str, str]
+    ):
         title, url = title_url
         try:
-            r = httpx.get(url, verify=False, timeout=20)
-            text = trafilatura.extract(r.text)
+            resp = await client.get(url, timeout=20)
+            text = trafilatura.extract(resp.text)
             if text:
                 print(f"Extracted: {url}")
                 return {"title": title, "url": url, "text": text}
@@ -54,19 +53,29 @@ class ScrapingDogCrawler:
             print(f"Failed {url}: {e}")
         return None
 
-    def _extract_text(
-        self, urls: List[Tuple[str, str]], max_workers: int = 8
-    ) -> List[dict]:  # change the max worker maybe to os.cpu_count() // 2
-        """Extract text content using Trafilatura in parallel."""
-        extracted_texts = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self._extract_single, t) for t in urls]
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    extracted_texts.append(result)
-        return extracted_texts
+    async def _extract_text(
+        self, urls: List[Tuple[str, str]], max_concurrent: int = 10
+    ):
+        semaphore = asyncio.Semaphore(max_concurrent)
+        results = []
 
-    def run(self, query: str, top_k: int = 5) -> List[dict]:
+        async with httpx.AsyncClient(
+            verify=False
+        ) as client:  # verify false to extract webpages with bad ssl certs
+
+            async def extract(title_url):
+                async with semaphore:
+                    return await self._extract_single(client, title_url)
+
+            tasks = [extract(t) for t in urls]
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                if result:
+                    results.append(result)
+        return results
+
+    async def run(self, query: str, top_k: int = 5):
         urls = self._search_scrapingdog(query, top_k)
-        return self._extract_text(urls)
+        if not urls:
+            return []
+        return await self._extract_text(urls)
