@@ -73,6 +73,33 @@ STAGING_PUBLIC_COLLECTIONS = [
     },
 ]
 
+SCRAPING_DOG_ALL_URLS = [
+    "https://earth.esa.int/eogateway",
+    "https://earthdata.nasa.gov",
+    "https://dataspace.copernicus.eu/",
+    "https://earthexplorer.usgs.gov",
+    "https://earthobservations.org",
+    "https://earthengine.google.com",
+    "https://www.class.noaa.gov",
+    "https://www.star.nesdis.noaa.gov",
+    "https://ceos.org",
+    "https://radiant.earth",
+    "https://eos.com",
+    "https://www.sentinel-hub.com/",
+    "https://www.eumetsat.int/",
+    "https://www.ecmwf.int/",
+    "https://atmosphere.copernicus.eu/",
+    "https://marine.copernicus.eu/",
+    "https://land.copernicus.eu/en",
+    "https://climate.copernicus.eu/",
+    "https://emergency.copernicus.eu/",
+    "https://nsidc.org/home",
+    "https://climate.esa.int/en/",
+    "https://cpom.org.uk/",
+    "https://earth.esa.int/eogateway/search?category=campaigns",
+    "https://philab.esa.int/",
+]
+
 _BASE_DIR = Path(__file__).parent
 _POLICY_PATH = _BASE_DIR / "templates" / "donotknow.yaml"
 with open(_POLICY_PATH, "r") as _f:

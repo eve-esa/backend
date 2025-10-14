@@ -51,10 +51,9 @@ from src.utils.helpers import (
 )
 import contextlib
 
-from src.utils.scraping_dog_crawler import (
-    ScrapingDogCrawler,
-    all_urls as SCRAPING_DOG_ALL_URLS,
-)
+from src.utils.scraping_dog_crawler import ScrapingDogCrawler
+from src.constants import SCRAPING_DOG_ALL_URLS
+
 
 logger = logging.getLogger(__name__)
 
