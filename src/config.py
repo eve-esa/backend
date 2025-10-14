@@ -55,6 +55,8 @@ FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 IS_PROD = os.getenv("IS_PROD", "").strip().lower() == "true"
 
+SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
+
 runpod.api_key = RUNPOD_API_KEY
 
 

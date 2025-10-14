@@ -35,3 +35,4 @@ bitsandbytes
 huggingface_hub
 replicate
 tiktoken
+trafilatura
