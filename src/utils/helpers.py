@@ -393,6 +393,49 @@ def trim_context_to_token_limit(parts: List[str], max_tokens: int = 7000) -> str
     return context
 
 
+def build_conversation_context(
+    conversation_history: List[Any], summary: Optional[str] = None
+) -> str:
+    """
+    Build conversation context from message history and optional summary.
+
+    Args:
+        conversation_history: List of previous messages
+        summary: Optional conversation summary
+
+    Returns:
+        Formatted conversation context string
+    """
+    context_parts = []
+
+    # Add summary if available
+    if summary and summary.strip():
+        context_parts.append(f"Conversation Summary: {summary}")
+        context_parts.append("")  # Empty line for separation
+
+    # Add recent message history
+    if conversation_history:
+        for msg in conversation_history:
+            try:
+                # Handle LangChain message objects
+                if hasattr(msg, "content") and hasattr(msg, "__class__"):
+                    role = "User" if "Human" in msg.__class__.__name__ else "Assistant"
+                    content = msg.content
+                # Handle dict-style messages
+                elif isinstance(msg, dict):
+                    role = msg.get("role", "User").title()
+                    content = msg.get("content", "")
+                else:
+                    continue
+
+                if content.strip():
+                    context_parts.append(f"{role}: {content}")
+            except Exception:
+                continue
+
+    return "\n".join(context_parts)
+
+
 def get_mongodb_uri() -> str:
     """Build MongoDB URI from environment, appending MONGO_PARAMS if provided."""
     params = MONGO_PARAMS or ""

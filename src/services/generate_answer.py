@@ -27,6 +27,7 @@ from src.constants import (
     TOKEN_OVERFLOW_LIMIT,
 )
 from src.utils.helpers import (
+    build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
     trim_context_to_token_limit,
@@ -68,6 +69,7 @@ class ShouldUseRagDecision(BaseModel):
         description="True if the query should use RAG; False for casual/generic queries."
     )
     reason: str = Field(description="Brief justification for the decision.")
+    requery: str = Field(description="Get new query from conversation history")
 
 
 class PolicyCheck(BaseModel):
@@ -349,9 +351,9 @@ async def _get_conversation_history_from_db(
         messages = await MessageModel.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", -1)],
-            limit=5,
+            limit=1,
+            skip=1,
         )
-
         # Convert to LangChain-compatible message format
         history = []
         for msg in messages:
@@ -777,29 +779,18 @@ async def get_mcp_context(
     return extracted, latencies
 
 
-async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
+async def should_use_rag(
+    llm_manager: LLMManager, query: str, conversation: str
+) -> bool:
     """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
 
     Returns True for scientific/technical queries; False for casual/generic ones.
     Defaults to True on uncertainty/errors.
     """
     try:
-        prompt = f"""
-            You are an AI assistant specialized in deciding whether a user query requires 
-            retrieval-augmented generation (RAG) or can be answered directly without external retrieval. 
-            Follow these rules:
-            - Do NOT use RAG for generic, casual, or non-specific queries, such as "hi",
-              "hello", "how are you", "what can you do", or "tell me a joke".
-            - USE RAG for queries related to earth science, space science, climate,
-              space agencies, or similar scientific topics.
-            - USE RAG for specific technical or scientific questions, even if the topic is unclear
-              (e.g., "What's the thermal conductivity of basalt?" or "How does orbital decay work?").
-            - If unsure whether RAG is needed, default to USING RAG.
-
-            Only return a value that conforms to the provided schema.
-
-            Query: {query}
-            """
+        prompt = get_template("is_rag_prompt", filename="prompts.yaml").format(
+            conversation=conversation, query=query
+        )
         if IS_PROD:
             base_llm = llm_manager.get_mistral_model()
             logger.info("deciding should_use_rag with mistral model")
@@ -814,8 +805,8 @@ async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
         logger.info(f"should_use_rag result: {result}")
         # with_structured_output returns a Pydantic object matching the schema
         if isinstance(result, ShouldUseRagDecision):
-            return bool(result.use_rag)
-        return False
+            return bool(result.use_rag), result.requery
+        return False, query
     except Exception as e:
         logger.error(f"Failed to decide should_use_rag: {e}")
         mistral_llm = llm_manager.get_mistral_model()
@@ -825,8 +816,8 @@ async def should_use_rag(llm_manager: LLMManager, query: str) -> bool:
         result = await structured_mistral_llm.ainvoke(prompt)
         logger.info(f"should_use_rag result from mistral: {result}")
         if isinstance(result, ShouldUseRagDecision):
-            return bool(result.use_rag)
-        return False
+            return bool(result.use_rag), result.requery
+        return False, query
 
 
 async def get_rag_context(
@@ -850,81 +841,73 @@ async def get_rag_context(
     return results, vs_latencies
 
 
-async def setup_rag_and_context(request: GenerationRequest, llm_manager: LLMManager):
+async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
     latencies: Dict[str, Optional[float]] = {}
-    # Check if we need to use RAG using LLMManager
-    latency = time.perf_counter()
-    is_rag = await should_use_rag(llm_manager, request.query)
-    latencies["rag_decision_latency"] = time.perf_counter() - latency
-
-    # Get context if using RAG
+    # Get RAG context
     context, results = "", []
-    if is_rag:
-        try:
-            vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-            rag_lat: Dict[str, Optional[float]] = {}
-            mcp_results: List[Any] = []
-            mcp_lat: Dict[str, Optional[float]] = {}
+    try:
+        vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+        rag_lat: Dict[str, Optional[float]] = {}
+        mcp_results: List[Any] = []
+        mcp_lat: Dict[str, Optional[float]] = {}
 
-            results, rag_lat = await get_rag_context(vector_store, request)
-            if "Wiley AI Gateway" in request.public_collections:
-                mcp_results, mcp_lat = await get_mcp_context(request)
+        results, rag_lat = await get_rag_context(vector_store, request)
+        if "Wiley AI Gateway" in request.public_collections:
+            mcp_results, mcp_lat = await get_mcp_context(request)
 
-            merged_results = list(results) + list(mcp_results)
-            # Build candidate texts with mapping to original indices
-            candidate_texts: List[str] = []
-            candidate_indices: List[int] = []
-            index_to_text: Dict[int, str] = {}
-            for idx, res in enumerate(merged_results):
-                text_val: Optional[str] = None
-                try:
-                    payload = getattr(res, "payload", None)
-                    if isinstance(payload, dict):
-                        text_val = payload.get("text") or payload.get("content")
-                    elif isinstance(res, dict):
-                        text_val = res.get("text")
-                except Exception:
-                    text_val = None
+        merged_results = list(results) + list(mcp_results)
+        # Build candidate texts with mapping to original indices
+        candidate_texts: List[str] = []
+        candidate_indices: List[int] = []
+        index_to_text: Dict[int, str] = {}
+        for idx, res in enumerate(merged_results):
+            text_val: Optional[str] = None
+            try:
+                payload = getattr(res, "payload", None)
+                if isinstance(payload, dict):
+                    text_val = payload.get("text") or payload.get("content")
+                elif isinstance(res, dict):
+                    text_val = res.get("text")
+            except Exception:
+                text_val = None
 
-                if text_val:
-                    text_str = str(text_val).strip()
-                    if text_str and "API call failed" not in text_str:
-                        candidate_indices.append(idx)
-                        candidate_texts.append(text_str)
-                        index_to_text[idx] = text_str
+            if text_val:
+                text_str = str(text_val).strip()
+                if text_str and "API call failed" not in text_str:
+                    candidate_indices.append(idx)
+                    candidate_texts.append(text_str)
+                    index_to_text[idx] = text_str
 
-            # Rerank candidates using DeepInfra reranker
-            latency = time.perf_counter()
-            reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
-            latencies["reranking_latency"] = time.perf_counter() - latency
-            if reranked:
-                ordered_indices = _sort_deepinfra_reranked_results(
-                    reranked, candidate_indices
-                )
-            else:
-                ordered_indices = list(candidate_indices)
+        # Rerank candidates using DeepInfra reranker
+        latency = time.perf_counter()
+        reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
+        latencies["reranking_latency"] = time.perf_counter() - latency
+        if reranked:
+            ordered_indices = _sort_deepinfra_reranked_results(
+                reranked, candidate_indices
+            )
+        else:
+            ordered_indices = list(candidate_indices)
 
-            # Trim to top-k
-            top_k = int(getattr(request, "k", 5) or 5)
-            selected_indices = ordered_indices[:top_k]
-            # Build context and filter original results to the selected set
-            context_list = [
-                index_to_text[i] for i in selected_indices if i in index_to_text
-            ]
-            context_list = list(set(context_list))
-            context = _build_context(context_list)
-            results = [merged_results[i] for i in selected_indices]
-            results = _deduplicate_results(results)
+        # Trim to top-k
+        top_k = int(getattr(request, "k", 5) or 5)
+        selected_indices = ordered_indices[:top_k]
+        # Build context and filter original results to the selected set
+        context_list = [
+            index_to_text[i] for i in selected_indices if i in index_to_text
+        ]
+        context_list = list(set(context_list))
+        context = _build_context(context_list)
+        results = [merged_results[i] for i in selected_indices]
+        results = _deduplicate_results(results)
 
-            latencies.update(rag_lat or {})
-            latencies.update(mcp_lat or {})
-        except Exception as e:
-            raise Exception(
-                f"Failed to get RAG context and MCP context and merge them: {e}"
-            ) from e
+        latencies.update(rag_lat or {})
+        latencies.update(mcp_lat or {})
+    except Exception as e:
+        logger.warning(f"Failed to get RAG context and MCP context and merge them: {e}")
 
-    return context, results, is_rag, latencies
+    return context, results, latencies
 
 
 async def check_policy(
@@ -972,12 +955,26 @@ async def generate_answer(
         if policy_result.violation:
             return POLICY_NOT_ANSWER, [], False, {}, {}
 
-        context, results, is_rag, latencies = "", [], False, {}
-        if len(request.collection_ids) > 0 and request.k > 0:
+        # Get conversation history and summary for multi-turn context
+        conversation_history, conversation_summary = (
+            await _get_conversation_history_from_db(conversation_id)
+            if conversation_id
+            else (None, None)
+        )
+        conversation_context = build_conversation_context(
+            conversation_history, conversation_summary
+        )
+
+        # Check if we need to use RAG using LLMManager
+        rag_decision_start = time.perf_counter()
+        is_rag, requery = await should_use_rag(
+            llm_manager, request.query, conversation_context
+        )
+        rag_decision_latency = time.perf_counter() - rag_decision_start
+        context, results, latencies = "", [], {}
+        if len(request.collection_ids) > 0 and request.k > 0 and is_rag:
             try:
-                context, results, is_rag, latencies = await setup_rag_and_context(
-                    request, llm_manager
-                )
+                context, results, latencies = await setup_rag_and_context(request)
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context: {e}")
                 scraping_dog_crawler = ScrapingDogCrawler(
@@ -985,7 +982,6 @@ async def generate_answer(
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
                 context = "\n".join([r.text for r in results])
-                is_rag = True
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - total_start,
                 }
@@ -993,37 +989,15 @@ async def generate_answer(
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
-        # Optionally fetch rolling summary to embed in user message content
-        summary_text: Optional[str] = None
-        if conversation_id:
-            try:
-                from src.database.models.conversation import (
-                    Conversation as ConversationModel,
-                )
-
-                convo = await ConversationModel.find_by_id(conversation_id)
-                if convo and getattr(convo, "summary", None):
-                    summary_text = convo.summary or None
-            except Exception:
-                # Non-critical: proceed without summary if retrieval fails
-                summary_text = None
-
         # Build user message using template conversation_prompt_with_context
-        try:
-            tmpl = get_template(
-                "conversation_prompt_with_context", filename="prompts.yaml"
-            )
-            user_content = tmpl.format(
-                conversation=summary_text or "",
-                context=context or "",
-                query=request.query or "",
-            )
-        except Exception:
-            # Fallback to simple formatting
-            user_parts: List[str] = [request.query]
-            if is_rag and context:
-                user_parts.append(f"Context:\n{context}")
-            user_content = "\n\n".join(user_parts)
+        if is_rag:
+            tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
+        else:
+            tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
+        user_content = tmpl.format(
+            context=context or "",
+            query=requery or "",
+        )
 
         # Append the templated user message
         messages_for_turn.append(_make_message("user", user_content))
@@ -1045,7 +1019,7 @@ async def generate_answer(
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
                         "max_tokens": request.max_new_tokens,
-                        "conversation_summary": summary_text,
+                        "conversation_summary": conversation_summary,
                         "is_streaming": False,
                     }
                     result = await graph.ainvoke(state, config)
@@ -1064,26 +1038,20 @@ async def generate_answer(
         if not use_langgraph:
             logger.info("starting to fallback using mistral model")
             gen_start = time.perf_counter()
-            # Get conversation history and summary for multi-turn context
-            conversation_history, conversation_summary = (
-                await _get_conversation_history_from_db(conversation_id)
-                if conversation_id
-                else (None, None)
-            )
+
             final_answer = await llm_manager.generate_answer_mistral(
-                query=request.query,
+                query=requery,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
-                conversation_history=conversation_history,
-                conversation_summary=conversation_summary,
+                conversation_context=conversation_context,
             )
             mistral_gen_latency = time.perf_counter() - gen_start
 
         answer = final_answer
 
         model = llm_manager.get_model()
-        generation_response = generation_schema(question=request.query, answer=answer)
+        generation_response = generation_schema(question=requery, answer=answer)
         loop_result: Optional[dict] = None
         hallucination_latency: Optional[dict] = None
         if len(context.strip()) != 0 and request.hallucination_loop_flag:
@@ -1111,6 +1079,7 @@ async def generate_answer(
         total_latency = time.perf_counter() - total_start
         latencies = {
             "guardrail_latency": guardrail_latency,
+            "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
@@ -1220,33 +1189,24 @@ async def generate_answer_stream_generator_helper(
             yield f"data: {json.dumps({'type': 'error', 'message': POLICY_NOT_ANSWER})}\n\n"
             return
 
-        # Setup RAG
-        context, results, is_rag, latencies = "", [], False, {}
-        if len(request.collection_ids) > 0 and request.k > 0:
-            context, results, is_rag, latencies = await setup_rag_and_context(
-                request, llm_manager
-            )
-
-        # Prepare conversation summary if any
-        summary_text: Optional[str] = None
-        if conversation_id:
-            try:
-                from src.database.models.conversation import (
-                    Conversation as ConversationModel,
-                )
-
-                convo = await ConversationModel.find_by_id(conversation_id)
-                if convo and getattr(convo, "summary", None):
-                    summary_text = convo.summary or None
-            except Exception:
-                summary_text = None
-
         # Prepare conversation history for fallback path
         conversation_history, conversation_summary = (
             await _get_conversation_history_from_db(conversation_id)
             if conversation_id
             else (None, None)
         )
+        conversation_context = build_conversation_context(
+            conversation_history, conversation_summary
+        )
+        # Setup RAG context
+        rag_decision_start = time.perf_counter()
+        is_rag, requery = await should_use_rag(
+            llm_manager, request.query, conversation_context
+        )
+        rag_decision_latency = time.perf_counter() - rag_decision_start
+        context, results, latencies = "", [], {}
+        if len(request.collection_ids) > 0 and request.k > 0 and is_rag:
+            context, results, latencies = await setup_rag_and_context(request)
 
         # Stream generation
         accumulated = []
@@ -1268,20 +1228,18 @@ async def generate_answer_stream_generator_helper(
                         f"Using optimized LangGraph streaming with mode: {mode}"
                     )
                     config = {"configurable": {"thread_id": conversation_id}}
-                    try:
+                    if is_rag:
                         tmpl = get_template(
-                            "conversation_prompt_with_context", filename="prompts.yaml"
+                            "rag_prompt_for_langgraph", filename="prompts.yaml"
                         )
-                        user_content = tmpl.format(
-                            conversation=summary_text or "",
-                            context=context or "",
-                            query=request.query or "",
+                    else:
+                        tmpl = get_template(
+                            "no_rag_prompt_for_langgraph", filename="prompts.yaml"
                         )
-                    except Exception:
-                        parts = [request.query]
-                        if is_rag and context:
-                            parts.append(f"Context:\n{context}")
-                        user_content = "\n\n".join(parts)
+                    user_content = tmpl.format(
+                        context=context or "",
+                        query=requery or "",
+                    )
 
                     state = {
                         "messages": add_messages(
@@ -1289,7 +1247,7 @@ async def generate_answer_stream_generator_helper(
                         ),
                         "temperature": request.temperature,
                         "max_tokens": request.max_new_tokens,
-                        "conversation_summary": summary_text,
+                        "conversation_summary": conversation_summary,
                         "is_streaming": True,
                     }
 
@@ -1338,12 +1296,11 @@ async def generate_answer_stream_generator_helper(
             gen_start = time.perf_counter()
             logger.info(f"Using Mistral streaming fallback")
             async for token in llm_manager.generate_answer_mistral_stream(
-                query=request.query,
+                query=requery,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
-                conversation_history=conversation_history,
-                conversation_summary=conversation_summary,
+                conversation_context=conversation_context,
             ):
                 # forward token
                 if output_format == "json":
@@ -1358,7 +1315,7 @@ async def generate_answer_stream_generator_helper(
 
         # Optional hallucination loop after stream completes
         model = llm_manager.get_model()
-        generation_response = generation_schema(question=request.query, answer=answer)
+        generation_response = generation_schema(question=requery, answer=answer)
         loop_result: Optional[dict] = None
         hallucination_latency: Optional[dict] = None
         if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
@@ -1373,6 +1330,7 @@ async def generate_answer_stream_generator_helper(
         total_latency = time.perf_counter() - total_start
         latencies = {
             "guardrail_latency": guardrail_latency,
+            "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
