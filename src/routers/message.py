@@ -88,8 +88,8 @@ async def create_message(
             metadata={},
         )
 
-        answer, results, is_rag, loop_result, latencies = await generate_answer(
-            request, conversation_id=conversation_id
+        answer, results, is_rag, loop_result, latencies, prompts = (
+            await generate_answer(request, conversation_id=conversation_id)
         )
 
         documents_data = []
@@ -101,6 +101,7 @@ async def create_message(
         message.use_rag = is_rag
         message.metadata = {
             "latencies": latencies,
+            "prompts": prompts,
         }
         await message.save()
 
@@ -159,8 +160,10 @@ async def retry(
                 detail="This message cannot be retried",
             )
 
-        answer, results, is_rag, loop_result, latencies = await generate_answer(
-            message.request_input, conversation_id=conversation_id
+        answer, results, is_rag, loop_result, latencies, prompts = (
+            await generate_answer(
+                message.request_input, conversation_id=conversation_id
+            )
         )
 
         documents_data = []
@@ -170,9 +173,7 @@ async def retry(
         message.output = answer
         message.documents = documents_data
         message.use_rag = is_rag
-        message.metadata = {
-            "latencies": latencies,
-        }
+        message.metadata = {"latencies": latencies, "prompts": prompts}
         await message.save()
 
         # Schedule rollup as background task to avoid blocking response

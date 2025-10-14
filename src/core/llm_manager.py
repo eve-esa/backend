@@ -371,7 +371,7 @@ class LLMManager:
         max_new_tokens: int = 150,
         temperature: float | None = None,
         conversation_context: str = "",
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Generate an answer using the mistral model.
 
@@ -405,9 +405,10 @@ class LLMManager:
                 prompt = self._generate_prompt(query=query, context=context)
 
             max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
-            return await self._call_eve_instruct_mistral(
+            answer = await self._call_eve_instruct_mistral(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             )
+            return answer, prompt
 
         except Exception as e:
             logger.error(f"Failed to generate answer using mistral model: {str(e)}")
@@ -420,7 +421,7 @@ class LLMManager:
         max_new_tokens: int = 150,
         temperature: float | None = None,
         conversation_context: str = "",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[tuple[str, str], None]:
         """Generate an answer using the mistral model, streaming tokens."""
         try:
             if conversation_context:
@@ -441,7 +442,7 @@ class LLMManager:
             async for chunk in self._call_eve_instruct_mistral_stream(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             ):
-                yield chunk
+                yield chunk, prompt
         except Exception as e:
             logger.error(f"Failed to generate answer using mistral model: {str(e)}")
             raise
