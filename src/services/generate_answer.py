@@ -1191,7 +1191,21 @@ async def generate_answer_stream_generator_helper(
         policy_result, policy_prompt = await check_policy(request, llm_manager)
         guardrail_latency = time.perf_counter() - total_start
         if policy_result.violation:
-            yield f"data: {json.dumps({'type': 'error', 'message': POLICY_NOT_ANSWER})}\n\n"
+            yield f"data: {json.dumps({'type': 'final', 'answer': POLICY_NOT_ANSWER})}\n\n"
+            try:
+                from src.database.models.message import Message as MessageModel
+
+                # Find message by id
+                message = await MessageModel.find_by_id(message_id)
+                if message is not None:
+                    message.output = POLICY_NOT_ANSWER
+                    message.metadata = {
+                        "latencies": {"guardrail_latency": guardrail_latency},
+                        "prompts": {"guardrail_prompt": policy_prompt},
+                    }
+                    await message.save()
+            except Exception as e:
+                logger.warning(f"Failed to persist streamed message: {e}")
             return
 
         # Prepare conversation history for fallback path
