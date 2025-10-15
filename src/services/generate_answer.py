@@ -905,7 +905,9 @@ async def setup_rag_and_context(request: GenerationRequest):
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})
     except Exception as e:
-        logger.warning(f"Failed to get RAG context and MCP context and merge them: {e}")
+        raise Exception(
+            f"Failed to get RAG context and MCP context and merge them: {e}"
+        )
 
     return context, results, latencies
 
@@ -977,14 +979,15 @@ async def generate_answer(
             try:
                 context, results, latencies = await setup_rag_and_context(request)
             except Exception as e:
-                logger.warning(f"Failed to setup RAG and context: {e}")
+                logger.warning(f"Failed to setup RAG and context")
+                scraping_dog_start = time.perf_counter()
                 scraping_dog_crawler = ScrapingDogCrawler(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = "\n".join([r.text for r in results])
+                context = _build_context(results)
                 latencies = {
-                    "scraping_dog_latency": time.perf_counter() - total_start,
+                    "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
 
         # Build messages for LangGraph memory + generation
@@ -1230,13 +1233,14 @@ async def generate_answer_stream_generator_helper(
                 context, results, latencies = await setup_rag_and_context(request)
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context: {e}")
+                scraping_dog_start = time.perf_counter()
                 scraping_dog_crawler = ScrapingDogCrawler(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = "\n".join([r.text for r in results])
+                context = _build_context(results)
                 latencies = {
-                    "scraping_dog_latency": time.perf_counter() - total_start,
+                    "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
 
         if is_rag:

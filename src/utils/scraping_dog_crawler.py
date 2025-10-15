@@ -31,11 +31,14 @@ class ScrapingDogCrawler:
             return []
         data = response.json()
         organic_results = data.get("organic_results", [])
-        urls = [
-            (r.get("title", ""), r.get("link", ""))
-            for r in organic_results
-            if r.get("title") and r.get("link")
-        ]
+        urls = []
+        for r in organic_results:
+            title = r.get("title", "")
+            link = r.get("link", "")
+            if link.lower().endswith(".pdf") or ".pdf?" in link.lower():  # skip pdfs
+                print(f"Skipping PDF: {link}")
+                continue
+            urls.append((title, link))
         print(f"ScrapingDog returned {len(urls)} URLs")
         return urls[:top_k]
 
@@ -44,11 +47,18 @@ class ScrapingDogCrawler:
     ):
         title, url = title_url
         try:
-            resp = await client.get(url, timeout=20)
+            resp = await client.get(url, timeout=20, follow_redirects=True)
             text = trafilatura.extract(resp.text)
             if text:
                 print(f"Extracted: {url}")
-                return {"title": title, "url": url, "text": text}
+                return {
+                    "collection_name": "Online search",
+                    "payload": {
+                        "title": title,
+                        "url": url,
+                    },
+                    "text": text,
+                }
         except Exception as e:
             print(f"Failed {url}: {e}")
         return None
