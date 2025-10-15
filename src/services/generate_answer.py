@@ -953,7 +953,7 @@ async def generate_answer(
         policy_result, policy_prompt = await check_policy(request, llm_manager)
         guardrail_latency = time.perf_counter() - total_start
         if policy_result.violation:
-            return POLICY_NOT_ANSWER, [], False, {}, {}
+            return POLICY_NOT_ANSWER, [], False, {}, {}, {}
 
         # Get conversation history and summary for multi-turn context
         conversation_history, conversation_summary = (
