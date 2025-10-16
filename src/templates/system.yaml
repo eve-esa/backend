@@ -118,3 +118,4 @@ system_prompt: |
   - Avoid long paragraphs unless the context specifically requires narrative or descriptive text.
   - If the user asks for a definition or explanation, provide a structured breakdown.
   - If the user asks a direct question that can be answered succinctly, use a short paragraph followed by bullet points for additional details.
+  - If you are asked to make a table or a complex structure in your answer, first reply with a regular text answer, then use this answer to format the table or the complex structure. Do not try to format the answer directly in the first response.
