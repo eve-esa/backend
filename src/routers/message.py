@@ -29,6 +29,7 @@ async def create_message(
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ):
+    message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -99,10 +100,14 @@ async def create_message(
         message.output = answer
         message.documents = documents_data
         message.use_rag = is_rag
-        message.metadata = {
-            "latencies": latencies,
-            "prompts": prompts,
-        }
+        existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        existing_metadata.update(
+            {
+                "latencies": latencies,
+                "prompts": prompts,
+            }
+        )
+        message.metadata = existing_metadata
         await message.save()
 
         # Schedule rollup as background task to avoid blocking response
@@ -121,9 +126,21 @@ async def create_message(
                 "latencies": latencies,
             },
         }
-    except HTTPException:
+    except HTTPException as http_exc:
+        if message:
+            try:
+                message.metadata = {"error": str(getattr(http_exc, "detail", http_exc))}
+                await message.save()
+            except Exception:
+                pass
         raise
     except Exception as e:
+        if message:
+            try:
+                message.metadata = {"error": str(e)}
+                await message.save()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
@@ -173,7 +190,9 @@ async def retry(
         message.output = answer
         message.documents = documents_data
         message.use_rag = is_rag
-        message.metadata = {"latencies": latencies, "prompts": prompts}
+        existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        existing_metadata.update({"latencies": latencies, "prompts": prompts})
+        message.metadata = existing_metadata
         await message.save()
 
         # Schedule rollup as background task to avoid blocking response
@@ -254,6 +273,7 @@ async def create_message_stream(
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ):
+    message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -327,7 +347,19 @@ async def create_message_stream(
         response.headers["Connection"] = "keep-alive"
         response.headers["X-Accel-Buffering"] = "no"  # Nginx buffering off if present
         return response
-    except HTTPException:
+    except HTTPException as http_exc:
+        if message:
+            try:
+                message.metadata = {"error": str(getattr(http_exc, "detail", http_exc))}
+                await message.save()
+            except Exception:
+                pass
         raise
     except Exception as e:
+        if message:
+            try:
+                message.metadata = {"error": str(e)}
+                await message.save()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

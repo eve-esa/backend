@@ -1217,13 +1217,17 @@ async def generate_answer_stream_generator_helper(
                 message = await MessageModel.find_by_id(message_id)
                 if message is not None:
                     message.output = POLICY_NOT_ANSWER
-                    message.metadata = {
-                        "latencies": {"guardrail_latency": guardrail_latency},
-                        "prompts": {
-                            "guardrail_prompt": policy_prompt,
-                            "guardrail_result": policy_result,
-                        },
-                    }
+                    existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                    existing_metadata.update(
+                        {
+                            "latencies": {"guardrail_latency": guardrail_latency},
+                            "prompts": {
+                                "guardrail_prompt": policy_prompt,
+                                "guardrail_result": policy_result,
+                            },
+                        }
+                    )
+                    message.metadata = existing_metadata
                     await message.save()
             except Exception as e:
                 logger.warning(f"Failed to persist streamed message: {e}")
@@ -1414,7 +1418,9 @@ async def generate_answer_stream_generator_helper(
                 message.output = answer
                 message.documents = documents_data
                 message.use_rag = rag_decition_result.use_rag
-                message.metadata = {"latencies": latencies, "prompts": prompts}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata.update({"latencies": latencies, "prompts": prompts})
+                message.metadata = existing_metadata
                 await message.save()
         except Exception as e:
             logger.warning(f"Failed to persist streamed message: {e}")
@@ -1437,6 +1443,15 @@ async def generate_answer_stream_generator_helper(
 
     except Exception as e:
         err_payload = {"type": "error", "message": str(e)}
+        try:
+            from src.database.models.message import Message as MessageModel
+
+            message = await MessageModel.find_by_id(message_id)
+            if message:
+                message.metadata = {"error": str(e)}
+                await message.save()
+        except Exception:
+            pass
         yield f"data: {json.dumps(err_payload)}\n\n"
 
 
