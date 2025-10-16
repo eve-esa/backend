@@ -291,15 +291,15 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         collection_name = result_payload.get("collection_name") or (
             result_payload.get("metadata") or {}
         ).get("collection_name")
-    # if result_payload has key "content" and doesn't have key "text", set "text" with "content"
-    if "content" in result_payload and "text" not in result_payload:
-        result_payload["text"] = result_payload["content"]
+
     result_text = _field(result, "text", "") or ""
     result_metadata = _field(result, "metadata", {}) or {}
 
     # Fallbacks from payload
     if not result_text and isinstance(result_payload, dict):
-        result_text = result_payload.get("text", "") or ""
+        result_text = (
+            result_payload.get("text", result_payload.get("content", "")) or ""
+        )
     if not result_metadata and isinstance(result_payload, dict):
         result_metadata = result_payload.get("metadata", {}) or {}
 
