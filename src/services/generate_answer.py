@@ -781,7 +781,7 @@ async def get_mcp_context(
 
 async def should_use_rag(
     llm_manager: LLMManager, query: str, conversation: str
-) -> tuple[bool, str, str]:
+) -> tuple[ShouldUseRagDecision, str]:
     """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
 
     Returns True for scientific/technical queries; False for casual/generic ones.
@@ -805,8 +805,8 @@ async def should_use_rag(
         logger.info(f"should_use_rag result: {result}")
         # with_structured_output returns a Pydantic object matching the schema
         if isinstance(result, ShouldUseRagDecision):
-            return bool(result.use_rag), result.requery, prompt
-        return False, query, prompt
+            return result, prompt
+        return None, prompt
     except Exception as e:
         logger.error(f"Failed to decide should_use_rag: {e}")
         mistral_llm = llm_manager.get_mistral_model()
@@ -816,8 +816,8 @@ async def should_use_rag(
         result = await structured_mistral_llm.ainvoke(prompt)
         logger.info(f"should_use_rag result from mistral: {result}")
         if isinstance(result, ShouldUseRagDecision):
-            return bool(result.use_rag), result.requery, prompt
-        return False, query, prompt
+            return result, prompt
+        return None, prompt
 
 
 async def get_rag_context(
@@ -969,13 +969,17 @@ async def generate_answer(
 
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
-        is_rag, requery, rag_decision_prompt = await should_use_rag(
+        rag_decition_result, rag_decision_prompt = await should_use_rag(
             llm_manager, request.query, conversation_context
         )
-        request.query = requery
+        request.query = rag_decition_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
-        if len(request.collection_ids) > 0 and request.k > 0 and is_rag:
+        if (
+            len(request.collection_ids) > 0
+            and request.k > 0
+            and rag_decition_result.use_rag
+        ):
             try:
                 context, results, latencies = await setup_rag_and_context(request)
             except Exception as e:
@@ -994,13 +998,13 @@ async def generate_answer(
         messages_for_turn: List[Any] = []
 
         # Build user message using template conversation_prompt_with_context
-        if is_rag:
+        if rag_decition_result.use_rag:
             tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
             tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
         user_content = tmpl.format(
             context=context or "",
-            query=requery or "",
+            query=request.query or "",
         )
 
         # Append the templated user message
@@ -1044,7 +1048,7 @@ async def generate_answer(
             gen_start = time.perf_counter()
 
             final_answer, generation_prompt = await llm_manager.generate_answer_mistral(
-                query=requery,
+                query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
@@ -1054,7 +1058,9 @@ async def generate_answer(
             user_content = generation_prompt
 
         model = llm_manager.get_model()
-        generation_response = generation_schema(question=requery, answer=final_answer)
+        generation_response = generation_schema(
+            question=request.query, answer=final_answer
+        )
         loop_result: Optional[dict] = None
         hallucination_latency: Optional[dict] = None
         if len(context.strip()) != 0 and request.hallucination_loop_flag:
@@ -1091,10 +1097,19 @@ async def generate_answer(
         }
         prompts = {
             "guardrail_prompt": policy_prompt,
+            "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
+            "rag_decision_result": rag_decition_result,
             "generation_prompt": user_content,
         }
-        return final_answer, results, is_rag, loop_result, latencies, prompts
+        return (
+            final_answer,
+            results,
+            rag_decition_result.use_rag,
+            loop_result,
+            latencies,
+            prompts,
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1204,7 +1219,10 @@ async def generate_answer_stream_generator_helper(
                     message.output = POLICY_NOT_ANSWER
                     message.metadata = {
                         "latencies": {"guardrail_latency": guardrail_latency},
-                        "prompts": {"guardrail_prompt": policy_prompt},
+                        "prompts": {
+                            "guardrail_prompt": policy_prompt,
+                            "guardrail_result": policy_result,
+                        },
                     }
                     await message.save()
             except Exception as e:
@@ -1222,13 +1240,17 @@ async def generate_answer_stream_generator_helper(
         )
         # Setup RAG context
         rag_decision_start = time.perf_counter()
-        is_rag, requery, rag_decision_prompt = await should_use_rag(
+        rag_decition_result, rag_decision_prompt = await should_use_rag(
             llm_manager, request.query, conversation_context
         )
-        request.query = requery
+        request.query = rag_decition_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
-        if len(request.collection_ids) > 0 and request.k > 0 and is_rag:
+        if (
+            len(request.collection_ids) > 0
+            and request.k > 0
+            and rag_decition_result.use_rag
+        ):
             try:
                 context, results, latencies = await setup_rag_and_context(request)
             except Exception as e:
@@ -1243,13 +1265,13 @@ async def generate_answer_stream_generator_helper(
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
 
-        if is_rag:
+        if rag_decition_result.use_rag:
             tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
             tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
         user_content = tmpl.format(
             context=context or "",
-            query=requery or "",
+            query=request.query or "",
         )
 
         # Stream generation
@@ -1331,7 +1353,7 @@ async def generate_answer_stream_generator_helper(
                 token,
                 mistral_generation_prompt,
             ) in llm_manager.generate_answer_mistral_stream(
-                query=requery,
+                query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
@@ -1351,7 +1373,7 @@ async def generate_answer_stream_generator_helper(
 
         # Optional hallucination loop after stream completes
         model = llm_manager.get_model()
-        generation_response = generation_schema(question=requery, answer=answer)
+        generation_response = generation_schema(question=request.query, answer=answer)
         loop_result: Optional[dict] = None
         hallucination_latency: Optional[dict] = None
         if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
@@ -1375,7 +1397,9 @@ async def generate_answer_stream_generator_helper(
         }
         prompts = {
             "guardrail_prompt": policy_prompt,
+            "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
+            "rag_decision_result": rag_decition_result,
             "generation_prompt": user_content,
         }
         # Persist results to MongoDB Message entry created by the router
@@ -1389,7 +1413,7 @@ async def generate_answer_stream_generator_helper(
 
                 message.output = answer
                 message.documents = documents_data
-                message.use_rag = bool(is_rag)
+                message.use_rag = rag_decition_result.use_rag
                 message.metadata = {"latencies": latencies, "prompts": prompts}
                 await message.save()
         except Exception as e:
