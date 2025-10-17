@@ -10,7 +10,7 @@ import os
 from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
 
-from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY
+from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY, IS_PROD
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
@@ -31,9 +31,8 @@ logger = logging.getLogger(__name__)
 class LLMType(Enum):
     """Enum for supported LLM types."""
 
-    OPENAI = "openai"
-    EVE_INSTRUCT = "eve-instruct-v0.1"
-    LLAMA = "llama-3.1"
+    Runpod = "runpod"
+    Mistral = "mistral"
 
 
 class LLMManager:
@@ -44,6 +43,7 @@ class LLMManager:
         self.config = Config()
         self._setup_api_keys()
         self._init_langchain_clients()
+        self._selected_llm_type = None
         # Load system prompt once
         try:
             self._system_prompt: Optional[str] = get_template(
@@ -126,6 +126,37 @@ class LLMManager:
                 timeout=mistral_timeout,
             )
         return self._mistral_chat
+
+    def get_client_for_model(self, llm_type: Optional[str] = None):
+        """Return an LLM client instance based on the requested model/provider.
+
+        Defaults depend on environment: Runpod on staging, Mistral on prod.
+        Transparent fallback to Mistral if Runpod selection fails.
+        """
+        try:
+            if llm_type == LLMType.Mistral.value:
+                self._selected_llm_type = LLMType.Mistral.value
+                return self._get_mistral_llm()
+            elif llm_type == LLMType.Runpod.value:
+                self._selected_llm_type = LLMType.Runpod.value
+                return self._get_runpod_llm()
+            else:
+                if llm_type is None and IS_PROD:
+                    self._selected_llm_type = LLMType.Mistral.value
+                    return self._get_mistral_llm()
+                elif llm_type is None and not IS_PROD:
+                    self._selected_llm_type = LLMType.Runpod.value
+                    return self._get_runpod_llm()
+                else:
+                    raise RuntimeError("Invalid model selection")
+        except Exception as e:
+            logger.error(f"Failed to get client for model: {e}")
+            self._selected_llm_type = LLMType.Mistral.value
+            return self._get_mistral_llm()
+
+    def get_selected_llm_type(self) -> str:
+        """Return the selected LLM type."""
+        return self._selected_llm_type
 
     def get_model(self) -> ChatOpenAI:
         """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
@@ -284,7 +315,7 @@ class LLMManager:
             HumanMessage(content=f"Conversation transcript:\n{transcript}"),
         ]
         try:
-            llm = self.get_model()
+            llm = self.get_client_for_model(self._selected_llm_type)
             resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
             return getattr(resp, "content", str(resp))
         except Exception:

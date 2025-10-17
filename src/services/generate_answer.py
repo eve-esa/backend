@@ -58,6 +58,17 @@ from src.constants import SCRAPING_DOG_ALL_URLS
 
 logger = logging.getLogger(__name__)
 
+# Shared LLMManager instance for this module
+_shared_llm_manager: Optional[LLMManager] = None
+
+
+def get_shared_llm_manager() -> LLMManager:
+    """Return a process-wide shared LLMManager instance."""
+    global _shared_llm_manager
+    if _shared_llm_manager is None:
+        _shared_llm_manager = LLMManager()
+    return _shared_llm_manager
+
 
 # No direct OpenAI client usage; we use Runpod-backed ChatOpenAI via LLMManager
 
@@ -83,7 +94,10 @@ class GenerationRequest(BaseModel):
     query: str = DEFAULT_QUERY
     year: Optional[List[int]] = None
     filters: Optional[Dict[str, Any]] = None
-    llm: str = DEFAULT_LLM  # or openai
+    llm_type: Optional[str] = Field(
+        default=None,
+        description="LLM type to use. Options: 'runpod' or 'mistral'. Defaults to None, which means the environment behavior.",
+    )
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = Field(DEFAULT_K, ge=0, le=10)
     temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
@@ -228,18 +242,13 @@ async def _get_or_create_compiled_graph():
         if _inmemory_compiled_graph is not None and _compiled_graph_mode == "memory":
             return _inmemory_compiled_graph, _compiled_graph_mode
 
-        # Build the simple one-node graph
-        if IS_PROD:
-            llm = LLMManager().get_mistral_model()
-        else:
-            llm = LLMManager().get_model()
-
         # Define a custom state so we can carry sampling params alongside messages
         class GenerationState(MessagesState):
             temperature: Optional[float]
             max_tokens: Optional[int]
             conversation_summary: Optional[str]
             is_streaming: Optional[bool]
+            llm_type: Optional[str]
 
         async def call_model(state: GenerationState):
             # Get conversation summary and all messages
@@ -288,6 +297,8 @@ Please continue the conversation using this summary as context for understanding
                 pass
 
             logger.info(f"bind_kwargs: {bind_kwargs}")
+            llm_manager = get_shared_llm_manager()
+            llm = llm_manager.get_client_for_model(state.get("llm_type"))
             bound_llm = llm.bind(**bind_kwargs)
 
             final_messages = context_messages
@@ -780,7 +791,10 @@ async def get_mcp_context(
 
 
 async def should_use_rag(
-    llm_manager: LLMManager, query: str, conversation: str
+    llm_manager: LLMManager,
+    query: str,
+    conversation: str,
+    llm_type: Optional[str] = None,
 ) -> tuple[ShouldUseRagDecision, str]:
     """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
 
@@ -791,12 +805,10 @@ async def should_use_rag(
         prompt = get_template("is_rag_prompt", filename="prompts.yaml").format(
             conversation=conversation, query=query
         )
-        if IS_PROD:
-            base_llm = llm_manager.get_mistral_model()
-            logger.info("deciding should_use_rag with mistral model")
-        else:
-            base_llm = llm_manager.get_model()
-            logger.info("deciding should_use_rag with runpod model")
+        base_llm = llm_manager.get_client_for_model(llm_type)
+        logger.info(
+            f"deciding should_use_rag with selected model: {llm_manager.get_selected_llm_type()}"
+        )
 
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             ShouldUseRagDecision
@@ -918,12 +930,10 @@ async def check_policy(
     """Check if the query violates EO policies."""
     policy_prompt = POLICY_PROMPT.format(question=request.query)
     try:
-        if IS_PROD:
-            base_llm = llm_manager.get_mistral_model()
-            logger.info("checking policy with mistral model")
-        else:
-            base_llm = llm_manager.get_model()
-            logger.info("checking policy with runpod model")
+        base_llm = llm_manager.get_client_for_model(request.llm_type)
+        logger.info(
+            f"checking policy with selected model: {llm_manager.get_selected_llm_type()}"
+        )
 
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
@@ -947,7 +957,7 @@ async def generate_answer(
     conversation_id: Optional[str] = None,
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
-    llm_manager = LLMManager()
+    llm_manager = get_shared_llm_manager()
 
     try:
         # Check if the query violates EO policies
@@ -970,7 +980,7 @@ async def generate_answer(
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
         rag_decition_result, rag_decision_prompt = await should_use_rag(
-            llm_manager, request.query, conversation_context
+            llm_manager, request.query, conversation_context, request.llm_type
         )
         request.query = rag_decition_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
@@ -1029,6 +1039,7 @@ async def generate_answer(
                         "max_tokens": request.max_new_tokens,
                         "conversation_summary": conversation_summary,
                         "is_streaming": False,
+                        "llm_type": request.llm_type,
                     }
                     result = await graph.ainvoke(state, config)
                 else:
@@ -1057,7 +1068,7 @@ async def generate_answer(
             mistral_gen_latency = time.perf_counter() - gen_start
             user_content = generation_prompt
 
-        model = llm_manager.get_model()
+        model_client = llm_manager.get_client_for_model(request.llm_type)
         generation_response = generation_schema(
             question=request.query, answer=final_answer
         )
@@ -1067,7 +1078,7 @@ async def generate_answer(
             logger.info("starting to run hallucination loop")
             try:
                 loop_result, hallucination_latency = await run_hallucination_loop(
-                    model,
+                    model_client,
                     context,
                     generation_response,
                     request.collection_ids,
@@ -1076,9 +1087,9 @@ async def generate_answer(
             except Exception as e:
                 logger.warning(f"Failed to run hallucination loop: {e}")
                 logger.info("falling back to mistral model for hallucination loop")
-                model = llm_manager.get_mistral_model()
+                model_client = llm_manager.get_mistral_model()
                 loop_result, hallucination_latency = await run_hallucination_loop(
-                    model,
+                    model_client,
                     context,
                     generation_response,
                     request.collection_ids,
@@ -1171,7 +1182,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
-        summary_text = await LLMManager().summarize_context_in_all(
+        summary_text = await get_shared_llm_manager().summarize_context_in_all(
             transcript=summarizer_input, is_force=True
         )
         if not summary_text:
@@ -1201,7 +1212,7 @@ async def generate_answer_stream_generator_helper(
     background_tasks: BackgroundTasks = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
-    llm_manager = LLMManager()
+    llm_manager = get_shared_llm_manager()
 
     try:
         # Guardrail check
@@ -1245,7 +1256,7 @@ async def generate_answer_stream_generator_helper(
         # Setup RAG context
         rag_decision_start = time.perf_counter()
         rag_decition_result, rag_decision_prompt = await should_use_rag(
-            llm_manager, request.query, conversation_context
+            llm_manager, request.query, conversation_context, request.llm_type
         )
         request.query = rag_decition_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
@@ -1307,6 +1318,7 @@ async def generate_answer_stream_generator_helper(
                         "max_tokens": request.max_new_tokens,
                         "conversation_summary": conversation_summary,
                         "is_streaming": True,
+                        "llm_type": request.llm_type,
                     }
 
                     logger.info("Using LangGraph astream for streaming")
@@ -1376,14 +1388,14 @@ async def generate_answer_stream_generator_helper(
         answer = "".join(accumulated)
 
         # Optional hallucination loop after stream completes
-        model = llm_manager.get_model()
+        model_client = llm_manager.get_client_for_model(request.llm_type)
         generation_response = generation_schema(question=request.query, answer=answer)
         loop_result: Optional[dict] = None
         hallucination_latency: Optional[dict] = None
         if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
             try:
                 loop_result, hallucination_latency = await run_hallucination_loop(
-                    model, context, generation_response, request.collection_ids
+                    model_client, context, generation_response, request.collection_ids
                 )
                 answer = loop_result.get("final_answer", answer)
             except Exception as e:
