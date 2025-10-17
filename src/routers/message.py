@@ -20,6 +20,75 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/conversations/messages/me/stats")
+async def get_my_message_stats(requesting_user: User = Depends(get_current_user)):
+    """Return counts and character totals for the current user's messages.
+
+    Aggregates across all messages belonging to conversations owned by the user.
+    """
+    try:
+        messages_col = Message.get_collection()
+
+        pipeline = [
+            {
+                "$lookup": {
+                    "from": "conversations",
+                    "let": {"convId": "$conversation_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {"$eq": [{"$toString": "$_id"}, "$$convId"]}
+                            }
+                        }
+                    ],
+                    "as": "conv",
+                }
+            },
+            {"$unwind": "$conv"},
+            {"$match": {"conv.user_id": requesting_user.id}},
+            {
+                "$group": {
+                    "_id": None,
+                    "message_count": {"$sum": 1},
+                    "input_characters": {
+                        "$sum": {"$strLenCP": {"$ifNull": ["$input", ""]}}
+                    },
+                    "output_characters": {
+                        "$sum": {"$strLenCP": {"$ifNull": ["$output", ""]}}
+                    },
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "message_count": 1,
+                    "input_characters": 1,
+                    "output_characters": 1,
+                    "total_characters": {
+                        "$add": ["$input_characters", "$output_characters"],
+                    },
+                }
+            },
+        ]
+
+        cursor = messages_col.aggregate(pipeline, allowDiskUse=True)
+        results = await cursor.to_list(length=1)
+
+        if results:
+            return results[0]
+
+        return {
+            "message_count": 0,
+            "input_characters": 0,
+            "output_characters": 0,
+            "total_characters": 0,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
 @router.post(
     "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse
 )
