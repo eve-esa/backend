@@ -1268,6 +1268,8 @@ async def generate_answer_stream_generator_helper(
         ):
             try:
                 context, results, latencies = await setup_rag_and_context(request)
+                if len(results) == 0:
+                    raise Exception("No RAG results found for the query")
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context: {e}")
                 scraping_dog_start = time.perf_counter()
