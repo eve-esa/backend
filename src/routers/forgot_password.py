@@ -47,16 +47,6 @@ async def send_forgot_password_code(request: ForgotPasswordRequest):
 
     await ForgotPassword.create(email=request.email, code=code)
 
-    email_service.send_email(
-        to_email=request.email,
-        subject="Forgot Password",
-        template_name="forgot_password.html",
-        context={
-            "reset_url": reset_url,
-            "expiry_minutes": FORGOT_PASSWORD_CODE_EXPIRE_MINUTES,
-        },
-    )
-
     return {"message": "Code sent"}
 
 
