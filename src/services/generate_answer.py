@@ -1258,6 +1258,8 @@ async def generate_answer_stream_generator_helper(
         rag_decition_result, rag_decision_prompt = await should_use_rag(
             llm_manager, request.query, conversation_context, request.llm_type
         )
+        if rag_decition_result.requery:
+            yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decition_result.requery})}\n\n"
         request.query = rag_decition_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
@@ -1266,6 +1268,7 @@ async def generate_answer_stream_generator_helper(
             and request.k > 0
             and rag_decition_result.use_rag
         ):
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
                 context, results, latencies = await setup_rag_and_context(request)
                 if len(results) == 0:
