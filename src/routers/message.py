@@ -51,7 +51,14 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
                     "_id": None,
                     "message_count": {"$sum": 1},
                     "input_characters": {
-                        "$sum": {"$strLenCP": {"$ifNull": ["$input", ""]}}
+                        "$sum": {
+                            "$strLenCP": {
+                                "$ifNull": [
+                                    "$metadata.prompts.generation_prompt",
+                                    "",
+                                ]
+                            }
+                        }
                     },
                     "output_characters": {
                         "$sum": {"$strLenCP": {"$ifNull": ["$output", ""]}}
