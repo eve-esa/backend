@@ -15,6 +15,7 @@ from src.routers import (
     collection_router,
     document_router,
     tool_router,
+    hallucination_router,
 )
 
 configure_logging(level=logging.DEBUG)
@@ -45,6 +46,9 @@ def register_routers(app: FastAPI):
 
     # Tools
     app.include_router(tool_router, tags=["Tools"])
+
+    # Hallucination
+    app.include_router(hallucination_router, tags=["Hallucination"])
 
 
 def create_app(debug=False, **kwargs):

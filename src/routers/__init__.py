@@ -8,6 +8,7 @@ from .user import router as user_router
 from .auth import router as auth_router
 from .forgot_password import router as forgot_password_router
 from .tool import router as tool_router
+from .hallucination_detector import router as hallucination_router
 
 __all__ = [
     "collection_router",
@@ -19,4 +20,5 @@ __all__ = [
     "auth_router",
     "forgot_password_router",
     "tool_router",
+    "hallucination_router",
 ]
