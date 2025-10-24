@@ -1135,34 +1135,6 @@ async def generate_answer(
             mistral_gen_latency = time.perf_counter() - gen_start
             user_content = generation_prompt
 
-        model_client = llm_manager.get_client_for_model(request.llm_type)
-        generation_response = generation_schema(
-            question=request.query, answer=final_answer
-        )
-        loop_result: Optional[dict] = None
-        hallucination_latency: Optional[dict] = None
-        if len(context.strip()) != 0 and request.hallucination_loop_flag:
-            logger.info("starting to run hallucination loop")
-            try:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                final_answer = loop_result["final_answer"]
-            except Exception as e:
-                logger.warning(f"Failed to run hallucination loop: {e}")
-                logger.info("falling back to mistral model for hallucination loop")
-                model_client = llm_manager.get_mistral_model()
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                final_answer = loop_result["final_answer"]
-
         total_latency = time.perf_counter() - total_start
         latencies = {
             "guardrail_latency": guardrail_latency,
@@ -1170,7 +1142,6 @@ async def generate_answer(
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
-            "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }
         prompts = {
@@ -1184,7 +1155,6 @@ async def generate_answer(
             final_answer,
             results,
             rag_decision_result.use_rag,
-            loop_result,
             latencies,
             prompts,
         )
@@ -1507,20 +1477,6 @@ async def generate_answer_stream_generator_helper(
         answer = "".join(accumulated)
         # Final accumulated answer without post-processing normalization
 
-        # Optional hallucination loop after stream completes
-        model_client = llm_manager.get_client_for_model(request.llm_type)
-        generation_response = generation_schema(question=request.query, answer=answer)
-        loop_result: Optional[dict] = None
-        hallucination_latency: Optional[dict] = None
-        if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
-            try:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client, context, generation_response, request.collection_ids
-                )
-                answer = loop_result.get("final_answer", answer)
-            except Exception as e:
-                logger.warning(f"Hallucination loop failed: {e}")
-
         total_latency = time.perf_counter() - total_start
         latencies = {
             # "guardrail_latency": guardrail_latency,
@@ -1530,7 +1486,6 @@ async def generate_answer_stream_generator_helper(
             "mistral_first_token_latency": mistral_first_token_latency,
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
-            "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }
         prompts = {
