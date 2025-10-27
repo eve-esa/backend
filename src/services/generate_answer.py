@@ -1321,6 +1321,7 @@ async def generate_answer_stream_generator_helper(
         # Choose streaming source (LangGraph memory if available → fallback mistral stream)
         mistral_gen_latency: Optional[float] = None
         base_gen_latency: Optional[float] = None
+        first_token_latency: Optional[float] = None
 
         used_stream = False
         tokens_yielded = 0
@@ -1364,6 +1365,11 @@ async def generate_answer_stream_generator_helper(
                                 accumulated.append(text)
                                 tokens_yielded += 1
 
+                                if tokens_yielded == 1:
+                                    first_token_latency = (
+                                        time.perf_counter() - total_start
+                                    )
+
                             base_gen_latency = time.perf_counter() - gen_start
                             logger.info(
                                 f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
@@ -1388,6 +1394,8 @@ async def generate_answer_stream_generator_helper(
                 )
 
         # Fallback to Mistral streaming if LangGraph didn't work or yielded no tokens
+        mistral_token_yielded = 0
+        mistral_first_token_latency: Optional[float] = None
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
             logger.info(f"Using Mistral streaming fallback")
@@ -1407,6 +1415,10 @@ async def generate_answer_stream_generator_helper(
                 else:
                     yield f"data: {token}\n\n"
                 accumulated.append(str(token))
+                mistral_token_yielded += 1
+                if mistral_token_yielded == 1:
+                    mistral_first_token_latency = time.perf_counter() - total_start
+
             mistral_gen_latency = time.perf_counter() - gen_start
             used_stream = True
             user_content = mistral_generation_prompt
@@ -1432,6 +1444,8 @@ async def generate_answer_stream_generator_helper(
             "guardrail_latency": guardrail_latency,
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
+            "first_token_latency": first_token_latency,
+            "mistral_first_token_latency": mistral_first_token_latency,
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
             "hallucination_latency": hallucination_latency,

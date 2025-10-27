@@ -9,7 +9,7 @@ runpod:
     id: "4947q1tk0d2lle"
     timeout: 20
   satcom_llm:
-    id: "6anks2nimpm5f5"
+    id: "ucttr8up9sxh0k"
     timeout: 40 # seconds in ChatOpenAI
 
 mistral:

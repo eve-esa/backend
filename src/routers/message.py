@@ -20,6 +20,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/conversations/messages/average-latencies")
+async def get_average_latencies():
+    """Return average latencies for the all messages."""
+    try:
+        messages_col = Message.get_collection()
+        pipeline = [
+            {
+                "$group": {
+                    "_id": None,
+                    "guardrail_latency": {
+                        "$avg": "$metadata.latencies.guardrail_latency"
+                    },
+                    "rag_decision_latency": {
+                        "$avg": "$metadata.latencies.rag_decision_latency"
+                    },
+                    "first_token_latency": {
+                        "$avg": "$metadata.latencies.first_token_latency"
+                    },
+                    "mistral_first_token_latency": {
+                        "$avg": "$metadata.latencies.mistral_first_token_latency"
+                    },
+                    "base_generation_latency": {
+                        "$avg": "$metadata.latencies.base_generation_latency"
+                    },
+                }
+            }
+        ]
+        cursor = messages_col.aggregate(pipeline, allowDiskUse=True)
+        results = await cursor.to_list(length=1)
+        return results[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
 @router.get("/conversations/messages/me/stats")
 async def get_my_message_stats(requesting_user: User = Depends(get_current_user)):
     """Return counts and character totals for the current user's messages.
