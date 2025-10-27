@@ -72,6 +72,11 @@ STAGING_PUBLIC_COLLECTIONS = [
         "description": "This collection brings together Wikipedia articles related to Earth Observation (EO). The content is intended to provide accessible, introductory information about EO concepts, technologies, and organizations active in the field. Please note that these articles are not peer-reviewed scientific publications. Instead, they are written for a general audience and aim to give broad overviews rather than in-depth, expert analyses. Users should treat this collection as a starting point for understanding EO, and complement it with specialized, peer-reviewed sources when deeper or technical knowledge is required. This collection contains about 2000 documents.",
     },
     {"name": "qwen-512-filtered", "description": "ESA data with Qwen-512 for testing"},
+    {
+        "name": "satcom-chunks-collection",
+        "alias": "SATCOM Technical Knowledge Base",
+        "description": "Curated collection of resources on Satellite Communications (SATCOM) sourced from peer-reviewed publishers and journals, including MDPI, Oxford University Press, Springer, IEEE, and other leading scientific platforms. The dataset covers a broad range of technical content such as research papers, review articles, standards, and technical documentation focused on communication systems, satellite payloads, link design, modulation, and emerging SATCOM technologies",
+    },
 ]
 
 SCRAPING_DOG_ALL_URLS = [

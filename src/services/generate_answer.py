@@ -39,6 +39,8 @@ from src.config import (
     IS_PROD,
     SCRAPING_DOG_API_KEY,
     SILICONFLOW_API_TOKEN,
+    SATCOM_QDRANT_URL,
+    SATCOM_QDRANT_API_KEY,
     config,
 )
 from src.hallucination_pipeline.loop import run_hallucination_loop
@@ -863,12 +865,31 @@ async def setup_rag_and_context(request: GenerationRequest):
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
+        satcom_results: List[Any] = []
+        satcom_lat: Dict[str, Optional[float]] = {}
+
+        # temporary for satcom collection
+        if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
+            satcom_vector_store = VectorStoreManager(
+                embeddings_model=request.embeddings_model,
+                qdrant_url=SATCOM_QDRANT_URL,
+                qdrant_api_key=SATCOM_QDRANT_API_KEY,
+            )
+            collection_ids = request.collection_ids
+            request.collection_ids = ["satcom-chunks-collection"]
+            satcom_results, satcom_lat = await get_rag_context(
+                satcom_vector_store, request
+            )
+            request.collection_ids = [
+                cid for cid in collection_ids if cid != "satcom-chunks-collection"
+            ]
+            latencies.update(satcom_lat or {})
 
         results, rag_lat = await get_rag_context(vector_store, request)
         if "Wiley AI Gateway" in request.public_collections:
             mcp_results, mcp_lat = await get_mcp_context(request)
 
-        merged_results = list(results) + list(mcp_results)
+        merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
         candidate_texts: List[str] = []
         candidate_indices: List[int] = []

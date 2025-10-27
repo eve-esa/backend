@@ -69,7 +69,12 @@ class VectorStoreManager:
     was used to embed the collection you want to work with.
     """
 
-    def __init__(self, embeddings_model: str = DEFAULT_EMBEDDING_MODEL) -> None:
+    def __init__(
+        self,
+        embeddings_model: str = DEFAULT_EMBEDDING_MODEL,
+        qdrant_url: str = QDRANT_URL,
+        qdrant_api_key: str = QDRANT_API_KEY,
+    ) -> None:
         """
         Initialize the VectorStoreManager with the specified embeddings model.
 
@@ -79,8 +84,8 @@ class VectorStoreManager:
         """
         # Initialize Qdrant client with timeout configuration
         self.client = QdrantClient(
-            QDRANT_URL,
-            api_key=QDRANT_API_KEY,
+            qdrant_url,
+            api_key=qdrant_api_key,
             timeout=120.0,  # 2 minutes timeout for operations
         )
         self.embeddings_model = embeddings_model

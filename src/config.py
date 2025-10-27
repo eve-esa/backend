@@ -12,6 +12,8 @@ load_dotenv(override=True)
 # ENV VARIABLES
 QDRANT_URL = os.getenv("QDRANT_URL").strip()
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY").strip()
+SATCOM_QDRANT_URL = os.getenv("SATCOM_QDRANT_URL").strip()
+SATCOM_QDRANT_API_KEY = os.getenv("SATCOM_QDRANT_API_KEY").strip()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
@@ -19,6 +21,7 @@ RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
 DEEPINFRA_API_TOKEN = os.getenv("DEEPINFRA_API_TOKEN", "").strip()
 INFERENCE_API_KEY = os.getenv("INFERENCE_API_KEY", "").strip()
 SILICONFLOW_API_TOKEN = os.getenv("SILICONFLOW_API_TOKEN", "").strip()
+SATCOM_RUNPOD_API_KEY = os.getenv("SATCOM_RUNPOD_API_KEY", "").strip()
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
@@ -117,6 +120,12 @@ class Config:
 
     def get_mistral_timeout(self):
         return self.get("mistral", "timeout")
+
+    def get_satcom_llm_id(self):
+        return self.get("runpod", "satcom_llm", "id")
+
+    def get_satcom_llm_timeout(self):
+        return self.get("runpod", "satcom_llm", "timeout")
 
     # MCP
     def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:

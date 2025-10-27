@@ -10,7 +10,13 @@ import os
 from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
 
-from src.config import Config, RUNPOD_API_KEY, MISTRAL_API_KEY, IS_PROD
+from src.config import (
+    Config,
+    RUNPOD_API_KEY,
+    MISTRAL_API_KEY,
+    IS_PROD,
+    SATCOM_RUNPOD_API_KEY,
+)
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.template_loader import format_template
@@ -33,6 +39,7 @@ class LLMType(Enum):
 
     Runpod = "runpod"
     Mistral = "mistral"
+    Satcom = "satcom"
 
 
 class LLMManager:
@@ -75,11 +82,26 @@ class LLMManager:
 
             # Lazily initialized; create on first use to avoid unnecessary startup cost
             self._runpod_chat_openai: ChatOpenAI | None = None
+
+            # Initialize Satcom client
+            satcom_endpoint_id = self.config.get_satcom_llm_id()
+            if not satcom_endpoint_id:
+                raise ValueError("Satcom endpoint id not configured")
+            self._satcom_base_url = (
+                f"https://api.runpod.ai/v2/{satcom_endpoint_id}/openai/v1"
+            )
+            self._satcom_model_name = os.getenv(
+                "SATCOM_MODEL_NAME", "esa-sceva/satcom-chat-8b"
+            )
+            self._satcom_chat_openai: ChatOpenAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize LangChain Runpod client: {e}")
             self._runpod_base_url = None
             self._runpod_model_name = None
             self._runpod_chat_openai = None
+            self._satcom_base_url = None
+            self._satcom_model_name = None
+            self._satcom_chat_openai = None
 
         # Configure Mistral native client lazily
         try:
@@ -127,6 +149,24 @@ class LLMManager:
             )
         return self._mistral_chat
 
+    def _get_satcom_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Satcom."""
+        if self._satcom_chat_openai is None:
+            if not self._satcom_base_url:
+                raise RuntimeError("Satcom base URL is not configured")
+            if not SATCOM_RUNPOD_API_KEY:
+                raise RuntimeError("SATCOM_API_KEY is not set")
+            satcom_llm_timeout = self.config.get_satcom_llm_timeout()
+            self._satcom_chat_openai = ChatOpenAI(
+                api_key=SATCOM_RUNPOD_API_KEY,
+                base_url=self._satcom_base_url,
+                model=self._satcom_model_name,
+                temperature=0.3,
+                timeout=satcom_llm_timeout,
+                max_retries=0,
+            )
+        return self._satcom_chat_openai
+
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
 
@@ -140,6 +180,9 @@ class LLMManager:
             elif llm_type == LLMType.Runpod.value:
                 self._selected_llm_type = LLMType.Runpod.value
                 return self._get_runpod_llm()
+            elif llm_type == LLMType.Satcom.value:
+                self._selected_llm_type = LLMType.Satcom.value
+                return self._get_satcom_llm()
             else:
                 if llm_type is None and IS_PROD:
                     self._selected_llm_type = LLMType.Mistral.value
