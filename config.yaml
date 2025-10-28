@@ -1,20 +1,20 @@
 runpod:
   instruct_llm:
     id: "2f9o93xc90871m"
-    timeout: 40 # seconds in ChatOpenAI
+    timeout: 13 # seconds in ChatOpenAI
   indus_embedder:
     id: "bqwuhwmnb3bdx0"
-    timeout: 20
+    timeout: 13
   reranker:
     id: "4947q1tk0d2lle"
-    timeout: 20
+    timeout: 13
   satcom_llm:
     id: "ucttr8up9sxh0k"
     timeout: 40 # seconds in ChatOpenAI
 
 mistral:
   model: "mistral-small-latest"
-  timeout: 20 # seconds
+  timeout: 13 # seconds
 
 mcp:
   servers:

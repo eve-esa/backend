@@ -1000,16 +1000,16 @@ async def generate_answer(
 
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
-        rag_decition_result, rag_decision_prompt = await should_use_rag(
+        rag_decision_result, rag_decision_prompt = await should_use_rag(
             llm_manager, request.query, conversation_context, request.llm_type
         )
-        request.query = rag_decition_result.requery
+        request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
         if (
             len(request.collection_ids) > 0
             and request.k > 0
-            and rag_decition_result.use_rag
+            and rag_decision_result.use_rag
         ):
             try:
                 context, results, latencies = await setup_rag_and_context(request)
@@ -1029,7 +1029,7 @@ async def generate_answer(
         messages_for_turn: List[Any] = []
 
         # Build user message using template conversation_prompt_with_context
-        if rag_decition_result.use_rag:
+        if rag_decision_result.use_rag:
             tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
             tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
@@ -1131,13 +1131,13 @@ async def generate_answer(
             "guardrail_prompt": policy_prompt,
             "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
-            "rag_decision_result": rag_decition_result,
+            "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
         return (
             final_answer,
             results,
-            rag_decition_result.use_rag,
+            rag_decision_result.use_rag,
             loop_result,
             latencies,
             prompts,
@@ -1236,34 +1236,34 @@ async def generate_answer_stream_generator_helper(
     llm_manager = get_shared_llm_manager()
 
     try:
-        # Guardrail check
         total_start = time.perf_counter()
-        policy_result, policy_prompt = await check_policy(request, llm_manager)
-        guardrail_latency = time.perf_counter() - total_start
-        if policy_result.violation:
-            yield f"data: {json.dumps({'type': 'final', 'answer': POLICY_NOT_ANSWER})}\n\n"
-            try:
-                from src.database.models.message import Message as MessageModel
+        # # Guardrail check
+        # policy_result, policy_prompt = await check_policy(request, llm_manager)
+        # guardrail_latency = time.perf_counter() - total_start
+        # if policy_result.violation:
+        #     yield f"data: {json.dumps({'type': 'final', 'answer': POLICY_NOT_ANSWER})}\n\n"
+        #     try:
+        #         from src.database.models.message import Message as MessageModel
 
-                # Find message by id
-                message = await MessageModel.find_by_id(message_id)
-                if message is not None:
-                    message.output = POLICY_NOT_ANSWER
-                    existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                    existing_metadata.update(
-                        {
-                            "latencies": {"guardrail_latency": guardrail_latency},
-                            "prompts": {
-                                "guardrail_prompt": policy_prompt,
-                                "guardrail_result": policy_result,
-                            },
-                        }
-                    )
-                    message.metadata = existing_metadata
-                    await message.save()
-            except Exception as e:
-                logger.warning(f"Failed to persist streamed message: {e}")
-            return
+        #         # Find message by id
+        #         message = await MessageModel.find_by_id(message_id)
+        #         if message is not None:
+        #             message.output = POLICY_NOT_ANSWER
+        #             existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        #             existing_metadata.update(
+        #                 {
+        #                     "latencies": {"guardrail_latency": guardrail_latency},
+        #                     "prompts": {
+        #                         "guardrail_prompt": policy_prompt,
+        #                         "guardrail_result": policy_result,
+        #                     },
+        #                 }
+        #             )
+        #             message.metadata = existing_metadata
+        #             await message.save()
+        #     except Exception as e:
+        #         logger.warning(f"Failed to persist streamed message: {e}")
+        #     return
 
         # Prepare conversation history for fallback path
         conversation_history, conversation_summary = (
@@ -1276,18 +1276,19 @@ async def generate_answer_stream_generator_helper(
         )
         # Setup RAG context
         rag_decision_start = time.perf_counter()
-        rag_decition_result, rag_decision_prompt = await should_use_rag(
+        rag_decision_result, rag_decision_prompt = await should_use_rag(
             llm_manager, request.query, conversation_context, request.llm_type
         )
-        if rag_decition_result.requery:
-            yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decition_result.requery})}\n\n"
-        request.query = rag_decition_result.requery
+        if rag_decision_result.requery:
+            if rag_decision_result.use_rag:
+                yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
+            request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
         if (
             len(request.collection_ids) > 0
             and request.k > 0
-            and rag_decition_result.use_rag
+            and rag_decision_result.use_rag
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
@@ -1306,7 +1307,7 @@ async def generate_answer_stream_generator_helper(
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
 
-        if rag_decition_result.use_rag:
+        if rag_decision_result.use_rag:
             tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
             tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
@@ -1441,7 +1442,7 @@ async def generate_answer_stream_generator_helper(
 
         total_latency = time.perf_counter() - total_start
         latencies = {
-            "guardrail_latency": guardrail_latency,
+            # "guardrail_latency": guardrail_latency,
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "first_token_latency": first_token_latency,
@@ -1452,10 +1453,10 @@ async def generate_answer_stream_generator_helper(
             "total_latency": total_latency,
         }
         prompts = {
-            "guardrail_prompt": policy_prompt,
-            "guardrail_result": policy_result,
+            # "guardrail_prompt": policy_prompt,
+            # "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
-            "rag_decision_result": rag_decition_result,
+            "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
         # Persist results to MongoDB Message entry created by the router
@@ -1469,7 +1470,7 @@ async def generate_answer_stream_generator_helper(
 
                 message.output = answer
                 message.documents = documents_data
-                message.use_rag = rag_decition_result.use_rag
+                message.use_rag = rag_decision_result.use_rag
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
                 existing_metadata.update({"latencies": latencies, "prompts": prompts})
                 message.metadata = existing_metadata
