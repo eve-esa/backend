@@ -82,7 +82,9 @@ class ShouldUseRagDecision(BaseModel):
         description="True if the query should use RAG; False for casual/generic queries."
     )
     reason: str = Field(description="Brief justification for the decision.")
-    requery: str = Field(description="Get new query from conversation history")
+    requery: str = Field(
+        description="Get new rewritten query from last query and conversation history."
+    )
 
 
 class PolicyCheck(BaseModel):
