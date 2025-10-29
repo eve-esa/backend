@@ -504,6 +504,7 @@ class VectorStoreManager:
                             oversampling=2.0,
                         )
                     ),
+                    timeout=120,
                 )
                 # Convert to generic objects and attach collection_name without mutating ScoredPoint
                 converted_results: List[Any] = []
