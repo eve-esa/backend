@@ -1404,47 +1404,69 @@ async def generate_answer_stream_generator_helper(
                         normalizer = None
                         if request.llm_type == LLMType.Mistral.value:
                             normalizer = MarkdownTableStreamNormalizer()
+
+                        # Create the async generator once so we can pull the first token with a timeout
+                        astream = graph.astream(
+                            state, config=config, stream_mode="messages"
+                        )
+
+                        # Enforce timeout only for the first token
                         async with asyncio.timeout(llm_instruct_timeout):
-                            async for chunk, metadata in graph.astream(
-                                state, config=config, stream_mode="messages"
-                            ):
-                                text = getattr(chunk, "content", None)
-                                if not text:
-                                    continue
-                                if normalizer is not None:
-                                    outputs = normalizer.ingest(text)
-                                    for out in outputs:
-                                        if output_format == "json":
-                                            yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                                        else:
-                                            yield f"data: {out}\n\n"
-                                else:
-                                    if output_format == "json":
-                                        yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                    else:
-                                        yield f"data: {text}\n\n"
-                                accumulated.append(text)
-                                tokens_yielded += 1
+                            first_chunk, first_metadata = await astream.__anext__()
 
-                                if tokens_yielded == 1:
-                                    first_token_latency = (
-                                        time.perf_counter() - total_start
-                                    )
-
-                            # Flush any remaining normalized outputs
+                        first_text = getattr(first_chunk, "content", None)
+                        if first_text:
                             if normalizer is not None:
-                                tail_outputs = normalizer.flush()
-                                for out in tail_outputs:
+                                outputs = normalizer.ingest(first_text)
+                                for out in outputs:
                                     if output_format == "json":
                                         yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
                                     else:
                                         yield f"data: {out}\n\n"
+                            else:
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
+                                else:
+                                    yield f"data: {first_text}\n\n"
+                            accumulated.append(first_text)
+                            tokens_yielded += 1
+                            if tokens_yielded == 1:
+                                first_token_latency = time.perf_counter() - total_start
 
-                            base_gen_latency = time.perf_counter() - gen_start
-                            logger.info(
-                                f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
-                            )
-                            used_stream = True
+                        # Continue streaming remaining tokens without a timeout
+                        async for chunk, metadata in astream:
+                            text = getattr(chunk, "content", None)
+                            if not text:
+                                continue
+                            if normalizer is not None:
+                                outputs = normalizer.ingest(text)
+                                for out in outputs:
+                                    if output_format == "json":
+                                        yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
+                                    else:
+                                        yield f"data: {out}\n\n"
+                            else:
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                else:
+                                    yield f"data: {text}\n\n"
+                            accumulated.append(text)
+                            tokens_yielded += 1
+
+                        # Flush any remaining normalized outputs
+                        if normalizer is not None:
+                            tail_outputs = normalizer.flush()
+                            for out in tail_outputs:
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
+                                else:
+                                    yield f"data: {out}\n\n"
+
+                        base_gen_latency = time.perf_counter() - gen_start
+                        logger.info(
+                            f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
+                        )
+                        used_stream = True
                     except TimeoutError:
                         logger.warning(
                             f"LangGraph streaming timed out, falling back to Mistral streaming"
