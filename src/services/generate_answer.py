@@ -210,6 +210,30 @@ def _make_message(role: str, content: str) -> Any:
     return {"role": role, "content": content}
 
 
+# --- System prompt resolution (default vs. satcom) ---
+try:
+    _DEFAULT_SYSTEM_PROMPT: Optional[str] = get_template(
+        "system_prompt", filename="system.yaml"
+    )
+except Exception:
+    _DEFAULT_SYSTEM_PROMPT = None
+
+
+def _resolve_system_prompt(llm_type: Optional[str]) -> Optional[str]:
+    """Return the appropriate system prompt for the given llm_type.
+
+    Uses satcom-specific system prompt when llm_type is satcom,
+    otherwise falls back to the default system prompt loaded above.
+    """
+    try:
+        if llm_type == LLMType.Satcom.value:
+            return get_template("system_prompt", filename="satcom/system.yaml")
+    except Exception:
+        # Fallback to default if satcom template is missing or fails to load
+        pass
+    return _DEFAULT_SYSTEM_PROMPT
+
+
 # --- Lazy singletons for compiled LangGraph and checkpointers ---
 _compiled_graph = None  # Mongo-backed compiled graph
 _compiled_graph_mode = None  # "mongo" or "memory"
@@ -217,14 +241,6 @@ _mongo_checkpointer_cm = None  # context manager kept open for process lifetime
 _mongo_checkpointer = None  # active AsyncMongoDBSaver obtained from __aenter__
 _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
 _graph_init_lock = asyncio.Lock()
-
-# Load system prompt from templates (optional)
-try:
-    _SYSTEM_PROMPT: Optional[str] = get_template(
-        "system_prompt", filename="system.yaml"
-    )
-except Exception:
-    _SYSTEM_PROMPT = None
 
 
 async def _get_or_create_compiled_graph():
@@ -263,8 +279,9 @@ async def _get_or_create_compiled_graph():
 
             available_tokens = DEFAULT_MAX_NEW_TOKENS
 
-            if _SYSTEM_PROMPT:
-                all_messages = [_make_message("system", _SYSTEM_PROMPT)] + all_messages
+            system_prompt = _resolve_system_prompt(state.get("llm_type"))
+            if system_prompt:
+                all_messages = [_make_message("system", system_prompt)] + all_messages
 
             if conversation_summary:
                 summary_context = f"""Previous conversation summary: {conversation_summary}
@@ -308,8 +325,9 @@ Please continue the conversation using this summary as context for understanding
             bound_llm = llm.bind(**bind_kwargs)
 
             final_messages = context_messages
-            if _SYSTEM_PROMPT:
-                final_messages = [_make_message("system", _SYSTEM_PROMPT)] + list(
+            system_prompt = _resolve_system_prompt(state.get("llm_type"))
+            if system_prompt:
+                final_messages = [_make_message("system", system_prompt)] + list(
                     context_messages
                 )
 
@@ -808,9 +826,11 @@ async def should_use_rag(
     Defaults to True on uncertainty/errors.
     """
     try:
-        prompt = get_template("is_rag_prompt", filename="prompts.yaml").format(
-            conversation=conversation, query=query
-        )
+        if llm_type == LLMType.Satcom.value:
+            tmpl = get_template("is_rag_prompt", filename="satcom/prompts.yaml")
+        else:
+            tmpl = get_template("is_rag_prompt", filename="prompts.yaml")
+        prompt = tmpl.format(conversation=conversation, query=query)
         base_llm = llm_manager.get_client_for_model(llm_type)
         logger.info(
             f"deciding should_use_rag with selected model: {llm_manager.get_selected_llm_type()}"
@@ -1034,9 +1054,21 @@ async def generate_answer(
 
         # Build user message using template conversation_prompt_with_context
         if rag_decision_result.use_rag:
-            tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
+            if request.llm_type == LLMType.Satcom.value:
+                tmpl = get_template(
+                    "rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
+                )
+            else:
+                tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
-            tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
+            if request.llm_type == LLMType.Satcom.value:
+                tmpl = get_template(
+                    "no_rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
+                )
+            else:
+                tmpl = get_template(
+                    "no_rag_prompt_for_langgraph", filename="prompts.yaml"
+                )
         user_content = tmpl.format(
             context=context or "",
             query=request.query or "",
@@ -1313,8 +1345,17 @@ async def generate_answer_stream_generator_helper(
                 }
 
         if rag_decision_result.use_rag:
-            tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
+            if request.llm_type == LLMType.Satcom.value:
+                tmpl = get_template("rag_prompt", filename="satcom/prompts.yaml")
+            else:
+                tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
+            if request.llm_type == LLMType.Satcom.value:
+                tmpl = get_template("no_rag_prompt", filename="satcom/prompts.yaml")
+            else:
+                tmpl = get_template(
+                    "no_rag_prompt_for_langgraph", filename="prompts.yaml"
+                )
             tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
         user_content = tmpl.format(
             context=context or "",

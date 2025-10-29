@@ -60,6 +60,20 @@ class LLMManager:
         except Exception:
             self._system_prompt = None
 
+    def _get_current_system_prompt(self) -> Optional[str]:
+        """Return system prompt based on the currently selected LLM type.
+
+        Uses satcom-specific system prompt when `self._selected_llm_type` is satcom,
+        otherwise falls back to the default system prompt loaded at initialization.
+        """
+        try:
+            if self._selected_llm_type == LLMType.Satcom.value:
+                return get_template("system_prompt", filename="satcom/system.yaml")
+        except Exception:
+            # If satcom template missing or fails to load, fall back to default
+            pass
+        return self._system_prompt
+
     def _setup_api_keys(self):
         """Set up API keys for different LLM providers."""
         # OpenAI key is read by the OpenAI SDK from env; nothing to set explicitly here
@@ -280,8 +294,11 @@ class LLMManager:
             base_llm = self._get_runpod_llm()
             llm = base_llm.bind(max_tokens=max_new_tokens)
             system_and_prompt = prompt
-            if self._system_prompt:
-                system_and_prompt = f"System:\n{self._system_prompt}\n\nUser:\n{prompt}"
+            current_system_prompt = self._get_current_system_prompt()
+            if current_system_prompt:
+                system_and_prompt = (
+                    f"System:\n{current_system_prompt}\n\nUser:\n{prompt}"
+                )
             response = llm.invoke(system_and_prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
@@ -301,9 +318,10 @@ class LLMManager:
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
-            if self._system_prompt:
+            current_system_prompt = self._get_current_system_prompt()
+            if current_system_prompt:
                 messages = [
-                    SystemMessage(content=self._system_prompt),
+                    SystemMessage(content=current_system_prompt),
                     HumanMessage(content=prompt),
                 ]
                 response = await llm.ainvoke(messages)
@@ -327,8 +345,11 @@ class LLMManager:
                 bind_kwargs["temperature"] = temperature
             llm = base_llm.bind(**bind_kwargs)
             system_and_prompt = prompt
-            if self._system_prompt:
-                system_and_prompt = f"System:\n{self._system_prompt}\n\nUser:\n{prompt}"
+            current_system_prompt = self._get_current_system_prompt()
+            if current_system_prompt:
+                system_and_prompt = (
+                    f"System:\n{current_system_prompt}\n\nUser:\n{prompt}"
+                )
             response = await llm.ainvoke(system_and_prompt)
             content = getattr(response, "content", str(response))
             return normalize_markdown_tables(content)
@@ -537,9 +558,10 @@ class LLMManager:
             llm = base_llm.bind(**bind_kwargs)
 
             # Prefer astream which yields message chunks with `.content`
-            if self._system_prompt:
+            current_system_prompt = self._get_current_system_prompt()
+            if current_system_prompt:
                 input_payload = [
-                    SystemMessage(content=self._system_prompt),
+                    SystemMessage(content=current_system_prompt),
                     HumanMessage(content=prompt),
                 ]
             else:
