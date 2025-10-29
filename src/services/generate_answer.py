@@ -1346,17 +1346,20 @@ async def generate_answer_stream_generator_helper(
 
         if rag_decision_result.use_rag:
             if request.llm_type == LLMType.Satcom.value:
-                tmpl = get_template("rag_prompt", filename="satcom/prompts.yaml")
+                tmpl = get_template(
+                    "rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
+                )
             else:
                 tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
             if request.llm_type == LLMType.Satcom.value:
-                tmpl = get_template("no_rag_prompt", filename="satcom/prompts.yaml")
+                tmpl = get_template(
+                    "no_rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
+                )
             else:
                 tmpl = get_template(
                     "no_rag_prompt_for_langgraph", filename="prompts.yaml"
                 )
-            tmpl = get_template("no_rag_prompt_for_langgraph", filename="prompts.yaml")
         user_content = tmpl.format(
             context=context or "",
             query=request.query or "",
