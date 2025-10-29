@@ -436,6 +436,141 @@ def build_conversation_context(
     return "\n".join(context_parts)
 
 
+def normalize_markdown_tables(text: str) -> str:
+    """Normalize Markdown tables: trim cell padding, ensure separator row, and avoid space-filled cells.
+
+    This function scans for contiguous lines that look like Markdown table rows (lines starting with '|'),
+    trims excessive whitespace inside cells, rebuilds rows with a single space around pipes,
+    and guarantees a standard separator row ("| --- | ... |") right after the header.
+
+    It is a best-effort normalizer and leaves non-table content unchanged.
+    """
+    try:
+        if not text or "|" not in text:
+            return text
+
+        lines = text.splitlines()
+        normalized_lines: List[str] = []
+        i = 0
+
+        def _is_table_line(s: str) -> bool:
+            ss = s.strip()
+            return ss.startswith("|") and ("|" in ss[1:])
+
+        def _only_dashes_colons(s: str) -> bool:
+            return all(ch in "-:| " for ch in s)
+
+        while i < len(lines):
+            if _is_table_line(lines[i]):
+                start = i
+                while i < len(lines) and _is_table_line(lines[i]):
+                    i += 1
+                block = lines[start:i]
+                if not block:
+                    continue
+
+                # Parse header cells from first line
+                header_cells = [
+                    c.strip() for c in block[0].strip().strip("|").split("|")
+                ]
+                header_cells = [c for c in header_cells]
+
+                normalized_block: List[str] = []
+
+                # Rebuild header
+                header_line = "| " + " | ".join(header_cells) + " |"
+                normalized_block.append(header_line)
+
+                # Build or normalize separator
+                sep_line: Optional[str] = None
+                if len(block) >= 2 and _only_dashes_colons(block[1].strip()):
+                    # Keep a standard separator matching number of header cells
+                    sep_line = (
+                        "| " + " | ".join(["---"] * max(1, len(header_cells))) + " |"
+                    )
+                    # Skip the original sep and insert standardized one
+                    row_start_idx = 2
+                else:
+                    sep_line = (
+                        "| " + " | ".join(["---"] * max(1, len(header_cells))) + " |"
+                    )
+                    row_start_idx = 1
+                normalized_block.append(sep_line)
+
+                # Normalize remaining rows
+                for j in range(row_start_idx, len(block)):
+                    raw = block[j].strip()
+                    cells = [c.strip() for c in raw.strip("|").split("|")]
+                    # If row has fewer or more cells, just rebuild with what we have
+                    row_line = "| " + " | ".join(cells) + " |"
+                    normalized_block.append(row_line)
+
+                normalized_lines.extend(normalized_block)
+            else:
+                normalized_lines.append(lines[i])
+                i += 1
+
+        return "\n".join(normalized_lines)
+    except Exception:
+        return text
+
+
+class MarkdownTableStreamNormalizer:
+    """Incremental normalizer for Markdown tables during streaming.
+
+    Accumulates lines that look like table rows and emits normalized blocks once
+    a non-table line is encountered or at flush(). Non-table lines are passed through.
+    """
+
+    def __init__(self):
+        self._buffer = ""
+        self._in_table = False
+        self._table_lines: List[str] = []
+
+    @staticmethod
+    def _is_table_line(s: str) -> bool:
+        ss = s.strip()
+        return ss.startswith("|") and ("|" in ss[1:])
+
+    def ingest(self, chunk: str) -> List[str]:
+        outputs: List[str] = []
+        if not isinstance(chunk, str) or chunk == "":
+            return outputs
+        self._buffer += chunk
+
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if self._is_table_line(line):
+                self._in_table = True
+                self._table_lines.append(line)
+                continue
+            # Flush table block first if any
+            if self._in_table and self._table_lines:
+                normalized_block = normalize_markdown_tables(
+                    "\n".join(self._table_lines)
+                )
+                outputs.append(normalized_block + "\n")
+                self._table_lines = []
+                self._in_table = False
+            # Emit non-table line
+            outputs.append(line + "\n")
+        return outputs
+
+    def flush(self) -> List[str]:
+        outputs: List[str] = []
+        if self._in_table and self._table_lines:
+            normalized_block = normalize_markdown_tables(
+                "\n".join(self._table_lines + ([self._buffer] if self._buffer else []))
+            )
+            outputs.append(normalized_block)
+        elif self._buffer:
+            outputs.append(self._buffer)
+        self._buffer = ""
+        self._table_lines = []
+        self._in_table = False
+        return outputs
+
+
 def get_mongodb_uri() -> str:
     """Build MongoDB URI from environment, appending MONGO_PARAMS if provided."""
     params = MONGO_PARAMS or ""
