@@ -39,7 +39,8 @@ class LLMType(Enum):
 
     Runpod = "runpod"
     Mistral = "mistral"
-    Satcom = "satcom"
+    Satcom_Small = "satcom_small"
+    Satcom_Large = "satcom_large"
 
 
 class LLMManager:
@@ -66,7 +67,10 @@ class LLMManager:
         otherwise falls back to the default system prompt loaded at initialization.
         """
         try:
-            if self._selected_llm_type == LLMType.Satcom.value:
+            if self._selected_llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
                 return get_template("system_prompt", filename="satcom/system.yaml")
         except Exception:
             # If satcom template missing or fails to load, fall back to default
@@ -98,24 +102,38 @@ class LLMManager:
             self._runpod_chat_openai: ChatOpenAI | None = None
 
             # Initialize Satcom client
-            satcom_endpoint_id = self.config.get_satcom_llm_id()
-            if not satcom_endpoint_id:
-                raise ValueError("Satcom endpoint id not configured")
-            self._satcom_base_url = (
-                f"https://api.runpod.ai/v2/{satcom_endpoint_id}/openai/v1"
+            satcom_small_endpoint_id = self.config.get_satcom_small_llm_id()
+            if not satcom_small_endpoint_id:
+                raise ValueError("Satcom small endpoint id not configured")
+            self._satcom_small_base_url = (
+                f"https://api.runpod.ai/v2/{satcom_small_endpoint_id}/openai/v1"
             )
-            self._satcom_model_name = os.getenv(
-                "SATCOM_MODEL_NAME", "esa-sceva/satcom-chat-8b"
+            self._satcom_small_model_name = os.getenv(
+                "SATCOM_SMALL_MODEL_NAME",
+                os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"),
             )
-            self._satcom_chat_openai: ChatOpenAI | None = None
+            satcom_large_endpoint_id = self.config.get_satcom_large_llm_id()
+            if not satcom_large_endpoint_id:
+                raise ValueError("Satcom large endpoint id not configured")
+            self._satcom_large_base_url = (
+                f"https://api.runpod.ai/v2/{satcom_large_endpoint_id}/openai/v1"
+            )
+            self._satcom_large_model_name = os.getenv(
+                "SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b"
+            )
+            self._satcom_small_chat_openai: ChatOpenAI | None = None
+            self._satcom_large_chat_openai: ChatOpenAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize LangChain Runpod client: {e}")
             self._runpod_base_url = None
             self._runpod_model_name = None
             self._runpod_chat_openai = None
-            self._satcom_base_url = None
-            self._satcom_model_name = None
-            self._satcom_chat_openai = None
+            self._satcom_small_base_url = None
+            self._satcom_large_base_url = None
+            self._satcom_small_model_name = None
+            self._satcom_large_model_name = None
+            self._satcom_small_chat_openai = None
+            self._satcom_large_chat_openai = None
 
         # Configure Mistral native client lazily
         try:
@@ -163,23 +181,41 @@ class LLMManager:
             )
         return self._mistral_chat
 
-    def _get_satcom_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for Satcom."""
-        if self._satcom_chat_openai is None:
-            if not self._satcom_base_url:
-                raise RuntimeError("Satcom base URL is not configured")
+    def _get_satcom_small_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Satcom Small."""
+        if self._satcom_small_chat_openai is None:
+            if not self._satcom_small_base_url:
+                raise RuntimeError("Satcom small base URL is not configured")
             if not SATCOM_RUNPOD_API_KEY:
                 raise RuntimeError("SATCOM_API_KEY is not set")
-            satcom_llm_timeout = self.config.get_satcom_llm_timeout()
-            self._satcom_chat_openai = ChatOpenAI(
+            satcom_small_llm_timeout = self.config.get_satcom_small_llm_timeout()
+            self._satcom_small_chat_openai = ChatOpenAI(
                 api_key=SATCOM_RUNPOD_API_KEY,
-                base_url=self._satcom_base_url,
-                model=self._satcom_model_name,
+                base_url=self._satcom_small_base_url,
+                model=self._satcom_small_model_name,
                 temperature=0.3,
-                timeout=satcom_llm_timeout,
+                timeout=satcom_small_llm_timeout,
                 max_retries=0,
             )
-        return self._satcom_chat_openai
+        return self._satcom_small_chat_openai
+
+    def _get_satcom_large_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Satcom Large."""
+        if self._satcom_large_chat_openai is None:
+            if not self._satcom_large_base_url:
+                raise RuntimeError("Satcom large base URL is not configured")
+            if not SATCOM_RUNPOD_API_KEY:
+                raise RuntimeError("SATCOM_API_KEY is not set")
+            satcom_large_llm_timeout = self.config.get_satcom_large_llm_timeout()
+            self._satcom_large_chat_openai = ChatOpenAI(
+                api_key=SATCOM_RUNPOD_API_KEY,
+                base_url=self._satcom_large_base_url,
+                model=self._satcom_large_model_name,
+                temperature=0.3,
+                timeout=satcom_large_llm_timeout,
+                max_retries=0,
+            )
+        return self._satcom_large_chat_openai
 
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
@@ -194,9 +230,12 @@ class LLMManager:
             elif llm_type == LLMType.Runpod.value:
                 self._selected_llm_type = LLMType.Runpod.value
                 return self._get_runpod_llm()
-            elif llm_type == LLMType.Satcom.value:
-                self._selected_llm_type = LLMType.Satcom.value
-                return self._get_satcom_llm()
+            elif llm_type == LLMType.Satcom_Small.value:
+                self._selected_llm_type = LLMType.Satcom_Small.value
+                return self._get_satcom_small_llm()
+            elif llm_type == LLMType.Satcom_Large.value:
+                self._selected_llm_type = LLMType.Satcom_Large.value
+                return self._get_satcom_large_llm()
             else:
                 if llm_type is None and IS_PROD:
                     self._selected_llm_type = LLMType.Mistral.value

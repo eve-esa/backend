@@ -121,11 +121,17 @@ class Config:
     def get_mistral_timeout(self):
         return self.get("mistral", "timeout")
 
-    def get_satcom_llm_id(self):
-        return self.get("runpod", "satcom_llm", "id")
+    def get_satcom_small_llm_id(self):
+        return self.get("runpod", "satcom_small_llm", "id")
 
-    def get_satcom_llm_timeout(self):
-        return self.get("runpod", "satcom_llm", "timeout")
+    def get_satcom_small_llm_timeout(self):
+        return self.get("runpod", "satcom_small_llm", "timeout")
+
+    def get_satcom_large_llm_id(self):
+        return self.get("runpod", "satcom_large_llm", "id")
+
+    def get_satcom_large_llm_timeout(self):
+        return self.get("runpod", "satcom_large_llm", "timeout")
 
     # MCP
     def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:

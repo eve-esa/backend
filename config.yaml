@@ -8,9 +8,12 @@ runpod:
   reranker:
     id: "4947q1tk0d2lle"
     timeout: 13
-  satcom_llm:
+  satcom_small_llm:
     id: "ucttr8up9sxh0k"
-    timeout: 40 # seconds in ChatOpenAI
+    timeout: 13 # seconds in ChatOpenAI
+  satcom_large_llm:
+    id: "zyy9iu4i7vmcxc"
+    timeout: 13 # seconds in ChatOpenAI
 
 mistral:
   model: "mistral-small-latest"

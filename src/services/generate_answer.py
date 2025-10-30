@@ -100,7 +100,10 @@ class GenerationRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     llm_type: Optional[str] = Field(
         default=None,
-        description="LLM type to use. Options: 'runpod' or 'mistral'. Defaults to None, which means the environment behavior.",
+        description=(
+            "LLM type to use. Options: 'runpod', 'mistral', 'satcom_small', 'satcom_large'. "
+            "Defaults to None, which means environment-based behavior."
+        ),
     )
     embeddings_model: str = DEFAULT_EMBEDDING_MODEL
     k: int = Field(DEFAULT_K, ge=0, le=10)
@@ -224,7 +227,7 @@ def _resolve_system_prompt(llm_type: Optional[str]) -> Optional[str]:
     otherwise falls back to the default system prompt loaded above.
     """
     try:
-        if llm_type == LLMType.Satcom.value:
+        if llm_type in (LLMType.Satcom_Small.value, LLMType.Satcom_Large.value):
             return get_template("system_prompt", filename="satcom/system.yaml")
     except Exception:
         # Fallback to default if satcom template is missing or fails to load
@@ -824,7 +827,7 @@ async def should_use_rag(
     Defaults to True on uncertainty/errors.
     """
     try:
-        if llm_type == LLMType.Satcom.value:
+        if llm_type in (LLMType.Satcom_Small.value, LLMType.Satcom_Large.value):
             tmpl = get_template("is_rag_prompt", filename="satcom/prompts.yaml")
         else:
             tmpl = get_template("is_rag_prompt", filename="prompts.yaml")
@@ -1052,14 +1055,20 @@ async def generate_answer(
 
         # Build user message using template conversation_prompt_with_context
         if rag_decision_result.use_rag:
-            if request.llm_type == LLMType.Satcom.value:
+            if request.llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
                 tmpl = get_template(
                     "rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
                 )
             else:
                 tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
-            if request.llm_type == LLMType.Satcom.value:
+            if request.llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
                 tmpl = get_template(
                     "no_rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
                 )
@@ -1342,14 +1351,20 @@ async def generate_answer_stream_generator_helper(
                 }
 
         if rag_decision_result.use_rag:
-            if request.llm_type == LLMType.Satcom.value:
+            if request.llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
                 tmpl = get_template(
                     "rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
                 )
             else:
                 tmpl = get_template("rag_prompt_for_langgraph", filename="prompts.yaml")
         else:
-            if request.llm_type == LLMType.Satcom.value:
+            if request.llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
                 tmpl = get_template(
                     "no_rag_prompt_for_langgraph", filename="satcom/prompts.yaml"
                 )
