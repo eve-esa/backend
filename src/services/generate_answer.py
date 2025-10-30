@@ -1419,21 +1419,19 @@ async def generate_answer_stream_generator_helper(
                         )
 
                         # Enforce timeout only for the first token
-                        async with asyncio.timeout(llm_instruct_timeout):
+                        async with asyncio.timeout(5000):
                             first_chunk, first_metadata = await astream.__anext__()
+                            tokens_yielded += 1
+                            if tokens_yielded == 1:
+                                first_token_latency = time.perf_counter() - total_start
 
                         first_text = getattr(first_chunk, "content", None)
                         if first_text:
-                            if not first_text:
-                                first_text = ""
                             if output_format == "json":
                                 yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
                             else:
                                 yield f"data: {first_text}\n\n"
                             accumulated.append(first_text)
-                            tokens_yielded += 1
-                            if tokens_yielded == 1:
-                                first_token_latency = time.perf_counter() - total_start
 
                         # Continue streaming remaining tokens without a timeout
                         async for chunk, metadata in astream:
