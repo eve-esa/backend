@@ -24,7 +24,6 @@ from src.utils.template_loader import get_template
 from src.utils.helpers import (
     str_token_counter,
     trim_text_to_token_limit,
-    normalize_markdown_tables,
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
@@ -328,7 +327,7 @@ class LLMManager:
             else:
                 response = await llm.ainvoke(prompt)
             content = getattr(response, "content", str(response))
-            return normalize_markdown_tables(content)
+            return content
         except Exception as e:
             logger.error(f"Mistral model call failed: {str(e)}")
             raise
@@ -352,7 +351,7 @@ class LLMManager:
                 )
             response = await llm.ainvoke(system_and_prompt)
             content = getattr(response, "content", str(response))
-            return normalize_markdown_tables(content)
+            return content
         except Exception as e:
             logger.error(
                 f"Eve Instruct async API call failed: {str(e)}. Trying Mistral fallback."

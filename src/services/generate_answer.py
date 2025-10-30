@@ -31,7 +31,6 @@ from src.utils.helpers import (
     extract_document_data,
     get_mongodb_uri,
     trim_context_to_token_limit,
-    normalize_markdown_tables,
 )
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
@@ -52,8 +51,8 @@ from src.utils.siliconflow_reranker import SiliconFlowReranker
 from src.utils.helpers import (
     get_mongodb_uri,
     tiktoken_counter,
-    MarkdownTableStreamNormalizer,
 )
+from src.utils.helpers import StreamWhitespaceNormalizer
 import contextlib
 
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
@@ -1122,7 +1121,6 @@ async def generate_answer(
                 temperature=request.temperature,
                 conversation_context=conversation_context,
             )
-            final_answer = normalize_markdown_tables(final_answer)
             mistral_gen_latency = time.perf_counter() - gen_start
             user_content = generation_prompt
 
@@ -1273,6 +1271,9 @@ async def generate_answer_stream_generator_helper(
     llm_manager = get_shared_llm_manager()
 
     try:
+        # Initialize whitespace normalizer (preserves code blocks; collapses space runs)
+        normalizer = StreamWhitespaceNormalizer()
+
         total_start = time.perf_counter()
         # # Guardrail check
         # policy_result, policy_prompt = await check_policy(request, llm_manager)
@@ -1401,33 +1402,24 @@ async def generate_answer_stream_generator_helper(
                     logger.info("Using LangGraph astream for streaming")
                     llm_instruct_timeout = llm_manager.config.get_instruct_llm_timeout()
                     try:
-                        normalizer = None
-                        if request.llm_type == LLMType.Mistral.value:
-                            normalizer = MarkdownTableStreamNormalizer()
-
                         # Create the async generator once so we can pull the first token with a timeout
                         astream = graph.astream(
                             state, config=config, stream_mode="messages"
                         )
 
                         # Enforce timeout only for the first token
-                        async with asyncio.timeout(llm_instruct_timeout):
+                        async with asyncio.timeout(5000):
                             first_chunk, first_metadata = await astream.__anext__()
 
                         first_text = getattr(first_chunk, "content", None)
                         if first_text:
-                            if normalizer is not None:
-                                outputs = normalizer.ingest(first_text)
-                                for out in outputs:
-                                    if output_format == "json":
-                                        yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                                    else:
-                                        yield f"data: {out}\n\n"
+                            first_text = normalizer.normalize(first_text)
+                            if not first_text:
+                                first_text = ""
+                            if output_format == "json":
+                                yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
                             else:
-                                if output_format == "json":
-                                    yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
-                                else:
-                                    yield f"data: {first_text}\n\n"
+                                yield f"data: {first_text}\n\n"
                             accumulated.append(first_text)
                             tokens_yielded += 1
                             if tokens_yielded == 1:
@@ -1438,29 +1430,15 @@ async def generate_answer_stream_generator_helper(
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
-                            if normalizer is not None:
-                                outputs = normalizer.ingest(text)
-                                for out in outputs:
-                                    if output_format == "json":
-                                        yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                                    else:
-                                        yield f"data: {out}\n\n"
+                            text = normalizer.normalize(text)
+                            if not text:
+                                continue
+                            if output_format == "json":
+                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
                             else:
-                                if output_format == "json":
-                                    yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
-                                else:
-                                    yield f"data: {text}\n\n"
+                                yield f"data: {text}\n\n"
                             accumulated.append(text)
                             tokens_yielded += 1
-
-                        # Flush any remaining normalized outputs
-                        if normalizer is not None:
-                            tail_outputs = normalizer.flush()
-                            for out in tail_outputs:
-                                if output_format == "json":
-                                    yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                                else:
-                                    yield f"data: {out}\n\n"
 
                         base_gen_latency = time.perf_counter() - gen_start
                         logger.info(
@@ -1491,9 +1469,6 @@ async def generate_answer_stream_generator_helper(
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
             logger.info(f"Using Mistral streaming fallback")
-            # Streaming post-processor to normalize Markdown tables line-by-line
-            normalizer = MarkdownTableStreamNormalizer()
-
             async for (
                 token,
                 mistral_generation_prompt,
@@ -1504,14 +1479,14 @@ async def generate_answer_stream_generator_helper(
                 temperature=request.temperature,
                 conversation_context=conversation_context,
             ):
-                token_str = str(token)
+                token_str = normalizer.normalize(str(token))
+                if not token_str:
+                    continue
                 accumulated.append(token_str)
-                outputs = normalizer.ingest(token_str)
-                for out in outputs:
-                    if output_format == "json":
-                        yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                    else:
-                        yield f"data: {out}\n\n"
+                if output_format == "json":
+                    yield f"data: {json.dumps({'type':'token','content':token_str})}\n\n"
+                else:
+                    yield f"data: {token_str}\n\n"
                 mistral_token_yielded += 1
                 if mistral_token_yielded == 1:
                     mistral_first_token_latency = time.perf_counter() - total_start
@@ -1520,17 +1495,8 @@ async def generate_answer_stream_generator_helper(
             used_stream = True
             user_content = mistral_generation_prompt
 
-            # Flush any remaining buffered content at end of stream
-            tail_outputs = normalizer.flush()
-            for out in tail_outputs:
-                if output_format == "json":
-                    yield f"data: {json.dumps({'type':'token','content':out})}\n\n"
-                else:
-                    yield f"data: {out}\n\n"
-
         answer = "".join(accumulated)
-        # Normalize the final accumulated answer for Markdown tables
-        answer = normalize_markdown_tables(answer)
+        # Final accumulated answer without post-processing normalization
 
         # Optional hallucination loop after stream completes
         model_client = llm_manager.get_client_for_model(request.llm_type)

@@ -48,6 +48,90 @@ from src.constants import DEFAULT_EMBEDDING_MODEL
 logger = logging.getLogger(__name__)
 
 
+class StreamWhitespaceNormalizer:
+    """Stateful normalizer for streamed text.
+
+    Collapses runs of spaces/tabs outside fenced code blocks to a single space,
+    preserves newlines, and keeps exact whitespace inside triple-backtick code blocks.
+    Handles fences that may be split across chunk boundaries.
+    """
+
+    def __init__(self) -> None:
+        self.in_code_block: bool = False
+        self.last_was_space: bool = False
+        self._tail_two: str = ""
+        # Track if we are currently at the start of a line to preserve
+        # leading indentation (for Markdown list nesting, etc.) outside
+        # of fenced code blocks.
+        self._at_line_start: bool = True
+
+    def _check_cross_chunk_fence(self, raw: str) -> int:
+        """If previous chunk ended with '``' and this chunk starts with '`', toggle fence.
+        Returns the number of leading characters to skip from this chunk (0 or 1).
+        """
+        if self._tail_two == "``" and raw.startswith("`"):
+            self.in_code_block = not self.in_code_block
+            self.last_was_space = False
+            return 1
+        return 0
+
+    def normalize(self, raw: str) -> str:
+        if not raw:
+            return raw
+
+        # Handle fence split across chunk boundary
+        start_idx = self._check_cross_chunk_fence(raw)
+
+        i = start_idx
+        out: List[str] = []
+        while i < len(raw):
+            # Toggle code block state on fenced markers within this chunk
+            if raw.startswith("```", i):
+                self.in_code_block = not self.in_code_block
+                out.append("```")
+                i += 3
+                self.last_was_space = False
+                continue
+
+            ch = raw[i]
+            if ch == "\n":
+                out.append(ch)
+                self.last_was_space = False
+                # Newline resets line-start state
+                self._at_line_start = True
+            elif not self.in_code_block and ch in (" ", "\t"):
+                if self._at_line_start:
+                    # Preserve all leading indentation at the beginning of a line
+                    # (important for Markdown nested lists and block formatting)
+                    j = i
+                    while j < len(raw) and raw[j] in (" ", "\t"):
+                        j += 1
+                    out.append(raw[i:j])
+                    # Do not mark last_was_space here – indentation is structural,
+                    # and we want a single collapsing rule to apply only within
+                    # inline text, not at line starts.
+                    i = j
+                    # Keep _at_line_start=True until we see the first non-space
+                    # character on this line (handled in the else-branch below).
+                    continue
+                else:
+                    if not self.last_was_space:
+                        out.append(" ")
+                        self.last_was_space = True
+                    # else skip extra spaces/tabs
+            else:
+                out.append(ch)
+                if ch not in (" ", "\t"):
+                    self.last_was_space = False
+                # Any non-newline character means we are no longer at line start
+                self._at_line_start = False
+            i += 1
+
+        # Update tail with last two characters of ORIGINAL raw (not normalized)
+        self._tail_two = raw[-2:] if len(raw) >= 2 else raw
+        return "".join(out)
+
+
 class EmbeddingModelType(Enum):
     """Supported embedding model types."""
 
