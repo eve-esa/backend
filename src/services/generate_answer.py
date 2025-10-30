@@ -52,7 +52,6 @@ from src.utils.helpers import (
     get_mongodb_uri,
     tiktoken_counter,
 )
-from src.utils.helpers import StreamWhitespaceNormalizer
 import contextlib
 
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
@@ -1271,9 +1270,6 @@ async def generate_answer_stream_generator_helper(
     llm_manager = get_shared_llm_manager()
 
     try:
-        # Initialize whitespace normalizer (preserves code blocks; collapses space runs)
-        normalizer = StreamWhitespaceNormalizer()
-
         total_start = time.perf_counter()
         # # Guardrail check
         # policy_result, policy_prompt = await check_policy(request, llm_manager)
@@ -1413,7 +1409,6 @@ async def generate_answer_stream_generator_helper(
 
                         first_text = getattr(first_chunk, "content", None)
                         if first_text:
-                            first_text = normalizer.normalize(first_text)
                             if not first_text:
                                 first_text = ""
                             if output_format == "json":
@@ -1428,9 +1423,6 @@ async def generate_answer_stream_generator_helper(
                         # Continue streaming remaining tokens without a timeout
                         async for chunk, metadata in astream:
                             text = getattr(chunk, "content", None)
-                            if not text:
-                                continue
-                            text = normalizer.normalize(text)
                             if not text:
                                 continue
                             if output_format == "json":
@@ -1479,14 +1471,11 @@ async def generate_answer_stream_generator_helper(
                 temperature=request.temperature,
                 conversation_context=conversation_context,
             ):
-                token_str = normalizer.normalize(str(token))
-                if not token_str:
-                    continue
-                accumulated.append(token_str)
                 if output_format == "json":
-                    yield f"data: {json.dumps({'type':'token','content':token_str})}\n\n"
+                    yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
                 else:
-                    yield f"data: {token_str}\n\n"
+                    yield f"data: {token}\n\n"
+                accumulated.append(str(token))
                 mistral_token_yielded += 1
                 if mistral_token_yielded == 1:
                     mistral_first_token_latency = time.perf_counter() - total_start
