@@ -175,7 +175,7 @@ class LLMManager:
             mistral_timeout = self.config.get_mistral_timeout()
             self._mistral_chat = ChatMistralAI(
                 api_key=MISTRAL_API_KEY,
-                model=self._mistral_model_name or "mistral-small-latest",
+                model=self._mistral_model_name or "mistral-medium-latest",
                 temperature=0.3,
                 timeout=mistral_timeout,
             )

@@ -16,7 +16,7 @@ runpod:
     timeout: 13 # seconds in ChatOpenAI
 
 mistral:
-  model: "mistral-small-latest"
+  model: "mistral-medium-latest"
   timeout: 13 # seconds
 
 mcp:
