@@ -1255,34 +1255,6 @@ async def generate_answer_stream_generator_helper(
     try:
         is_main_LLM_fail = False
         total_start = time.perf_counter()
-        # # Guardrail check
-        # policy_result, policy_prompt = await check_policy(request, llm_manager)
-        # guardrail_latency = time.perf_counter() - total_start
-        # if policy_result.violation:
-        #     yield f"data: {json.dumps({'type': 'final', 'answer': POLICY_NOT_ANSWER})}\n\n"
-        #     try:
-        #         from src.database.models.message import Message as MessageModel
-
-        #         # Find message by id
-        #         message = await MessageModel.find_by_id(message_id)
-        #         if message is not None:
-        #             message.output = POLICY_NOT_ANSWER
-        #             existing_metadata = dict(getattr(message, "metadata", {}) or {})
-        #             existing_metadata.update(
-        #                 {
-        #                     "latencies": {"guardrail_latency": guardrail_latency},
-        #                     "prompts": {
-        #                         "guardrail_prompt": policy_prompt,
-        #                         "guardrail_result": policy_result,
-        #                     },
-        #                 }
-        #             )
-        #             message.metadata = existing_metadata
-        #             await message.save()
-        #     except Exception as e:
-        #         logger.warning(f"Failed to persist streamed message: {e}")
-        #     return
-
         # Prepare conversation history for fallback path
         conversation_history, conversation_summary = (
             await _get_conversation_history_from_db(conversation_id)
@@ -1479,7 +1451,6 @@ async def generate_answer_stream_generator_helper(
 
         total_latency = time.perf_counter() - total_start
         latencies = {
-            # "guardrail_latency": guardrail_latency,
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "first_token_latency": first_token_latency,
@@ -1489,8 +1460,6 @@ async def generate_answer_stream_generator_helper(
             "total_latency": total_latency,
         }
         prompts = {
-            # "guardrail_prompt": policy_prompt,
-            # "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
