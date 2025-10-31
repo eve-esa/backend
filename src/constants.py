@@ -41,10 +41,6 @@ Together, this collection provides a comprehensive representation of the Earth a
 
 PUBLIC_COLLECTIONS = [
     {
-        "name": "eve-esa-data",
-        "description": "Open-access collection of Earth Observation materials sourced from publishers and platforms such as MDPI, Springer, IOPscience, SagePub, EOGE, EOS, ISPRS,  and others. The dataset spans a wide range of content types, including research papers, journal articles, blog posts, and web pages. Alongside the documents, metadata has been systematically extracted to facilitate search and downstream analysis. All collected resources are compliant with current legislation regarding data use and accessibility.",
-    },
-    {
         "name": "ESA EO Knowledge Base",
         "description": "Curated collection of resources from ESA-related platforms and portals. It includes materials from ESA Earth Online, the Newcomers Earth Observation Guide, EO Portal, Sentiwiki, EO for Society publications, the CEOS ESA Catalogue, and the ESA Open Science Catalog. The dataset covers heterogeneous content such as web articles, technical documentation, instruments, datasets, and applications. Metadata has been systematically extracted and obtained, including URLs and titles.",
     },
@@ -53,7 +49,7 @@ PUBLIC_COLLECTIONS = [
         "description": "Curated collection of resources from ESA-related platforms and portals. It includes materials from ESA Earth Online, the Newcomers Earth Observation Guide, EO Portal, Sentiwiki, EO for Society publications, the CEOS ESA Catalogue, and the ESA Open Science Catalog. The dataset covers heterogeneous content such as web articles, technical documentation, instruments, datasets, and applications. Metadata has been systematically extracted and obtained, including URLs and titles. This collection contains around 100.000 documents.",
     },
     {
-        "name": "EVE open-access",
+        "name": "qwen-512-filtered",
         "description": "Open-access collection of Earth Observation materials sourced from publishers and platforms such as MDPI, Springer, IOPscience, SagePub, EOGE, EOS, ISPRS,  and others. The dataset spans a wide range of content types, including research papers, journal articles, blog posts, and web pages. Alongside the documents, metadata has been systematically extracted to facilitate search and downstream analysis. All collected resources are compliant with current legislation regarding data use and accessibility. This collection contains about 250.00 documents.",
     },
     {

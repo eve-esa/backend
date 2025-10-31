@@ -189,7 +189,8 @@ class VectorStoreManager:
                 ),
             }
             for collection in collections.collections
-            if collection.name
+            if collection.name in desc_map
+            and collection.name
             not in [collection.id for collection in existing_user_collections]
         ]
 
