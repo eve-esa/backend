@@ -30,7 +30,7 @@ from src.utils.helpers import (
     build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
-    trim_context_to_token_limit,
+    build_context,
 )
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
@@ -467,64 +467,7 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
     return deduped
 
 
-def _build_context(items: List[Any]) -> str:
-    """Build a context string from items that may be strings or {text, metadata} dicts.
-
-    - If items are strings, join non-empty with newlines (backward compatible).
-    - If items are dicts with keys 'text' and optional 'metadata', format as:
-
-      Document metadata\n
-      Key: value\n
-      ...\n
-      Content:\n
-      {text}\n
-    """
-    if not items:
-        return ""
-
-    # Detect structured items
-    try:
-        if isinstance(items[0], dict):
-            parts: List[str] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    # Mixed types; fall back to string rendering
-                    text_val = str(item)
-                    if text_val:
-                        parts.append(text_val)
-                    continue
-
-                text_val = (
-                    item.get("text")
-                    or item.get("document")
-                    or item.get("content")
-                    or ""
-                )
-                metadata_val = item.get("metadata") or {}
-
-                # Render metadata block if present
-                if isinstance(metadata_val, dict) and metadata_val:
-                    parts.append("Document metadata")
-                    # Stable key order for deterministic output
-                    for key in sorted(metadata_val.keys()):
-                        value = metadata_val.get(key)
-                        parts.append(f"{key}: {value}")
-                else:
-                    # Still include a header for consistency when no metadata
-                    parts.append("Document metadata")
-
-                parts.append("Content:")
-                if text_val:
-                    parts.append(str(text_val))
-                # Blank line between documents
-                parts.append("")
-            return trim_context_to_token_limit(parts, TOKEN_OVERFLOW_LIMIT)
-    except Exception:
-        # On any error, fall back to simple join of strings
-        pass
-
-    # Default: treat as list of strings
-    return trim_context_to_token_limit(items, TOKEN_OVERFLOW_LIMIT)
+# _build_context moved to src.utils.helpers
 
 
 async def _maybe_rerank_runpod(
@@ -956,7 +899,7 @@ async def setup_rag_and_context(request: GenerationRequest):
             index_to_text[i] for i in selected_indices if i in index_to_text
         ]
         context_list = list(set(context_list))
-        context = _build_context(context_list)
+        context = build_context(context_list)
         results = [merged_results[i] for i in selected_indices]
         results = _deduplicate_results(results)
 
@@ -1048,7 +991,7 @@ async def generate_answer(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = _build_context(results)
+                context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
@@ -1294,7 +1237,7 @@ async def generate_answer_stream_generator_helper(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = _build_context(results)
+                context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }

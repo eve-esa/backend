@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import List, Optional, Dict
+from typing import Optional, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -10,12 +10,7 @@ from src.database.models.user import User
 from src.database.models.conversation import Conversation
 from src.services.hallucination_detector import HallucinationDetector
 from src.database.models.message import Message
-from src.constants import (
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_K,
-    DEFAULT_SCORE_THRESHOLD,
-)
-
+from src.utils.helpers import build_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -78,9 +73,7 @@ async def hallucination_detect(
         ) = await detector.run(
             query=message.input,
             model_response=message.output,
-            collection_names=message.request_input.collection_ids,
-            k=message.request_input.k,
-            score_threshold=message.request_input.score_threshold,
+            docs=build_context(message.documents),
             llm_type=request.llm_type,
         )
         total_latency = time.perf_counter() - total_start
@@ -113,7 +106,7 @@ async def hallucination_detect(
         return HallucinationDetectResponse(
             label=label,
             reason=reason,
-            original_question=request.query,
+            original_question=message.input,
             rewritten_question=rewritten_question,
             final_answer=final_answer,
             latencies=latencies,
