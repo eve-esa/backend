@@ -65,23 +65,22 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
     try:
         messages_col = Message.get_collection()
 
+        # Fetch conversation IDs owned by the current user (avoid $lookup pipelines unsupported by DocumentDB)
+        user_conversations = await Conversation.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+        conversation_ids = [c.id for c in user_conversations if getattr(c, "id", None)]
+
+        if not conversation_ids:
+            return {
+                "message_count": 0,
+                "input_characters": 0,
+                "output_characters": 0,
+                "total_characters": 0,
+            }
+
         pipeline = [
-            {
-                "$lookup": {
-                    "from": "conversations",
-                    "let": {"convId": "$conversation_id"},
-                    "pipeline": [
-                        {
-                            "$match": {
-                                "$expr": {"$eq": [{"$toString": "$_id"}, "$$convId"]}
-                            }
-                        }
-                    ],
-                    "as": "conv",
-                }
-            },
-            {"$unwind": "$conv"},
-            {"$match": {"conv.user_id": requesting_user.id}},
+            {"$match": {"conversation_id": {"$in": conversation_ids}}},
             {
                 "$group": {
                     "_id": None,
