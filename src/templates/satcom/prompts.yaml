@@ -3,6 +3,8 @@ basic_prompt: |
   Given the following context: {context}.
 
   Please reply in a precise and accurate manner to this query: {query}
+  
+  Note: when your answer involves mathematical or engineering formulas, present them using LaTeX notation for clarity.
 
   Answer:
 
@@ -14,6 +16,8 @@ rag_prompt: |
   Given the following context: {context}.
 
   Please reply in a precise and accurate manner to this query: {query}
+  
+  Note: when your answer involves mathematical or engineering formulas, present them using LaTeX notation for clarity.
 
   Answer:
 
@@ -24,6 +28,8 @@ no_rag_prompt: |
   Previous conversation: {conversation}
 
   Please reply in a precise and accurate manner to this query: {query}
+  
+  Note: when your answer involves mathematical or engineering formulas, present them using LaTeX notation for clarity.
 
   Answer:
 
@@ -42,7 +48,9 @@ no_rag_prompt_for_langgraph: |
   Answer the user's question using your own knowledge and any relevant information from the conversation history.
 
   Please reply in a precise and accurate manner to this query: {query}
-
+  
+  Note: when your answer involves mathematical or engineering formulas, present them using LaTeX notation for clarity.
+  
   Answer:
 
 is_rag_prompt: |
