@@ -1277,6 +1277,7 @@ async def generate_answer_stream_generator_helper(
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = get_shared_llm_manager()
+    llm_manager.set_selected_llm_type(request.llm_type)
 
     try:
         total_start = time.perf_counter()

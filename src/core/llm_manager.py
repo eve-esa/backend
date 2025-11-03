@@ -149,6 +149,10 @@ class LLMManager:
             self._mistral_model_name = None
             self._mistral_chat = None
 
+    def set_selected_llm_type(self, llm_type: str) -> None:
+        """Set the selected LLM type."""
+        self._selected_llm_type = llm_type
+
     def _get_runpod_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for Runpod."""
         if self._runpod_chat_openai is None:
