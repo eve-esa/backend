@@ -53,7 +53,7 @@ def get_template(template_name: str, filename: str = "prompts.yaml") -> str:
     return templates[template_name]
 
 
-def format_template(template_name: str, **kwargs) -> str:
+def format_template(template_name: str, filename: str = None, **kwargs) -> str:
     """
     Load and format a template with the given parameters.
 
@@ -64,5 +64,8 @@ def format_template(template_name: str, **kwargs) -> str:
     Returns:
         Formatted template string
     """
-    template = get_template(template_name)
+    if filename:
+        template = get_template(template_name, filename=filename)
+    else:
+        template = get_template(template_name)
     return template.format(**kwargs)

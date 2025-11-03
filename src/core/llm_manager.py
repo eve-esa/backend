@@ -287,7 +287,23 @@ class LLMManager:
         Returns:
             A formatted prompt string
         """
-        return format_template("basic_prompt", query=query, context=context)
+        if self._selected_llm_type in (
+            LLMType.Satcom_Small.value,
+            LLMType.Satcom_Large.value,
+        ):
+            return format_template(
+                "basic_prompt",
+                filename="satcom/prompts.yaml",
+                query=query,
+                context=context,
+            )
+        else:
+            return format_template(
+                "basic_prompt",
+                filename="prompts.yaml",
+                query=query,
+                context=context,
+            )
 
     def _generate_prompt_with_history(
         self, query: str, context: str, conversation_context: str
@@ -304,18 +320,43 @@ class LLMManager:
             A formatted prompt string with conversation history
         """
         if context:
-            return format_template(
-                "rag_prompt",
-                query=query,
-                context=context,
-                conversation=conversation_context,
-            )
+            if self._selected_llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
+                return format_template(
+                    "rag_prompt",
+                    filename="satcom/prompts.yaml",
+                    query=query,
+                    context=context,
+                    conversation=conversation_context,
+                )
+            else:
+                return format_template(
+                    "rag_prompt",
+                    filename="prompts.yaml",
+                    query=query,
+                    context=context,
+                    conversation=conversation_context,
+                )
         else:
-            return format_template(
-                "no_rag_prompt",
-                query=query,
-                conversation=conversation_context,
-            )
+            if self._selected_llm_type in (
+                LLMType.Satcom_Small.value,
+                LLMType.Satcom_Large.value,
+            ):
+                return format_template(
+                    "no_rag_prompt",
+                    filename="satcom/prompts.yaml",
+                    query=query,
+                    conversation=conversation_context,
+                )
+            else:
+                return format_template(
+                    "no_rag_prompt",
+                    filename="prompts.yaml",
+                    query=query,
+                    conversation=conversation_context,
+                )
 
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
         """
@@ -608,7 +649,6 @@ class LLMManager:
                 ]
             else:
                 input_payload = prompt
-
             async for event in llm.astream(input_payload):
                 try:
                     text = getattr(event, "content", None)

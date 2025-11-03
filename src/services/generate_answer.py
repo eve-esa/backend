@@ -1420,7 +1420,7 @@ async def generate_answer_stream_generator_helper(
                         )
 
                         # Enforce timeout only for the first token
-                        async with asyncio.timeout(5000):
+                        async with asyncio.timeout(llm_instruct_timeout):
                             first_chunk, first_metadata = await astream.__anext__()
                             tokens_yielded += 1
                             if tokens_yielded == 1:
