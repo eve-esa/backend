@@ -1,3 +1,9 @@
+from src.config import IS_PROD
+from src.constants import (
+    PUBLIC_COLLECTIONS,
+    STAGING_PUBLIC_COLLECTIONS,
+    WILEY_PUBLIC_COLLECTIONS,
+)
 from src.schemas.message import MessageUpdate, CreateMessageResponse
 from src.services.generate_answer import (
     GenerationRequest,
@@ -151,6 +157,22 @@ async def create_message(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+
+        # Normalize and validate requested public collections against allowed lists
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
 
         # lookup query to check if some of the collection ids from other users are in the request.collection_ids
         other_users_collections = await CollectionModel.find_all(
@@ -395,6 +417,22 @@ async def create_message_stream(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+
+        # Normalize and validate requested public collections against allowed lists
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
 
         # lookup query to check if some of the collection ids from other users are in the request.collection_ids
         other_users_collections = await CollectionModel.find_all(
