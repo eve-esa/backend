@@ -791,8 +791,11 @@ async def stream_hallucination(
                 message.request_input.llm_type
             )
             async for token in llm.astream(prompt):
-                final_answer_chunks.append(str(token))
-                yield f"data: {json.dumps({'type':'token','content':str(token)})}\n\n"
+                text = getattr(token, "content", None)
+                if not text:
+                    continue
+                final_answer_chunks.append(text)
+                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
             final_latency = time.perf_counter() - t2
 
             final_answer = "".join(final_answer_chunks)
