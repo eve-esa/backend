@@ -1,3 +1,6 @@
+from datetime import datetime
+
+from pydantic import BaseModel, Field
 from src.config import IS_PROD
 from src.constants import (
     PUBLIC_COLLECTIONS,
@@ -24,6 +27,15 @@ from src.utils.helpers import extract_document_data, extract_year_range_from_fil
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class SourceLogsRequest(BaseModel):
+    source_id: str = Field(default=None, description="Source ID")
+    source_url: str = Field(default=None, description="Source URL")
+    source_title: str = Field(default=None, description="Source title")
+    source_collection_name: str = Field(
+        default=None, description="Source collection name"
+    )
 
 
 @router.get("/conversations/messages/average-latencies")
@@ -511,4 +523,45 @@ async def create_message_stream(
                 await message.save()
             except Exception:
                 pass
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/source_logs")
+async def get_source_logs(
+    conversation_id: str,
+    message_id: str,
+    request: SourceLogsRequest,
+    requesting_user: User = Depends(get_current_user),
+):
+    try:
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        message = await Message.find_by_id(message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        if message.conversation_id != conversation_id:
+            raise HTTPException(
+                status_code=404, detail="Message not found in this conversation"
+            )
+
+        # store source logs as an array and append each new entry
+        existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        source_logs = list(existing_metadata.get("source_logs") or [])
+        source_logs.append(
+            {
+                **request.model_dump(),
+                "timestamp": datetime.now().isoformat(),
+                "user_id": requesting_user.id,
+            }
+        )
+        existing_metadata["source_logs"] = source_logs
+        message.metadata = existing_metadata
+        await message.save()
+        return {"message": "Source logs stored successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
