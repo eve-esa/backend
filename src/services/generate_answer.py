@@ -820,7 +820,7 @@ async def should_use_rag(
     query: str,
     conversation: str,
     llm_type: Optional[str] = None,
-) -> tuple[ShouldUseRagDecision, str]:
+) -> tuple[ShouldUseRagDecision, str, bool]:
     """Decide whether to use RAG for the given query using the Runpod-backed ChatOpenAI.
 
     Returns True for scientific/technical queries; False for casual/generic ones.
@@ -844,8 +844,8 @@ async def should_use_rag(
         logger.info(f"should_use_rag result: {result}")
         # with_structured_output returns a Pydantic object matching the schema
         if isinstance(result, ShouldUseRagDecision):
-            return result, prompt
-        return None, prompt
+            return result, prompt, False
+        return None, prompt, False
     except Exception as e:
         logger.error(f"Failed to decide should_use_rag: {e}")
         mistral_llm = llm_manager.get_mistral_model()
@@ -855,8 +855,8 @@ async def should_use_rag(
         result = await structured_mistral_llm.ainvoke(prompt)
         logger.info(f"should_use_rag result from mistral: {result}")
         if isinstance(result, ShouldUseRagDecision):
-            return result, prompt
-        return None, prompt
+            return result, prompt, True
+        return None, prompt, True
 
 
 async def get_rag_context(
@@ -1008,6 +1008,7 @@ async def generate_answer(
     try:
         # Check if the query violates EO policies
         total_start = time.perf_counter()
+        is_main_LLM_fail = False
         policy_result, policy_prompt = await check_policy(request, llm_manager)
         guardrail_latency = time.perf_counter() - total_start
         if policy_result.violation:
@@ -1025,8 +1026,10 @@ async def generate_answer(
 
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt = await should_use_rag(
-            llm_manager, request.query, conversation_context, request.llm_type
+        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
+            await should_use_rag(
+                llm_manager, request.query, conversation_context, request.llm_type
+            )
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
@@ -1089,7 +1092,7 @@ async def generate_answer(
         base_gen_latency: Optional[float] = None
         mistral_gen_latency: Optional[float] = None
         use_langgraph = False
-        if _langgraph_available and conversation_id:
+        if _langgraph_available and conversation_id and not is_main_LLM_fail:
             try:
                 # Single invoke to append assistant response to memory (async)
                 gen_start = time.perf_counter()
@@ -1280,6 +1283,7 @@ async def generate_answer_stream_generator_helper(
     llm_manager.set_selected_llm_type(request.llm_type)
 
     try:
+        is_main_LLM_fail = False
         total_start = time.perf_counter()
         # # Guardrail check
         # policy_result, policy_prompt = await check_policy(request, llm_manager)
@@ -1320,8 +1324,10 @@ async def generate_answer_stream_generator_helper(
         )
         # Setup RAG context
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt = await should_use_rag(
-            llm_manager, request.query, conversation_context, request.llm_type
+        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
+            await should_use_rag(
+                llm_manager, request.query, conversation_context, request.llm_type
+            )
         )
         if rag_decision_result.requery:
             if rag_decision_result.use_rag:
@@ -1390,7 +1396,7 @@ async def generate_answer_stream_generator_helper(
         tokens_yielded = 0
 
         # Try optimized LangGraph streaming first
-        if _langgraph_available and conversation_id:
+        if _langgraph_available and conversation_id and not is_main_LLM_fail:
             try:
                 gen_start = time.perf_counter()
                 graph, mode = await _get_or_create_compiled_graph()
