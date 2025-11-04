@@ -22,6 +22,6 @@ mistral:
 mcp:
   servers:
     eve-mcp-demo:
-      url: "https://eve-mcp-demo.literatum.com/mcp"
+      url: "https://custom-agents-dev-mcp.scholargateway.ai/mcp"
       transport: "streamable_http"
       enabled: true

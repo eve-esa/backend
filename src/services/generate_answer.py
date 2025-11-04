@@ -599,7 +599,7 @@ def _maybe_rerank_deepinfra(
     candidate_texts: List[str], query: str, timeout: int = 5
 ) -> dict | None:
     """Call DeepInfra reranker if configured with timeout, else fall back to SiliconFlow."""
-    if not candidate_texts:
+    if not candidate_texts or len(candidate_texts) == 0:
         return None
 
     # --- Try DeepInfra first ---
@@ -1336,7 +1336,7 @@ async def generate_answer_stream_generator_helper(
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
         if (
-            len(request.collection_ids) > 0
+            len(request.public_collections) > 0
             and request.k > 0
             and rag_decision_result.use_rag
         ):
