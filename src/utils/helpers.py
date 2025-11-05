@@ -42,7 +42,7 @@ from src.config import (
     MONGO_PARAMS,
     DEEPINFRA_API_TOKEN,
 )
-from src.constants import DEFAULT_EMBEDDING_MODEL
+from src.constants import DEFAULT_EMBEDDING_MODEL, TOKEN_OVERFLOW_LIMIT
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -475,6 +475,66 @@ def trim_context_to_token_limit(parts: List[str], max_tokens: int = 7000) -> str
         context_len = str_token_counter(context)
 
     return context
+
+
+def build_context(items: List[Any]) -> str:
+    """Build a context string from items that may be strings or {text, metadata} dicts.
+
+    - If items are strings, join non-empty with newlines (backward compatible).
+    - If items are dicts with keys 'text' and optional 'metadata', format as:
+
+      Document metadata\n
+      Key: value\n
+      ...\n
+      Content:\n
+      {text}\n
+    """
+    if not items:
+        return ""
+
+    # Detect structured items
+    try:
+        if isinstance(items[0], dict):
+            parts: List[str] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    # Mixed types; fall back to string rendering
+                    text_val = str(item)
+                    if text_val:
+                        parts.append(text_val)
+                    continue
+
+                text_val = (
+                    item.get("text")
+                    or item.get("document")
+                    or item.get("content")
+                    or ""
+                )
+                metadata_val = item.get("metadata") or {}
+
+                # Render metadata block if present
+                if isinstance(metadata_val, dict) and metadata_val:
+                    parts.append("Document metadata")
+                    # Stable key order for deterministic output
+                    for key in sorted(metadata_val.keys()):
+                        value = metadata_val.get(key)
+                        parts.append(f"{key}: {value}")
+                else:
+                    # Still include a header for consistency when no metadata
+                    parts.append("Document metadata")
+
+                parts.append("Content:")
+                if text_val:
+                    parts.append(str(text_val))
+                # Blank line between documents
+                parts.append("")
+            return trim_context_to_token_limit(parts, TOKEN_OVERFLOW_LIMIT)
+    except Exception:
+        # On any error, fall back to simple join of strings
+        pass
+
+    # Default: treat as list of strings
+    return trim_context_to_token_limit(items, TOKEN_OVERFLOW_LIMIT)
 
 
 def build_conversation_context(

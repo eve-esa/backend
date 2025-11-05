@@ -1,0 +1,59 @@
+hallucination_binary_with_retrieval: |
+  You are a domain expert in Earth Observation and scientific analysis. Your task is to evaluate whether an answer contains hallucinated or fabricated information,
+  based on its compatibility with the question, your expert-level knowledge and supporting documents
+
+  Please follow this reasoning process:
+
+  1. Interpret the question:
+  Identify what type of information is being asked (e.g., factual, explanatory, scientific reasoning, temporal, etc.).
+
+  2. Analyze the answer:
+  Does it logically and scientifically respond to the question? Is the terminology appropriate and plausible?
+  Does it introduce facts or claims that are inconsistent with Earth Observation knowledge or the provided claims?
+
+  3. Detect hallucination:
+  Determine whether any part of the answer appears to be made up, scientifically incorrect, or inconsistent with the question and claims.
+
+  4. Assign a binary label:
+      `1` if there is potential hallucination or fabricated information in the answer.
+      `0` if the answer seems factually accurate and grounded.
+
+  5. Explain your decision:
+  Provide a brief rationale for each claim in (1-2 sentence).
+
+  Now evaluate the following QA pair:
+  Question: {question}
+  Answer: {answer}
+  supporting documents: {docs}
+
+rewriting_template: |
+  You are a query rewriting assistant in a hallucination-mitigation pipeline. 
+  Your task is to rewrite a user's original question to improve the chances of retrieving factual, grounded, and verifiable information from a reliable document collection.
+
+  **Input Components**:
+  - **question**: The original question asked by the user.
+  - **answer**: A language model-generated answer, which may include hallucinated or unverifiable content. This is shown for reference only — do not reuse its wording or facts.
+  - **reason**: The reason why the answer is considered hallucinated.
+
+  **Your Objective**:
+  - Rewrite the original question in a way that makes it more specific, unambiguous, and likely to retrieve correct and grounded information.
+  - You may clarify vague terms, restructure grammar, or adjust scope to better reflect the user's intent.
+  - Use the reasons provided to understand what to avoid or refine in the rewritten version.
+  - The rewritten query should stay true to the original user intent while improving retrieval precision and factual reliability.
+
+  **Inputs**:
+  Original question:
+  {question}
+
+  Generated answer (do not reuse):
+  {answer}
+
+  Reasons:
+  {reason}
+
+  Output the rewritten query using the required output formatting instructions.
+
+llm_answer_template: |
+  You are a helpful assistant.
+  Answer the following question:
+  {query}

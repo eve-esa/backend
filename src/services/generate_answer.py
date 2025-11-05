@@ -30,7 +30,7 @@ from src.utils.helpers import (
     build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
-    trim_context_to_token_limit,
+    build_context,
 )
 from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
@@ -467,64 +467,7 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
     return deduped
 
 
-def _build_context(items: List[Any]) -> str:
-    """Build a context string from items that may be strings or {text, metadata} dicts.
-
-    - If items are strings, join non-empty with newlines (backward compatible).
-    - If items are dicts with keys 'text' and optional 'metadata', format as:
-
-      Document metadata\n
-      Key: value\n
-      ...\n
-      Content:\n
-      {text}\n
-    """
-    if not items:
-        return ""
-
-    # Detect structured items
-    try:
-        if isinstance(items[0], dict):
-            parts: List[str] = []
-            for item in items:
-                if not isinstance(item, dict):
-                    # Mixed types; fall back to string rendering
-                    text_val = str(item)
-                    if text_val:
-                        parts.append(text_val)
-                    continue
-
-                text_val = (
-                    item.get("text")
-                    or item.get("document")
-                    or item.get("content")
-                    or ""
-                )
-                metadata_val = item.get("metadata") or {}
-
-                # Render metadata block if present
-                if isinstance(metadata_val, dict) and metadata_val:
-                    parts.append("Document metadata")
-                    # Stable key order for deterministic output
-                    for key in sorted(metadata_val.keys()):
-                        value = metadata_val.get(key)
-                        parts.append(f"{key}: {value}")
-                else:
-                    # Still include a header for consistency when no metadata
-                    parts.append("Document metadata")
-
-                parts.append("Content:")
-                if text_val:
-                    parts.append(str(text_val))
-                # Blank line between documents
-                parts.append("")
-            return trim_context_to_token_limit(parts, TOKEN_OVERFLOW_LIMIT)
-    except Exception:
-        # On any error, fall back to simple join of strings
-        pass
-
-    # Default: treat as list of strings
-    return trim_context_to_token_limit(items, TOKEN_OVERFLOW_LIMIT)
+# _build_context moved to src.utils.helpers
 
 
 async def _maybe_rerank_runpod(
@@ -956,7 +899,7 @@ async def setup_rag_and_context(request: GenerationRequest):
             index_to_text[i] for i in selected_indices if i in index_to_text
         ]
         context_list = list(set(context_list))
-        context = _build_context(context_list)
+        context = build_context(context_list)
         results = [merged_results[i] for i in selected_indices]
         results = _deduplicate_results(results)
 
@@ -1048,7 +991,7 @@ async def generate_answer(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = _build_context(results)
+                context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
@@ -1135,34 +1078,6 @@ async def generate_answer(
             mistral_gen_latency = time.perf_counter() - gen_start
             user_content = generation_prompt
 
-        model_client = llm_manager.get_client_for_model(request.llm_type)
-        generation_response = generation_schema(
-            question=request.query, answer=final_answer
-        )
-        loop_result: Optional[dict] = None
-        hallucination_latency: Optional[dict] = None
-        if len(context.strip()) != 0 and request.hallucination_loop_flag:
-            logger.info("starting to run hallucination loop")
-            try:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                final_answer = loop_result["final_answer"]
-            except Exception as e:
-                logger.warning(f"Failed to run hallucination loop: {e}")
-                logger.info("falling back to mistral model for hallucination loop")
-                model_client = llm_manager.get_mistral_model()
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client,
-                    context,
-                    generation_response,
-                    request.collection_ids,
-                )
-                final_answer = loop_result["final_answer"]
-
         total_latency = time.perf_counter() - total_start
         latencies = {
             "guardrail_latency": guardrail_latency,
@@ -1170,7 +1085,6 @@ async def generate_answer(
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
-            "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }
         prompts = {
@@ -1184,7 +1098,6 @@ async def generate_answer(
             final_answer,
             results,
             rag_decision_result.use_rag,
-            loop_result,
             latencies,
             prompts,
         )
@@ -1285,34 +1198,6 @@ async def generate_answer_stream_generator_helper(
     try:
         is_main_LLM_fail = False
         total_start = time.perf_counter()
-        # # Guardrail check
-        # policy_result, policy_prompt = await check_policy(request, llm_manager)
-        # guardrail_latency = time.perf_counter() - total_start
-        # if policy_result.violation:
-        #     yield f"data: {json.dumps({'type': 'final', 'answer': POLICY_NOT_ANSWER})}\n\n"
-        #     try:
-        #         from src.database.models.message import Message as MessageModel
-
-        #         # Find message by id
-        #         message = await MessageModel.find_by_id(message_id)
-        #         if message is not None:
-        #             message.output = POLICY_NOT_ANSWER
-        #             existing_metadata = dict(getattr(message, "metadata", {}) or {})
-        #             existing_metadata.update(
-        #                 {
-        #                     "latencies": {"guardrail_latency": guardrail_latency},
-        #                     "prompts": {
-        #                         "guardrail_prompt": policy_prompt,
-        #                         "guardrail_result": policy_result,
-        #                     },
-        #                 }
-        #             )
-        #             message.metadata = existing_metadata
-        #             await message.save()
-        #     except Exception as e:
-        #         logger.warning(f"Failed to persist streamed message: {e}")
-        #     return
-
         # Prepare conversation history for fallback path
         conversation_history, conversation_summary = (
             await _get_conversation_history_from_db(conversation_id)
@@ -1352,7 +1237,7 @@ async def generate_answer_stream_generator_helper(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
                 results = await scraping_dog_crawler.run(request.query, request.k)
-                context = _build_context(results)
+                context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
@@ -1507,35 +1392,17 @@ async def generate_answer_stream_generator_helper(
         answer = "".join(accumulated)
         # Final accumulated answer without post-processing normalization
 
-        # Optional hallucination loop after stream completes
-        model_client = llm_manager.get_client_for_model(request.llm_type)
-        generation_response = generation_schema(question=request.query, answer=answer)
-        loop_result: Optional[dict] = None
-        hallucination_latency: Optional[dict] = None
-        if len((context or "").strip()) != 0 and request.hallucination_loop_flag:
-            try:
-                loop_result, hallucination_latency = await run_hallucination_loop(
-                    model_client, context, generation_response, request.collection_ids
-                )
-                answer = loop_result.get("final_answer", answer)
-            except Exception as e:
-                logger.warning(f"Hallucination loop failed: {e}")
-
         total_latency = time.perf_counter() - total_start
         latencies = {
-            # "guardrail_latency": guardrail_latency,
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "first_token_latency": first_token_latency,
             "mistral_first_token_latency": mistral_first_token_latency,
             "base_generation_latency": base_gen_latency,
             "fallback_latency": mistral_gen_latency,
-            "hallucination_latency": hallucination_latency,
             "total_latency": total_latency,
         }
         prompts = {
-            # "guardrail_prompt": policy_prompt,
-            # "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
