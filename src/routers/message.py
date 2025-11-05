@@ -39,19 +39,38 @@ class SourceLogsRequest(BaseModel):
 
 
 @router.get("/conversations/messages/average-latencies")
-async def get_average_latencies():
+async def get_average_latencies(
+    start_date: datetime | None = None, end_date: datetime | None = None
+):
     """Return average latencies for the all messages."""
     try:
         messages_col = Message.get_collection()
-        pipeline = [
+        pipeline = []
+        if start_date is not None or end_date is not None:
+            time_filter = {}
+            if start_date is not None:
+                time_filter["$gte"] = start_date
+            if end_date is not None:
+                time_filter["$lte"] = end_date
+            pipeline.append({"$match": {"timestamp": time_filter}})
+        pipeline.append(
             {
                 "$group": {
                     "_id": None,
-                    "guardrail_latency": {
-                        "$avg": "$metadata.latencies.guardrail_latency"
-                    },
                     "rag_decision_latency": {
                         "$avg": "$metadata.latencies.rag_decision_latency"
+                    },
+                    "query_embedding_latency": {
+                        "$avg": "$metadata.latencies.query_embedding_latency"
+                    },
+                    "qdrant_retrieval_latency": {
+                        "$avg": "$metadata.latencies.qdrant_retrieval_latency"
+                    },
+                    "mcp_retrieval_latency": {
+                        "$avg": "$metadata.latencies.mcp_retrieval_latency"
+                    },
+                    "reranking_latency": {
+                        "$avg": "$metadata.latencies.reranking_latency"
                     },
                     "first_token_latency": {
                         "$avg": "$metadata.latencies.first_token_latency"
@@ -64,7 +83,7 @@ async def get_average_latencies():
                     },
                 }
             }
-        ]
+        )
         cursor = messages_col.aggregate(pipeline, allowDiskUse=True)
         results = await cursor.to_list(length=1)
         return results[0]
