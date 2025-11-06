@@ -63,6 +63,10 @@ STAGING_PUBLIC_COLLECTIONS = [
         "name": "Wikipedia EO",
         "description": "This collection brings together Wikipedia articles related to Earth Observation (EO). The content is intended to provide accessible, introductory information about EO concepts, technologies, and organizations active in the field. Please note that these articles are not peer-reviewed scientific publications. Instead, they are written for a general audience and aim to give broad overviews rather than in-depth, expert analyses. Users should treat this collection as a starting point for understanding EO, and complement it with specialized, peer-reviewed sources when deeper or technical knowledge is required. This collection contains about 2000 documents.",
     },
+    {
+        "name": "wikipedia-512",
+        "description": "ESA data with Wikipedia articles for testing",
+    },
     {"name": "qwen-512-filtered", "description": "ESA data with Qwen-512 for testing"},
     {
         "name": "satcom-chunks-collection",
