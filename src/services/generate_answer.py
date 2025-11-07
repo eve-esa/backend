@@ -514,30 +514,6 @@ def _sort_runpod_reranked_results(
     return ordered_indices
 
 
-def _sort_deepinfra_reranked_results(
-    reranked: dict, candidate_indices: List[int]
-) -> List[int]:
-    """Sort results from DeepInfra reranker.
-
-    DeepInfra returns results with 'scores' array where each score corresponds
-    to the relevance of the document at that index.
-    """
-    if not isinstance(reranked, dict) or "scores" not in reranked:
-        return list(candidate_indices)
-
-    scores = reranked["scores"]
-    if not isinstance(scores, list) or len(scores) != len(candidate_indices):
-        return list(candidate_indices)
-
-    # Create list of (score, original_index) pairs and sort by score descending
-    scored_indices = [(scores[i], candidate_indices[i]) for i in range(len(scores))]
-    scored_indices.sort(key=lambda x: x[0], reverse=True)
-
-    # Extract the ordered indices
-    ordered_indices = [idx for _, idx in scored_indices]
-    return ordered_indices
-
-
 def _maybe_rerank_deepinfra(
     candidate_texts: List[str], query: str, timeout: int = 5
 ) -> dict | None:
@@ -575,7 +551,7 @@ def _maybe_rerank_deepinfra(
     try:
         reranker = SiliconFlowReranker(api_token)
         results = reranker.rerank([query], candidate_texts)
-        return {"scores": results} if not isinstance(results, dict) else results
+        return results
     except Exception:
         logger.warning("SiliconFlow reranker failed", exc_info=True)
         return None
@@ -860,9 +836,7 @@ async def setup_rag_and_context(request: GenerationRequest):
         merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
         candidate_texts: List[str] = []
-        candidate_indices: List[int] = []
-        index_to_text: Dict[int, str] = {}
-        for idx, res in enumerate(merged_results):
+        for res in merged_results:
             text_val: Optional[str] = None
             try:
                 payload = getattr(res, "payload", None)
@@ -876,31 +850,27 @@ async def setup_rag_and_context(request: GenerationRequest):
             if text_val:
                 text_str = str(text_val).strip()
                 if text_str and "API call failed" not in text_str:
-                    candidate_indices.append(idx)
                     candidate_texts.append(text_str)
-                    index_to_text[idx] = text_str
 
         # Rerank candidates using DeepInfra reranker
         latency = time.perf_counter()
         reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
         latencies["reranking_latency"] = time.perf_counter() - latency
-        if reranked:
-            ordered_indices = _sort_deepinfra_reranked_results(
-                reranked, candidate_indices
-            )
-        else:
-            ordered_indices = list(candidate_indices)
+        # Attach reranking_score to each result
+        formated_results = [extract_document_data(e) for e in merged_results]
+        for item in reranked:
+            idx = item["index"]
+            reranking_score = item["reranking_score"]
+            formated_results[idx]["reranking_score"] = reranking_score
 
         # Trim to top-k
         top_k = int(getattr(request, "k", 5) or 5)
-        selected_indices = ordered_indices[:top_k]
+        selected_indices = [item["index"] for item in reranked[:top_k]]
         # Build context and filter original results to the selected set
-        context_list = [
-            index_to_text[i] for i in selected_indices if i in index_to_text
-        ]
+        context_list = [formated_results[i]["text"] for i in selected_indices]
         context_list = list(set(context_list))
         context = build_context(context_list)
-        results = [merged_results[i] for i in selected_indices]
+        results = [formated_results[i] for i in selected_indices]
         results = _deduplicate_results(results)
 
         latencies.update(rag_lat or {})
@@ -910,7 +880,7 @@ async def setup_rag_and_context(request: GenerationRequest):
             f"Failed to get RAG context and MCP context and merge them: {e}"
         )
 
-    return context, results, latencies
+    return context, results, latencies, formated_results
 
 
 async def check_policy(
@@ -977,13 +947,16 @@ async def generate_answer(
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies = "", [], {}
+        retrieved_docs: List[Dict[str, Any]] = []
         if (
             len(request.collection_ids) > 0
             and request.k > 0
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies = await setup_rag_and_context(request)
+                context, results, latencies, retrieved_docs = (
+                    await setup_rag_and_context(request)
+                )
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context")
                 scraping_dog_start = time.perf_counter()
@@ -995,6 +968,7 @@ async def generate_answer(
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
+                retrieved_docs = []
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
@@ -1100,6 +1074,7 @@ async def generate_answer(
             rag_decision_result.use_rag,
             latencies,
             prompts,
+            retrieved_docs,
         )
 
     except Exception as e:
@@ -1227,7 +1202,9 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies = await setup_rag_and_context(request)
+                context, results, latencies, retrieved_docs = (
+                    await setup_rag_and_context(request)
+                )
                 if len(results) == 0:
                     raise Exception("No RAG results found for the query")
             except Exception as e:
@@ -1241,6 +1218,7 @@ async def generate_answer_stream_generator_helper(
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
+                retrieved_docs = []
 
         if rag_decision_result.use_rag:
             if request.llm_type in (
@@ -1420,7 +1398,13 @@ async def generate_answer_stream_generator_helper(
                 message.documents = documents_data
                 message.use_rag = rag_decision_result.use_rag
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata.update({"latencies": latencies, "prompts": prompts})
+                existing_metadata.update(
+                    {
+                        "latencies": latencies,
+                        "prompts": prompts,
+                        "retrieved_docs": retrieved_docs,
+                    }
+                )
                 message.metadata = existing_metadata
                 await message.save()
         except Exception as e:

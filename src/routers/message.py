@@ -270,8 +270,8 @@ async def create_message(
             metadata={},
         )
 
-        answer, results, is_rag, latencies, prompts = await generate_answer(
-            request, conversation_id=conversation_id
+        answer, results, is_rag, latencies, prompts, retrieved_docs = (
+            await generate_answer(request, conversation_id=conversation_id)
         )
 
         documents_data = []
@@ -286,6 +286,7 @@ async def create_message(
             {
                 "latencies": latencies,
                 "prompts": prompts,
+                "retrieved_docs": retrieved_docs,
             }
         )
         message.metadata = existing_metadata
@@ -357,8 +358,10 @@ async def retry(
                 detail="This message cannot be retried",
             )
 
-        answer, results, is_rag, latencies, prompts = await generate_answer(
-            message.request_input, conversation_id=conversation_id
+        answer, results, is_rag, latencies, prompts, retrieved_docs = (
+            await generate_answer(
+                message.request_input, conversation_id=conversation_id
+            )
         )
 
         documents_data = []
@@ -369,7 +372,13 @@ async def retry(
         message.documents = documents_data
         message.use_rag = is_rag
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
-        existing_metadata.update({"latencies": latencies, "prompts": prompts})
+        existing_metadata.update(
+            {
+                "latencies": latencies,
+                "prompts": prompts,
+                "retrieved_docs": retrieved_docs,
+            }
+        )
         message.metadata = existing_metadata
         await message.save()
 

@@ -367,6 +367,7 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
     result_id = _field(result, "id")
     result_version = _to_int(_field(result, "version"))
     result_score = _to_float(_field(result, "score") or _field(result, "distance"))
+    result_rerank = _to_float(_field(result, "reranking_score"))
     result_payload = (
         _field(result, "payload", {}) or _field(result, "document", {}) or {}
     )
@@ -391,6 +392,7 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         "id": str(result_id) if result_id is not None else None,
         "version": result_version,
         "score": result_score,
+        "reranking_score": result_rerank,
         "collection_name": collection_name,
         "payload": result_payload,
         "text": result_text,

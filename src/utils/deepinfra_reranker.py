@@ -42,8 +42,13 @@ class DeepInfraReranker:
         try:
             response = requests.post(url, headers=headers, json=payload)
             response.raise_for_status()  # Raises an HTTPError for bad responses
-
-            return response.json()
+            data = response.json()
+            scores_with_indices = [
+                {"index": idx, "reranking_score": score}
+                for idx, score in enumerate(data["scores"])
+            ]
+            scores_with_indices.sort(key=lambda x: x["reranking_score"], reverse=True)
+            return scores_with_indices
 
         except requests.RequestException as e:
             raise requests.RequestException(f"API request failed: {str(e)}")

@@ -57,9 +57,13 @@ class SiliconFlowReranker:
             # Extract relevance scores
             if "results" not in data:
                 raise ValueError(f"Unexpected response format: {data}")
-
-            scores = [item["relevance_score"] for item in data["results"]]
-            return scores
+            reranked_results = data["results"]
+            scores_with_indices = [
+                {"index": item["index"], "reranking_score": item["relevance_score"]}
+                for item in reranked_results
+            ]
+            scores_with_indices.sort(key=lambda x: x["reranking_score"], reverse=True)
+            return scores_with_indices
 
         except requests.RequestException as e:
             raise requests.RequestException(f"API request failed: {str(e)}")

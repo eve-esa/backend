@@ -25,6 +25,9 @@ class DocumentReference(BaseModel):
     score: Optional[float] = Field(
         default=None, description="Similarity or relevance score if present"
     )
+    reranking_score: Optional[float] = Field(
+        default=None, description="Reranker score if present"
+    )
     collection_name: Optional[str] = Field(
         default=None, description="Source collection name of the retrieved document"
     )
