@@ -867,11 +867,9 @@ async def setup_rag_and_context(request: GenerationRequest):
         top_k = int(getattr(request, "k", 5) or 5)
         selected_indices = [item["index"] for item in reranked[:top_k]]
         # Build context and filter original results to the selected set
-        context_list = [formated_results[i]["text"] for i in selected_indices]
-        context_list = list(set(context_list))
-        context = build_context(context_list)
         results = [formated_results[i] for i in selected_indices]
         results = _deduplicate_results(results)
+        context = build_context(results)
 
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})

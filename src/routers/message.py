@@ -395,6 +395,8 @@ async def retry(
             "collection_ids": message.request_input.collection_ids,
             "metadata": {
                 "latencies": latencies,
+                "prompts": prompts,
+                "retrieved_docs": retrieved_docs,
             },
         }
     except HTTPException:
