@@ -1192,7 +1192,7 @@ async def generate_answer_stream_generator_helper(
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies = "", [], {}
+        context, results, latencies, retrieved_docs = "", [], {}, []
         if (
             len(request.public_collections) > 0
             and request.k > 0
