@@ -732,6 +732,8 @@ async def get_mcp_context(
         "mcp_retrieval_latency": mcp_retrieval_latency,
     }
 
+    logger.info(f"retrieved {len(extracted)} documents from MCP")
+
     return extracted, latencies
 
 
@@ -830,9 +832,17 @@ async def setup_rag_and_context(request: GenerationRequest):
             ]
             latencies.update(satcom_lat or {})
 
-        results, rag_lat = await get_rag_context(vector_store, request)
+        rag_task = asyncio.create_task(get_rag_context(vector_store, request))
+        mcp_task = None
         if "Wiley AI Gateway" in request.public_collections:
-            mcp_results, mcp_lat = await get_mcp_context(request)
+            mcp_task = asyncio.create_task(get_mcp_context(request))
+
+        if mcp_task:
+            (results, rag_lat), (mcp_results, mcp_lat) = await asyncio.gather(
+                rag_task, mcp_task
+            )
+        else:
+            results, rag_lat = await rag_task
 
         merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
