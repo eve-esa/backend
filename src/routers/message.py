@@ -31,6 +31,10 @@ import time
 from typing import Optional, Dict
 from pydantic import BaseModel
 from src.services.hallucination_detector import HallucinationDetector
+import asyncio
+import json
+from src.services.generate_answer import run_generation_to_bus
+from src.services.stream_bus import get_stream_bus
 
 logger = logging.getLogger(__name__)
 
@@ -537,15 +541,29 @@ async def create_message_stream(
             metadata={},
         )
 
-        response = StreamingResponse(
-            generate_answer_json_stream_generator(
-                request,
+        # Start decoupled background job that publishes to bus
+        asyncio.create_task(
+            run_generation_to_bus(
+                request=request,
                 conversation_id=conversation_id,
                 message_id=message.id,
                 background_tasks=background_tasks,
-            ),
-            media_type="text/event-stream",
+            )
         )
+
+        bus = get_stream_bus()
+
+        async def _gen():
+            # Optional catch-up from currently saved output (usually empty right after create)
+            try:
+                if message.output:
+                    yield f"data: {json.dumps({'type':'partial','content': message.output})}\n\n"
+            except Exception:
+                pass
+            async for data in bus.subscribe(message.id):
+                yield data
+
+        response = StreamingResponse(_gen(), media_type="text/event-stream")
         # Set SSE-friendly headers to prevent proxy/client reconnect loops
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Connection"] = "keep-alive"

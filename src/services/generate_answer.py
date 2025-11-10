@@ -56,6 +56,7 @@ import contextlib
 
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.constants import SCRAPING_DOG_ALL_URLS
+from src.services.stream_bus import get_stream_bus
 
 
 logger = logging.getLogger(__name__)
@@ -1462,3 +1463,33 @@ async def generate_answer_json_stream_generator(
         request, conversation_id, message_id, "json", background_tasks
     ):
         yield chunk
+
+
+async def run_generation_to_bus(
+    request: GenerationRequest,
+    conversation_id: str,
+    message_id: str,
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    Run generation in the background and publish chunks to a per-message bus.
+    This decouples generation from HTTP connection lifetime.
+    """
+    bus = get_stream_bus()
+    try:
+        async for chunk in generate_answer_json_stream_generator(
+            request=request,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            background_tasks=background_tasks,
+        ):
+            # Forward SSE-formatted chunks as-is
+            await bus.publish(message_id, chunk)
+    except Exception as e:
+        await bus.publish(
+            message_id,
+            f"data: {json.dumps({'type':'error','message':str(e)})}\n\n",
+        )
+    finally:
+        # Signal end-of-data for subscribers
+        await bus.close(message_id)
