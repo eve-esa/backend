@@ -908,6 +908,7 @@ async def stream_hallucination(
                 "type": "final",
                 "answer": final_answer,
                 "latencies": latencies,
+                "top_k_retrieved_docs": results,
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         except Exception as e:
