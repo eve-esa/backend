@@ -767,8 +767,6 @@ async def stream_hallucination(
                 llm_type=message.request_input.llm_type,
             )
             detect_latency = time.perf_counter() - t0
-            # Transparency: emit detection step
-            yield f"data: {json.dumps({'type': 'status', 'content': 'Detecting hallucination...'})}\n\n"
 
             # If factual (label == 0), emit reason and finish
             if label == 0:
@@ -866,6 +864,7 @@ async def stream_hallucination(
             if context:
                 prompt = f"{prompt}\n\nContext:\n{context}"
 
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Generating answer...'})}\n\n"
             final_answer_chunks = []
             t2 = time.perf_counter()
             # Use mistral streaming path (follows existing generate_answer streaming behavior)
@@ -898,7 +897,7 @@ async def stream_hallucination(
                     "rewritten_question": rewritten_question,
                     "final_answer": final_answer,
                     "latencies": latencies,
-                    "top-k-retrieved-docs": results,
+                    "top_k_retrieved_docs": results,
                     "retrieved_docs": retrieved_docs,
                 }
                 await message.save()
