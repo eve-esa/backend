@@ -13,6 +13,7 @@ from src.services.generate_answer import (
     generate_answer,
     maybe_rollup_and_trim_history,
 )
+from src.services.generate_answer import setup_rag_and_context
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
@@ -755,6 +756,8 @@ async def stream_hallucination(
         total_start = time.perf_counter()
         detector = HallucinationDetector()
         try:
+            # Emit an initial status event early to start the stream promptly
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Starting hallucination pipeline...'})}\n\n"
             # Step 1: Detect
             t0 = time.perf_counter()
             label, reason = await detector.detect(
@@ -764,6 +767,8 @@ async def stream_hallucination(
                 llm_type=message.request_input.llm_type,
             )
             detect_latency = time.perf_counter() - t0
+            # Transparency: emit detection step
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Detecting hallucination...'})}\n\n"
 
             # If factual (label == 0), emit reason and finish
             if label == 0:
@@ -776,15 +781,13 @@ async def stream_hallucination(
                 }
                 # Persist to message metadata
                 try:
-                    existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                    existing_metadata["hallucination"] = {
+                    message.hallucination = {
                         "label": label,
                         "reason": reason,
                         "rewritten_question": None,
                         "final_answer": None,
                         "latencies": latencies,
                     }
-                    message.metadata = existing_metadata
                     await message.save()
                 except Exception:
                     pass
@@ -798,6 +801,8 @@ async def stream_hallucination(
                 return
 
             # Step 2: Rewrite (for hallucination)
+            # Transparency: emit rewriting step
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Rewriting query...'})}\n\n"
             t1 = time.perf_counter()
             _orig_q, rewritten_question = await detector.rewrite_query(
                 query=message.input,
@@ -807,11 +812,59 @@ async def stream_hallucination(
             )
             rewrite_latency = time.perf_counter() - t1
 
-            # Step 3: Stream final answer from LLM using the hallucination answer template
+            # Step 3: Retrieve docs for rewritten_question (Qdrant + Wiley MCP)
+            # Transparency: emit retrieving step
+            yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents...'})}\n\n"
+            # Build a new GenerationRequest based on original, overriding the query
+            req_in = message.request_input or GenerationRequest(query=message.input)
+            rewritten_request = GenerationRequest(
+                query=rewritten_question or message.input,
+                year=getattr(req_in, "year", None),
+                filters=getattr(req_in, "filters", None),
+                llm_type=getattr(req_in, "llm_type", None),
+                embeddings_model=getattr(req_in, "embeddings_model", None),
+                k=getattr(req_in, "k", 5),
+                temperature=getattr(req_in, "temperature", 0.3),
+                score_threshold=getattr(req_in, "score_threshold", 0.7),
+                max_new_tokens=getattr(req_in, "max_new_tokens", 1024),
+                public_collections=list(
+                    getattr(req_in, "public_collections", []) or []
+                ),
+            )
+            try:
+                rewritten_request.collection_ids = list(
+                    getattr(req_in, "collection_ids", []) or []
+                )
+            except Exception:
+                pass
+            try:
+                rewritten_request.private_collections_map = dict(
+                    getattr(req_in, "private_collections_map", {}) or {}
+                )
+            except Exception:
+                pass
+
+            context = ""
+            retrieved_docs = []
+            rag_latencies = {}
+            try:
+                context, results, rag_latencies, retrieved_docs = (
+                    await setup_rag_and_context(rewritten_request)
+                )
+            except Exception as e:
+                # Soft-fail RAG retrieval; proceed without new docs
+                rag_latencies = {"rag_error": str(e)}
+                retrieved_docs = []
+                context = ""
+
+            # Step 4: Stream final answer from LLM using the hallucination answer template
             template = get_template(
                 "llm_answer_template", filename="hallucination_detector.yaml"
             )
+            # Inject retrieved context for better grounding
             prompt = template.format(query=rewritten_question or message.input)
+            if context:
+                prompt = f"{prompt}\n\nContext:\n{context}"
 
             final_answer_chunks = []
             t2 = time.perf_counter()
@@ -832,21 +885,22 @@ async def stream_hallucination(
             latencies = {
                 "detect": detect_latency,
                 "rewrite": rewrite_latency,
+                **(rag_latencies or {}),
                 "final_answer": final_latency,
                 "total": total_latency,
             }
 
-            # Persist to message metadata
+            # Persist to message.hallucination
             try:
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["hallucination"] = {
+                message.hallucination = {
                     "label": label,
                     "reason": reason,
                     "rewritten_question": rewritten_question,
                     "final_answer": final_answer,
                     "latencies": latencies,
+                    "top-k-retrieved-docs": results,
+                    "retrieved_docs": retrieved_docs,
                 }
-                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass

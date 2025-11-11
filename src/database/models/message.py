@@ -37,6 +37,9 @@ class Message(MongoModel):
     metadata: Optional[Dict[str, Any]] = Field(
         default=None, description="Metadata for the message"
     )
+    hallucination: Optional[Dict[str, Any]] = Field(
+        default=None, description="Hallucination analysis data"
+    )
 
     collection_name: ClassVar[str] = "messages"
 
