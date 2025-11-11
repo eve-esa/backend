@@ -769,6 +769,7 @@ async def stream_hallucination(
             detect_latency = time.perf_counter() - t0
 
             yield f"data: {json.dumps({'type': 'label', 'content': label})}\n\n"
+            yield f"data: {json.dumps({'type': 'reason', 'content': reason})}\n\n"
 
             # If factual (label == 0), emit reason and finish
             if label == 0:
@@ -794,8 +795,12 @@ async def stream_hallucination(
 
                 final_payload = {
                     "type": "final",
-                    "answer": reason,
+                    "label": label,
+                    "reason": reason,
+                    "rewritten_question": None,
+                    "answer": None,
                     "latencies": latencies,
+                    "top_k_retrieved_docs": None,
                 }
                 yield f"data: {json.dumps(final_payload)}\n\n"
                 return
@@ -908,6 +913,8 @@ async def stream_hallucination(
 
             final_payload = {
                 "type": "final",
+                "label": label,
+                "reason": reason,
                 "rewritten_question": rewritten_question,
                 "answer": final_answer,
                 "latencies": latencies,
