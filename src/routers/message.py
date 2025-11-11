@@ -757,7 +757,7 @@ async def stream_hallucination(
         detector = HallucinationDetector()
         try:
             # Emit an initial status event early to start the stream promptly
-            yield f"data: {json.dumps({'type': 'status', 'content': 'Starting hallucination pipeline...'})}\n\n"
+            yield f"data: {json.dumps({'type': 'status', 'content': 'hallucination detection started...'})}\n\n"
             # Step 1: Detect
             t0 = time.perf_counter()
             label, reason = await detector.detect(
