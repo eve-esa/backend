@@ -768,6 +768,8 @@ async def stream_hallucination(
             )
             detect_latency = time.perf_counter() - t0
 
+            yield f"data: {json.dumps({'type': 'label', 'content': label})}\n\n"
+
             # If factual (label == 0), emit reason and finish
             if label == 0:
                 total_latency = time.perf_counter() - total_start
@@ -906,6 +908,7 @@ async def stream_hallucination(
 
             final_payload = {
                 "type": "final",
+                "rewritten_question": rewritten_question,
                 "answer": final_answer,
                 "latencies": latencies,
                 "top_k_retrieved_docs": results,
