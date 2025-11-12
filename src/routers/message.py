@@ -315,7 +315,9 @@ async def create_message(
     except HTTPException as http_exc:
         if message:
             try:
-                message.metadata = {"error": str(getattr(http_exc, "detail", http_exc))}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
@@ -323,7 +325,9 @@ async def create_message(
     except Exception as e:
         if message:
             try:
-                message.metadata = {"error": str(e)}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(e)
+                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
@@ -573,7 +577,9 @@ async def create_message_stream(
     except HTTPException as http_exc:
         if message:
             try:
-                message.metadata = {"error": str(getattr(http_exc, "detail", http_exc))}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
@@ -581,7 +587,9 @@ async def create_message_stream(
     except Exception as e:
         if message:
             try:
-                message.metadata = {"error": str(e)}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(e)
+                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
@@ -816,6 +824,7 @@ async def stream_hallucination(
                 llm_type=message.request_input.llm_type,
             )
             rewrite_latency = time.perf_counter() - t1
+            yield f"data: {json.dumps({'type': 'rewritten_question', 'content': rewritten_question})}\n\n"
 
             # Step 3: Retrieve docs for rewritten_question (Qdrant + Wiley MCP)
             # Transparency: emit retrieving step
@@ -874,16 +883,51 @@ async def stream_hallucination(
             yield f"data: {json.dumps({'type': 'status', 'content': 'Generating answer...'})}\n\n"
             final_answer_chunks = []
             t2 = time.perf_counter()
-            # Use mistral streaming path (follows existing generate_answer streaming behavior)
+            # Try primary provider streaming first with a first-token timeout, then fallback to Mistral
             llm = detector.llm_manager.get_client_for_model(
                 message.request_input.llm_type
             )
-            async for token in llm.astream(prompt):
-                text = getattr(token, "content", None)
-                if not text:
-                    continue
-                final_answer_chunks.append(text)
-                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+            used_stream = False
+            try:
+                astream = llm.astream(prompt)
+                # Enforce first token timeout similar to generate_answer
+                llm_instruct_timeout = (
+                    detector.llm_manager.config.get_instruct_llm_timeout()
+                )
+                async with asyncio.timeout(llm_instruct_timeout):
+                    first = await astream.__anext__()
+                    first_text = getattr(first, "content", None)
+                    if first_text:
+                        final_answer_chunks.append(first_text)
+                        yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
+                # Continue without timeout
+                async for token in astream:
+                    text = getattr(token, "content", None)
+                    if not text:
+                        continue
+                    final_answer_chunks.append(text)
+                    yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                used_stream = True
+            except Exception:
+                used_stream = False
+
+            # Fallback to Mistral streaming if needed
+            if not used_stream:
+                logger.info("Hallucination Falling back to Mistral streaming")
+                async for (
+                    token,
+                    _prompt,
+                ) in detector.llm_manager.generate_answer_mistral_stream(
+                    query=rewritten_question or message.input,
+                    context=context or "",
+                    temperature=getattr(message.request_input, "temperature", 0.3),
+                    conversation_context="",
+                ):
+                    if not token:
+                        continue
+                    final_answer_chunks.append(str(token))
+                    yield f"data: {json.dumps({'type':'token','content':str(token)})}\n\n"
+
             final_latency = time.perf_counter() - t2
 
             final_answer = "".join(final_answer_chunks)
@@ -924,7 +968,9 @@ async def stream_hallucination(
         except Exception as e:
             # Persist error and stream error event
             try:
-                message.metadata = {"error": str(e)}
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(e)
+                message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
