@@ -1,6 +1,8 @@
 from datetime import datetime
 
 from pydantic import BaseModel, Field
+from langfuse import observe, propagate_attributes
+
 from src.config import IS_PROD
 from src.constants import (
     PUBLIC_COLLECTIONS,
@@ -193,6 +195,7 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
 @router.post(
     "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse
 )
+@observe()
 async def create_message(
     request: GenerationRequest,
     conversation_id: str,
@@ -200,138 +203,139 @@ async def create_message(
     requesting_user: User = Depends(get_current_user),
 ):
     message = None
-    try:
-        conversation = await Conversation.find_by_id(conversation_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        if conversation.user_id != requesting_user.id:
-            raise HTTPException(
-                status_code=403,
-                detail="You are not allowed to add a message to this conversation",
-            )
-
-        # Normalize and validate requested public collections against allowed lists
-        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+    with propagate_attributes(session_id=conversation_id):
         try:
-            allowed_names = {
-                item.get("name")
-                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-                if isinstance(item, dict) and item.get("name")
-            }
-        except Exception:
-            allowed_names = set()
+            conversation = await Conversation.find_by_id(conversation_id)
+            if not conversation:
+                raise HTTPException(status_code=404, detail="Conversation not found")
 
-        public_collections = [
-            n for n in request.public_collections if n in allowed_names
-        ]
-        request.public_collections = public_collections
+            if conversation.user_id != requesting_user.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You are not allowed to add a message to this conversation",
+                )
 
-        # lookup query to check if some of the collection ids from other users are in the request.collection_ids
-        other_users_collections = await CollectionModel.find_all(
-            filter_dict={
-                "id": {"$in": request.public_collections},
-                "user_id": {"$ne": requesting_user.id},
-            }
-        )
+            # Normalize and validate requested public collections against allowed lists
+            allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+            try:
+                allowed_names = {
+                    item.get("name")
+                    for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                    if isinstance(item, dict) and item.get("name")
+                }
+            except Exception:
+                allowed_names = set()
 
-        if len(other_users_collections) > 0:
-            raise HTTPException(
-                status_code=403,
-                detail="You are not allowed to use collections from other users",
-            )
-
-        request.collection_ids = request.collection_ids + request.public_collections
-
-        # All user collections are used by default
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
+            public_collections = [
+                n for n in request.public_collections if n in allowed_names
             ]
-        # remove "Wiley AI Gateway" from collection_ids
-        request.collection_ids = [
-            c for c in request.collection_ids if c != "Wiley AI Gateway"
-        ]
-        logger.info(f"Collection IDs: {request.collection_ids}")
+            request.public_collections = public_collections
 
-        # Extract year range from filters for MCP usage
-        try:
-            request.year = extract_year_range_from_filters(request.filters)
-        except Exception:
-            request.year = None
+            # lookup query to check if some of the collection ids from other users are in the request.collection_ids
+            other_users_collections = await CollectionModel.find_all(
+                filter_dict={
+                    "id": {"$in": request.public_collections},
+                    "user_id": {"$ne": requesting_user.id},
+                }
+            )
 
-        message = await Message.create(
-            conversation_id=conversation_id,
-            input=request.query,
-            output="",
-            documents=[],
-            use_rag=False,
-            request_input=request,
-            metadata={},
-        )
+            if len(other_users_collections) > 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You are not allowed to use collections from other users",
+                )
 
-        answer, results, is_rag, latencies, prompts, retrieved_docs = (
-            await generate_answer(request, conversation_id=conversation_id)
-        )
+            request.collection_ids = request.collection_ids + request.public_collections
 
-        documents_data = []
-        if results:
-            documents_data = [extract_document_data(result) for result in results]
+            # All user collections are used by default
+            user_collections = await CollectionModel.find_all(
+                filter_dict={"user_id": requesting_user.id}
+            )
 
-        message.output = answer
-        message.documents = documents_data
-        message.use_rag = is_rag
-        existing_metadata = dict(getattr(message, "metadata", {}) or {})
-        existing_metadata.update(
-            {
-                "latencies": latencies,
-                "prompts": prompts,
-                "retrieved_docs": retrieved_docs,
+            request.private_collections_map = {c.id: c.name for c in user_collections}
+            if len(user_collections) > 0:
+                request.collection_ids = request.collection_ids + [
+                    c.id for c in user_collections
+                ]
+            # remove "Wiley AI Gateway" from collection_ids
+            request.collection_ids = [
+                c for c in request.collection_ids if c != "Wiley AI Gateway"
+            ]
+            logger.info(f"Collection IDs: {request.collection_ids}")
+
+            # Extract year range from filters for MCP usage
+            try:
+                request.year = extract_year_range_from_filters(request.filters)
+            except Exception:
+                request.year = None
+
+            message = await Message.create(
+                conversation_id=conversation_id,
+                input=request.query,
+                output="",
+                documents=[],
+                use_rag=False,
+                request_input=request,
+                metadata={},
+            )
+
+            answer, results, is_rag, latencies, prompts, retrieved_docs = (
+                await generate_answer(request, conversation_id=conversation_id)
+            )
+
+            documents_data = []
+            if results:
+                documents_data = [extract_document_data(result) for result in results]
+
+            message.output = answer
+            message.documents = documents_data
+            message.use_rag = is_rag
+            existing_metadata = dict(getattr(message, "metadata", {}) or {})
+            existing_metadata.update(
+                {
+                    "latencies": latencies,
+                    "prompts": prompts,
+                    "retrieved_docs": retrieved_docs,
+                }
+            )
+            message.metadata = existing_metadata
+            await message.save()
+
+            # Schedule rollup as background task to avoid blocking response
+            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+
+            return {
+                "id": message.id,
+                "query": request.query,
+                "answer": answer,
+                "documents": documents_data,
+                "use_rag": is_rag,
+                "conversation_id": conversation_id,
+                "collection_ids": request.collection_ids,
+                "metadata": {
+                    "latencies": latencies,
+                },
             }
-        )
-        message.metadata = existing_metadata
-        await message.save()
-
-        # Schedule rollup as background task to avoid blocking response
-        background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
-
-        return {
-            "id": message.id,
-            "query": request.query,
-            "answer": answer,
-            "documents": documents_data,
-            "use_rag": is_rag,
-            "conversation_id": conversation_id,
-            "collection_ids": request.collection_ids,
-            "metadata": {
-                "latencies": latencies,
-            },
-        }
-    except HTTPException as http_exc:
-        if message:
-            try:
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
-                message.metadata = existing_metadata
-                await message.save()
-            except Exception:
-                pass
-        raise
-    except Exception as e:
-        if message:
-            try:
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(e)
-                message.metadata = existing_metadata
-                await message.save()
-            except Exception:
-                pass
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        except HTTPException as http_exc:
+            if message:
+                try:
+                    existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                    existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                    message.metadata = existing_metadata
+                    await message.save()
+                except Exception:
+                    pass
+            raise
+        except Exception as e:
+            if message:
+                try:
+                    existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                    existing_metadata["error"] = str(e)
+                    message.metadata = existing_metadata
+                    await message.save()
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
 @router.post("/conversations/{conversation_id}/messages/{message_id}/retry")

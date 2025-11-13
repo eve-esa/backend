@@ -77,3 +77,14 @@ chmod +x test.sh
 ```
 
 The server will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+
+## Self host langfuse(Optional)
+
+To self host langfuse, clone [Langfuse](https://github.com/langfuse/langfuse).
+
+```bash
+cd langfuse
+docker compose up
+```
+

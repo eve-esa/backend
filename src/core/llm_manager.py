@@ -9,6 +9,7 @@ import os
 
 from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
+from langfuse import observe
 
 from src.config import (
     Config,
@@ -544,7 +545,8 @@ class LLMManager:
         except Exception as e:
             logger.error(f"Failed to generate answer using runpod model: {str(e)}")
             raise
-
+    
+    @observe()
     async def generate_answer_mistral(
         self,
         query: str,

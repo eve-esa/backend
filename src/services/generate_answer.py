@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from fastapi import BackgroundTasks, HTTPException
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field, PrivateAttr
+from langfuse import observe
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.core.llm_manager import LLMManager, LLMType
@@ -557,7 +558,7 @@ def _maybe_rerank_deepinfra(
         logger.warning("SiliconFlow reranker failed", exc_info=True)
         return None
 
-
+@observe()
 async def get_mcp_context(
     request: GenerationRequest,
 ) -> tuple[list, Dict[str, Optional[float]]]:
@@ -736,7 +737,7 @@ async def get_mcp_context(
 
     return extracted, latencies
 
-
+@observe()
 async def should_use_rag(
     llm_manager: LLMManager,
     query: str,
@@ -780,7 +781,7 @@ async def should_use_rag(
             return result, prompt, True
         return None, prompt, True
 
-
+@observe()
 async def get_rag_context(
     vector_store: VectorStoreManager, request: GenerationRequest
 ) -> tuple[list, Dict[str, Optional[float]]]:
@@ -801,7 +802,7 @@ async def get_rag_context(
 
     return results, vs_latencies
 
-
+@observe()
 async def setup_rag_and_context(request: GenerationRequest):
     """Setup RAG and get context for the request."""
     latencies: Dict[str, Optional[float]] = {}
@@ -891,7 +892,7 @@ async def setup_rag_and_context(request: GenerationRequest):
 
     return context, results, latencies, formated_results
 
-
+@observe()
 async def check_policy(
     request: GenerationRequest, llm_manager: LLMManager
 ) -> tuple[PolicyCheck, str]:
@@ -919,7 +920,7 @@ async def check_policy(
         logger.info(f"policy_result from mistral: {policy_result}")
         return policy_result, policy_prompt
 
-
+@observe
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
