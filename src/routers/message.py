@@ -36,6 +36,7 @@ import asyncio
 import json
 from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
+from src.services.cancel_manager import get_cancel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -547,14 +548,19 @@ async def create_message_stream(
         )
 
         # Start decoupled background job that publishes to bus
-        asyncio.create_task(
+        cancel_mgr = get_cancel_manager()
+        cancel_event = cancel_mgr.create(message.id)
+        cancel_mgr.link_conversation(conversation_id, message.id)
+        gen_task = asyncio.create_task(
             run_generation_to_bus(
                 request=request,
                 conversation_id=conversation_id,
                 message_id=message.id,
                 background_tasks=background_tasks,
+                cancel_event=cancel_event,
             )
         )
+        cancel_mgr.set_task(message.id, gen_task)
 
         bus = get_stream_bus()
 
@@ -593,6 +599,66 @@ async def create_message_stream(
                 await message.save()
             except Exception:
                 pass
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/conversations/{conversation_id}/stop")
+async def stop_conversation(
+    conversation_id: str,
+    requesting_user: User = Depends(get_current_user),
+):
+    try:
+        logger.info(
+            "generation.stop.requested user_id=%s conversation_id=%s",
+            requesting_user.id,
+            conversation_id,
+        )
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to access this conversation",
+            )
+
+        cancel_mgr = get_cancel_manager()
+        # Prefer async lookup to support Redis-backed mapping across workers
+        try:
+            message_id = await cancel_mgr.get_message_for_conversation_async(conversation_id)  # type: ignore
+        except Exception:
+            message_id = cancel_mgr.get_message_for_conversation(conversation_id)
+        if not message_id:
+            # Nothing active to stop; respond success for idempotency
+            logger.info(
+                "generation.stop.no_active user_id=%s conversation_id=%s",
+                requesting_user.id,
+                conversation_id,
+            )
+            return {"status": "no_active_generation"}
+
+        cancel_mgr.cancel(message_id)
+        try:
+            bus = get_stream_bus()
+            await bus.publish(message_id, f"data: {json.dumps({'type':'stopped'})}\n\n")
+            await bus.close(message_id)
+            logger.info(
+                "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
+                requesting_user.id,
+                conversation_id,
+                message_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "generation.stop.signal_failed conversation_id=%s message_id=%s err=%s",
+                conversation_id,
+                message_id,
+                str(e),
+            )
+        return {"status": "stopping", "message_id": message_id}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 

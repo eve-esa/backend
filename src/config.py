@@ -60,6 +60,9 @@ IS_PROD = os.getenv("IS_PROD", "").strip().lower() == "true"
 
 SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 
+# Optional Redis URL for cross-process cancel/pubsub
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
 runpod.api_key = RUNPOD_API_KEY
 
 

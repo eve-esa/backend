@@ -560,6 +560,7 @@ def _maybe_rerank_deepinfra(
 
 async def get_mcp_context(
     request: GenerationRequest,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> tuple[list, Dict[str, Optional[float]]]:
     """Call MCP semantic search and return (results, latencies)."""
     mcp_client = MultiServerMCPClientService.get_shared()
@@ -592,6 +593,10 @@ async def get_mcp_context(
                 "mcp_docs_reranking_latency": None,
             },
         )
+
+    # Early cancellation check
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
 
     # Build tool arguments
     args: Dict[str, Any] = {
@@ -650,6 +655,10 @@ async def get_mcp_context(
             return False
         return False
 
+    # Early cancellation check
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
+
     mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
@@ -673,6 +682,8 @@ async def get_mcp_context(
         except Exception:
             pass
         mcp_client = MultiServerMCPClientService.get_shared()
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         mcp_start = time.perf_counter()
         raw = await mcp_client.call_tool_on_server(
             "eve-mcp-demo", "semanticSearch", args
@@ -782,9 +793,13 @@ async def should_use_rag(
 
 
 async def get_rag_context(
-    vector_store: VectorStoreManager, request: GenerationRequest
+    vector_store: VectorStoreManager,
+    request: GenerationRequest,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> tuple[list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
     # Retrieve with latency measurements
     results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
         collection_names=request.collection_ids,
@@ -796,18 +811,26 @@ async def get_rag_context(
         private_collections_map=request.private_collections_map,
     )
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
+
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
 
     return results, vs_latencies
 
 
-async def setup_rag_and_context(request: GenerationRequest):
+async def setup_rag_and_context(
+    request: GenerationRequest,
+    cancel_event: Optional[asyncio.Event] = None,
+):
     """Setup RAG and get context for the request."""
     latencies: Dict[str, Optional[float]] = {}
     # Get RAG context
     context, results = "", []
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
@@ -825,24 +848,32 @@ async def setup_rag_and_context(request: GenerationRequest):
             collection_ids = request.collection_ids
             request.collection_ids = ["satcom-chunks-collection"]
             satcom_results, satcom_lat = await get_rag_context(
-                satcom_vector_store, request
+                satcom_vector_store, request, cancel_event=cancel_event
             )
             request.collection_ids = [
                 cid for cid in collection_ids if cid != "satcom-chunks-collection"
             ]
             latencies.update(satcom_lat or {})
 
-        rag_task = asyncio.create_task(get_rag_context(vector_store, request))
-        mcp_task = None
-        if "Wiley AI Gateway" in request.public_collections:
-            mcp_task = asyncio.create_task(get_mcp_context(request))
+        # Run RAG and optional MCP in a TaskGroup to inherit cancellation
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
 
-        if mcp_task:
-            (results, rag_lat), (mcp_results, mcp_lat) = await asyncio.gather(
-                rag_task, mcp_task
-            )
+        if "Wiley AI Gateway" in request.public_collections:
+            async with asyncio.TaskGroup() as tg:
+                rag_future = tg.create_task(
+                    get_rag_context(vector_store, request, cancel_event=cancel_event)
+                )
+                mcp_future = tg.create_task(
+                    get_mcp_context(request, cancel_event=cancel_event)
+                )
+                (results, rag_lat) = await rag_future
+                (mcp_results, mcp_lat) = await mcp_future
         else:
-            results, rag_lat = await rag_task
+            results, rag_lat = await get_rag_context(
+                vector_store, request, cancel_event=cancel_event
+            )
+            mcp_results, mcp_lat = [], {}
 
         merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
@@ -864,6 +895,8 @@ async def setup_rag_and_context(request: GenerationRequest):
                     candidate_texts.append(text_str)
 
         # Rerank candidates using DeepInfra reranker
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         latency = time.perf_counter()
         reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
         latencies["reranking_latency"] = time.perf_counter() - latency
@@ -875,6 +908,8 @@ async def setup_rag_and_context(request: GenerationRequest):
             formated_results[idx]["reranking_score"] = reranking_score
 
         # Trim to top-k
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         top_k = int(getattr(request, "k", 5) or 5)
         selected_indices = [item["index"] for item in reranked[:top_k]]
         # Build context and filter original results to the selected set
@@ -884,10 +919,9 @@ async def setup_rag_and_context(request: GenerationRequest):
 
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})
-    except Exception as e:
-        raise Exception(
-            f"Failed to get RAG context and MCP context and merge them: {e}"
-        )
+    except* asyncio.CancelledError:
+        # Propagate cooperative cancellation cleanly out of TaskGroup
+        raise
 
     return context, results, latencies, formated_results
 
@@ -1174,17 +1208,49 @@ async def generate_answer_stream_generator_helper(
     message_id: str,
     output_format: str = "plain",
     background_tasks: BackgroundTasks = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
 
     try:
+        logger.info(
+            "stream.helper.start conversation_id=%s message_id=%s",
+            conversation_id,
+            message_id,
+        )
+
+        def cancelled() -> bool:
+            return cancel_event is not None and cancel_event.is_set()
+
+        async def cancel_aware(coro):
+            if cancel_event is None:
+                return await coro
+            task = asyncio.create_task(coro)
+            wait_task = asyncio.create_task(cancel_event.wait())
+            done, pending = await asyncio.wait(
+                {task, wait_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if task in done:
+                with contextlib.suppress(Exception):
+                    wait_task.cancel()
+                return task.result()
+            with contextlib.suppress(Exception):
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise asyncio.CancelledError()
+
+        if cancelled():
+            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            return
+
         is_main_LLM_fail = False
         total_start = time.perf_counter()
         # Prepare conversation history for fallback path
         conversation_history, conversation_summary = (
-            await _get_conversation_history_from_db(conversation_id)
+            await cancel_aware(_get_conversation_history_from_db(conversation_id))
             if conversation_id
             else (None, None)
         )
@@ -1193,8 +1259,8 @@ async def generate_answer_stream_generator_helper(
         )
         # Setup RAG context
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
-            await should_use_rag(
+        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = await cancel_aware(
+            should_use_rag(
                 llm_manager, request.query, conversation_context, request.llm_type
             )
         )
@@ -1211,8 +1277,8 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies, retrieved_docs = (
-                    await setup_rag_and_context(request)
+                context, results, latencies, retrieved_docs = await cancel_aware(
+                    setup_rag_and_context(request, cancel_event=cancel_event)
                 )
                 if len(results) == 0:
                     raise Exception("No RAG results found for the query")
@@ -1222,12 +1288,18 @@ async def generate_answer_stream_generator_helper(
                 scraping_dog_crawler = ScrapingDogCrawler(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
                 )
-                results = await scraping_dog_crawler.run(request.query, request.k)
+                results = await cancel_aware(
+                    scraping_dog_crawler.run(request.query, request.k)
+                )
                 context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
                 retrieved_docs = []
+
+        if cancelled():
+            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            return
 
         if rag_decision_result.use_rag:
             if request.llm_type in (
@@ -1299,6 +1371,9 @@ async def generate_answer_stream_generator_helper(
 
                         # Enforce timeout only for the first token
                         async with asyncio.timeout(llm_instruct_timeout):
+                            if cancelled():
+                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                return
                             first_chunk, first_metadata = await astream.__anext__()
                             tokens_yielded += 1
                             if tokens_yielded == 1:
@@ -1314,6 +1389,11 @@ async def generate_answer_stream_generator_helper(
 
                         # Continue streaming remaining tokens without a timeout
                         async for chunk, metadata in astream:
+                            if cancelled():
+                                with contextlib.suppress(Exception):
+                                    await graph.aclose()
+                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                return
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
@@ -1353,24 +1433,32 @@ async def generate_answer_stream_generator_helper(
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
             logger.info(f"Using Mistral streaming fallback")
-            async for (
-                token,
-                mistral_generation_prompt,
-            ) in llm_manager.generate_answer_mistral_stream(
+            gen = llm_manager.generate_answer_mistral_stream(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
                 conversation_context=conversation_context,
-            ):
-                if output_format == "json":
-                    yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
-                else:
-                    yield f"data: {token}\n\n"
-                accumulated.append(str(token))
-                mistral_token_yielded += 1
-                if mistral_token_yielded == 1:
-                    mistral_first_token_latency = time.perf_counter() - total_start
+            )
+            try:
+                async for token, mistral_generation_prompt in gen:
+                    if cancelled():
+                        # Best-effort generator close
+                        with contextlib.suppress(Exception):
+                            await gen.aclose()  # type: ignore[attr-defined]
+                        yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                        return
+                    if output_format == "json":
+                        yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
+                    else:
+                        yield f"data: {token}\n\n"
+                    accumulated.append(str(token))
+                    mistral_token_yielded += 1
+                    if mistral_token_yielded == 1:
+                        mistral_first_token_latency = time.perf_counter() - total_start
+            finally:
+                with contextlib.suppress(Exception):
+                    await gen.aclose()  # type: ignore[attr-defined]
 
             mistral_gen_latency = time.perf_counter() - gen_start
             used_stream = True
@@ -1454,10 +1542,11 @@ async def generate_answer_stream_generator(
     conversation_id: str,
     message_id: str,
     background_tasks: BackgroundTasks = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ):
     """Generate streaming answer using RAG and LLM."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "plain", background_tasks
+        request, conversation_id, message_id, "plain", background_tasks, cancel_event
     ):
         yield chunk
 
@@ -1467,10 +1556,11 @@ async def generate_answer_json_stream_generator(
     conversation_id: str,
     message_id: str,
     background_tasks: BackgroundTasks = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "json", background_tasks
+        request, conversation_id, message_id, "json", background_tasks, cancel_event
     ):
         yield chunk
 
@@ -1480,6 +1570,7 @@ async def run_generation_to_bus(
     conversation_id: str,
     message_id: str,
     background_tasks: BackgroundTasks = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ):
     """
     Run generation in the background and publish chunks to a per-message bus.
@@ -1492,9 +1583,13 @@ async def run_generation_to_bus(
             conversation_id=conversation_id,
             message_id=message_id,
             background_tasks=background_tasks,
+            cancel_event=cancel_event,
         ):
             # Forward SSE-formatted chunks as-is
             await bus.publish(message_id, chunk)
+    except asyncio.CancelledError:
+        # Task was cancelled (via stop endpoint). Do not publish error; just exit.
+        pass
     except Exception as e:
         await bus.publish(
             message_id,
@@ -1503,3 +1598,12 @@ async def run_generation_to_bus(
     finally:
         # Signal end-of-data for subscribers
         await bus.close(message_id)
+        # Cleanup cancel manager state for this message
+        try:
+            from src.services.cancel_manager import get_cancel_manager
+
+            cm = get_cancel_manager()
+            cm.clear_mapping_for(conversation_id, message_id)
+            cm.clear(message_id)
+        except Exception:
+            pass
