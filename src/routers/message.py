@@ -451,6 +451,23 @@ async def update_message(
         if request.feedback_reason is not None:
             message.feedback_reason = request.feedback_reason
 
+        if request.hallucination_feedback is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["feedback"] = request.hallucination_feedback.value
+
+        if request.hallucination_feedback_reason is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["feedback_reason"] = (
+                request.hallucination_feedback_reason
+            )
+
+        if request.hallucination_was_copied is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["was_copied"] = request.hallucination_was_copied
+
         await message.save()
 
         return {"message": "Feedback updated successfully"}
