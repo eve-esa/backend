@@ -1487,6 +1487,30 @@ async def generate_answer_stream_generator_helper(
 
                         # Continue streaming remaining tokens without a timeout
                         async for chunk, metadata in astream:
+                            if cancelled():
+                                # Cancelled during LangGraph streaming; persist stopped state and exit
+                                with contextlib.suppress(Exception):
+                                    await astream.aclose()
+                                # Best-effort persist of any partial output and metadata snapshot
+                                current_total_latency = (
+                                    time.perf_counter() - total_start
+                                )
+                                final_latencies = {
+                                    "rag_decision_latency": rag_decision_latency,
+                                    **(locals().get("latencies") or {}),
+                                    "first_token_latency": first_token_latency,
+                                    "mistral_first_token_latency": None,
+                                    "base_generation_latency": None,
+                                    "fallback_latency": None,
+                                    "total_latency": current_total_latency,
+                                }
+                                await persist_message_state(
+                                    message_id,
+                                    stopped=True,
+                                    latencies=final_latencies,
+                                )
+                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                return
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
