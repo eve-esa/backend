@@ -169,6 +169,59 @@ def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
     return content
 
 
+async def persist_message_state(
+    message_id: str,
+    *,
+    output: Optional[str] = None,
+    results: Optional[List[Any]] = None,
+    documents: Optional[List[Any]] = None,
+    use_rag: Optional[bool] = None,
+    latencies: Optional[Dict[str, Any]] = None,
+    prompts: Optional[Dict[str, Any]] = None,
+    retrieved_docs: Optional[List[Any]] = None,
+    stopped: Optional[bool] = None,
+    error: Optional[str] = None,
+) -> None:
+    """
+    Best-effort persistence helper for Message state.
+    - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
+    - Updates output/documents/use_rag if provided.
+    - Sets Message.stopped if provided.
+    """
+    try:
+        from src.database.models.message import Message as MessageModel
+
+        message = await MessageModel.find_by_id(message_id)
+        if message is None:
+            return
+        if stopped is not None:
+            message.stopped = bool(stopped)
+        if output is not None:
+            message.output = output
+        # Documents handling: explicit documents override; else compute from results if provided
+        docs_payload = documents
+        if docs_payload is None and results is not None:
+            docs_payload = [extract_document_data(r) for r in (results or [])]
+        if docs_payload is not None:
+            message.documents = docs_payload
+        if use_rag is not None:
+            message.use_rag = bool(use_rag)
+        existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        if latencies is not None:
+            existing_metadata["latencies"] = latencies
+        if prompts is not None:
+            existing_metadata["prompts"] = prompts
+        if retrieved_docs is not None:
+            existing_metadata["retrieved_docs"] = retrieved_docs
+        if error is not None:
+            existing_metadata["error"] = error
+        message.metadata = existing_metadata
+        await message.save()
+    except Exception as e:
+        logger.error(f"Failed to persist message state: {e}")
+        return
+
+
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
 _langgraph_available = False
@@ -1243,27 +1296,48 @@ async def generate_answer_stream_generator_helper(
             raise asyncio.CancelledError()
 
         if cancelled():
+            # Mark message as stopped in DB
+            await persist_message_state(message_id, stopped=True)
             yield f"data: {json.dumps({'type':'stopped'})}\n\n"
             return
 
         is_main_LLM_fail = False
         total_start = time.perf_counter()
         # Prepare conversation history for fallback path
-        conversation_history, conversation_summary = (
-            await cancel_aware(_get_conversation_history_from_db(conversation_id))
-            if conversation_id
-            else (None, None)
-        )
+        if conversation_id:
+            try:
+                conversation_history, conversation_summary = await cancel_aware(
+                    _get_conversation_history_from_db(conversation_id)
+                )
+            except asyncio.CancelledError:
+                # Cancelled while fetching history; persist stopped and exit
+
+                await persist_message_state(message_id, stopped=True)
+                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                return
+        else:
+            conversation_history, conversation_summary = (None, None)
         conversation_context = build_conversation_context(
             conversation_history, conversation_summary
         )
         # Setup RAG context
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = await cancel_aware(
-            should_use_rag(
-                llm_manager, request.query, conversation_context, request.llm_type
+        try:
+            rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
+                await cancel_aware(
+                    should_use_rag(
+                        llm_manager,
+                        request.query,
+                        conversation_context,
+                        request.llm_type,
+                    )
+                )
             )
-        )
+        except asyncio.CancelledError:
+            # Cancelled during RAG decision; persist stopped and exit
+            await persist_message_state(message_id, stopped=True)
+            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            return
         if rag_decision_result.requery:
             if rag_decision_result.use_rag:
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
@@ -1282,6 +1356,21 @@ async def generate_answer_stream_generator_helper(
                 )
                 if len(results) == 0:
                     raise Exception("No RAG results found for the query")
+            except asyncio.CancelledError:
+                # Cancelled during RAG setup: persist stopped state and exit cleanly
+                await persist_message_state(
+                    message_id,
+                    stopped=True,
+                    results=results,
+                    retrieved_docs=retrieved_docs,
+                    latencies=latencies,
+                    prompts={
+                        "is_rag_prompt": rag_decision_prompt,
+                        "rag_decision_result": rag_decision_result,
+                    },
+                )
+                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                return
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context: {e}")
                 scraping_dog_start = time.perf_counter()
@@ -1298,6 +1387,18 @@ async def generate_answer_stream_generator_helper(
                 retrieved_docs = []
 
         if cancelled():
+            # Mark message as stopped in DB and persist current context snapshot
+            await persist_message_state(
+                message_id,
+                stopped=True,
+                results=results,
+                retrieved_docs=retrieved_docs,
+                latencies=latencies,
+                prompts={
+                    "is_rag_prompt": rag_decision_prompt,
+                    "rag_decision_result": rag_decision_result,
+                },
+            )
             yield f"data: {json.dumps({'type':'stopped'})}\n\n"
             return
 
@@ -1372,6 +1473,19 @@ async def generate_answer_stream_generator_helper(
                         # Enforce timeout only for the first token
                         async with asyncio.timeout(llm_instruct_timeout):
                             if cancelled():
+                                # Mark message stopped and persist current context (no partials yet)
+                                await persist_message_state(
+                                    message_id,
+                                    stopped=True,
+                                    results=results,
+                                    retrieved_docs=retrieved_docs,
+                                    latencies=latencies,
+                                    prompts={
+                                        "is_rag_prompt": rag_decision_prompt,
+                                        "rag_decision_result": rag_decision_result,
+                                        "generation_prompt": user_content,
+                                    },
+                                )
                                 yield f"data: {json.dumps({'type':'stopped'})}\n\n"
                                 return
                             first_chunk, first_metadata = await astream.__anext__()
@@ -1392,7 +1506,51 @@ async def generate_answer_stream_generator_helper(
                             if cancelled():
                                 with contextlib.suppress(Exception):
                                     await graph.aclose()
-                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                # Persist partial output before stopping
+                                if accumulated:
+                                    current_total_latency = (
+                                        time.perf_counter() - total_start
+                                    )
+                                    final_latencies = {
+                                        "rag_decision_latency": rag_decision_latency,
+                                        **(latencies or {}),
+                                        "first_token_latency": first_token_latency,
+                                        "mistral_first_token_latency": mistral_first_token_latency,
+                                        "base_generation_latency": base_gen_latency,
+                                        "fallback_latency": mistral_gen_latency,
+                                        "total_latency": current_total_latency,
+                                    }
+                                    await persist_message_state(
+                                        message_id,
+                                        output="".join(accumulated),
+                                        results=results,
+                                        retrieved_docs=retrieved_docs,
+                                        latencies=final_latencies,
+                                        prompts={
+                                            "is_rag_prompt": rag_decision_prompt,
+                                            "rag_decision_result": rag_decision_result,
+                                            "generation_prompt": user_content,
+                                        },
+                                        stopped=True,
+                                    )
+
+                                # Emit a final event with the partial answer in the same format as normal completion
+                                if output_format == "json":
+                                    current_total_latency = (
+                                        time.perf_counter() - total_start
+                                    )
+                                    final_latencies = {
+                                        "rag_decision_latency": rag_decision_latency,
+                                        **(latencies or {}),
+                                        "first_token_latency": first_token_latency,
+                                        "mistral_first_token_latency": mistral_first_token_latency,
+                                        "base_generation_latency": base_gen_latency,
+                                        "fallback_latency": mistral_gen_latency,
+                                        "total_latency": current_total_latency,
+                                    }
+                                    yield f"data: {json.dumps({'type':'final','answer': ''.join(accumulated), 'latencies': final_latencies})}\n\n"
+                                else:
+                                    yield f"data: [DONE]\n\n"
                                 return
                             text = getattr(chunk, "content", None)
                             if not text:
@@ -1446,8 +1604,51 @@ async def generate_answer_stream_generator_helper(
                         # Best-effort generator close
                         with contextlib.suppress(Exception):
                             await gen.aclose()  # type: ignore[attr-defined]
-                        yield f"data: {json.dumps({'type':'stopped'})}\n\n"
-                        return
+                            # Persist partial output before stopping
+                            if accumulated:
+                                current_total_latency = (
+                                    time.perf_counter() - total_start
+                                )
+                                final_latencies = {
+                                    "rag_decision_latency": rag_decision_latency,
+                                    **(latencies or {}),
+                                    "first_token_latency": first_token_latency,
+                                    "mistral_first_token_latency": mistral_first_token_latency,
+                                    "base_generation_latency": base_gen_latency,
+                                    "fallback_latency": mistral_gen_latency,
+                                    "total_latency": current_total_latency,
+                                }
+                                await persist_message_state(
+                                    message_id,
+                                    output="".join(accumulated),
+                                    results=results,
+                                    retrieved_docs=retrieved_docs,
+                                    latencies=final_latencies,
+                                    prompts={
+                                        "is_rag_prompt": rag_decision_prompt,
+                                        "rag_decision_result": rag_decision_result,
+                                        "generation_prompt": user_content,
+                                    },
+                                    stopped=True,
+                                )
+                            # Emit a final event with the partial answer in the same format as normal completion
+                            if output_format == "json":
+                                current_total_latency = (
+                                    time.perf_counter() - total_start
+                                )
+                                final_latencies = {
+                                    "rag_decision_latency": rag_decision_latency,
+                                    **(latencies or {}),
+                                    "first_token_latency": first_token_latency,
+                                    "mistral_first_token_latency": mistral_first_token_latency,
+                                    "base_generation_latency": base_gen_latency,
+                                    "fallback_latency": mistral_gen_latency,
+                                    "total_latency": current_total_latency,
+                                }
+                                yield f"data: {json.dumps({'type':'final','answer': ''.join(accumulated), 'latencies': final_latencies})}\n\n"
+                            else:
+                                yield f"data: [DONE]\n\n"
+                            return
                     if output_format == "json":
                         yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
                     else:
@@ -1483,29 +1684,15 @@ async def generate_answer_stream_generator_helper(
             "generation_prompt": user_content,
         }
         # Persist results to MongoDB Message entry created by the router
-        try:
-            from src.database.models.message import Message as MessageModel
-
-            # Find message by id
-            message = await MessageModel.find_by_id(message_id)
-            if message is not None:
-                documents_data = [extract_document_data(r) for r in (results or [])]
-
-                message.output = answer
-                message.documents = documents_data
-                message.use_rag = rag_decision_result.use_rag
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata.update(
-                    {
-                        "latencies": latencies,
-                        "prompts": prompts,
-                        "retrieved_docs": retrieved_docs,
-                    }
-                )
-                message.metadata = existing_metadata
-                await message.save()
-        except Exception as e:
-            logger.warning(f"Failed to persist streamed message: {e}")
+        await persist_message_state(
+            message_id,
+            output=answer,
+            results=results,
+            use_rag=rag_decision_result.use_rag,
+            latencies=latencies,
+            prompts=prompts,
+            retrieved_docs=retrieved_docs,
+        )
 
         if background_tasks:
             background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -1525,15 +1712,39 @@ async def generate_answer_stream_generator_helper(
 
     except Exception as e:
         err_payload = {"type": "error", "message": str(e)}
-        try:
-            from src.database.models.message import Message as MessageModel
+        # Best-effort persist of any partial output and metadata snapshot
+        final_latencies = None
+        current_total_latency = time.perf_counter() - total_start
+        final_latencies = {
+            "rag_decision_latency": rag_decision_latency,
+            **(latencies or {}),
+            "first_token_latency": first_token_latency,
+            "mistral_first_token_latency": mistral_first_token_latency,
+            "base_generation_latency": base_gen_latency,
+            "fallback_latency": mistral_gen_latency,
+            "total_latency": current_total_latency,
+        }
+        await persist_message_state(
+            message_id,
+            output=(
+                "".join(accumulated)
+                if "accumulated" in locals() and accumulated
+                else None
+            ),
+            latencies=final_latencies,
+            prompts=(
+                {
+                    "is_rag_prompt": rag_decision_prompt,
+                    "rag_decision_result": rag_decision_result,
+                    "generation_prompt": user_content,
+                }
+                if "rag_decision_prompt" in locals() and "user_content" in locals()
+                else None
+            ),
+            retrieved_docs=(retrieved_docs if "retrieved_docs" in locals() else None),
+            error=str(e),
+        )
 
-            message = await MessageModel.find_by_id(message_id)
-            if message:
-                message.metadata = {"error": str(e)}
-                await message.save()
-        except Exception:
-            pass
         yield f"data: {json.dumps(err_payload)}\n\n"
 
 
