@@ -1638,6 +1638,12 @@ async def generate_answer_stream_generator_helper(
                 if "accumulated" in locals() and accumulated
                 else None
             ),
+            documents=(results if "results" in locals() else []),
+            use_rag=(
+                bool(rag_decision_result.use_rag)
+                if "rag_decision_result" in locals()
+                else False
+            ),
             latencies=final_latencies,
             prompts=(
                 {
