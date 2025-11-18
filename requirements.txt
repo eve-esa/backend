@@ -36,3 +36,4 @@ huggingface_hub
 replicate
 tiktoken
 trafilatura
+redis>=4.2.0

@@ -1472,22 +1472,6 @@ async def generate_answer_stream_generator_helper(
 
                         # Enforce timeout only for the first token
                         async with asyncio.timeout(llm_instruct_timeout):
-                            if cancelled():
-                                # Mark message stopped and persist current context (no partials yet)
-                                await persist_message_state(
-                                    message_id,
-                                    stopped=True,
-                                    results=results,
-                                    retrieved_docs=retrieved_docs,
-                                    latencies=latencies,
-                                    prompts={
-                                        "is_rag_prompt": rag_decision_prompt,
-                                        "rag_decision_result": rag_decision_result,
-                                        "generation_prompt": user_content,
-                                    },
-                                )
-                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
-                                return
                             first_chunk, first_metadata = await astream.__anext__()
                             tokens_yielded += 1
                             if tokens_yielded == 1:
@@ -1503,55 +1487,6 @@ async def generate_answer_stream_generator_helper(
 
                         # Continue streaming remaining tokens without a timeout
                         async for chunk, metadata in astream:
-                            if cancelled():
-                                with contextlib.suppress(Exception):
-                                    await graph.aclose()
-                                # Persist partial output before stopping
-                                if accumulated:
-                                    current_total_latency = (
-                                        time.perf_counter() - total_start
-                                    )
-                                    final_latencies = {
-                                        "rag_decision_latency": rag_decision_latency,
-                                        **(latencies or {}),
-                                        "first_token_latency": first_token_latency,
-                                        "mistral_first_token_latency": mistral_first_token_latency,
-                                        "base_generation_latency": base_gen_latency,
-                                        "fallback_latency": mistral_gen_latency,
-                                        "total_latency": current_total_latency,
-                                    }
-                                    await persist_message_state(
-                                        message_id,
-                                        output="".join(accumulated),
-                                        results=results,
-                                        retrieved_docs=retrieved_docs,
-                                        latencies=final_latencies,
-                                        prompts={
-                                            "is_rag_prompt": rag_decision_prompt,
-                                            "rag_decision_result": rag_decision_result,
-                                            "generation_prompt": user_content,
-                                        },
-                                        stopped=True,
-                                    )
-
-                                # Emit a final event with the partial answer in the same format as normal completion
-                                if output_format == "json":
-                                    current_total_latency = (
-                                        time.perf_counter() - total_start
-                                    )
-                                    final_latencies = {
-                                        "rag_decision_latency": rag_decision_latency,
-                                        **(latencies or {}),
-                                        "first_token_latency": first_token_latency,
-                                        "mistral_first_token_latency": mistral_first_token_latency,
-                                        "base_generation_latency": base_gen_latency,
-                                        "fallback_latency": mistral_gen_latency,
-                                        "total_latency": current_total_latency,
-                                    }
-                                    yield f"data: {json.dumps({'type':'final','answer': ''.join(accumulated), 'latencies': final_latencies})}\n\n"
-                                else:
-                                    yield f"data: [DONE]\n\n"
-                                return
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
@@ -1604,33 +1539,6 @@ async def generate_answer_stream_generator_helper(
                         # Best-effort generator close
                         with contextlib.suppress(Exception):
                             await gen.aclose()  # type: ignore[attr-defined]
-                            # Persist partial output before stopping
-                            if accumulated:
-                                current_total_latency = (
-                                    time.perf_counter() - total_start
-                                )
-                                final_latencies = {
-                                    "rag_decision_latency": rag_decision_latency,
-                                    **(latencies or {}),
-                                    "first_token_latency": first_token_latency,
-                                    "mistral_first_token_latency": mistral_first_token_latency,
-                                    "base_generation_latency": base_gen_latency,
-                                    "fallback_latency": mistral_gen_latency,
-                                    "total_latency": current_total_latency,
-                                }
-                                await persist_message_state(
-                                    message_id,
-                                    output="".join(accumulated),
-                                    results=results,
-                                    retrieved_docs=retrieved_docs,
-                                    latencies=final_latencies,
-                                    prompts={
-                                        "is_rag_prompt": rag_decision_prompt,
-                                        "rag_decision_result": rag_decision_result,
-                                        "generation_prompt": user_content,
-                                    },
-                                    stopped=True,
-                                )
                             # Emit a final event with the partial answer in the same format as normal completion
                             if output_format == "json":
                                 current_total_latency = (
@@ -1710,7 +1618,42 @@ async def generate_answer_stream_generator_helper(
         else:
             yield f"data: [DONE]\n\n"
 
+    except asyncio.CancelledError:
+        logger.info("Cancelled during generation")
+        current_total_latency = time.perf_counter() - total_start
+        existing_latencies = locals().get("latencies") or {}
+        final_latencies = {
+            "rag_decision_latency": locals().get("rag_decision_latency"),
+            **existing_latencies,
+            "first_token_latency": locals().get("first_token_latency"),
+            "mistral_first_token_latency": locals().get("mistral_first_token_latency"),
+            "base_generation_latency": locals().get("base_gen_latency"),
+            "fallback_latency": locals().get("mistral_gen_latency"),
+            "total_latency": current_total_latency,
+        }
+        await persist_message_state(
+            message_id,
+            output=(
+                "".join(accumulated)
+                if "accumulated" in locals() and accumulated
+                else None
+            ),
+            latencies=final_latencies,
+            prompts=(
+                {
+                    "is_rag_prompt": rag_decision_prompt,
+                    "rag_decision_result": rag_decision_result,
+                    "generation_prompt": user_content,
+                }
+                if "rag_decision_prompt" in locals() and "user_content" in locals()
+                else None
+            ),
+            retrieved_docs=(retrieved_docs if "retrieved_docs" in locals() else None),
+            stopped=True,
+        )
+        return
     except Exception as e:
+        logger.error(f"Error during generation: {e}")
         err_payload = {"type": "error", "message": str(e)}
         # Best-effort persist of any partial output and metadata snapshot
         final_latencies = None
