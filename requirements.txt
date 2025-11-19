@@ -37,3 +37,4 @@ replicate
 tiktoken
 trafilatura
 redis>=4.2.0
+qdrant-client>=1.15.1,<2.0

@@ -492,9 +492,10 @@ class VectorStoreManager:
             else:
                 collection_query_filter = query_filter
             try:
-                results = self.client.search(
+                # Use query_points API exclusively
+                qp_response = self.client.query_points(
                     collection_name=collection_name,
-                    query_vector=query_vector,
+                    query=query_vector,
                     limit=limit_per_collection,
                     score_threshold=score_threshold,
                     query_filter=collection_query_filter,
@@ -507,6 +508,7 @@ class VectorStoreManager:
                     ),
                     timeout=120,
                 )
+                results = getattr(qp_response, "points", []) or []
                 # Convert to generic objects and attach collection_name without mutating ScoredPoint
                 converted_results: List[Any] = []
                 for r in results or []:
