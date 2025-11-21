@@ -1334,7 +1334,7 @@ async def generate_answer_stream_generator_helper(
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies, retrieved_docs = "", [], {}, []
         if (
-            len(request.public_collections) > 0
+            len(request.collection_ids) > 0
             and request.k > 0
             and rag_decision_result.use_rag
         ):
