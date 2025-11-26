@@ -722,4 +722,5 @@ def get_mongodb_uri() -> str:
     params = MONGO_PARAMS or ""
     if params and not params.startswith("?"):
         params = f"?{params}"
-    return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}{params}"
+    # return f"mongodb://{MONGO_USERNAME}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}{params}"
+    return f"mongodb://{MONGO_HOST}:{MONGO_PORT}/{MONGO_DATABASE}{params}"

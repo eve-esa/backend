@@ -57,6 +57,17 @@ async def _get_counts_for_id(collection_id: str):
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
 async def list_public_collections(pagination: Pagination = Depends()):
+    """
+    List public collections with pagination.
+
+    Combines platform-curated public collections and environment-specific
+    public collections, then paginates the combined list.
+
+    :param pagination: Pagination parameters.\n
+    :type pagination: Pagination\n
+    :return: Paginated list of public collections.\n
+    :rtype: PaginatedResponse[Collection]\n
+    """
     public_collections, total_count = await vector_store.list_public_collections(
         page=pagination.page, limit=pagination.limit
     )
@@ -86,6 +97,16 @@ async def list_public_collections(pagination: Pagination = Depends()):
 async def list_collections(
     request: Pagination = Depends(), request_user: User = Depends(get_current_user)
 ):
+    """
+    List collections owned by the current user.
+
+    :param request: Pagination parameters.\n
+    :type request: Pagination\n
+    :param request_user: Authenticated user injected by dependency.\n
+    :type request_user: User\n
+    :return: Paginated list of user collections.\n
+    :rtype: PaginatedResponse[Collection]\n
+    """
     return await Collection.find_all_with_pagination(
         limit=request.limit,
         page=request.page,
@@ -96,6 +117,16 @@ async def list_collections(
 
 @router.get("/collections/{collection_id}")
 async def get_collection(collection_id: str):
+    """
+    Get a collection by id with document and vector counts.
+
+    :param collection_id: Target collection identifier.\n
+    :type collection_id: str\n
+    :return: Collection data including ``documents_count`` and ``points_count``.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: Collection not found.
+    """
     collection = await Collection.find_by_id(collection_id)
     if not collection:
         raise HTTPException(status_code=404, detail="Collection not found")
@@ -114,6 +145,19 @@ async def create_collection(
     request: CollectionRequest,
     requesting_user: User = Depends(get_current_user),
 ):
+    """
+    Create a private collection and provision its backing vector index (Qdrant).
+    The new collection is private to its creator. The MongoDB collection ID is used as the Qdrant collection name.
+
+    :param request: New collection parameters.\n
+    :type request: CollectionRequest\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Created collection.\n
+    :rtype: Collection\n
+    :raises HTTPException:\n
+        - 500: Failed to create vector collection or server error.
+    """
     collection = Collection(
         name=request.name,
         user_id=requesting_user.id,
@@ -147,6 +191,22 @@ async def update_collection(
     collection_id: str,
     requesting_user: User = Depends(get_current_user),
 ):
+    """
+    Update a collection's mutable fields.
+
+    :param request: Update payload (e.g., name).\n
+    :type request: CollectionUpdate\n
+    :param collection_id: Collection identifier.\n
+    :type collection_id: str\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Updated collection.\n
+    :rtype: Collection\n
+    :raises HTTPException:\n
+        - 404: Collection not found.\n
+        - 403: Not allowed to update this collection.\n
+        - 500: Server error.
+    """
     try:
         collection = await Collection.find_by_id(collection_id)
         if not collection:
@@ -173,6 +233,23 @@ async def delete_collection(
     collection_id: str,
     requesting_user: User = Depends(get_current_user),
 ):
+    """
+    Delete a collection and its related resources.
+
+    Deletes documents in the collection, attempts to remove the vector index,
+    and finally deletes the collection record.
+
+    :param collection_id: Collection identifier.\n
+    :type collection_id: str\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: Collection not found.\n
+        - 403: Not allowed to delete this collection.\n
+        - 500: Server error.
+    """
     try:
         collection = await Collection.find_by_id(collection_id)
         if not collection:

@@ -65,7 +65,20 @@ class HallucinationDetectResponse(BaseModel):
 async def get_average_latencies(
     start_date: datetime | None = None, end_date: datetime | None = None
 ):
-    """Return average latencies for the all messages."""
+    """
+    Return average latencies aggregated across all messages.
+
+    Optionally filters the aggregation by a timestamp window.
+
+    :param start_date: Optional start of the time window (inclusive).\n
+    :type start_date: datetime | None\n
+    :param end_date: Optional end of the time window (inclusive).\n
+    :type end_date: datetime | None\n
+    :return: A mapping of latency metric name to average value.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 500: Server error during aggregation.
+    """
     try:
         messages_col = Message.get_collection()
         pipeline = []
@@ -118,9 +131,17 @@ async def get_average_latencies(
 
 @router.get("/conversations/messages/me/stats")
 async def get_my_message_stats(requesting_user: User = Depends(get_current_user)):
-    """Return counts and character totals for the current user's messages.
+    """
+    Return counts and character totals for the current user's messages.
 
     Aggregates across all messages belonging to conversations owned by the user.
+
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Aggregated stats including counts and character sums.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 500: Server error during aggregation.
     """
     try:
         messages_col = Message.get_collection()
@@ -207,15 +228,15 @@ async def create_message(
     persists a `Message` placeholder, runs generation, updates the message with
     answer and retrieval metadata, and schedules rollup/trimming of history.
 
-    :param request: Generation parameters including query, collections, and model settings.
-    :param conversation_id: Target conversation identifier.
-    :param background_tasks: FastAPI background task runner used to schedule rollups.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: Response payload with message id, query, answer, documents, flags, and metadata.
-    :raises HTTPException:
-        - 404 if conversation is not found
-        - 403 if user does not own the conversation or uses unauthorized collections
-        - 500 for unexpected server errors
+    :param request: Generation parameters including query, collections, and model settings.\n
+    :param conversation_id: Target conversation identifier.\n
+    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: Response payload with message id, query, answer, documents, flags, and metadata.\n
+    :raises HTTPException:\n
+        - 404 if conversation is not found.\n
+        - 403 if user does not own the conversation or uses unauthorized collections.\n
+        - 500 for unexpected server errors.\n
     """
     message = None
     try:
@@ -366,15 +387,15 @@ async def retry(
     original `request_input` stored on the message, regenerates the answer,
     and updates message content, documents, and metadata.
 
-    :param conversation_id: Conversation identifier.
-    :param message_id: Message identifier to retry.
-    :param background_tasks: FastAPI background task runner used to schedule rollups.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: Response payload mirroring `create_message` with updated answer and metadata.
-    :raises HTTPException:
-        - 404 if conversation or message is not found
-        - 403 if user does not own the conversation
-        - 400 if message cannot be retried (missing original request_input)
+    :param conversation_id: Conversation identifier.\n
+    :param message_id: Message identifier to retry.\n
+    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: Response payload mirroring `create_message` with updated answer and metadata.\n
+    :raises HTTPException:\n
+        - 404 if conversation or message is not found\n
+        - 403 if user does not own the conversation\n
+        - 400 if message cannot be retried (missing original request_input)\n
         - 500 for unexpected server errors
     """
     try:
@@ -463,15 +484,15 @@ async def update_message(
     Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`,
     and hallucination feedback metadata on the target message.
 
-    :param conversation_id: Conversation identifier.
-    :param message_id: Message identifier to update.
-    :param request: Partial update payload for feedback fields.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: A success message upon update.
-    :raises HTTPException:
-        - 404 if conversation or message is not found or mismatched
-        - 403 if user does not own the conversation
-        - 500 for unexpected server errors
+    :param conversation_id: Conversation identifier.\n
+    :param message_id: Message identifier to update.\n
+    :param request: Partial update payload for feedback fields.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: A success message upon update.\n
+    :raises HTTPException:\n
+        - 404 if conversation or message is not found or mismatched\n
+        - 403 if user does not own the conversation\n
+        - 500 for unexpected server errors\n
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -545,15 +566,15 @@ async def create_message_stream(
     Sets up a per-message stream bus and runs generation in a decoupled task.
     Yields SSE-formatted chunks including status updates, tokens, and final payloads.
 
-    :param request: Generation parameters including query, collections, and model settings.
-    :param conversation_id: Target conversation identifier.
-    :param background_tasks: FastAPI background task runner used to schedule rollups.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: StreamingResponse that emits SSE events for the generation lifecycle.
-    :raises HTTPException:
-        - 404 if conversation is not found
-        - 403 if user does not own the conversation or uses unauthorized collections
-        - 500 for unexpected server errors
+    :param request: Generation parameters including query, collections, and model settings.\n
+    :param conversation_id: Target conversation identifier.\n
+    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: StreamingResponse that emits SSE events for the generation lifecycle.\n
+    :raises HTTPException:\n
+        - 404 if conversation is not found\n
+        - 403 if user does not own the conversation or uses unauthorized collections\n
+        - 500 for unexpected server errors\n
     """
     message = None
     try:
@@ -697,13 +718,13 @@ async def stop_conversation(
     Uses the cancel manager to locate the in-flight message/task and requests
     cooperative cancellation, also notifying downstream subscribers via the stream bus.
 
-    :param conversation_id: Conversation identifier to stop generation for.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: A status payload indicating stop state or absence of active generation.
-    :raises HTTPException:
-        - 404 if conversation is not found
-        - 403 if user does not own the conversation
-        - 500 for unexpected server errors
+    :param conversation_id: Conversation identifier to stop generation for.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: A status payload indicating stop state or absence of active generation.\n
+    :raises HTTPException:\n
+        - 404 if conversation is not found\n
+        - 403 if user does not own the conversation\n
+        - 500 for unexpected server errors\n
     """
     try:
         logger.info(
@@ -773,14 +794,14 @@ async def get_source_logs(
     Stores user-attributed source inspection information such as id, url, title,
     and collection name, with a server-side timestamp.
 
-    :param conversation_id: Conversation identifier.
-    :param message_id: Message identifier.
-    :param request: Source log details to append.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: Confirmation message upon successful append.
-    :raises HTTPException:
-        - 404 if conversation or message is not found or mismatched
-        - 500 for unexpected server errors
+    :param conversation_id: Conversation identifier.\n
+    :param message_id: Message identifier.\n
+    :param request: Source log details to append.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: Confirmation message upon successful append.\n
+    :raises HTTPException:\n
+        - 404 if conversation or message is not found or mismatched\n
+        - 500 for unexpected server errors\n
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -831,14 +852,14 @@ async def hallucination_detect(
     Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and
     stores the result and latency breakdown on the message metadata.
 
-    :param conversation_id: Conversation identifier.
-    :param message_id: Message identifier to analyze.
-    :param requesting_user: Authenticated user injected by dependency.
-    :returns: Structured hallucination analysis result with optional final answer.
-    :raises HTTPException:
-        - 404 if conversation or message is not found or mismatched
-        - 403 if user does not own the conversation
-        - 500 for unexpected server errors
+    :param conversation_id: Conversation identifier.\n
+    :param message_id: Message identifier to analyze.\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :returns: Structured hallucination analysis result with optional final answer.\n
+    :raises HTTPException:\n
+        - 404 if conversation or message is not found or mismatched\n
+        - 403 if user does not own the conversation\n
+        - 500 for unexpected server errors\n
     """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)
@@ -927,10 +948,27 @@ async def stream_hallucination(
     message_id: str,
     requesting_user: User = Depends(get_current_user),
 ):
-    """Stream hallucination handling result.
+    """
+    Stream hallucination handling result as Server-Sent Events (SSE).
 
-    - If label == 0 (factual), stream a single final event with the reason.
-    - If label == 1 (hallucination), stream tokens for the final answer and then a final event.
+    Streams structured events for detection, optional rewriting, retrieval,
+    and answer generation steps.
+
+    - If label == 0 (factual), emits a final event with the reason.
+    - If label == 1 (hallucination), streams tokens for the final answer and then a final event.
+
+    :param conversation_id: Conversation identifier.\n
+    :type conversation_id: str
+    :param message_id: Message identifier to analyze.\n
+    :type message_id: str\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: StreamingResponse emitting SSE events for the detection workflow.\n
+    :rtype: StreamingResponse\n
+    :raises HTTPException:\n
+        - 404: Conversation or message not found, or mismatched relationship.\n
+        - 403: Not allowed to access this conversation.\n
+        - 500: Server error during streaming pipeline.\n
     """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)

@@ -10,6 +10,14 @@ logger = logging.getLogger(__name__)
 
 @router.get("/me", response_model=User)
 async def me(user: User = Depends(get_current_user)):
+    """
+    Return the authenticated user's profile.
+
+    :param user: Authenticated user injected by dependency.\n
+    :type user: User\n
+    :return: Current user.\n
+    :rtype: User\n
+    """
     return user
 
 
@@ -17,6 +25,16 @@ async def me(user: User = Depends(get_current_user)):
 async def update_user(
     request: UpdateUserRequest, user: User = Depends(get_current_user)
 ):
+    """
+    Update the authenticated user's profile.
+
+    :param request: New user attributes to set.\n
+    :type request: UpdateUserRequest\n
+    :param user: Authenticated user injected by dependency.\n
+    :type user: User\n
+    :return: Updated user.\n
+    :rtype: User\n
+    """
     user.first_name = request.first_name
     user.last_name = request.last_name
     await user.save()
