@@ -1,0 +1,2058 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../routers-user/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.0">
+    
+    
+      
+        <title>Types - EVE chating system</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.618322db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#common" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="EVE chating system" class="md-header__button md-logo" aria-label="EVE chating system" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            EVE chating system
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Types
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="EVE chating system" class="md-nav__button md-logo" aria-label="EVE chating system" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    EVE chating system
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-collection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-conversation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conversation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-document/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Document
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-forgot_password/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forgot Password
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-health_check/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health Check
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-message/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Message
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../routers-user/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Types
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#common" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Common">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pagination" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pagination
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paginationmetadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PaginationMetadata
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paginatedresponset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PaginatedResponse[T]
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auth
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Auth">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#loginrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoginRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loginresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoginResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refreshrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RefreshRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refreshresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RefreshResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signuprequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignupRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signupresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignupResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resendactivationrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResendActivationRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifyrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VerifyRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#user" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="User">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#updateuserrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UpdateUserRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#user-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#collections" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collections
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Collections">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#collectionrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CollectionRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collectionupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CollectionUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collection-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collection (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documents
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Documents">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adddocumentrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AddDocumentRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#updatedocumentrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UpdateDocumentRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#document-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Document (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conversations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conversations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conversations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#conversationcreate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationCreate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversationnameupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationNameUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversationdetail-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationDetail (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversation-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conversation (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#messages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Messages
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Messages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#generationrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GenerationRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#createmessageresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CreateMessageResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentreference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DocumentReference
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#latencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hallucinationlatencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HallucinationLatencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responsemetadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResponseMetadata
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loopresult" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoopResult
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hallucinationdetectresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HallucinationDetectResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sourcelogsrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SourceLogsRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#toolconfigrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolConfigRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tool-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tool (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolconfig-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolConfig (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forgot-password" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forgot Password
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Forgot Password">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#forgotpasswordrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ForgotPasswordRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#forgotpasswordconfirmation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ForgotPasswordConfirmation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#common" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Common
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Common">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pagination" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pagination
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paginationmetadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PaginationMetadata
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#paginatedresponset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PaginatedResponse[T]
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auth
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Auth">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#loginrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoginRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loginresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoginResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refreshrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RefreshRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#refreshresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RefreshResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signuprequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignupRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signupresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignupResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resendactivationrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResendActivationRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifyrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        VerifyRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#user" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="User">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#updateuserrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UpdateUserRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#user-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        User (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#collections" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collections
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Collections">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#collectionrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CollectionRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collectionupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CollectionUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collection-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collection (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#documents" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documents
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Documents">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adddocumentrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        AddDocumentRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#updatedocumentrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        UpdateDocumentRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#document-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Document (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#conversations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conversations
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conversations">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#conversationcreate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationCreate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversationnameupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationNameUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversationdetail-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ConversationDetail (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#conversation-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conversation (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#messages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Messages
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Messages">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#generationrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        GenerationRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#createmessageresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CreateMessageResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentreference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DocumentReference
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#latencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Latencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hallucinationlatencies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HallucinationLatencies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#responsemetadata" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ResponseMetadata
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#loopresult" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LoopResult
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hallucinationdetectresponse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        HallucinationDetectResponse
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sourcelogsrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SourceLogsRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tools
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tools">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#toolconfigrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolConfigRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolupdate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolUpdate
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tool-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tool (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#toolconfig-response-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ToolConfig (response model)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forgot-password" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forgot Password
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Forgot Password">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#forgotpasswordrequest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ForgotPasswordRequest
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#forgotpasswordconfirmation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ForgotPasswordConfirmation
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+  <h1>Types</h1>
+
+<h2 id="common">Common</h2>
+<h3 id="pagination">Pagination</h3>
+<ul>
+<li><strong>page</strong>: int (default 1)</li>
+<li><strong>limit</strong>: int (default 10)</li>
+</ul>
+<h3 id="paginationmetadata">PaginationMetadata</h3>
+<ul>
+<li><strong>total_count</strong>: int</li>
+<li><strong>current_page</strong>: int</li>
+<li><strong>total_pages</strong>: int</li>
+<li><strong>has_next</strong>: bool</li>
+</ul>
+<h3 id="paginatedresponset">PaginatedResponse[T]</h3>
+<ul>
+<li><strong>data</strong>: list[T]</li>
+<li><strong>meta</strong>: PaginationMetadata</li>
+</ul>
+<h2 id="auth">Auth</h2>
+<h3 id="loginrequest">LoginRequest</h3>
+<ul>
+<li><strong>email</strong>: string (email)</li>
+<li><strong>password</strong>: string</li>
+</ul>
+<h3 id="loginresponse">LoginResponse</h3>
+<ul>
+<li><strong>access_token</strong>: string</li>
+<li><strong>refresh_token</strong>: string</li>
+</ul>
+<h3 id="refreshrequest">RefreshRequest</h3>
+<ul>
+<li><strong>refresh_token</strong>: string</li>
+</ul>
+<h3 id="refreshresponse">RefreshResponse</h3>
+<ul>
+<li><strong>access_token</strong>: string</li>
+</ul>
+<h3 id="signuprequest">SignupRequest</h3>
+<ul>
+<li><strong>email</strong>: string (email)</li>
+<li><strong>password</strong>: string</li>
+<li><strong>first_name</strong>: string | null</li>
+<li><strong>last_name</strong>: string | null</li>
+</ul>
+<h3 id="signupresponse">SignupResponse</h3>
+<ul>
+<li><strong>id</strong>: string</li>
+<li><strong>email</strong>: string (email)</li>
+<li><strong>first_name</strong>: string | null</li>
+<li><strong>last_name</strong>: string | null</li>
+</ul>
+<h3 id="resendactivationrequest">ResendActivationRequest</h3>
+<ul>
+<li><strong>email</strong>: string</li>
+</ul>
+<h3 id="verifyrequest">VerifyRequest</h3>
+<ul>
+<li><strong>email</strong>: string</li>
+<li><strong>activation_code</strong>: string</li>
+</ul>
+<h2 id="user">User</h2>
+<h3 id="updateuserrequest">UpdateUserRequest</h3>
+<ul>
+<li><strong>first_name</strong>: string</li>
+<li><strong>last_name</strong>: string</li>
+</ul>
+<h3 id="user-response-model">User (response model)</h3>
+<ul>
+<li>Inherits <code>MongoModel</code> → includes <strong>id</strong>: string, <strong>timestamp</strong>: datetime</li>
+<li><strong>email</strong>: string (email)</li>
+<li><strong>password_hash</strong>: string</li>
+<li><strong>first_name</strong>: string | null</li>
+<li><strong>last_name</strong>: string | null</li>
+<li><strong>is_active</strong>: bool</li>
+<li><strong>activation_code</strong>: string | null</li>
+</ul>
+<h2 id="collections">Collections</h2>
+<h3 id="collectionrequest">CollectionRequest</h3>
+<ul>
+<li><strong>embeddings_model</strong>: string</li>
+<li><strong>name</strong>: string</li>
+<li><strong>description</strong>: string</li>
+</ul>
+<h3 id="collectionupdate">CollectionUpdate</h3>
+<ul>
+<li><strong>name</strong>: string</li>
+</ul>
+<h3 id="collection-response-model">Collection (response model)</h3>
+<ul>
+<li>Inherits <code>MongoModel</code> → includes <strong>id</strong>: string, <strong>timestamp</strong>: datetime</li>
+<li><strong>user_id</strong>: string | null</li>
+<li><strong>name</strong>: string</li>
+<li><strong>description</strong>: string | null</li>
+<li><strong>embeddings_model</strong>: string</li>
+</ul>
+<h2 id="documents">Documents</h2>
+<h3 id="adddocumentrequest">AddDocumentRequest</h3>
+<ul>
+<li><strong>embeddings_model</strong>: string</li>
+<li><strong>chunk_size</strong>: int</li>
+<li><strong>chunk_overlap</strong>: int</li>
+<li><strong>metadata_urls</strong>: list[string] | null</li>
+<li><strong>metadata_names</strong>: list[string] | null</li>
+</ul>
+<h3 id="updatedocumentrequest">UpdateDocumentRequest</h3>
+<ul>
+<li><strong>embeddings_model</strong>: string</li>
+<li><strong>source_name</strong>: string</li>
+<li><strong>new_metadata</strong>: dict | null</li>
+</ul>
+<h3 id="document-response-model">Document (response model)</h3>
+<ul>
+<li>Inherits <code>MongoModel</code> → includes <strong>id</strong>: string, <strong>timestamp</strong>: datetime</li>
+<li><strong>user_id</strong>: string</li>
+<li><strong>collection_id</strong>: string</li>
+<li><strong>name</strong>: string</li>
+<li><strong>filename</strong>: string | null</li>
+<li><strong>file_type</strong>: string | null</li>
+<li><strong>source_url</strong>: string | null</li>
+<li><strong>chunk_count</strong>: int | null</li>
+<li><strong>file_size</strong>: int | null</li>
+<li><strong>vector_ids</strong>: list[string] | null</li>
+</ul>
+<h2 id="conversations">Conversations</h2>
+<h3 id="conversationcreate">ConversationCreate</h3>
+<ul>
+<li><strong>name</strong>: string</li>
+</ul>
+<h3 id="conversationnameupdate">ConversationNameUpdate</h3>
+<ul>
+<li><strong>name</strong>: string</li>
+</ul>
+<h3 id="conversationdetail-response-model">ConversationDetail (response model)</h3>
+<ul>
+<li><strong>id</strong>: string</li>
+<li><strong>user_id</strong>: string</li>
+<li><strong>name</strong>: string</li>
+<li><strong>timestamp</strong>: datetime</li>
+<li><strong>messages</strong>: list[Message]</li>
+</ul>
+<h3 id="conversation-response-model">Conversation (response model)</h3>
+<ul>
+<li>Inherits <code>MongoModel</code> → includes <strong>id</strong>: string, <strong>timestamp</strong>: datetime</li>
+<li><strong>user_id</strong>: string</li>
+<li><strong>name</strong>: string</li>
+<li><strong>summary</strong>: string | null</li>
+</ul>
+<h2 id="messages">Messages</h2>
+<h3 id="generationrequest">GenerationRequest</h3>
+<ul>
+<li><strong>query</strong>: string</li>
+<li><strong>year</strong>: list[int] | null</li>
+<li><strong>filters</strong>: dict | null</li>
+<li><strong>llm_type</strong>: string | null (one of 'runpod', 'mistral', 'satcom_small', 'satcom_large')</li>
+<li><strong>embeddings_model</strong>: string</li>
+<li><strong>k</strong>: int</li>
+<li><strong>temperature</strong>: float</li>
+<li><strong>score_threshold</strong>: float</li>
+<li><strong>max_new_tokens</strong>: int</li>
+<li><strong>public_collections</strong>: list[string]</li>
+<li>Note: server populates private <code>collection_ids</code> and <code>private_collections_map</code>.</li>
+</ul>
+<h3 id="createmessageresponse">CreateMessageResponse</h3>
+<ul>
+<li><strong>id</strong>: string</li>
+<li><strong>query</strong>: string</li>
+<li><strong>answer</strong>: string</li>
+<li><strong>documents</strong>: list[DocumentReference]</li>
+<li><strong>use_rag</strong>: bool</li>
+<li><strong>conversation_id</strong>: string</li>
+<li><strong>loop_result</strong>: LoopResult | null</li>
+<li><strong>metadata</strong>: ResponseMetadata</li>
+</ul>
+<h3 id="documentreference">DocumentReference</h3>
+<ul>
+<li><strong>id</strong>: string | null</li>
+<li><strong>version</strong>: int | null</li>
+<li><strong>score</strong>: float | null</li>
+<li><strong>reranking_score</strong>: float | null</li>
+<li><strong>collection_name</strong>: string | null</li>
+<li><strong>payload</strong>: dict</li>
+<li><strong>text</strong>: string</li>
+<li><strong>metadata</strong>: dict</li>
+</ul>
+<h3 id="latencies">Latencies</h3>
+<ul>
+<li><strong>guardrail_latency</strong>: float | null</li>
+<li><strong>rag_decision_latency</strong>: float | null</li>
+<li><strong>query_embedding_latency</strong>: float | null</li>
+<li><strong>qdrant_retrieval_latency</strong>: float | null</li>
+<li><strong>mcp_retrieval_latency</strong>: float | null</li>
+<li><strong>reranking_latency</strong>: float | null</li>
+<li><strong>base_generation_latency</strong>: float | null</li>
+<li><strong>fallback_latency</strong>: float | null</li>
+<li><strong>hallucination_latency</strong>: HallucinationLatencies | null</li>
+<li><strong>total_latency</strong>: float | null</li>
+</ul>
+<h3 id="hallucinationlatencies">HallucinationLatencies</h3>
+<ul>
+<li><strong>detection_latency</strong>: float | null</li>
+<li><strong>span_reprompting_latency</strong>: float | null</li>
+<li><strong>query_rewriting_latency</strong>: float | null</li>
+<li><strong>regeneration_latency</strong>: float | null</li>
+<li><strong>overall_latency</strong>: float | null</li>
+</ul>
+<h3 id="responsemetadata">ResponseMetadata</h3>
+<ul>
+<li><strong>latencies</strong>: Latencies</li>
+</ul>
+<h3 id="loopresult">LoopResult</h3>
+<ul>
+<li><strong>final_answer</strong>: string | null</li>
+<li><strong>generation_response</strong>: dict | null</li>
+<li><strong>hallucination_response</strong>: dict | null</li>
+<li><strong>rewrite_response</strong>: dict | null</li>
+<li><strong>reflected_response</strong>: dict | null</li>
+<li><strong>ranked_output</strong>: dict | null</li>
+<li><strong>docs</strong>: string | null</li>
+</ul>
+<h3 id="hallucinationdetectresponse">HallucinationDetectResponse</h3>
+<ul>
+<li><strong>label</strong>: int</li>
+<li><strong>reason</strong>: string</li>
+</ul>
+<h3 id="sourcelogsrequest">SourceLogsRequest</h3>
+<ul>
+<li><strong>source_id</strong>: string | null</li>
+<li><strong>source_url</strong>: string | null</li>
+<li><strong>source_title</strong>: string | null</li>
+<li><strong>source_collection_name</strong>: string | null</li>
+</ul>
+<h2 id="tools">Tools</h2>
+<h3 id="toolconfigrequest">ToolConfigRequest</h3>
+<ul>
+<li><strong>url</strong>: string | null</li>
+<li><strong>transport</strong>: "streamable_http" | "stdio" | null</li>
+<li><strong>headers</strong>: dict[str, str] | null</li>
+<li><strong>command</strong>: string | null</li>
+<li><strong>args</strong>: list[string] | null</li>
+<li><strong>env</strong>: dict[str, str] | null</li>
+</ul>
+<h3 id="toolrequest">ToolRequest</h3>
+<ul>
+<li><strong>name</strong>: string</li>
+<li><strong>provider</strong>: string | null</li>
+<li><strong>description</strong>: string | null</li>
+<li><strong>type</strong>: string (default "mcp")</li>
+<li><strong>enabled</strong>: bool</li>
+<li><strong>environment</strong>: list[string] | null</li>
+<li><strong>config</strong>: ToolConfigRequest</li>
+</ul>
+<h3 id="toolupdate">ToolUpdate</h3>
+<ul>
+<li>Partial fields mirroring <code>ToolRequest</code>; all optional.</li>
+</ul>
+<h3 id="tool-response-model">Tool (response model)</h3>
+<ul>
+<li>Inherits <code>MongoModel</code> → includes <strong>id</strong>: string, <strong>timestamp</strong>: datetime</li>
+<li><strong>user_id</strong>: string | null</li>
+<li><strong>name</strong>: string</li>
+<li><strong>provider</strong>: string | null</li>
+<li><strong>description</strong>: string | null</li>
+<li><strong>type</strong>: enum ("mcp")</li>
+<li><strong>enabled</strong>: bool</li>
+<li><strong>environment</strong>: list[string] | null</li>
+<li><strong>config</strong>: ToolConfig</li>
+<li><strong>created_at</strong>: datetime</li>
+<li><strong>updated_at</strong>: datetime</li>
+<li><strong>deleted_at</strong>: datetime | null</li>
+</ul>
+<h3 id="toolconfig-response-model">ToolConfig (response model)</h3>
+<ul>
+<li><strong>url</strong>: string | null</li>
+<li><strong>transport</strong>: enum ("streamable_http" | "stdio") | null</li>
+<li><strong>headers</strong>: dict[str, str] | null</li>
+<li><strong>command</strong>: string | null</li>
+<li><strong>args</strong>: list[string] | null</li>
+<li><strong>env</strong>: dict[str, str] | null</li>
+</ul>
+<h2 id="forgot-password">Forgot Password</h2>
+<h3 id="forgotpasswordrequest">ForgotPasswordRequest</h3>
+<ul>
+<li><strong>email</strong>: string (email)</li>
+</ul>
+<h3 id="forgotpasswordconfirmation">ForgotPasswordConfirmation</h3>
+<ul>
+<li><strong>new_password</strong>: string</li>
+<li><strong>confirm_password</strong>: string</li>
+<li><strong>code</strong>: string</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": [], "search": "../assets/javascripts/workers/search.7a47a382.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.e71a0d61.min.js"></script>
+      
+    
+  </body>
+</html>

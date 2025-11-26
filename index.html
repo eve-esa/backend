@@ -1,0 +1,1000 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+      
+        <link rel="next" href="routers-auth/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.0">
+    
+    
+      
+        <title>EVE chating system</title>
+      
+    
+    
+      <link rel="stylesheet" href="assets/stylesheets/main.618322db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#eve-backend" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="." title="EVE chating system" class="md-header__button md-logo" aria-label="EVE chating system" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            EVE chating system
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Home
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="." title="EVE chating system" class="md-nav__button md-logo" aria-label="EVE chating system" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    EVE chating system
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="." class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#eve-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EVE Backend
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="EVE Backend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#directory-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Directory structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key workflows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-surface-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API surface (reference)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#message-generation-flow-high-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Message generation flow (high-level)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mcp-information" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP information
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MCP information">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-wiley-mcp-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Wiley MCP works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#which-endpoint-it-exposes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which endpoint it exposes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-to-authenticate-to-wiley-mcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How to authenticate to Wiley MCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#operational-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operational notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentation-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documentation notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-auth/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Auth
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-collection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Collection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-conversation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conversation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-document/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Document
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-forgot_password/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Forgot Password
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-health_check/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health Check
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-message/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Message
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="routers-user/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#eve-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        EVE Backend
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="EVE Backend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Architecture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#directory-structure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Directory structure
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#key-workflows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Key workflows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-surface-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API surface (reference)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#message-generation-flow-high-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Message generation flow (high-level)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mcp-information" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        MCP information
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="MCP information">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-wiley-mcp-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How Wiley MCP works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#which-endpoint-it-exposes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which endpoint it exposes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-to-authenticate-to-wiley-mcp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How to authenticate to Wiley MCP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#operational-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operational notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#documentation-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Documentation notes
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+  <h1>Home</h1>
+
+<h2 id="eve-backend">EVE Backend</h2>
+<p>A FastAPI-based backend service for chat with Retrieval-Augmented Generation (RAG). It provides authentication, collections and document ingestion, conversation/message management, streaming responses, and a hallucination detection pipeline. Documentation is generated via MkDocs + mkdocstrings.</p>
+<p>For setup, Docker usage, local development, and deployment details, refer to <a href="../README.md">README.md</a>.</p>
+<h3 id="architecture">Architecture</h3>
+<ul>
+<li><strong>FastAPI</strong>: HTTP API and dependency injection</li>
+<li><strong>MongoDB/DocumentDB</strong>: Primary datastore for users, collections, documents, conversations, messages</li>
+<li><strong>Qdrant</strong>: Vector store for embeddings and retrieval</li>
+<li><strong>LLM providers</strong>: Pluggable via <code>src/core/llm_manager.py</code></li>
+<li><strong>Docs</strong>: MkDocs Material + mkdocstrings (Sphinx-style docstrings)</li>
+</ul>
+<h3 id="directory-structure">Directory structure</h3>
+<pre><code class="language-text">src/
+  routers/            # FastAPI route handlers (auth, collection, document, conversation, message, tool, user, health)
+  services/           # Business logic (auth, generate_answer, email, hallucination, etc.)
+  database/           # ODM-style models and pagination helpers
+  core/               # Vector store and LLM managers
+  middlewares/        # Authentication dependencies
+  schemas/            # Pydantic request/response models
+  templates/          # Prompt templates and pipeline configs
+  utils/              # Helpers, parsers, embeddings, rerankers
+tests/                # API and domain tests
+docs/                 # Site content (this page, api references)
+</code></pre>
+<h3 id="key-workflows">Key workflows</h3>
+<ul>
+<li><strong>Authentication</strong></li>
+<li>Signup, email activation, login, refresh</li>
+<li>Endpoints in <code>routers.auth</code> and <code>routers.forgot_password</code></li>
+<li><strong>Collections &amp; Documents</strong></li>
+<li>Create Qdrant collections, upload documents, delete documents</li>
+<li>Ingestion triggers parsing, chunking, embedding, and vector upsert</li>
+<li>Endpoints in <code>routers.collection</code> and <code>routers.document</code></li>
+<li><strong>Conversations &amp; Messages</strong></li>
+<li>Create conversations, post messages, stream responses (SSE)</li>
+<li>Retry message generation, update feedback/annotations</li>
+<li>Endpoints in <code>routers.conversation</code> and <code>routers.message</code></li>
+<li><strong>Hallucination Detection</strong></li>
+<li>Synchronous detection and streaming modes</li>
+<li>Annotates message metadata with label, reason, timings</li>
+</ul>
+<h3 id="api-surface-reference">API surface (reference)</h3>
+<ul>
+<li>Auth: <code>[routers-auth]</code> — <code>routers.auth</code></li>
+<li>Collections: <code>[routers-collection]</code> — <code>routers.collection</code></li>
+<li>Documents: <code>[routers-document]</code> — <code>routers.document</code></li>
+<li>Conversations: <code>[routers-conversation]</code> — <code>routers.conversation</code></li>
+<li>Messages: <code>[routers-message]</code> — <code>routers.message</code></li>
+<li>Users: <code>[routers-user]</code> — <code>routers.user</code></li>
+<li>Health: <code>[routers-health_check]</code> — <code>routers.health_check</code></li>
+</ul>
+<h3 id="message-generation-flow-high-level">Message generation flow (high-level)</h3>
+<ol>
+<li>Validate conversation ownership and requested collections</li>
+<li>Expand requested collections with allowed public and user-owned collections</li>
+<li>Optionally extract year range from filters for MCP usage</li>
+<li>If starting a new chat, create <code>Conversation</code> first; then create placeholder <code>Message</code> record</li>
+<li>Run the answer generation pipeline:</li>
+<li>Build context (RAG decision, retrieval, reranking)</li>
+<li>Generate answer from LLM and record timings and prompt metadata</li>
+<li>Update <code>Message</code> output (answer), documents, flags, and latencies</li>
+<li>Optionally schedule rollup/trim in background</li>
+<li>For streaming endpoints, publish tokens and lifecycle events via bus</li>
+</ol>
+<h3 id="mcp-information">MCP information</h3>
+<p>This backend integrates with Model Context Protocol (MCP) servers, including Wiley’s MCP, using LangChain’s <code>MultiServerMCPClient</code>. The service automatically handles token acquisition and caches tokens for subsequent MCP calls.</p>
+<h4 id="how-wiley-mcp-works">How Wiley MCP works</h4>
+<ul>
+<li><strong>Transport</strong>: HTTP (streamable) or WebSocket sessions are established to the MCP endpoint, then a <code>ClientSession</code> is initialized and tools are invoked via <code>call_tool(name, arguments)</code>.</li>
+<li><strong>Auth model</strong>: OAuth2 Client Credentials. The backend exchanges a Basic credential for a short‑lived Bearer access token, which is then sent on MCP requests.</li>
+<li><strong>Implementation</strong>: See <code>src/services/mcp_client_service.py</code>:</li>
+<li>Token fetch and caching in <code>_call_tool_over_network</code></li>
+<li>Session setup and <code>call_tool(...)</code> over HTTP/WebSocket</li>
+<li>Server configuration loading in <code>_load_server_configs</code></li>
+</ul>
+<h4 id="which-endpoint-it-exposes">Which endpoint it exposes</h4>
+<ul>
+<li><strong>MCP endpoint</strong>: <code>https://custom-agents-dev-mcp.scholargateway.ai/mcp</code></li>
+<li><strong>Token endpoint</strong>: <code>https://custom-agents-dev-mcp.scholargateway.ai/oauth2/token?grant_type=client_credentials</code></li>
+</ul>
+<h4 id="how-to-authenticate-to-wiley-mcp">How to authenticate to Wiley MCP</h4>
+<ol>
+<li>Prepare client credentials:</li>
+<li>Client ID: <code>XXX</code></li>
+<li>Client Secret: <code>XXX</code></li>
+<li>Authorization (Basic): <code>Basic base64(client_id:client_secret)</code></li>
+<li>Set the backend environment variable so the service can exchange for a Bearer token:</li>
+<li><code>WILEY_AUTH_TOKEN='Basic XXXXXX'</code></li>
+<li>The backend will:</li>
+<li>POST to the Token endpoint with header <code>Authorization: $WILEY_AUTH_TOKEN</code></li>
+<li>Receive <code>{ access_token, expires_in }</code> and cache the token until <code>expires_in - 60s</code></li>
+<li>Send MCP requests with <code>Authorization: Bearer &lt;access_token&gt;</code></li>
+<li>For WebSocket, the Authorization is forwarded as query parameters <code>auth_header=Authorization</code> and <code>auth_value=Bearer%20&lt;access_token&gt;</code></li>
+</ol>
+<h4 id="operational-notes">Operational notes</h4>
+<ul>
+<li>Server definitions come from <code>Config.get_mcp_servers()</code>; ensure your Wiley MCP server is enabled with <code>transport</code> set to <code>streamable_http</code> or <code>websocket</code>, and <code>url</code> set to the MCP endpoint above.</li>
+<li>If an <code>Authorization</code> header is preconfigured without a <code>Bearer</code> or <code>Basic</code> prefix, the service normalizes it to <code>Bearer</code> at runtime.</li>
+<li>For examples of listing and invoking tools, see <code>MultiServerMCPClientService.list_tools_from_server(...)</code>, <code>list_tools_from_all_servers(...)</code>, and <code>call_tool_on_server(...)</code>.</li>
+</ul>
+<h3 id="documentation-notes">Documentation notes</h3>
+<ul>
+<li>Docstrings are Sphinx-style with <code>:param</code>, <code>:type</code>, <code>:return</code>, <code>:rtype</code>, <code>:raises</code>.</li>
+<li>Module reference pages in <code>docs/</code> use:</li>
+</ul>
+<pre><code class="language-markdown">::: routers.&lt;module&gt;
+handler: python
+</code></pre>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": [], "search": "assets/javascripts/workers/search.7a47a382.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="assets/javascripts/bundle.e71a0d61.min.js"></script>
+      
+    
+  </body>
+</html>
