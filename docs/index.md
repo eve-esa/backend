@@ -68,44 +68,6 @@ docs/                 # Site content (this page, api references)
 7. Optionally schedule rollup/trim in background
 8. For streaming endpoints, publish tokens and lifecycle events via bus
 
-### MCP information
-
-This backend integrates with Model Context Protocol (MCP) servers, including Wiley’s MCP, using LangChain’s `MultiServerMCPClient`. The service automatically handles token acquisition and caches tokens for subsequent MCP calls.
-
-#### How Wiley MCP works
-
-- **Transport**: HTTP (streamable) or WebSocket sessions are established to the MCP endpoint, then a `ClientSession` is initialized and tools are invoked via `call_tool(name, arguments)`.
-- **Auth model**: OAuth2 Client Credentials. The backend exchanges a Basic credential for a short‑lived Bearer access token, which is then sent on MCP requests.
-- **Implementation**: See `src/services/mcp_client_service.py`:
-  - Token fetch and caching in `_call_tool_over_network`
-  - Session setup and `call_tool(...)` over HTTP/WebSocket
-  - Server configuration loading in `_load_server_configs`
-
-#### Which endpoint it exposes
-
-- **MCP endpoint**: `https://custom-agents-dev-mcp.scholargateway.ai/mcp`
-- **Token endpoint**: `https://custom-agents-dev-mcp.scholargateway.ai/oauth2/token?grant_type=client_credentials`
-
-#### How to authenticate to Wiley MCP
-
-1. Prepare client credentials:
-   - Client ID: `XXX`
-   - Client Secret: `XXX`
-   - Authorization (Basic): `Basic base64(client_id:client_secret)`
-2. Set the backend environment variable so the service can exchange for a Bearer token:
-   - `WILEY_AUTH_TOKEN='Basic XXXXXX'`
-3. The backend will:
-   - POST to the Token endpoint with header `Authorization: $WILEY_AUTH_TOKEN`
-   - Receive `{ access_token, expires_in }` and cache the token until `expires_in - 60s`
-   - Send MCP requests with `Authorization: Bearer <access_token>`
-   - For WebSocket, the Authorization is forwarded as query parameters `auth_header=Authorization` and `auth_value=Bearer%20<access_token>`
-
-#### Operational notes
-
-- Server definitions come from `Config.get_mcp_servers()`; ensure your Wiley MCP server is enabled with `transport` set to `streamable_http` or `websocket`, and `url` set to the MCP endpoint above.
-- If an `Authorization` header is preconfigured without a `Bearer` or `Basic` prefix, the service normalizes it to `Bearer` at runtime.
-- For examples of listing and invoking tools, see `MultiServerMCPClientService.list_tools_from_server(...)`, `list_tools_from_all_servers(...)`, and `call_tool_on_server(...)`.
-
 ### Documentation notes
 
 - Docstrings are Sphinx-style with `:param`, `:type`, `:return`, `:rtype`, `:raises`.

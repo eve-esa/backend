@@ -1,4 +1,4 @@
-site_name: "EVE chating system"
+site_name: "EVE documentation"
 
 theme:
   name: "material"
@@ -18,3 +18,6 @@ plugins:
             docstring_options:
               ignore_init_summary: false
               trim_doctest_flags: true
+
+extra_css:
+  - styles/overrides.css
