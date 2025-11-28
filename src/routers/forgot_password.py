@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 
 @router.post("/code", response_model=Dict[str, str])
 async def send_forgot_password_code(request: ForgotPasswordRequest):
+    """
+    Send a password reset code to the user's email.
+
+    Generates a one-time code, stores it with an expiry, and emails a reset link.
+
+    :param request: Request containing the user's email.\n
+    :type request: ForgotPasswordRequest\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: User not found.
+    """
     user = await User.find_one({"email": request.email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -52,6 +64,20 @@ async def send_forgot_password_code(request: ForgotPasswordRequest):
 
 @router.post("/confirm", response_model=Dict[str, str])
 async def confirm_new_password(request: ForgotPasswordConfirmation):
+    """
+    Confirm a password reset with the provided code and new password.
+
+    Validates the reset code and its expiry, ensures password confirmation
+    matches, updates the user's password, and invalidates the code.
+
+    :param request: Confirmation payload with code and new password.\n
+    :type request: ForgotPasswordConfirmation\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: Invalid or expired code, or user not found.\n
+        - 400: Passwords do not match.
+    """
     forgot_password = await ForgotPassword.find_one({"code": request.code})
     if not forgot_password:
         raise HTTPException(status_code=404, detail="Invalid code")

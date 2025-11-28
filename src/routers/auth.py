@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 
 @router.post("/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
+    """
+    Authenticate a user and issue JWT tokens.
+
+    Validates the provided credentials, ensures the account is active, and
+    returns a short-lived access token and a long-lived refresh token.
+
+    :param request: Login credentials payload.\n
+    :type request: LoginRequest\n
+    :return: Access and refresh tokens.\n
+    :rtype: LoginResponse\n
+    :raises HTTPException:\n
+        - 401: Invalid credentials or user not found.\n
+        - 403: Account not activated.
+    """
     if not await verify_user(request.email, request.password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -49,6 +63,19 @@ async def login(request: LoginRequest):
 
 @router.post("/refresh", response_model=RefreshResponse)
 async def refresh(request: RefreshRequest):
+    """
+    Exchange a refresh token for a new access token.
+
+    Decodes and validates the provided refresh token and returns a new
+    access token if the token and user are valid.
+
+    :param request: Refresh token payload.\n
+    :type request: RefreshRequest\n
+    :return: Fresh access token.\n
+    :rtype: RefreshResponse\n
+    :raises HTTPException:\n
+        - 401: Invalid refresh token or user not found.
+    """
     try:
         payload = jwt.decode(
             request.refresh_token,
@@ -74,6 +101,19 @@ async def refresh(request: RefreshRequest):
 
 @router.post("/signup", response_model=SignupResponse)
 async def signup(request: SignupRequest):
+    """
+    Register a new user and send an activation email.
+
+    Creates a user account and emails an activation link containing a one-time
+    activation code.
+
+    :param request: Signup payload with user details and password.\n
+    :type request: SignupRequest\n
+    :return: Created user summary.\n
+    :rtype: SignupResponse\n
+    :raises HTTPException:\n
+        - 400: Invalid or duplicate signup data.
+    """
     try:
         user = await create_user(
             email=request.email,
@@ -104,6 +144,19 @@ async def signup(request: SignupRequest):
 
 @router.post("/resend-activation")
 async def resend_activation(request: ResendActivationRequest):
+    """
+    Resend the account activation email.
+
+    Generates a new activation code (if the account is not yet active) and
+    sends the activation email again.
+
+    :param request: Email address for the account.\n
+    :type request: ResendActivationRequest\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: User not found.
+    """
     user = await User.find_one({"email": request.email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -127,6 +180,19 @@ async def resend_activation(request: ResendActivationRequest):
 
 @router.post("/verify")
 async def verify(request: VerifyRequest):
+    """
+    Verify account activation using the activation code.
+
+    Marks the user as active if the provided code matches and clears the code.
+
+    :param request: Verification payload with email and activation code.\n
+    :type request: VerifyRequest\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: User not found.\n
+        - 400: Invalid activation code.
+    """
     user = await User.find_one({"email": request.email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

@@ -1,0 +1,8 @@
+/* Set Material primary (header/app bar) color */
+:root {
+  --md-primary-fg-color: #003247;
+  --md-primary-fg-color--light: #2f5970;
+  --md-primary-fg-color--dark: #001c26;
+}
+
+

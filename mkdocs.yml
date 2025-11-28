@@ -1,0 +1,23 @@
+site_name: "EVE documentation"
+
+theme:
+  name: "material"
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src"] # add src to sys.path
+          options:
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            show_signature_annotations: true
+            docstring_style: sphinx
+            docstring_options:
+              ignore_init_summary: false
+              trim_doctest_flags: true
+
+extra_css:
+  - styles/overrides.css
