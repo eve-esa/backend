@@ -17,18 +17,19 @@ router = APIRouter()
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
 async def list_conversations(
     request_user: User = Depends(get_current_user), pagination: Pagination = Depends()
-):
+) -> PaginatedResponse[Conversation]:
     """
     List conversations owned by the current user.
 
-    :param request_user: Authenticated user injected by dependency.\n
-    :type request_user: User\n
-    :param pagination: Pagination parameters.\n
-    :type pagination: Pagination\n
-    :return: Paginated conversations for the user.\n
-    :rtype: PaginatedResponse[Conversation]\n
-    :raises HTTPException:\n
-        - 500: Server error.
+    Args:
+        request_user (User): Authenticated user injected by dependency.
+        pagination (Pagination): Pagination parameters.
+
+    Returns:
+        Paginated conversations for the user.
+
+    Raises:
+        HTTPException: 500 for server errors.
     """
     try:
         result = await Conversation.find_all_with_pagination(
@@ -50,20 +51,19 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> ConversationDetail:
     """
     Get a conversation and its messages.
 
-    :param conversation_id: Conversation identifier.\n
-    :type conversation_id: str\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Conversation with messages and metadata.\n
-    :rtype: ConversationDetail\n
-    :raises HTTPException:\n
-        - 404: Conversation not found.\n
-        - 403: Not allowed to access this conversation.\n
-        - 500: Server error.\n
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Conversation with messages and metadata.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -99,18 +99,19 @@ async def get_conversation(
 async def create_conversation(
     request: ConversationCreate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> Conversation:
     """
     Create a new conversation for the current user.
 
-    :param request: New conversation payload.\n
-    :type request: ConversationCreate\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Created conversation.\n
-    :rtype: Conversation\n
-    :raises HTTPException:\n
-        - 500: Server error.
+    Args:
+        request (ConversationCreate): New conversation payload.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Created conversation.
+
+    Raises:
+        HTTPException: 500 for server errors.
     """
     try:
         return await Conversation.create(
@@ -129,22 +130,20 @@ async def update_conversation_name(
     conversation_id: str,
     request: ConversationNameUpdate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> Conversation:
     """
     Update a conversation's name.
 
-    :param conversation_id: Conversation identifier.\n
-    :type conversation_id: str\n
-    :param request: New name payload.\n
-    :type request: ConversationNameUpdate\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Updated conversation.\n
-    :rtype: Conversation\n
-    :raises HTTPException:\n
-        - 404: Conversation not found.\n
-        - 403: Not allowed to update this conversation.\n
-        - 500: Server error.
+    Args:
+        conversation_id (str): Conversation identifier.
+        request (ConversationNameUpdate): New name payload.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Updated conversation.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if update is forbidden; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -172,20 +171,19 @@ async def update_conversation_name(
 async def delete_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Delete a conversation and its messages.
 
-    :param conversation_id: Conversation identifier.\n
-    :type conversation_id: str\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Confirmation message.\n
-    :rtype: dict\n
-    :raises HTTPException:\n
-        - 404: Conversation not found.\n
-        - 403: Not allowed to delete this conversation.\n
-        - 500: Server error.
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)

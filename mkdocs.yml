@@ -14,7 +14,7 @@ plugins:
             show_root_full_path: false
             members_order: source
             show_signature_annotations: true
-            docstring_style: sphinx
+            docstring_style: google
             docstring_options:
               ignore_init_summary: false
               trim_doctest_flags: true

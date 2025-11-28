@@ -64,20 +64,21 @@ class HallucinationDetectResponse(BaseModel):
 @router.get("/conversations/messages/average-latencies")
 async def get_average_latencies(
     start_date: datetime | None = None, end_date: datetime | None = None
-):
+) -> dict:
     """
     Return average latencies aggregated across all messages.
 
     Optionally filters the aggregation by a timestamp window.
 
-    :param start_date: Optional start of the time window (inclusive).\n
-    :type start_date: datetime | None\n
-    :param end_date: Optional end of the time window (inclusive).\n
-    :type end_date: datetime | None\n
-    :return: A mapping of latency metric name to average value.\n
-    :rtype: dict\n
-    :raises HTTPException:\n
-        - 500: Server error during aggregation.
+    Args:
+        start_date (datetime | None): Optional start of the time window (inclusive).
+        end_date (datetime | None): Optional end of the time window (inclusive).
+
+    Returns:
+        Mapping of latency metric name to average value.
+
+    Raises:
+        HTTPException: 500 for server errors during aggregation.
     """
     try:
         messages_col = Message.get_collection()
@@ -130,18 +131,20 @@ async def get_average_latencies(
 
 
 @router.get("/conversations/messages/me/stats")
-async def get_my_message_stats(requesting_user: User = Depends(get_current_user)):
+async def get_my_message_stats(requesting_user: User = Depends(get_current_user)) -> dict:
     """
     Return counts and character totals for the current user's messages.
 
     Aggregates across all messages belonging to conversations owned by the user.
 
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Aggregated stats including counts and character sums.\n
-    :rtype: dict\n
-    :raises HTTPException:\n
-        - 500: Server error during aggregation.
+    Args:
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Aggregated stats including counts and character sums.
+
+    Raises:
+        HTTPException: 500 for server errors during aggregation.
     """
     try:
         messages_col = Message.get_collection()
@@ -220,23 +223,23 @@ async def create_message(
     conversation_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> CreateMessageResponse:
     """
     Create a new message in a conversation and generate an answer.
 
-    Validates conversation ownership, normalizes requested public collections,
-    persists a `Message` placeholder, runs generation, updates the message with
-    answer and retrieval metadata, and schedules rollup/trimming of history.
+    Validates conversation ownership, normalizes requested public collections, persists a placeholder `Message`, runs generation, updates the message with answer and retrieval metadata, and schedules rollup/trimming of history.
 
-    :param request: Generation parameters including query, collections, and model settings.\n
-    :param conversation_id: Target conversation identifier.\n
-    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: Response payload with message id, query, answer, documents, flags, and metadata.\n
-    :raises HTTPException:\n
-        - 404 if conversation is not found.\n
-        - 403 if user does not own the conversation or uses unauthorized collections.\n
-        - 500 for unexpected server errors.\n
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Message id, query, answer, documents, flags, and metadata.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
     """
     message = None
     try:
@@ -379,24 +382,23 @@ async def retry(
     message_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Retry generation for an existing message.
 
-    Re-validates conversation ownership and message relationship, reuses the
-    original `request_input` stored on the message, regenerates the answer,
-    and updates message content, documents, and metadata.
+    Re-validates conversation ownership and message relationship, reuses the original `request_input` stored on the message, regenerates the answer, and updates message content, documents, and metadata.
 
-    :param conversation_id: Conversation identifier.\n
-    :param message_id: Message identifier to retry.\n
-    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: Response payload mirroring `create_message` with updated answer and metadata.\n
-    :raises HTTPException:\n
-        - 404 if conversation or message is not found\n
-        - 403 if user does not own the conversation\n
-        - 400 if message cannot be retried (missing original request_input)\n
-        - 500 for unexpected server errors
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to retry.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Response payload mirroring create_message with updated answer and metadata.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -477,22 +479,23 @@ async def update_message(
     message_id: str,
     request: MessageUpdate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Update message feedback and related annotations.
 
-    Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`,
-    and hallucination feedback metadata on the target message.
+    Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`, and hallucination feedback metadata on the target message.
 
-    :param conversation_id: Conversation identifier.\n
-    :param message_id: Message identifier to update.\n
-    :param request: Partial update payload for feedback fields.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: A success message upon update.\n
-    :raises HTTPException:\n
-        - 404 if conversation or message is not found or mismatched\n
-        - 403 if user does not own the conversation\n
-        - 500 for unexpected server errors\n
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to update.
+        request (MessageUpdate): Partial update payload for feedback fields.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Success message upon update.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -559,22 +562,23 @@ async def create_message_stream(
     conversation_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> StreamingResponse:
     """
     Create a new message and stream generation via Server-Sent Events (SSE).
 
-    Sets up a per-message stream bus and runs generation in a decoupled task.
-    Yields SSE-formatted chunks including status updates, tokens, and final payloads.
+    Sets up a per-message stream bus and runs generation in a decoupled task. Yields SSE-formatted chunks including status updates, tokens, and final payloads.
 
-    :param request: Generation parameters including query, collections, and model settings.\n
-    :param conversation_id: Target conversation identifier.\n
-    :param background_tasks: FastAPI background task runner used to schedule rollups.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: StreamingResponse that emits SSE events for the generation lifecycle.\n
-    :raises HTTPException:\n
-        - 404 if conversation is not found\n
-        - 403 if user does not own the conversation or uses unauthorized collections\n
-        - 500 for unexpected server errors\n
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        SSE stream for the generation lifecycle.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
     """
     message = None
     try:
@@ -711,20 +715,21 @@ async def create_message_stream(
 async def stop_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Signal cancellation for the active generation within a conversation.
 
-    Uses the cancel manager to locate the in-flight message/task and requests
-    cooperative cancellation, also notifying downstream subscribers via the stream bus.
+    Uses the cancel manager to locate the in-flight message/task and requests cooperative cancellation, also notifying downstream subscribers via the stream bus.
 
-    :param conversation_id: Conversation identifier to stop generation for.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: A status payload indicating stop state or absence of active generation.\n
-    :raises HTTPException:\n
-        - 404 if conversation is not found\n
-        - 403 if user does not own the conversation\n
-        - 500 for unexpected server errors\n
+    Args:
+        conversation_id (str): Conversation identifier to stop generation for.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Status payload indicating stop state or absence of active generation.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
     """
     try:
         logger.info(
@@ -787,21 +792,23 @@ async def get_source_logs(
     message_id: str,
     request: SourceLogsRequest,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Append a source log entry to a message's metadata.
 
-    Stores user-attributed source inspection information such as id, url, title,
-    and collection name, with a server-side timestamp.
+    Stores user-attributed source inspection information such as id, url, title, and collection name, with a server-side timestamp.
 
-    :param conversation_id: Conversation identifier.\n
-    :param message_id: Message identifier.\n
-    :param request: Source log details to append.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: Confirmation message upon successful append.\n
-    :raises HTTPException:\n
-        - 404 if conversation or message is not found or mismatched\n
-        - 500 for unexpected server errors\n
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier.
+        request (SourceLogsRequest): Source log details to append.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message upon successful append.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -845,21 +852,22 @@ async def hallucination_detect(
     conversation_id: str,
     message_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> HallucinationDetectResponse:
     """
     Detect and persist hallucination analysis for a message.
 
-    Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and
-    stores the result and latency breakdown on the message metadata.
+    Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and stores the result and latency breakdown on the message metadata.
 
-    :param conversation_id: Conversation identifier.\n
-    :param message_id: Message identifier to analyze.\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :returns: Structured hallucination analysis result with optional final answer.\n
-    :raises HTTPException:\n
-        - 404 if conversation or message is not found or mismatched\n
-        - 403 if user does not own the conversation\n
-        - 500 for unexpected server errors\n
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to analyze.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Structured hallucination analysis with optional final answer.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.
     """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)
@@ -947,28 +955,25 @@ async def stream_hallucination(
     conversation_id: str,
     message_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> StreamingResponse:
     """
     Stream hallucination handling result as Server-Sent Events (SSE).
 
-    Streams structured events for detection, optional rewriting, retrieval,
-    and answer generation steps.
+    Streams structured events for detection, optional rewriting, retrieval, and answer generation steps.
 
     - If label == 0 (factual), emits a final event with the reason.
     - If label == 1 (hallucination), streams tokens for the final answer and then a final event.
 
-    :param conversation_id: Conversation identifier.\n
-    :type conversation_id: str
-    :param message_id: Message identifier to analyze.\n
-    :type message_id: str\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: StreamingResponse emitting SSE events for the detection workflow.\n
-    :rtype: StreamingResponse\n
-    :raises HTTPException:\n
-        - 404: Conversation or message not found, or mismatched relationship.\n
-        - 403: Not allowed to access this conversation.\n
-        - 500: Server error during streaming pipeline.\n
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to analyze.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        SSE events for the detection workflow.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if access is forbidden; 500 for streaming errors.
     """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)

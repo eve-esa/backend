@@ -50,21 +50,20 @@ async def list_documents(
     collection_id: str = Path(..., description="Collection ID"),
     pagination: Pagination = Depends(),
     requesting_user: User = Depends(get_current_user),
-):
+) -> PaginatedResponse[DocumentModel]:
     """
     List documents in a collection.
 
-    :param collection_id: Collection identifier.\n
-    :type collection_id: str\n
-    :param pagination: Pagination parameters.\n
-    :type pagination: Pagination\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Paginated documents for the collection.\n
-    :rtype: PaginatedResponse[DocumentModel]\n
-    :raises HTTPException:\n
-        - 404: Collection not found.\n
-        - 403: Not allowed to access this collection.
+    Args:
+        collection_id (str): Collection identifier.
+        pagination (Pagination): Pagination parameters.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Paginated documents for the collection.
+
+    Raises:
+        HTTPException: 404 if collection is not found; 403 if access is forbidden.
     """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
@@ -83,22 +82,20 @@ async def get_document(
     collection_id: str = Path(..., description="Collection ID"),
     document_id: str = Path(..., description="Document ID"),
     requesting_user: User = Depends(get_current_user),
-):
+) -> DocumentModel:
     """
     Get a specific document from a collection.
 
-    :param collection_id: Collection identifier.\n
-    :type collection_id: str\n
-    :param document_id: Document identifier.\n
-    :type document_id: str\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Document details.\n
-    :rtype: DocumentModel\n
-    :raises HTTPException:\n
-        - 404: Document not found.\n
-        - 400: Document does not belong to this collection.\n
-        - 403: Not allowed to access this document.
+    Args:
+        collection_id (str): Collection identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Document details.
+
+    Raises:
+        HTTPException: 404 if not found; 400 if document not in collection; 403 if access is forbidden.
     """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
@@ -129,35 +126,27 @@ async def upload_documents(
     chunk_size: int = Form(default=DEFAULT_CHUNK_SIZE),
     chunk_overlap: int = Form(default=DEFAULT_CHUNK_OVERLAP),
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Upload documents to a collection.
 
-    Stores document records and triggers asynchronous parsing, chunking, and
-    vectorization for retrieval.
+    Stores document records and triggers asynchronous parsing, chunking, and vectorization for retrieval.
 
-    :param collection_id: Collection identifier.\n
-    :type collection_id: str\n
-    :param files: One or more files to ingest.\n
-    :type files: list[UploadFile]\n
-    :param metadata_urls: Optional list or single URL per file.\n
-    :type metadata_urls: list[str] | str | None\n
-    :param metadata_names: Optional list or single display name per file.\n
-    :type metadata_names: list[str] | str | None\n
-    :param embeddings_model: Embeddings model to use for vectorization.\n
-    :type embeddings_model: str\n
-    :param chunk_size: Chunk size for splitting documents.\n
-    :type chunk_size: int\n
-    :param chunk_overlap: Overlap between chunks.\n
-    :type chunk_overlap: int\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Service response with ingestion details.\n
-    :rtype: dict\n
-    :raises HTTPException:\n
-        - 404: Collection not found.\n
-        - 403: Not allowed to access this collection.\n
-        - 500: Error processing documents.
+    Args:
+        collection_id (str): Collection identifier.
+        files (list[UploadFile]): One or more files to ingest.
+        metadata_urls (list[str] | str | None): Optional list or single URL per file.
+        metadata_names (list[str] | str | None): Optional list or single display name per file.
+        embeddings_model (str): Embeddings model to use for vectorization.
+        chunk_size (int): Chunk size for splitting documents.
+        chunk_overlap (int): Overlap between chunks.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Service response with ingestion details.
+
+    Raises:
+        HTTPException: 404 if collection is not found; 403 if access is forbidden; 500 for processing errors.
     """
     collection = await get_collection_and_validate_ownership(
         collection_id, requesting_user
@@ -214,24 +203,22 @@ async def delete_document(
     collection_id: str = Path(..., description="Collection ID"),
     document_id: str = Path(..., description="Document ID"),
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
     """
     Delete a document from a collection.
 
     Removes the document record and attempts to delete associated vectors.
 
-    :param collection_id: Collection identifier.\n
-    :type collection_id: str\n
-    :param document_id: Document identifier.\n
-    :type document_id: str\n
-    :param requesting_user: Authenticated user injected by dependency.\n
-    :type requesting_user: User\n
-    :return: Confirmation message.\n
-    :rtype: dict\n
-    :raises HTTPException:\n
-        - 404: Document not found.\n
-        - 400: Document does not belong to this collection.\n
-        - 403: Not allowed to delete this document.
+    Args:
+        collection_id (str): Collection identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if not found; 400 if document not in collection; 403 if deletion is forbidden.
     """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
