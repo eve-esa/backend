@@ -846,7 +846,7 @@
 
 
 <h3 id="routers.message.get_average_latencies" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_average_latencies</span><span class="p">(</span><span class="n">start_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">end_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">get_average_latencies</span><span class="p">(</span><span class="n">start_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">end_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -919,11 +919,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A mapping of latency metric name to average value.</p>
+                <p>Mapping of latency metric name to average value.</p>
               </div>
             </td>
           </tr>
@@ -942,13 +942,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>500: Server error during aggregation.</li>
-</ul>
+                <p>500 for server errors during aggregation.</p>
               </div>
             </td>
           </tr>
@@ -1023,23 +1021,25 @@
 <span class="normal">126</span>
 <span class="normal">127</span>
 <span class="normal">128</span>
-<span class="normal">129</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations/messages/average-latencies&quot;</span><span class="p">)</span>
+<span class="normal">129</span>
+<span class="normal">130</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations/messages/average-latencies&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_average_latencies</span><span class="p">(</span>
     <span class="n">start_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">end_date</span><span class="p">:</span> <span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Return average latencies aggregated across all messages.</span>
 
 <span class="sd">    Optionally filters the aggregation by a timestamp window.</span>
 
-<span class="sd">    :param start_date: Optional start of the time window (inclusive).\n</span>
-<span class="sd">    :type start_date: datetime | None\n</span>
-<span class="sd">    :param end_date: Optional end of the time window (inclusive).\n</span>
-<span class="sd">    :type end_date: datetime | None\n</span>
-<span class="sd">    :return: A mapping of latency metric name to average value.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 500: Server error during aggregation.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        start_date (datetime | None): Optional start of the time window (inclusive).</span>
+<span class="sd">        end_date (datetime | None): Optional end of the time window (inclusive).</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Mapping of latency metric name to average value.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 500 for server errors during aggregation.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">messages_col</span> <span class="o">=</span> <span class="n">Message</span><span class="o">.</span><span class="n">get_collection</span><span class="p">()</span>
@@ -1099,7 +1099,7 @@
 
 
 <h3 id="routers.message.get_my_message_stats" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_my_message_stats</span><span class="p">(</span><span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">get_my_message_stats</span><span class="p">(</span><span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1156,7 +1156,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1179,13 +1179,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>500: Server error during aggregation.</li>
-</ul>
+                <p>500 for server errors during aggregation.</p>
               </div>
             </td>
           </tr>
@@ -1195,8 +1193,7 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">132</span>
-<span class="normal">133</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">133</span>
 <span class="normal">134</span>
 <span class="normal">135</span>
 <span class="normal">136</span>
@@ -1275,19 +1272,24 @@
 <span class="normal">209</span>
 <span class="normal">210</span>
 <span class="normal">211</span>
-<span class="normal">212</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations/messages/me/stats&quot;</span><span class="p">)</span>
-<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_my_message_stats</span><span class="p">(</span><span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">)):</span>
+<span class="normal">212</span>
+<span class="normal">213</span>
+<span class="normal">214</span>
+<span class="normal">215</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations/messages/me/stats&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_my_message_stats</span><span class="p">(</span><span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Return counts and character totals for the current user&#39;s messages.</span>
 
 <span class="sd">    Aggregates across all messages belonging to conversations owned by the user.</span>
 
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Aggregated stats including counts and character sums.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 500: Server error during aggregation.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Aggregated stats including counts and character sums.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 500 for server errors during aggregation.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">messages_col</span> <span class="o">=</span> <span class="n">Message</span><span class="o">.</span><span class="n">get_collection</span><span class="p">()</span>
@@ -1366,7 +1368,7 @@
 
 
 <h3 id="routers.message.create_message" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_message</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">GenerationRequest</span><span class="p">,</span> <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">create_message</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">GenerationRequest</span><span class="p">,</span> <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">CreateMessageResponse</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1378,9 +1380,7 @@
     <div class="doc doc-contents ">
 
         <p>Create a new message in a conversation and generate an answer.</p>
-<p>Validates conversation ownership, normalizes requested public collections,
-persists a <code>Message</code> placeholder, runs generation, updates the message with
-answer and retrieval metadata, and schedules rollup/trimming of history.</p>
+<p>Validates conversation ownership, normalizes requested public collections, persists a placeholder <code>Message</code>, runs generation, updates the message with answer and retrieval metadata, and schedules rollup/trimming of history.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -1435,7 +1435,7 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>FastAPI background task runner used to schedule rollups.</p>
+                <p>Background task runner used to schedule rollups.</p>
               </div>
             </td>
             <td>
@@ -1473,10 +1473,11 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="src.schemas.message.CreateMessageResponse">CreateMessageResponse</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Response payload with message id, query, answer, documents, flags, and metadata.</p>
+                <p>Message id, query, answer, documents, flags, and metadata.</p>
               </div>
             </td>
           </tr>
@@ -1495,13 +1496,11 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation is not found.  - 403 if user does not own the conversation or uses unauthorized collections.  - 500 for unexpected server errors.</li>
-</ul>
+                <p>404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1511,10 +1510,7 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">215</span>
-<span class="normal">216</span>
-<span class="normal">217</span>
-<span class="normal">218</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">218</span>
 <span class="normal">219</span>
 <span class="normal">220</span>
 <span class="normal">221</span>
@@ -1669,7 +1665,10 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
 <span class="normal">370</span>
 <span class="normal">371</span>
 <span class="normal">372</span>
-<span class="normal">373</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<span class="normal">373</span>
+<span class="normal">374</span>
+<span class="normal">375</span>
+<span class="normal">376</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
     <span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">CreateMessageResponse</span>
 <span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">create_message</span><span class="p">(</span>
@@ -1677,23 +1676,23 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">CreateMessageResponse</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Create a new message in a conversation and generate an answer.</span>
 
-<span class="sd">    Validates conversation ownership, normalizes requested public collections,</span>
-<span class="sd">    persists a `Message` placeholder, runs generation, updates the message with</span>
-<span class="sd">    answer and retrieval metadata, and schedules rollup/trimming of history.</span>
+<span class="sd">    Validates conversation ownership, normalizes requested public collections, persists a placeholder `Message`, runs generation, updates the message with answer and retrieval metadata, and schedules rollup/trimming of history.</span>
 
-<span class="sd">    :param request: Generation parameters including query, collections, and model settings.\n</span>
-<span class="sd">    :param conversation_id: Target conversation identifier.\n</span>
-<span class="sd">    :param background_tasks: FastAPI background task runner used to schedule rollups.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: Response payload with message id, query, answer, documents, flags, and metadata.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation is not found.\n</span>
-<span class="sd">        - 403 if user does not own the conversation or uses unauthorized collections.\n</span>
-<span class="sd">        - 500 for unexpected server errors.\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (GenerationRequest): Generation parameters including query, collections, and model settings.</span>
+<span class="sd">        conversation_id (str): Target conversation identifier.</span>
+<span class="sd">        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Message id, query, answer, documents, flags, and metadata.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">message</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="k">try</span><span class="p">:</span>
@@ -1838,7 +1837,7 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
 
 
 <h3 id="routers.message.retry" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">retry</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">retry</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1850,9 +1849,7 @@ answer and retrieval metadata, and schedules rollup/trimming of history.</p>
     <div class="doc doc-contents ">
 
         <p>Retry generation for an existing message.</p>
-<p>Re-validates conversation ownership and message relationship, reuses the
-original <code>request_input</code> stored on the message, regenerates the answer,
-and updates message content, documents, and metadata.</p>
+<p>Re-validates conversation ownership and message relationship, reuses the original <code>request_input</code> stored on the message, regenerates the answer, and updates message content, documents, and metadata.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -1907,7 +1904,7 @@ and updates message content, documents, and metadata.</p>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>FastAPI background task runner used to schedule rollups.</p>
+                <p>Background task runner used to schedule rollups.</p>
               </div>
             </td>
             <td>
@@ -1945,10 +1942,11 @@ and updates message content, documents, and metadata.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Response payload mirroring <code>create_message</code> with updated answer and metadata.</p>
+                <p>Response payload mirroring create_message with updated answer and metadata.</p>
               </div>
             </td>
           </tr>
@@ -1967,13 +1965,11 @@ and updates message content, documents, and metadata.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation or message is not found  - 403 if user does not own the conversation  - 400 if message cannot be retried (missing original request_input)  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1983,10 +1979,7 @@ and updates message content, documents, and metadata.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">376</span>
-<span class="normal">377</span>
-<span class="normal">378</span>
-<span class="normal">379</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">379</span>
 <span class="normal">380</span>
 <span class="normal">381</span>
 <span class="normal">382</span>
@@ -2078,30 +2071,31 @@ and updates message content, documents, and metadata.</p>
 <span class="normal">468</span>
 <span class="normal">469</span>
 <span class="normal">470</span>
-<span class="normal">471</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/retry&quot;</span><span class="p">)</span>
+<span class="normal">471</span>
+<span class="normal">472</span>
+<span class="normal">473</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/retry&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">retry</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Retry generation for an existing message.</span>
 
-<span class="sd">    Re-validates conversation ownership and message relationship, reuses the</span>
-<span class="sd">    original `request_input` stored on the message, regenerates the answer,</span>
-<span class="sd">    and updates message content, documents, and metadata.</span>
+<span class="sd">    Re-validates conversation ownership and message relationship, reuses the original `request_input` stored on the message, regenerates the answer, and updates message content, documents, and metadata.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :param message_id: Message identifier to retry.\n</span>
-<span class="sd">    :param background_tasks: FastAPI background task runner used to schedule rollups.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: Response payload mirroring `create_message` with updated answer and metadata.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation or message is not found\n</span>
-<span class="sd">        - 403 if user does not own the conversation\n</span>
-<span class="sd">        - 400 if message cannot be retried (missing original request_input)\n</span>
-<span class="sd">        - 500 for unexpected server errors</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        message_id (str): Message identifier to retry.</span>
+<span class="sd">        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Response payload mirroring create_message with updated answer and metadata.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -2184,7 +2178,7 @@ and updates message content, documents, and metadata.</p>
 
 
 <h3 id="routers.message.update_message" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">update_message</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">MessageUpdate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">update_message</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">MessageUpdate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -2196,8 +2190,7 @@ and updates message content, documents, and metadata.</p>
     <div class="doc doc-contents ">
 
         <p>Update message feedback and related annotations.</p>
-<p>Supports updating fields such as <code>feedback</code>, <code>feedback_reason</code>, <code>was_copied</code>,
-and hallucination feedback metadata on the target message.</p>
+<p>Supports updating fields such as <code>feedback</code>, <code>feedback_reason</code>, <code>was_copied</code>, and hallucination feedback metadata on the target message.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -2290,10 +2283,11 @@ and hallucination feedback metadata on the target message.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A success message upon update.</p>
+                <p>Success message upon update.</p>
               </div>
             </td>
           </tr>
@@ -2312,13 +2306,11 @@ and hallucination feedback metadata on the target message.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation or message is not found or mismatched  - 403 if user does not own the conversation  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -2328,9 +2320,7 @@ and hallucination feedback metadata on the target message.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">474</span>
-<span class="normal">475</span>
-<span class="normal">476</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">476</span>
 <span class="normal">477</span>
 <span class="normal">478</span>
 <span class="normal">479</span>
@@ -2404,28 +2394,32 @@ and hallucination feedback metadata on the target message.</p>
 <span class="normal">547</span>
 <span class="normal">548</span>
 <span class="normal">549</span>
-<span class="normal">550</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="normal">550</span>
+<span class="normal">551</span>
+<span class="normal">552</span>
+<span class="normal">553</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_message</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">MessageUpdate</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Update message feedback and related annotations.</span>
 
-<span class="sd">    Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`,</span>
-<span class="sd">    and hallucination feedback metadata on the target message.</span>
+<span class="sd">    Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`, and hallucination feedback metadata on the target message.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :param message_id: Message identifier to update.\n</span>
-<span class="sd">    :param request: Partial update payload for feedback fields.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: A success message upon update.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation or message is not found or mismatched\n</span>
-<span class="sd">        - 403 if user does not own the conversation\n</span>
-<span class="sd">        - 500 for unexpected server errors\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        message_id (str): Message identifier to update.</span>
+<span class="sd">        request (MessageUpdate): Partial update payload for feedback fields.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Success message upon update.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -2491,7 +2485,7 @@ and hallucination feedback metadata on the target message.</p>
 
 
 <h3 id="routers.message.create_message_stream" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_message_stream</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">GenerationRequest</span><span class="p">,</span> <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">create_message_stream</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">GenerationRequest</span><span class="p">,</span> <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">StreamingResponse</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -2503,8 +2497,7 @@ and hallucination feedback metadata on the target message.</p>
     <div class="doc doc-contents ">
 
         <p>Create a new message and stream generation via Server-Sent Events (SSE).</p>
-<p>Sets up a per-message stream bus and runs generation in a decoupled task.
-Yields SSE-formatted chunks including status updates, tokens, and final payloads.</p>
+<p>Sets up a per-message stream bus and runs generation in a decoupled task. Yields SSE-formatted chunks including status updates, tokens, and final payloads.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -2559,7 +2552,7 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
             </td>
             <td>
               <div class="doc-md-description">
-                <p>FastAPI background task runner used to schedule rollups.</p>
+                <p>Background task runner used to schedule rollups.</p>
               </div>
             </td>
             <td>
@@ -2597,10 +2590,11 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="fastapi.responses.StreamingResponse">StreamingResponse</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>StreamingResponse that emits SSE events for the generation lifecycle.</p>
+                <p>SSE stream for the generation lifecycle.</p>
               </div>
             </td>
           </tr>
@@ -2619,13 +2613,11 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation is not found  - 403 if user does not own the conversation or uses unauthorized collections  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -2635,10 +2627,7 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">553</span>
-<span class="normal">554</span>
-<span class="normal">555</span>
-<span class="normal">556</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">556</span>
 <span class="normal">557</span>
 <span class="normal">558</span>
 <span class="normal">559</span>
@@ -2789,7 +2778,11 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
 <span class="normal">704</span>
 <span class="normal">705</span>
 <span class="normal">706</span>
-<span class="normal">707</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<span class="normal">707</span>
+<span class="normal">708</span>
+<span class="normal">709</span>
+<span class="normal">710</span>
+<span class="normal">711</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
     <span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/stream_messages&quot;</span><span class="p">,</span>
     <span class="n">response_class</span><span class="o">=</span><span class="n">StreamingResponse</span><span class="p">,</span>
 <span class="p">)</span>
@@ -2798,22 +2791,23 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">background_tasks</span><span class="p">:</span> <span class="n">BackgroundTasks</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StreamingResponse</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Create a new message and stream generation via Server-Sent Events (SSE).</span>
 
-<span class="sd">    Sets up a per-message stream bus and runs generation in a decoupled task.</span>
-<span class="sd">    Yields SSE-formatted chunks including status updates, tokens, and final payloads.</span>
+<span class="sd">    Sets up a per-message stream bus and runs generation in a decoupled task. Yields SSE-formatted chunks including status updates, tokens, and final payloads.</span>
 
-<span class="sd">    :param request: Generation parameters including query, collections, and model settings.\n</span>
-<span class="sd">    :param conversation_id: Target conversation identifier.\n</span>
-<span class="sd">    :param background_tasks: FastAPI background task runner used to schedule rollups.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: StreamingResponse that emits SSE events for the generation lifecycle.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation is not found\n</span>
-<span class="sd">        - 403 if user does not own the conversation or uses unauthorized collections\n</span>
-<span class="sd">        - 500 for unexpected server errors\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (GenerationRequest): Generation parameters including query, collections, and model settings.</span>
+<span class="sd">        conversation_id (str): Target conversation identifier.</span>
+<span class="sd">        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        SSE stream for the generation lifecycle.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">message</span> <span class="o">=</span> <span class="kc">None</span>
     <span class="k">try</span><span class="p">:</span>
@@ -2954,7 +2948,7 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
 
 
 <h3 id="routers.message.stop_conversation" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">stop_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">stop_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -2966,8 +2960,7 @@ Yields SSE-formatted chunks including status updates, tokens, and final payloads
     <div class="doc doc-contents ">
 
         <p>Signal cancellation for the active generation within a conversation.</p>
-<p>Uses the cancel manager to locate the in-flight message/task and requests
-cooperative cancellation, also notifying downstream subscribers via the stream bus.</p>
+<p>Uses the cancel manager to locate the in-flight message/task and requests cooperative cancellation, also notifying downstream subscribers via the stream bus.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3028,10 +3021,11 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>A status payload indicating stop state or absence of active generation.</p>
+                <p>Status payload indicating stop state or absence of active generation.</p>
               </div>
             </td>
           </tr>
@@ -3050,13 +3044,11 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation is not found  - 403 if user does not own the conversation  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation is not found; 403 if ownership invalid; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -3066,11 +3058,7 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">710</span>
-<span class="normal">711</span>
-<span class="normal">712</span>
-<span class="normal">713</span>
-<span class="normal">714</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">714</span>
 <span class="normal">715</span>
 <span class="normal">716</span>
 <span class="normal">717</span>
@@ -3137,24 +3125,30 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
 <span class="normal">778</span>
 <span class="normal">779</span>
 <span class="normal">780</span>
-<span class="normal">781</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/stop&quot;</span><span class="p">)</span>
+<span class="normal">781</span>
+<span class="normal">782</span>
+<span class="normal">783</span>
+<span class="normal">784</span>
+<span class="normal">785</span>
+<span class="normal">786</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/stop&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">stop_conversation</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Signal cancellation for the active generation within a conversation.</span>
 
-<span class="sd">    Uses the cancel manager to locate the in-flight message/task and requests</span>
-<span class="sd">    cooperative cancellation, also notifying downstream subscribers via the stream bus.</span>
+<span class="sd">    Uses the cancel manager to locate the in-flight message/task and requests cooperative cancellation, also notifying downstream subscribers via the stream bus.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier to stop generation for.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: A status payload indicating stop state or absence of active generation.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation is not found\n</span>
-<span class="sd">        - 403 if user does not own the conversation\n</span>
-<span class="sd">        - 500 for unexpected server errors\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier to stop generation for.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Status payload indicating stop state or absence of active generation.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">logger</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
@@ -3219,7 +3213,7 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
 
 
 <h3 id="routers.message.get_source_logs" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_source_logs</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">SourceLogsRequest</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">get_source_logs</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">SourceLogsRequest</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -3231,8 +3225,7 @@ cooperative cancellation, also notifying downstream subscribers via the stream b
     <div class="doc doc-contents ">
 
         <p>Append a source log entry to a message's metadata.</p>
-<p>Stores user-attributed source inspection information such as id, url, title,
-and collection name, with a server-side timestamp.</p>
+<p>Stores user-attributed source inspection information such as id, url, title, and collection name, with a server-side timestamp.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3325,6 +3318,7 @@ and collection name, with a server-side timestamp.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -3347,13 +3341,11 @@ and collection name, with a server-side timestamp.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation or message is not found or mismatched  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation/message not found or mismatched; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -3363,12 +3355,7 @@ and collection name, with a server-side timestamp.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">784</span>
-<span class="normal">785</span>
-<span class="normal">786</span>
-<span class="normal">787</span>
-<span class="normal">788</span>
-<span class="normal">789</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">789</span>
 <span class="normal">790</span>
 <span class="normal">791</span>
 <span class="normal">792</span>
@@ -3416,27 +3403,36 @@ and collection name, with a server-side timestamp.</p>
 <span class="normal">834</span>
 <span class="normal">835</span>
 <span class="normal">836</span>
-<span class="normal">837</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/source_logs&quot;</span><span class="p">)</span>
+<span class="normal">837</span>
+<span class="normal">838</span>
+<span class="normal">839</span>
+<span class="normal">840</span>
+<span class="normal">841</span>
+<span class="normal">842</span>
+<span class="normal">843</span>
+<span class="normal">844</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/source_logs&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_source_logs</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">SourceLogsRequest</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Append a source log entry to a message&#39;s metadata.</span>
 
-<span class="sd">    Stores user-attributed source inspection information such as id, url, title,</span>
-<span class="sd">    and collection name, with a server-side timestamp.</span>
+<span class="sd">    Stores user-attributed source inspection information such as id, url, title, and collection name, with a server-side timestamp.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :param message_id: Message identifier.\n</span>
-<span class="sd">    :param request: Source log details to append.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: Confirmation message upon successful append.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation or message is not found or mismatched\n</span>
-<span class="sd">        - 500 for unexpected server errors\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        message_id (str): Message identifier.</span>
+<span class="sd">        request (SourceLogsRequest): Source log details to append.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Confirmation message upon successful append.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation/message not found or mismatched; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -3480,7 +3476,7 @@ and collection name, with a server-side timestamp.</p>
 
 
 <h3 id="routers.message.hallucination_detect" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">hallucination_detect</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">hallucination_detect</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">HallucinationDetectResponse</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -3492,8 +3488,7 @@ and collection name, with a server-side timestamp.</p>
     <div class="doc doc-contents ">
 
         <p>Detect and persist hallucination analysis for a message.</p>
-<p>Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and
-stores the result and latency breakdown on the message metadata.</p>
+<p>Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and stores the result and latency breakdown on the message metadata.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -3570,10 +3565,11 @@ stores the result and latency breakdown on the message metadata.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
+                  <code><span title="routers.message.HallucinationDetectResponse">HallucinationDetectResponse</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Structured hallucination analysis result with optional final answer.</p>
+                <p>Structured hallucination analysis with optional final answer.</p>
               </div>
             </td>
           </tr>
@@ -3592,13 +3588,11 @@ stores the result and latency breakdown on the message metadata.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404 if conversation or message is not found or mismatched  - 403 if user does not own the conversation  - 500 for unexpected server errors</li>
-</ul>
+                <p>404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -3608,14 +3602,7 @@ stores the result and latency breakdown on the message metadata.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">840</span>
-<span class="normal">841</span>
-<span class="normal">842</span>
-<span class="normal">843</span>
-<span class="normal">844</span>
-<span class="normal">845</span>
-<span class="normal">846</span>
-<span class="normal">847</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">847</span>
 <span class="normal">848</span>
 <span class="normal">849</span>
 <span class="normal">850</span>
@@ -3707,7 +3694,15 @@ stores the result and latency breakdown on the message metadata.</p>
 <span class="normal">936</span>
 <span class="normal">937</span>
 <span class="normal">938</span>
-<span class="normal">939</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<span class="normal">939</span>
+<span class="normal">940</span>
+<span class="normal">941</span>
+<span class="normal">942</span>
+<span class="normal">943</span>
+<span class="normal">944</span>
+<span class="normal">945</span>
+<span class="normal">946</span>
+<span class="normal">947</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
     <span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/hallucination&quot;</span><span class="p">,</span>
     <span class="n">response_model</span><span class="o">=</span><span class="n">HallucinationDetectResponse</span><span class="p">,</span>
 <span class="p">)</span>
@@ -3715,21 +3710,22 @@ stores the result and latency breakdown on the message metadata.</p>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">HallucinationDetectResponse</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Detect and persist hallucination analysis for a message.</span>
 
-<span class="sd">    Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and</span>
-<span class="sd">    stores the result and latency breakdown on the message metadata.</span>
+<span class="sd">    Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and stores the result and latency breakdown on the message metadata.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :param message_id: Message identifier to analyze.\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :returns: Structured hallucination analysis result with optional final answer.\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404 if conversation or message is not found or mismatched\n</span>
-<span class="sd">        - 403 if user does not own the conversation\n</span>
-<span class="sd">        - 500 for unexpected server errors\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        message_id (str): Message identifier to analyze.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Structured hallucination analysis with optional final answer.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="c1"># Validate conversation ownership and message relationship</span>
     <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -3817,7 +3813,7 @@ stores the result and latency breakdown on the message metadata.</p>
 
 
 <h3 id="routers.message.stream_hallucination" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">stream_hallucination</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">stream_hallucination</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">StreamingResponse</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -3829,8 +3825,7 @@ stores the result and latency breakdown on the message metadata.</p>
     <div class="doc doc-contents ">
 
         <p>Stream hallucination handling result as Server-Sent Events (SSE).</p>
-<p>Streams structured events for detection, optional rewriting, retrieval,
-and answer generation steps.</p>
+<p>Streams structured events for detection, optional rewriting, retrieval, and answer generation steps.</p>
 <ul>
 <li>If label == 0 (factual), emits a final event with the reason.</li>
 <li>If label == 1 (hallucination), streams tokens for the final answer and then a final event.</li>
@@ -3911,11 +3906,11 @@ and answer generation steps.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>StreamingResponse</code>
+                  <code><span title="fastapi.responses.StreamingResponse">StreamingResponse</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>StreamingResponse emitting SSE events for the detection workflow.</p>
+                <p>SSE events for the detection workflow.</p>
               </div>
             </td>
           </tr>
@@ -3934,13 +3929,11 @@ and answer generation steps.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Conversation or message not found, or mismatched relationship.  - 403: Not allowed to access this conversation.  - 500: Server error during streaming pipeline.</li>
-</ul>
+                <p>404 if conversation/message not found or mismatched; 403 if access is forbidden; 500 for streaming errors.</p>
               </div>
             </td>
           </tr>
@@ -3950,15 +3943,7 @@ and answer generation steps.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/message.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 942</span>
-<span class="normal"> 943</span>
-<span class="normal"> 944</span>
-<span class="normal"> 945</span>
-<span class="normal"> 946</span>
-<span class="normal"> 947</span>
-<span class="normal"> 948</span>
-<span class="normal"> 949</span>
-<span class="normal"> 950</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 950</span>
 <span class="normal"> 951</span>
 <span class="normal"> 952</span>
 <span class="normal"> 953</span>
@@ -4223,7 +4208,12 @@ and answer generation steps.</p>
 <span class="normal">1212</span>
 <span class="normal">1213</span>
 <span class="normal">1214</span>
-<span class="normal">1215</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
+<span class="normal">1215</span>
+<span class="normal">1216</span>
+<span class="normal">1217</span>
+<span class="normal">1218</span>
+<span class="normal">1219</span>
+<span class="normal">1220</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
     <span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">/messages/</span><span class="si">{message_id}</span><span class="s2">/stream-hallucination&quot;</span><span class="p">,</span>
     <span class="n">response_class</span><span class="o">=</span><span class="n">StreamingResponse</span><span class="p">,</span>
 <span class="p">)</span>
@@ -4231,28 +4221,25 @@ and answer generation steps.</p>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">message_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StreamingResponse</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Stream hallucination handling result as Server-Sent Events (SSE).</span>
 
-<span class="sd">    Streams structured events for detection, optional rewriting, retrieval,</span>
-<span class="sd">    and answer generation steps.</span>
+<span class="sd">    Streams structured events for detection, optional rewriting, retrieval, and answer generation steps.</span>
 
 <span class="sd">    - If label == 0 (factual), emits a final event with the reason.</span>
 <span class="sd">    - If label == 1 (hallucination), streams tokens for the final answer and then a final event.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :type conversation_id: str</span>
-<span class="sd">    :param message_id: Message identifier to analyze.\n</span>
-<span class="sd">    :type message_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: StreamingResponse emitting SSE events for the detection workflow.\n</span>
-<span class="sd">    :rtype: StreamingResponse\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Conversation or message not found, or mismatched relationship.\n</span>
-<span class="sd">        - 403: Not allowed to access this conversation.\n</span>
-<span class="sd">        - 500: Server error during streaming pipeline.\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        message_id (str): Message identifier to analyze.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        SSE events for the detection workflow.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if conversation/message not found or mismatched; 403 if access is forbidden; 500 for streaming errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="c1"># Validate conversation ownership and message relationship</span>
     <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>

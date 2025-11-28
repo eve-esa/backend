@@ -670,7 +670,7 @@
 
 
 <h3 id="routers.user.me" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">me</span><span class="p">(</span><span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">me</span><span class="p">(</span><span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">User</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -726,7 +726,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>User</code>
+                  <code><span title="src.database.models.user.User">User</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -750,15 +750,17 @@
 <span class="normal">18</span>
 <span class="normal">19</span>
 <span class="normal">20</span>
-<span class="normal">21</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/me&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">User</span><span class="p">)</span>
-<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">me</span><span class="p">(</span><span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">)):</span>
+<span class="normal">21</span>
+<span class="normal">22</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/me&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">User</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">me</span><span class="p">(</span><span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">User</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Return the authenticated user&#39;s profile.</span>
 
-<span class="sd">    :param user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type user: User\n</span>
-<span class="sd">    :return: Current user.\n</span>
-<span class="sd">    :rtype: User\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Current user.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">user</span>
 </code></pre></div></td></tr></table></div>
@@ -771,7 +773,7 @@
 
 
 <h3 id="routers.user.update_user" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">update_user</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">UpdateUserRequest</span><span class="p">,</span> <span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">update_user</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">UpdateUserRequest</span><span class="p">,</span> <span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">User</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -843,7 +845,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>User</code>
+                  <code><span title="src.database.models.user.User">User</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -857,8 +859,7 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/user.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">24</span>
-<span class="normal">25</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">25</span>
 <span class="normal">26</span>
 <span class="normal">27</span>
 <span class="normal">28</span>
@@ -874,19 +875,20 @@
 <span class="normal">38</span>
 <span class="normal">39</span>
 <span class="normal">40</span>
-<span class="normal">41</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">User</span><span class="p">)</span>
+<span class="normal">41</span>
+<span class="normal">42</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">User</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_user</span><span class="p">(</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">UpdateUserRequest</span><span class="p">,</span> <span class="n">user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">)</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">User</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Update the authenticated user&#39;s profile.</span>
 
-<span class="sd">    :param request: New user attributes to set.\n</span>
-<span class="sd">    :type request: UpdateUserRequest\n</span>
-<span class="sd">    :param user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type user: User\n</span>
-<span class="sd">    :return: Updated user.\n</span>
-<span class="sd">    :rtype: User\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (UpdateUserRequest): New user attributes to set.</span>
+<span class="sd">        user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Updated user.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">user</span><span class="o">.</span><span class="n">first_name</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">first_name</span>
     <span class="n">user</span><span class="o">.</span><span class="n">last_name</span> <span class="o">=</span> <span class="n">request</span><span class="o">.</span><span class="n">last_name</span>

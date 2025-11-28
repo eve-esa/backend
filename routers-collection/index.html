@@ -758,7 +758,7 @@
 
 
 <h3 id="routers.collection.list_public_collections" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">list_public_collections</span><span class="p">(</span><span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">())</span></code>
+            <code class="highlight language-python"><span class="n">list_public_collections</span><span class="p">(</span><span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">())</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">]</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -770,8 +770,7 @@
     <div class="doc doc-contents ">
 
         <p>List public collections with pagination.</p>
-<p>Combines platform-curated public collections and environment-specific
-public collections, then paginates the combined list.</p>
+<p>Combines platform-curated public collections and environment-specific public collections, then paginates the combined list.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -816,7 +815,7 @@ public collections, then paginates the combined list.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>PaginatedResponse[Collection]</code>
+                  <code><span title="src.database.mongo_model.PaginatedResponse">PaginatedResponse</span>[<span title="src.database.models.collection.Collection">Collection</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -866,17 +865,17 @@ public collections, then paginates the combined list.</p>
 <span class="normal">91</span>
 <span class="normal">92</span>
 <span class="normal">93</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/collections/public&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">])</span>
-<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_public_collections</span><span class="p">(</span><span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">()):</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_public_collections</span><span class="p">(</span><span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">())</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    List public collections with pagination.</span>
 
-<span class="sd">    Combines platform-curated public collections and environment-specific</span>
-<span class="sd">    public collections, then paginates the combined list.</span>
+<span class="sd">    Combines platform-curated public collections and environment-specific public collections, then paginates the combined list.</span>
 
-<span class="sd">    :param pagination: Pagination parameters.\n</span>
-<span class="sd">    :type pagination: Pagination\n</span>
-<span class="sd">    :return: Paginated list of public collections.\n</span>
-<span class="sd">    :rtype: PaginatedResponse[Collection]\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        pagination (Pagination): Pagination parameters.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Paginated list of public collections.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">public_collections</span><span class="p">,</span> <span class="n">total_count</span> <span class="o">=</span> <span class="k">await</span> <span class="n">vector_store</span><span class="o">.</span><span class="n">list_public_collections</span><span class="p">(</span>
         <span class="n">page</span><span class="o">=</span><span class="n">pagination</span><span class="o">.</span><span class="n">page</span><span class="p">,</span> <span class="n">limit</span><span class="o">=</span><span class="n">pagination</span><span class="o">.</span><span class="n">limit</span>
@@ -911,7 +910,7 @@ public collections, then paginates the combined list.</p>
 
 
 <h3 id="routers.collection.list_collections" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">list_collections</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span> <span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">list_collections</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span> <span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">]</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -983,7 +982,7 @@ public collections, then paginates the combined list.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>PaginatedResponse[Collection]</code>
+                  <code><span title="src.database.mongo_model.PaginatedResponse">PaginatedResponse</span>[<span title="src.database.models.collection.Collection">Collection</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1019,16 +1018,16 @@ public collections, then paginates the combined list.</p>
 <span class="normal">115</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/collections&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">])</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_collections</span><span class="p">(</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span> <span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">)</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Collection</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    List collections owned by the current user.</span>
 
-<span class="sd">    :param request: Pagination parameters.\n</span>
-<span class="sd">    :type request: Pagination\n</span>
-<span class="sd">    :param request_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type request_user: User\n</span>
-<span class="sd">    :return: Paginated list of user collections.\n</span>
-<span class="sd">    :rtype: PaginatedResponse[Collection]\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (Pagination): Pagination parameters.</span>
+<span class="sd">        request_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Paginated list of user collections.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="k">await</span> <span class="n">Collection</span><span class="o">.</span><span class="n">find_all_with_pagination</span><span class="p">(</span>
         <span class="n">limit</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">limit</span><span class="p">,</span>
@@ -1046,7 +1045,7 @@ public collections, then paginates the combined list.</p>
 
 
 <h3 id="routers.collection.get_collection" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span></code>
+            <code class="highlight language-python"><span class="n">get_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1102,11 +1101,11 @@ public collections, then paginates the combined list.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <p>Collection data including <code>documents_count</code> and <code>points_count</code>.</p>
+                <p>Collection data including documents_count and points_count.</p>
               </div>
             </td>
           </tr>
@@ -1125,13 +1124,11 @@ public collections, then paginates the combined list.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Collection not found.</li>
-</ul>
+                <p>404 if collection is not found.</p>
               </div>
             </td>
           </tr>
@@ -1163,17 +1160,21 @@ public collections, then paginates the combined list.</p>
 <span class="normal">137</span>
 <span class="normal">138</span>
 <span class="normal">139</span>
-<span class="normal">140</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">&quot;</span><span class="p">)</span>
-<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+<span class="normal">140</span>
+<span class="normal">141</span>
+<span class="normal">142</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Get a collection by id with document and vector counts.</span>
 
-<span class="sd">    :param collection_id: Target collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :return: Collection data including ``documents_count`` and ``points_count``.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Collection not found.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Target collection identifier.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Collection data including documents_count and points_count.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if collection is not found.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">collection</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Collection</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">collection_id</span><span class="p">)</span>
     <span class="k">if</span> <span class="ow">not</span> <span class="n">collection</span><span class="p">:</span>
@@ -1196,7 +1197,7 @@ public collections, then paginates the combined list.</p>
 
 
 <h3 id="routers.collection.create_collection" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_collection</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">CollectionRequest</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">create_collection</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">CollectionRequest</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">Collection</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1207,8 +1208,8 @@ public collections, then paginates the combined list.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Create a private collection and provision its backing vector index (Qdrant).
-The new collection is private to its creator. The MongoDB collection ID is used as the Qdrant collection name.</p>
+        <p>Create a private collection and provision its backing vector index (Qdrant).</p>
+<p>The new collection is private to its creator. The MongoDB collection ID is used as the Qdrant collection name.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -1269,7 +1270,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>Collection</code>
+                  <code><span title="src.database.models.collection.Collection">Collection</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1292,13 +1293,11 @@ The new collection is private to its creator. The MongoDB collection ID is used 
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>500: Failed to create vector collection or server error.</li>
-</ul>
+                <p>500 if vector collection creation fails or on server errors.</p>
               </div>
             </td>
           </tr>
@@ -1308,9 +1307,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/collection.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">143</span>
-<span class="normal">144</span>
-<span class="normal">145</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">145</span>
 <span class="normal">146</span>
 <span class="normal">147</span>
 <span class="normal">148</span>
@@ -1350,23 +1347,29 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 <span class="normal">182</span>
 <span class="normal">183</span>
 <span class="normal">184</span>
-<span class="normal">185</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/collections&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Collection</span><span class="p">)</span>
+<span class="normal">185</span>
+<span class="normal">186</span>
+<span class="normal">187</span>
+<span class="normal">188</span>
+<span class="normal">189</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/collections&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Collection</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">create_collection</span><span class="p">(</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">CollectionRequest</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Collection</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Create a private collection and provision its backing vector index (Qdrant).</span>
+
 <span class="sd">    The new collection is private to its creator. The MongoDB collection ID is used as the Qdrant collection name.</span>
 
-<span class="sd">    :param request: New collection parameters.\n</span>
-<span class="sd">    :type request: CollectionRequest\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Created collection.\n</span>
-<span class="sd">    :rtype: Collection\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 500: Failed to create vector collection or server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (CollectionRequest): New collection parameters.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Created collection.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 500 if vector collection creation fails or on server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">collection</span> <span class="o">=</span> <span class="n">Collection</span><span class="p">(</span>
         <span class="n">name</span><span class="o">=</span><span class="n">request</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
@@ -1403,7 +1406,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 
 
 <h3 id="routers.collection.update_collection" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">update_collection</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">CollectionUpdate</span><span class="p">,</span> <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">update_collection</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">CollectionUpdate</span><span class="p">,</span> <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">Collection</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1491,7 +1494,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>Collection</code>
+                  <code><span title="src.database.models.collection.Collection">Collection</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1514,13 +1517,11 @@ The new collection is private to its creator. The MongoDB collection ID is used 
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Collection not found.  - 403: Not allowed to update this collection.  - 500: Server error.</li>
-</ul>
+                <p>404 if not found; 403 if update is forbidden; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1530,11 +1531,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/collection.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">188</span>
-<span class="normal">189</span>
-<span class="normal">190</span>
-<span class="normal">191</span>
-<span class="normal">192</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">192</span>
 <span class="normal">193</span>
 <span class="normal">194</span>
 <span class="normal">195</span>
@@ -1570,27 +1567,27 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 <span class="normal">225</span>
 <span class="normal">226</span>
 <span class="normal">227</span>
-<span class="normal">228</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="normal">228</span>
+<span class="normal">229</span>
+<span class="normal">230</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_collection</span><span class="p">(</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">CollectionUpdate</span><span class="p">,</span>
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Collection</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Update a collection&#39;s mutable fields.</span>
 
-<span class="sd">    :param request: Update payload (e.g., name).\n</span>
-<span class="sd">    :type request: CollectionUpdate\n</span>
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Updated collection.\n</span>
-<span class="sd">    :rtype: Collection\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Collection not found.\n</span>
-<span class="sd">        - 403: Not allowed to update this collection.\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (CollectionUpdate): Update payload (e.g., name).</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Updated collection.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 403 if update is forbidden; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">collection</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Collection</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">collection_id</span><span class="p">)</span>
@@ -1621,7 +1618,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
 
 
 <h3 id="routers.collection.delete_collection" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">delete_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">delete_collection</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1633,8 +1630,7 @@ The new collection is private to its creator. The MongoDB collection ID is used 
     <div class="doc doc-contents ">
 
         <p>Delete a collection and its related resources.</p>
-<p>Deletes documents in the collection, attempts to remove the vector index,
-and finally deletes the collection record.</p>
+<p>Deletes documents in the collection, attempts to remove the vector index, and finally deletes the collection record.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -1695,7 +1691,7 @@ and finally deletes the collection record.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1718,13 +1714,11 @@ and finally deletes the collection record.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Collection not found.  - 403: Not allowed to delete this collection.  - 500: Server error.</li>
-</ul>
+                <p>404 if not found; 403 if deletion is forbidden; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1734,9 +1728,7 @@ and finally deletes the collection record.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/collection.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">231</span>
-<span class="normal">232</span>
-<span class="normal">233</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">233</span>
 <span class="normal">234</span>
 <span class="normal">235</span>
 <span class="normal">236</span>
@@ -1787,23 +1779,21 @@ and finally deletes the collection record.</p>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">delete_collection</span><span class="p">(</span>
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Delete a collection and its related resources.</span>
 
-<span class="sd">    Deletes documents in the collection, attempts to remove the vector index,</span>
-<span class="sd">    and finally deletes the collection record.</span>
+<span class="sd">    Deletes documents in the collection, attempts to remove the vector index, and finally deletes the collection record.</span>
 
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Confirmation message.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Collection not found.\n</span>
-<span class="sd">        - 403: Not allowed to delete this collection.\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Confirmation message.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">collection</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Collection</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">collection_id</span><span class="p">)</span>

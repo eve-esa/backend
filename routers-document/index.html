@@ -791,7 +791,7 @@
 
 
 <h3 id="routers.document.list_documents" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">list_documents</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">list_documents</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">DocumentModel</span><span class="p">]</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -879,7 +879,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>PaginatedResponse[DocumentModel]</code>
+                  <code><span title="src.database.mongo_model.PaginatedResponse">PaginatedResponse</span>[<span title="src.database.models.document.Document">Document</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -902,13 +902,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Collection not found.  - 403: Not allowed to access this collection.</li>
-</ul>
+                <p>404 if collection is not found; 403 if access is forbidden.</p>
               </div>
             </td>
           </tr>
@@ -948,8 +946,7 @@
 <span class="normal">72</span>
 <span class="normal">73</span>
 <span class="normal">74</span>
-<span class="normal">75</span>
-<span class="normal">76</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+<span class="normal">75</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
     <span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents&quot;</span><span class="p">,</span>
     <span class="n">response_model</span><span class="o">=</span><span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">DocumentModel</span><span class="p">],</span>
 <span class="p">)</span>
@@ -957,21 +954,20 @@
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Collection ID&quot;</span><span class="p">),</span>
     <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(),</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">DocumentModel</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    List documents in a collection.</span>
 
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param pagination: Pagination parameters.\n</span>
-<span class="sd">    :type pagination: Pagination\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Paginated documents for the collection.\n</span>
-<span class="sd">    :rtype: PaginatedResponse[DocumentModel]\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Collection not found.\n</span>
-<span class="sd">        - 403: Not allowed to access this collection.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        pagination (Pagination): Pagination parameters.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Paginated documents for the collection.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if collection is not found; 403 if access is forbidden.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">await</span> <span class="n">get_collection_and_validate_ownership</span><span class="p">(</span><span class="n">collection_id</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">)</span>
 
@@ -991,7 +987,7 @@
 
 
 <h3 id="routers.document.get_document" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_document</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Document ID&#39;</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">get_document</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Document ID&#39;</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">DocumentModel</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1079,7 +1075,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>DocumentModel</code>
+                  <code><span title="src.database.models.document.Document">Document</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1102,13 +1098,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Document not found.  - 400: Document does not belong to this collection.  - 403: Not allowed to access this document.</li>
-</ul>
+                <p>404 if not found; 400 if document not in collection; 403 if access is forbidden.</p>
               </div>
             </td>
           </tr>
@@ -1118,7 +1112,8 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/document.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 79</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 78</span>
+<span class="normal"> 79</span>
 <span class="normal"> 80</span>
 <span class="normal"> 81</span>
 <span class="normal"> 82</span>
@@ -1155,32 +1150,27 @@
 <span class="normal">113</span>
 <span class="normal">114</span>
 <span class="normal">115</span>
-<span class="normal">116</span>
-<span class="normal">117</span>
-<span class="normal">118</span>
-<span class="normal">119</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+<span class="normal">116</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
     <span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents/</span><span class="si">{document_id}</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">DocumentModel</span>
 <span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_document</span><span class="p">(</span>
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Collection ID&quot;</span><span class="p">),</span>
     <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Document ID&quot;</span><span class="p">),</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DocumentModel</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Get a specific document from a collection.</span>
 
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param document_id: Document identifier.\n</span>
-<span class="sd">    :type document_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Document details.\n</span>
-<span class="sd">    :rtype: DocumentModel\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Document not found.\n</span>
-<span class="sd">        - 400: Document does not belong to this collection.\n</span>
-<span class="sd">        - 403: Not allowed to access this document.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        document_id (str): Document identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Document details.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 400 if document not in collection; 403 if access is forbidden.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">await</span> <span class="n">get_collection_and_validate_ownership</span><span class="p">(</span><span class="n">collection_id</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">)</span>
 
@@ -1209,7 +1199,7 @@
 
 
 <h3 id="routers.document.upload_documents" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">upload_documents</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">files</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">UploadFile</span><span class="p">]</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">metadata_urls</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">),</span> <span class="n">metadata_names</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">),</span> <span class="n">embeddings_model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_EMBEDDING_MODEL</span><span class="p">),</span> <span class="n">chunk_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_SIZE</span><span class="p">),</span> <span class="n">chunk_overlap</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_OVERLAP</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">upload_documents</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">files</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">UploadFile</span><span class="p">]</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">metadata_urls</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">),</span> <span class="n">metadata_names</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="kc">None</span><span class="p">),</span> <span class="n">embeddings_model</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_EMBEDDING_MODEL</span><span class="p">),</span> <span class="n">chunk_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_SIZE</span><span class="p">),</span> <span class="n">chunk_overlap</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_OVERLAP</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1221,8 +1211,7 @@
     <div class="doc doc-contents ">
 
         <p>Upload documents to a collection.</p>
-<p>Stores document records and triggers asynchronous parsing, chunking, and
-vectorization for retrieval.</p>
+<p>Stores document records and triggers asynchronous parsing, chunking, and vectorization for retrieval.</p>
 
 
 <p><span class="doc-section-title">Parameters:</span></p>
@@ -1257,7 +1246,7 @@ vectorization for retrieval.</p>
                 <code>files</code>
             </td>
             <td>
-                  <code><span title="typing.List">List</span>[<span title="fastapi.UploadFile">UploadFile</span>]</code>
+                  <code><span title="list">list</span>[<span title="fastapi.UploadFile">UploadFile</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1273,7 +1262,7 @@ vectorization for retrieval.</p>
                 <code>metadata_urls</code>
             </td>
             <td>
-                  <code><span title="typing.Optional">Optional</span>[<span title="typing.List">List</span>[<span title="str">str</span>] | <span title="str">str</span>]</code>
+                  <code><span title="list">list</span>[<span title="str">str</span>] | <span title="str">str</span> | None</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1289,7 +1278,7 @@ vectorization for retrieval.</p>
                 <code>metadata_names</code>
             </td>
             <td>
-                  <code><span title="typing.Optional">Optional</span>[<span title="typing.List">List</span>[<span title="str">str</span>] | <span title="str">str</span>]</code>
+                  <code><span title="list">list</span>[<span title="str">str</span>] | <span title="str">str</span> | None</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1379,7 +1368,7 @@ vectorization for retrieval.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1402,13 +1391,11 @@ vectorization for retrieval.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Collection not found.  - 403: Not allowed to access this collection.  - 500: Error processing documents.</li>
-</ul>
+                <p>404 if collection is not found; 403 if access is forbidden; 500 for processing errors.</p>
               </div>
             </td>
           </tr>
@@ -1418,7 +1405,10 @@ vectorization for retrieval.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/document.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">122</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">119</span>
+<span class="normal">120</span>
+<span class="normal">121</span>
+<span class="normal">122</span>
 <span class="normal">123</span>
 <span class="normal">124</span>
 <span class="normal">125</span>
@@ -1494,18 +1484,7 @@ vectorization for retrieval.</p>
 <span class="normal">195</span>
 <span class="normal">196</span>
 <span class="normal">197</span>
-<span class="normal">198</span>
-<span class="normal">199</span>
-<span class="normal">200</span>
-<span class="normal">201</span>
-<span class="normal">202</span>
-<span class="normal">203</span>
-<span class="normal">204</span>
-<span class="normal">205</span>
-<span class="normal">206</span>
-<span class="normal">207</span>
-<span class="normal">208</span>
-<span class="normal">209</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents&quot;</span><span class="p">)</span>
+<span class="normal">198</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">upload_documents</span><span class="p">(</span>
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Collection ID&quot;</span><span class="p">),</span>
     <span class="n">files</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">UploadFile</span><span class="p">]</span> <span class="o">=</span> <span class="n">File</span><span class="p">(</span><span class="o">...</span><span class="p">),</span>
@@ -1515,35 +1494,27 @@ vectorization for retrieval.</p>
     <span class="n">chunk_size</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_SIZE</span><span class="p">),</span>
     <span class="n">chunk_overlap</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">Form</span><span class="p">(</span><span class="n">default</span><span class="o">=</span><span class="n">DEFAULT_CHUNK_OVERLAP</span><span class="p">),</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Upload documents to a collection.</span>
 
-<span class="sd">    Stores document records and triggers asynchronous parsing, chunking, and</span>
-<span class="sd">    vectorization for retrieval.</span>
+<span class="sd">    Stores document records and triggers asynchronous parsing, chunking, and vectorization for retrieval.</span>
 
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param files: One or more files to ingest.\n</span>
-<span class="sd">    :type files: list[UploadFile]\n</span>
-<span class="sd">    :param metadata_urls: Optional list or single URL per file.\n</span>
-<span class="sd">    :type metadata_urls: list[str] | str | None\n</span>
-<span class="sd">    :param metadata_names: Optional list or single display name per file.\n</span>
-<span class="sd">    :type metadata_names: list[str] | str | None\n</span>
-<span class="sd">    :param embeddings_model: Embeddings model to use for vectorization.\n</span>
-<span class="sd">    :type embeddings_model: str\n</span>
-<span class="sd">    :param chunk_size: Chunk size for splitting documents.\n</span>
-<span class="sd">    :type chunk_size: int\n</span>
-<span class="sd">    :param chunk_overlap: Overlap between chunks.\n</span>
-<span class="sd">    :type chunk_overlap: int\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Service response with ingestion details.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Collection not found.\n</span>
-<span class="sd">        - 403: Not allowed to access this collection.\n</span>
-<span class="sd">        - 500: Error processing documents.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        files (list[UploadFile]): One or more files to ingest.</span>
+<span class="sd">        metadata_urls (list[str] | str | None): Optional list or single URL per file.</span>
+<span class="sd">        metadata_names (list[str] | str | None): Optional list or single display name per file.</span>
+<span class="sd">        embeddings_model (str): Embeddings model to use for vectorization.</span>
+<span class="sd">        chunk_size (int): Chunk size for splitting documents.</span>
+<span class="sd">        chunk_overlap (int): Overlap between chunks.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Service response with ingestion details.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if collection is not found; 403 if access is forbidden; 500 for processing errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">collection</span> <span class="o">=</span> <span class="k">await</span> <span class="n">get_collection_and_validate_ownership</span><span class="p">(</span>
         <span class="n">collection_id</span><span class="p">,</span> <span class="n">requesting_user</span>
@@ -1603,7 +1574,7 @@ vectorization for retrieval.</p>
 
 
 <h3 id="routers.document.delete_document" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">delete_document</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Document ID&#39;</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">delete_document</span><span class="p">(</span><span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Collection ID&#39;</span><span class="p">),</span> <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s1">&#39;Document ID&#39;</span><span class="p">),</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1692,7 +1663,7 @@ vectorization for retrieval.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1715,13 +1686,11 @@ vectorization for retrieval.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Document not found.  - 400: Document does not belong to this collection.  - 403: Not allowed to delete this document.</li>
-</ul>
+                <p>404 if not found; 400 if document not in collection; 403 if deletion is forbidden.</p>
               </div>
             </td>
           </tr>
@@ -1731,7 +1700,18 @@ vectorization for retrieval.</p>
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/document.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">212</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">201</span>
+<span class="normal">202</span>
+<span class="normal">203</span>
+<span class="normal">204</span>
+<span class="normal">205</span>
+<span class="normal">206</span>
+<span class="normal">207</span>
+<span class="normal">208</span>
+<span class="normal">209</span>
+<span class="normal">210</span>
+<span class="normal">211</span>
+<span class="normal">212</span>
 <span class="normal">213</span>
 <span class="normal">214</span>
 <span class="normal">215</span>
@@ -1770,42 +1750,27 @@ vectorization for retrieval.</p>
 <span class="normal">248</span>
 <span class="normal">249</span>
 <span class="normal">250</span>
-<span class="normal">251</span>
-<span class="normal">252</span>
-<span class="normal">253</span>
-<span class="normal">254</span>
-<span class="normal">255</span>
-<span class="normal">256</span>
-<span class="normal">257</span>
-<span class="normal">258</span>
-<span class="normal">259</span>
-<span class="normal">260</span>
-<span class="normal">261</span>
-<span class="normal">262</span>
-<span class="normal">263</span>
-<span class="normal">264</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents/</span><span class="si">{document_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="normal">251</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="s2">&quot;/collections/</span><span class="si">{collection_id}</span><span class="s2">/documents/</span><span class="si">{document_id}</span><span class="s2">&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">delete_document</span><span class="p">(</span>
     <span class="n">collection_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Collection ID&quot;</span><span class="p">),</span>
     <span class="n">document_id</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">description</span><span class="o">=</span><span class="s2">&quot;Document ID&quot;</span><span class="p">),</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Delete a document from a collection.</span>
 
 <span class="sd">    Removes the document record and attempts to delete associated vectors.</span>
 
-<span class="sd">    :param collection_id: Collection identifier.\n</span>
-<span class="sd">    :type collection_id: str\n</span>
-<span class="sd">    :param document_id: Document identifier.\n</span>
-<span class="sd">    :type document_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Confirmation message.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Document not found.\n</span>
-<span class="sd">        - 400: Document does not belong to this collection.\n</span>
-<span class="sd">        - 403: Not allowed to delete this document.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        collection_id (str): Collection identifier.</span>
+<span class="sd">        document_id (str): Document identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Confirmation message.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 400 if document not in collection; 403 if deletion is forbidden.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">await</span> <span class="n">get_collection_and_validate_ownership</span><span class="p">(</span><span class="n">collection_id</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">)</span>
 

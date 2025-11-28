@@ -736,7 +736,7 @@
 
 
 <h3 id="routers.conversation.list_conversations" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">list_conversations</span><span class="p">(</span><span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span> <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">())</span></code>
+            <code class="highlight language-python"><span class="n">list_conversations</span><span class="p">(</span><span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span> <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">())</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Conversation</span><span class="p">]</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -808,7 +808,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>PaginatedResponse[Conversation]</code>
+                  <code><span title="src.database.mongo_model.PaginatedResponse">PaginatedResponse</span>[<span title="src.database.models.conversation.Conversation">Conversation</span>]</code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -831,13 +831,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>500: Server error.</li>
-</ul>
+                <p>500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -876,21 +874,23 @@
 <span class="normal">43</span>
 <span class="normal">44</span>
 <span class="normal">45</span>
-<span class="normal">46</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Conversation</span><span class="p">])</span>
+<span class="normal">46</span>
+<span class="normal">47</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/conversations&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Conversation</span><span class="p">])</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_conversations</span><span class="p">(</span>
     <span class="n">request_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span> <span class="n">pagination</span><span class="p">:</span> <span class="n">Pagination</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">()</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PaginatedResponse</span><span class="p">[</span><span class="n">Conversation</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    List conversations owned by the current user.</span>
 
-<span class="sd">    :param request_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type request_user: User\n</span>
-<span class="sd">    :param pagination: Pagination parameters.\n</span>
-<span class="sd">    :type pagination: Pagination\n</span>
-<span class="sd">    :return: Paginated conversations for the user.\n</span>
-<span class="sd">    :rtype: PaginatedResponse[Conversation]\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request_user (User): Authenticated user injected by dependency.</span>
+<span class="sd">        pagination (Pagination): Pagination parameters.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Paginated conversations for the user.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">result</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_all_with_pagination</span><span class="p">(</span>
@@ -916,7 +916,7 @@
 
 
 <h3 id="routers.conversation.get_conversation" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">get_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">get_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">ConversationDetail</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -988,7 +988,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>ConversationDetail</code>
+                  <code><span title="src.schemas.conversation.ConversationDetail">ConversationDetail</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1011,13 +1011,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Conversation not found.  - 403: Not allowed to access this conversation.  - 500: Server error.</li>
-</ul>
+                <p>404 if not found; 403 if access is forbidden; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1027,8 +1025,7 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/conversation.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">49</span>
-<span class="normal">50</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">50</span>
 <span class="normal">51</span>
 <span class="normal">52</span>
 <span class="normal">53</span>
@@ -1077,20 +1074,19 @@
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_conversation</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ConversationDetail</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Get a conversation and its messages.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :type conversation_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Conversation with messages and metadata.\n</span>
-<span class="sd">    :rtype: ConversationDetail\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Conversation not found.\n</span>
-<span class="sd">        - 403: Not allowed to access this conversation.\n</span>
-<span class="sd">        - 500: Server error.\n</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Conversation with messages and metadata.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -1130,7 +1126,7 @@
 
 
 <h3 id="routers.conversation.create_conversation" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">create_conversation</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">ConversationCreate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">create_conversation</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">ConversationCreate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">Conversation</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1202,7 +1198,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>Conversation</code>
+                  <code><span title="src.database.models.conversation.Conversation">Conversation</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1225,13 +1221,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>500: Server error.</li>
-</ul>
+                <p>500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1267,22 +1261,24 @@
 <span class="normal">121</span>
 <span class="normal">122</span>
 <span class="normal">123</span>
-<span class="normal">124</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Conversation</span><span class="p">)</span>
+<span class="normal">124</span>
+<span class="normal">125</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/conversations&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Conversation</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">create_conversation</span><span class="p">(</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">ConversationCreate</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Conversation</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Create a new conversation for the current user.</span>
 
-<span class="sd">    :param request: New conversation payload.\n</span>
-<span class="sd">    :type request: ConversationCreate\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Created conversation.\n</span>
-<span class="sd">    :rtype: Conversation\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (ConversationCreate): New conversation payload.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Created conversation.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="k">return</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">create</span><span class="p">(</span>
@@ -1304,7 +1300,7 @@
 
 
 <h3 id="routers.conversation.update_conversation_name" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">update_conversation_name</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">ConversationNameUpdate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">update_conversation_name</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">request</span><span class="p">:</span> <span class="n">ConversationNameUpdate</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="n">Conversation</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1392,7 +1388,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>Conversation</code>
+                  <code><span title="src.database.models.conversation.Conversation">Conversation</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1415,13 +1411,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Conversation not found.  - 403: Not allowed to update this conversation.  - 500: Server error.</li>
-</ul>
+                <p>404 if not found; 403 if update is forbidden; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1431,8 +1425,7 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/conversation.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">127</span>
-<span class="normal">128</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">128</span>
 <span class="normal">129</span>
 <span class="normal">130</span>
 <span class="normal">131</span>
@@ -1471,28 +1464,25 @@
 <span class="normal">164</span>
 <span class="normal">165</span>
 <span class="normal">166</span>
-<span class="normal">167</span>
-<span class="normal">168</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="normal">167</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">patch</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update_conversation_name</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">request</span><span class="p">:</span> <span class="n">ConversationNameUpdate</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Conversation</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Update a conversation&#39;s name.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :type conversation_id: str\n</span>
-<span class="sd">    :param request: New name payload.\n</span>
-<span class="sd">    :type request: ConversationNameUpdate\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Updated conversation.\n</span>
-<span class="sd">    :rtype: Conversation\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Conversation not found.\n</span>
-<span class="sd">        - 403: Not allowed to update this conversation.\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        request (ConversationNameUpdate): New name payload.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Updated conversation.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 403 if update is forbidden; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
@@ -1524,7 +1514,7 @@
 
 
 <h3 id="routers.conversation.delete_conversation" class="doc doc-heading">
-            <code class="highlight language-python"><span class="n">delete_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span></code>
+            <code class="highlight language-python"><span class="n">delete_conversation</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">))</span> <span class="o">-&gt;</span> <span class="nb">dict</span></code>
 
   <span class="doc doc-labels">
       <small class="doc doc-label doc-label-async"><code>async</code></small>
@@ -1596,7 +1586,7 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1619,13 +1609,11 @@
       <tbody>
           <tr class="doc-section-item">
             <td>
-                  <code>HTTPException</code>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
             </td>
             <td>
               <div class="doc-md-description">
-                <ul>
-<li>404: Conversation not found.  - 403: Not allowed to delete this conversation.  - 500: Server error.</li>
-</ul>
+                <p>404 if not found; 403 if deletion is forbidden; 500 for server errors.</p>
               </div>
             </td>
           </tr>
@@ -1635,7 +1623,8 @@
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/conversation.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">171</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal">170</span>
+<span class="normal">171</span>
 <span class="normal">172</span>
 <span class="normal">173</span>
 <span class="normal">174</span>
@@ -1669,26 +1658,23 @@
 <span class="normal">202</span>
 <span class="normal">203</span>
 <span class="normal">204</span>
-<span class="normal">205</span>
-<span class="normal">206</span>
-<span class="normal">207</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="normal">205</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">delete</span><span class="p">(</span><span class="s2">&quot;/conversations/</span><span class="si">{conversation_id}</span><span class="s2">&quot;</span><span class="p">)</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">delete_conversation</span><span class="p">(</span>
     <span class="n">conversation_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
     <span class="n">requesting_user</span><span class="p">:</span> <span class="n">User</span> <span class="o">=</span> <span class="n">Depends</span><span class="p">(</span><span class="n">get_current_user</span><span class="p">),</span>
-<span class="p">):</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
 <span class="sd">    Delete a conversation and its messages.</span>
 
-<span class="sd">    :param conversation_id: Conversation identifier.\n</span>
-<span class="sd">    :type conversation_id: str\n</span>
-<span class="sd">    :param requesting_user: Authenticated user injected by dependency.\n</span>
-<span class="sd">    :type requesting_user: User\n</span>
-<span class="sd">    :return: Confirmation message.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Conversation not found.\n</span>
-<span class="sd">        - 403: Not allowed to delete this conversation.\n</span>
-<span class="sd">        - 500: Server error.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        conversation_id (str): Conversation identifier.</span>
+<span class="sd">        requesting_user (User): Authenticated user injected by dependency.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Confirmation message.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 for server errors.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">try</span><span class="p">:</span>
         <span class="n">conversation</span> <span class="o">=</span> <span class="k">await</span> <span class="n">Conversation</span><span class="o">.</span><span class="n">find_by_id</span><span class="p">(</span><span class="n">conversation_id</span><span class="p">)</span>
