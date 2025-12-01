@@ -1,8 +1,51 @@
-/* Set Material primary (header/app bar) color */
-:root {
+:root > * {
   --md-primary-fg-color: #003247;
-  --md-primary-fg-color--light: #2f5970;
-  --md-primary-fg-color--dark: #001c26;
+  --md-primary-fg-color--light: #003247;
+  --md-primary-fg-color--dark: #ffffff;
 }
 
+/* Make the logo bigger */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 3rem;
+  width: auto;
+}
 
+.md-header__button.md-logo {
+  padding: 0.2rem;
+}
+
+/* Custom footer styling */
+.custom-footer {
+  font-family: Arial, sans-serif;
+  font-size: 0.65rem;
+  padding: 2rem 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.custom-footer .footer-text {
+  color: white;
+}
+
+.custom-footer .footer-left a {
+  color: #757575;
+  text-decoration: underline;
+}
+
+.custom-footer .footer-social {
+  display: flex;
+  gap: 1rem;
+}
+
+.custom-footer .footer-social a {
+  color: #757575;
+  font-size: 1.2rem;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.custom-footer .footer-social a:hover {
+  color: white;
+}
