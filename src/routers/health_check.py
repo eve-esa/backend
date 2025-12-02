@@ -5,10 +5,9 @@ router = APIRouter()
 
 @router.get("/health")
 def health_check():
-    """
-    Liveness probe endpoint.
+    """Liveness probe endpoint.
 
-    :return: Static status payload indicating service health.\n
-    :rtype: dict\n
+    Returns:
+        dict: Static status payload indicating service health.
     """
     return {"status": "healthy"}
