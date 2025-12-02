@@ -689,13 +689,82 @@
 
         <p>Send a password reset code to the user's email.</p>
 <p>Generates a one-time code, stores it with an expiry, and emails a reset link.</p>
-<p>:param request: Request containing the user's email.</p>
-<p>:type request: ForgotPasswordRequest</p>
-<p>:return: Confirmation message.</p>
-<p>:rtype: dict</p>
-<p>:raises HTTPException:</p>
-<pre><code>- 404: User not found.
-</code></pre>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>request</code>
+            </td>
+            <td>
+                  <code><span title="src.schemas.forgot_password.ForgotPasswordRequest">ForgotPasswordRequest</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Request containing the user's email.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Dict[str, str]: Confirmation message.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>404 if user not found.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
 
 
             <details class="mkdocstrings-source">
@@ -741,19 +810,21 @@
 <span class="normal">59</span>
 <span class="normal">60</span>
 <span class="normal">61</span>
-<span class="normal">62</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/code&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span>
+<span class="normal">62</span>
+<span class="normal">63</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/code&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">send_forgot_password_code</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">ForgotPasswordRequest</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">    Send a password reset code to the user&#39;s email.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Send a password reset code to the user&#39;s email.</span>
 
 <span class="sd">    Generates a one-time code, stores it with an expiry, and emails a reset link.</span>
 
-<span class="sd">    :param request: Request containing the user&#39;s email.\n</span>
-<span class="sd">    :type request: ForgotPasswordRequest\n</span>
-<span class="sd">    :return: Confirmation message.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: User not found.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (ForgotPasswordRequest): Request containing the user&#39;s email.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Dict[str, str]: Confirmation message.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if user not found.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">user</span> <span class="o">=</span> <span class="k">await</span> <span class="n">User</span><span class="o">.</span><span class="n">find_one</span><span class="p">({</span><span class="s2">&quot;email&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">email</span><span class="p">})</span>
     <span class="k">if</span> <span class="ow">not</span> <span class="n">user</span><span class="p">:</span>
@@ -807,21 +878,97 @@
         <p>Confirm a password reset with the provided code and new password.</p>
 <p>Validates the reset code and its expiry, ensures password confirmation
 matches, updates the user's password, and invalidates the code.</p>
-<p>:param request: Confirmation payload with code and new password.</p>
-<p>:type request: ForgotPasswordConfirmation</p>
-<p>:return: Confirmation message.</p>
-<p>:rtype: dict</p>
-<p>:raises HTTPException:</p>
-<pre><code>- 404: Invalid or expired code, or user not found.
 
-- 400: Passwords do not match.
-</code></pre>
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>request</code>
+            </td>
+            <td>
+                  <code><span title="src.schemas.forgot_password.ForgotPasswordConfirmation">ForgotPasswordConfirmation</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Confirmation payload with code and new password.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Dict[str, str]: Confirmation message.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<p><span class="doc-section-title">Raises:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>404 if code is invalid or expired, or user not found.</p>
+              </div>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                  <code><span title="fastapi.HTTPException">HTTPException</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>400 if passwords do not match.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
 
 
             <details class="mkdocstrings-source">
               <summary>Source code in <code>src/routers/forgot_password.py</code></summary>
-              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 65</span>
-<span class="normal"> 66</span>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"> 66</span>
 <span class="normal"> 67</span>
 <span class="normal"> 68</span>
 <span class="normal"> 69</span>
@@ -859,21 +1006,24 @@ matches, updates the user's password, and invalidates the code.</p>
 <span class="normal">101</span>
 <span class="normal">102</span>
 <span class="normal">103</span>
-<span class="normal">104</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/confirm&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span>
+<span class="normal">104</span>
+<span class="normal">105</span>
+<span class="normal">106</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="nd">@router</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/confirm&quot;</span><span class="p">,</span> <span class="n">response_model</span><span class="o">=</span><span class="n">Dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">confirm_new_password</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">ForgotPasswordConfirmation</span><span class="p">):</span>
-<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">    Confirm a password reset with the provided code and new password.</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Confirm a password reset with the provided code and new password.</span>
 
 <span class="sd">    Validates the reset code and its expiry, ensures password confirmation</span>
 <span class="sd">    matches, updates the user&#39;s password, and invalidates the code.</span>
 
-<span class="sd">    :param request: Confirmation payload with code and new password.\n</span>
-<span class="sd">    :type request: ForgotPasswordConfirmation\n</span>
-<span class="sd">    :return: Confirmation message.\n</span>
-<span class="sd">    :rtype: dict\n</span>
-<span class="sd">    :raises HTTPException:\n</span>
-<span class="sd">        - 404: Invalid or expired code, or user not found.\n</span>
-<span class="sd">        - 400: Passwords do not match.</span>
+<span class="sd">    Args:</span>
+<span class="sd">        request (ForgotPasswordConfirmation): Confirmation payload with code and new password.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Dict[str, str]: Confirmation message.</span>
+
+<span class="sd">    Raises:</span>
+<span class="sd">        HTTPException: 404 if code is invalid or expired, or user not found.</span>
+<span class="sd">        HTTPException: 400 if passwords do not match.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">forgot_password</span> <span class="o">=</span> <span class="k">await</span> <span class="n">ForgotPassword</span><span class="o">.</span><span class="n">find_one</span><span class="p">({</span><span class="s2">&quot;code&quot;</span><span class="p">:</span> <span class="n">request</span><span class="o">.</span><span class="n">code</span><span class="p">})</span>
     <span class="k">if</span> <span class="ow">not</span> <span class="n">forgot_password</span><span class="p">:</span>
