@@ -3,7 +3,9 @@
 This guide will help you set up and run the backend on local machine or production.
 
 ## Prerequisites
+
 Before you begin, ensure you have the following installed:
+
 - Python 3.12+
 - MongoDB
 - Docker and Docker Compose
