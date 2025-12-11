@@ -1,6 +1,6 @@
 import math
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List, TypeVar, Generic, Type, ClassVar
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
@@ -50,9 +50,10 @@ class MongoModel(BaseModel):
         description="Time of creation",
     )
 
-    class Config:
-        allow_population_by_field_name = True
-        json_encoders = {ObjectId: lambda v: str(v)}
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={ObjectId: lambda v: str(v)},
+    )
 
     # Collection name - should be overridden by subclasses
     collection_name: ClassVar[str] = "documents"
