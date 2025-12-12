@@ -50,8 +50,21 @@ async def list_documents(
     collection_id: str = Path(..., description="Collection ID"),
     pagination: Pagination = Depends(),
     requesting_user: User = Depends(get_current_user),
-):
-    """List documents in a collection."""
+) -> PaginatedResponse[DocumentModel]:
+    """
+    List documents in a collection.
+
+    Args:
+        collection_id (str): Collection identifier.
+        pagination (Pagination): Pagination parameters.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Paginated documents for the collection.
+
+    Raises:
+        HTTPException: 404 if collection is not found; 403 if access is forbidden.
+    """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
     return await DocumentModel.find_all_with_pagination(
@@ -69,8 +82,21 @@ async def get_document(
     collection_id: str = Path(..., description="Collection ID"),
     document_id: str = Path(..., description="Document ID"),
     requesting_user: User = Depends(get_current_user),
-):
-    """Get a specific document from a collection."""
+) -> DocumentModel:
+    """
+    Get a specific document from a collection.
+
+    Args:
+        collection_id (str): Collection identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Document details.
+
+    Raises:
+        HTTPException: 404 if not found; 400 if document not in collection; 403 if access is forbidden.
+    """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
     document = await DocumentModel.find_by_id(document_id)
@@ -100,8 +126,28 @@ async def upload_documents(
     chunk_size: int = Form(default=DEFAULT_CHUNK_SIZE),
     chunk_overlap: int = Form(default=DEFAULT_CHUNK_OVERLAP),
     requesting_user: User = Depends(get_current_user),
-):
-    """Upload documents to a collection."""
+) -> dict:
+    """
+    Upload documents to a collection.
+
+    Stores document records and triggers asynchronous parsing, chunking, and vectorization for retrieval.
+
+    Args:
+        collection_id (str): Collection identifier.
+        files (list[UploadFile]): One or more files to ingest.
+        metadata_urls (list[str] | str | None): Optional list or single URL per file.
+        metadata_names (list[str] | str | None): Optional list or single display name per file.
+        embeddings_model (str): Embeddings model to use for vectorization.
+        chunk_size (int): Chunk size for splitting documents.
+        chunk_overlap (int): Overlap between chunks.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Service response with ingestion details.
+
+    Raises:
+        HTTPException: 404 if collection is not found; 403 if access is forbidden; 500 for processing errors.
+    """
     collection = await get_collection_and_validate_ownership(
         collection_id, requesting_user
     )
@@ -157,8 +203,23 @@ async def delete_document(
     collection_id: str = Path(..., description="Collection ID"),
     document_id: str = Path(..., description="Document ID"),
     requesting_user: User = Depends(get_current_user),
-):
-    """Delete a document from a collection."""
+) -> dict:
+    """
+    Delete a document from a collection.
+
+    Removes the document record and attempts to delete associated vectors.
+
+    Args:
+        collection_id (str): Collection identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if not found; 400 if document not in collection; 403 if deletion is forbidden.
+    """
     await get_collection_and_validate_ownership(collection_id, requesting_user)
 
     document = await DocumentModel.find_by_id(document_id)

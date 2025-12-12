@@ -17,7 +17,20 @@ router = APIRouter()
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
 async def list_conversations(
     request_user: User = Depends(get_current_user), pagination: Pagination = Depends()
-):
+) -> PaginatedResponse[Conversation]:
+    """
+    List conversations owned by the current user.
+
+    Args:
+        request_user (User): Authenticated user injected by dependency.
+        pagination (Pagination): Pagination parameters.
+
+    Returns:
+        Paginated conversations for the user.
+
+    Raises:
+        HTTPException: 500 for server errors.
+    """
     try:
         result = await Conversation.find_all_with_pagination(
             filter_dict={"user_id": request_user.id},
@@ -38,7 +51,20 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> ConversationDetail:
+    """
+    Get a conversation and its messages.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Conversation with messages and metadata.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -73,7 +99,20 @@ async def get_conversation(
 async def create_conversation(
     request: ConversationCreate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> Conversation:
+    """
+    Create a new conversation for the current user.
+
+    Args:
+        request (ConversationCreate): New conversation payload.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Created conversation.
+
+    Raises:
+        HTTPException: 500 for server errors.
+    """
     try:
         return await Conversation.create(
             user_id=requesting_user.id,
@@ -91,7 +130,21 @@ async def update_conversation_name(
     conversation_id: str,
     request: ConversationNameUpdate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> Conversation:
+    """
+    Update a conversation's name.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        request (ConversationNameUpdate): New name payload.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Updated conversation.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if update is forbidden; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -118,7 +171,20 @@ async def update_conversation_name(
 async def delete_conversation(
     conversation_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
+    """
+    Delete a conversation and its messages.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:

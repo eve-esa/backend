@@ -34,6 +34,16 @@ async def list_tools(
     pagination: Pagination = Depends(),
     requesting_user: User = Depends(get_current_user),
 ):
+    """
+    List MCP tools owned by the current user.
+
+    :param pagination: Pagination parameters.\n
+    :type pagination: Pagination\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Paginated tools for the user.\n
+    :rtype: PaginatedResponse[Tool]\n
+    """
     return await Tool.find_all_with_pagination(
         limit=pagination.limit,
         page=pagination.page,
@@ -46,6 +56,19 @@ async def list_tools(
 async def create_tool(
     request: ToolRequest, requesting_user: User = Depends(get_current_user)
 ):
+    """
+    Create a new MCP tool configuration for the current user.
+
+    :param request: Tool details and configuration.\n
+    :type request: ToolRequest\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Created tool.\n
+    :rtype: Tool\n
+    :raises HTTPException:\n
+        - 400: Invalid request data.
+        - 500: Server error.
+    """
     try:
         tool = Tool(
             user_id=requesting_user.id,
@@ -68,6 +91,19 @@ async def create_tool(
 
 @router.get("/tools/{tool_id}", response_model=Tool)
 async def get_tool(tool_id: str, requesting_user: User = Depends(get_current_user)):
+    """
+    Get a MCP tool by id owned by the current user.
+
+    :param tool_id: Tool identifier.\n
+    :type tool_id: str\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Tool.\n
+    :rtype: Tool\n
+    :raises HTTPException:\n
+        - 404: Tool not found.
+        - 403: Not allowed to access this tool.
+    """
     tool = await Tool.find_by_id(tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
@@ -82,6 +118,23 @@ async def update_tool(
     request: ToolUpdate,
     requesting_user: User = Depends(get_current_user),
 ):
+    """
+    Update an existing MCP tool owned by the current user.
+
+    Supports partial updates of both top-level and nested config fields.
+
+    :param tool_id: Tool identifier.\n
+    :type tool_id: str\n
+    :param request: Update payload.\n
+    :type request: ToolUpdate\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Updated tool.\n
+    :rtype: Tool\n
+    :raises HTTPException:\n
+        - 404: Tool not found.
+        - 403: Not allowed to update this tool.
+    """
     tool = await Tool.find_by_id(tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
@@ -122,6 +175,19 @@ async def update_tool(
 
 @router.delete("/tools/{tool_id}")
 async def delete_tool(tool_id: str, requesting_user: User = Depends(get_current_user)):
+    """
+    Delete a MCP tool owned by the current user.
+
+    :param tool_id: Tool identifier.\n
+    :type tool_id: str\n
+    :param requesting_user: Authenticated user injected by dependency.\n
+    :type requesting_user: User\n
+    :return: Confirmation message.\n
+    :rtype: dict\n
+    :raises HTTPException:\n
+        - 404: Tool not found.
+        - 403: Not allowed to delete this tool.
+    """
     tool = await Tool.find_by_id(tool_id)
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")

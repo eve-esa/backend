@@ -1,0 +1,45 @@
+site_name: "EVE documentation"
+
+theme:
+  font:
+    text: Arial
+    code: The Sans
+  name: material
+  logo: assets/esa_logo.svg
+  favicon: assets/esa_logo.ico
+  palette:
+    primary: custom
+
+extra_css:
+  - styles/overrides.css
+
+copyright: Implemented by <a href="https://picampus-school.com/" target="_blank">Pi School</a>, <a href="https://www.imperative.space/" target="_blank">Imperative Space</a>
+
+extra:
+  social:
+    - icon: fontawesome/solid/globe
+      link: https://eve.philab.esa.int/
+      name: Project Page
+    - icon: fontawesome/brands/github
+      link: https://github.com/eve-esa/backend
+      name: GitHub
+    - icon: simple/huggingface
+      link: https://huggingface.co/eve-esa
+      name: Hugging Face
+  generator: false
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["src"] # add src to sys.path
+          options:
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            show_signature_annotations: true
+            docstring_style: google
+            docstring_options:
+              ignore_init_summary: false
+              trim_doctest_flags: true

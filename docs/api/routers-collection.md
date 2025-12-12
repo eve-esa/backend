@@ -1,0 +1,3 @@
+# Collection
+
+::: routers.collection

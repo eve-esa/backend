@@ -30,7 +30,6 @@ docker compose up -d
 
 Once the container is running, visit [http://localhost:8000/docs](http://localhost:8000/docs) to view the available endpoints.
 
-
 ### Access the backend container
 
 ```bash
@@ -64,7 +63,6 @@ python -m venv venv
 source venv/bin/activate
 ```
 
-
 ### Install Dependencies
 
 ```bash
@@ -86,6 +84,12 @@ chmod +x test.sh
 ```
 
 The server will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+### Deployment
+
+- Branches: `staging` (pre-production), `main` (production).
+- Staging: open a PR to `staging` and merge. This deploys to the staging environment.
+- Production: after verifying on staging, open a PR from `staging` to `main` and merge. This deploys to production.
 
 ## Funding
 

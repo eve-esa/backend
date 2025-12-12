@@ -36,6 +36,7 @@ import asyncio
 import json
 from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
+from src.services.cancel_manager import get_cancel_manager
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,22 @@ class HallucinationDetectResponse(BaseModel):
 @router.get("/conversations/messages/average-latencies")
 async def get_average_latencies(
     start_date: datetime | None = None, end_date: datetime | None = None
-):
-    """Return average latencies for the all messages."""
+) -> dict:
+    """
+    Return average latencies aggregated across all messages.
+
+    Optionally filters the aggregation by a timestamp window.
+
+    Args:
+        start_date (datetime | None): Optional start of the time window (inclusive).
+        end_date (datetime | None): Optional end of the time window (inclusive).
+
+    Returns:
+        Mapping of latency metric name to average value.
+
+    Raises:
+        HTTPException: 500 for server errors during aggregation.
+    """
     try:
         messages_col = Message.get_collection()
         pipeline = []
@@ -116,10 +131,20 @@ async def get_average_latencies(
 
 
 @router.get("/conversations/messages/me/stats")
-async def get_my_message_stats(requesting_user: User = Depends(get_current_user)):
-    """Return counts and character totals for the current user's messages.
+async def get_my_message_stats(requesting_user: User = Depends(get_current_user)) -> dict:
+    """
+    Return counts and character totals for the current user's messages.
 
     Aggregates across all messages belonging to conversations owned by the user.
+
+    Args:
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Aggregated stats including counts and character sums.
+
+    Raises:
+        HTTPException: 500 for server errors during aggregation.
     """
     try:
         messages_col = Message.get_collection()
@@ -198,7 +223,24 @@ async def create_message(
     conversation_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> CreateMessageResponse:
+    """
+    Create a new message in a conversation and generate an answer.
+
+    Validates conversation ownership, normalizes requested public collections, persists a placeholder `Message`, runs generation, updates the message with answer and retrieval metadata, and schedules rollup/trimming of history.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Message id, query, answer, documents, flags, and metadata.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
+    """
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -340,7 +382,24 @@ async def retry(
     message_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
+    """
+    Retry generation for an existing message.
+
+    Re-validates conversation ownership and message relationship, reuses the original `request_input` stored on the message, regenerates the answer, and updates message content, documents, and metadata.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to retry.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Response payload mirroring create_message with updated answer and metadata.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -420,7 +479,24 @@ async def update_message(
     message_id: str,
     request: MessageUpdate,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
+    """
+    Update message feedback and related annotations.
+
+    Supports updating fields such as `feedback`, `feedback_reason`, `was_copied`, and hallucination feedback metadata on the target message.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to update.
+        request (MessageUpdate): Partial update payload for feedback fields.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Success message upon update.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -450,6 +526,23 @@ async def update_message(
         if request.feedback_reason is not None:
             message.feedback_reason = request.feedback_reason
 
+        if request.hallucination_feedback is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["feedback"] = request.hallucination_feedback.value
+
+        if request.hallucination_feedback_reason is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["feedback_reason"] = (
+                request.hallucination_feedback_reason
+            )
+
+        if request.hallucination_was_copied is not None:
+            if message.hallucination is None:
+                message.hallucination = {}
+            message.hallucination["was_copied"] = request.hallucination_was_copied
+
         await message.save()
 
         return {"message": "Feedback updated successfully"}
@@ -469,7 +562,24 @@ async def create_message_stream(
     conversation_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
-):
+) -> StreamingResponse:
+    """
+    Create a new message and stream generation via Server-Sent Events (SSE).
+
+    Sets up a per-message stream bus and runs generation in a decoupled task. Yields SSE-formatted chunks including status updates, tokens, and final payloads.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        SSE stream for the generation lifecycle.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
+    """
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -547,14 +657,19 @@ async def create_message_stream(
         )
 
         # Start decoupled background job that publishes to bus
-        asyncio.create_task(
+        cancel_mgr = get_cancel_manager()
+        cancel_event = cancel_mgr.create(message.id)
+        cancel_mgr.link_conversation(conversation_id, message.id)
+        gen_task = asyncio.create_task(
             run_generation_to_bus(
                 request=request,
                 conversation_id=conversation_id,
                 message_id=message.id,
                 background_tasks=background_tasks,
+                cancel_event=cancel_event,
             )
         )
+        cancel_mgr.set_task(message.id, gen_task)
 
         bus = get_stream_bus()
 
@@ -596,13 +711,105 @@ async def create_message_stream(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+@router.post("/conversations/{conversation_id}/stop")
+async def stop_conversation(
+    conversation_id: str,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Signal cancellation for the active generation within a conversation.
+
+    Uses the cancel manager to locate the in-flight message/task and requests cooperative cancellation, also notifying downstream subscribers via the stream bus.
+
+    Args:
+        conversation_id (str): Conversation identifier to stop generation for.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Status payload indicating stop state or absence of active generation.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
+    """
+    try:
+        logger.info(
+            "generation.stop.requested user_id=%s conversation_id=%s",
+            requesting_user.id,
+            conversation_id,
+        )
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to access this conversation",
+            )
+
+        cancel_mgr = get_cancel_manager()
+        # Prefer async lookup to support Redis-backed mapping across workers
+        try:
+            message_id = await cancel_mgr.get_message_for_conversation_async(conversation_id)  # type: ignore
+        except Exception:
+            message_id = cancel_mgr.get_message_for_conversation(conversation_id)
+        if not message_id:
+            # Nothing active to stop; respond success for idempotency
+            logger.info(
+                "generation.stop.no_active user_id=%s conversation_id=%s",
+                requesting_user.id,
+                conversation_id,
+            )
+            return {"status": "no_active_generation"}
+
+        cancel_mgr.cancel(message_id)
+        try:
+            bus = get_stream_bus()
+            await bus.publish(message_id, f"data: {json.dumps({'type':'stopped'})}\n\n")
+            await bus.close(message_id)
+            logger.info(
+                "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
+                requesting_user.id,
+                conversation_id,
+                message_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "generation.stop.signal_failed conversation_id=%s message_id=%s err=%s",
+                conversation_id,
+                message_id,
+                str(e),
+            )
+        return {"status": "stopping", "message_id": message_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
 @router.post("/conversations/{conversation_id}/messages/{message_id}/source_logs")
 async def get_source_logs(
     conversation_id: str,
     message_id: str,
     request: SourceLogsRequest,
     requesting_user: User = Depends(get_current_user),
-):
+) -> dict:
+    """
+    Append a source log entry to a message's metadata.
+
+    Stores user-attributed source inspection information such as id, url, title, and collection name, with a server-side timestamp.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier.
+        request (SourceLogsRequest): Source log details to append.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message upon successful append.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 500 for server errors.
+    """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -645,7 +852,23 @@ async def hallucination_detect(
     conversation_id: str,
     message_id: str,
     requesting_user: User = Depends(get_current_user),
-):
+) -> HallucinationDetectResponse:
+    """
+    Detect and persist hallucination analysis for a message.
+
+    Runs a multi-step pipeline (detect, optionally rewrite, retrieve, answer) and stores the result and latency breakdown on the message metadata.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to analyze.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Structured hallucination analysis with optional final answer.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if ownership invalid; 500 for server errors.
+    """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)
     if not conversation:
@@ -732,11 +955,25 @@ async def stream_hallucination(
     conversation_id: str,
     message_id: str,
     requesting_user: User = Depends(get_current_user),
-):
-    """Stream hallucination handling result.
+) -> StreamingResponse:
+    """
+    Stream hallucination handling result as Server-Sent Events (SSE).
 
-    - If label == 0 (factual), stream a single final event with the reason.
-    - If label == 1 (hallucination), stream tokens for the final answer and then a final event.
+    Streams structured events for detection, optional rewriting, retrieval, and answer generation steps.
+
+    - If label == 0 (factual), emits a final event with the reason.
+    - If label == 1 (hallucination), streams tokens for the final answer and then a final event.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        message_id (str): Message identifier to analyze.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        SSE events for the detection workflow.
+
+    Raises:
+        HTTPException: 404 if conversation/message not found or mismatched; 403 if access is forbidden; 500 for streaming errors.
     """
     # Validate conversation ownership and message relationship
     conversation = await Conversation.find_by_id(conversation_id)

@@ -14,6 +14,9 @@ class Message(MongoModel):
     conversation_id: str = Field(..., description="Conversation ID")
     input: str = Field(..., description="Message input")
     output: str = Field(..., description="Message output")
+    stopped: Optional[bool] = Field(
+        default=False, description="Whether the message was stopped"
+    )
     feedback: Optional[str] = Field(
         default=None, description="Feedback for the message"
     )

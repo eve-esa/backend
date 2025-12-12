@@ -12,6 +12,9 @@ class MessageUpdate(BaseModel):
     was_copied: Optional[bool] = None
     feedback: Optional[FeedbackEnum] = None
     feedback_reason: Optional[str] = None
+    hallucination_was_copied: Optional[bool] = None
+    hallucination_feedback: Optional[FeedbackEnum] = None
+    hallucination_feedback_reason: Optional[str] = None
 
 
 # -------- Response models for create_message endpoint --------
