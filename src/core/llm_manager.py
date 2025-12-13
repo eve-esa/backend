@@ -33,9 +33,9 @@ from src.utils.helpers import (
     str_token_counter,
     trim_text_to_token_limit,
 )
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain.chains.summarize import load_summarize_chain
+from langchain_classic.chains.summarize import load_summarize_chain
 from langchain_core.messages import SystemMessage, HumanMessage
 
 

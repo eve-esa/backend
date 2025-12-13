@@ -218,10 +218,10 @@ async def persist_message_state(
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
 _langgraph_available = False
-try:  # type: ignore
-    from langgraph.graph import StateGraph, MessagesState, START  # noqa: F401
-    from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver  # noqa: F401
-    from langgraph.graph.message import add_messages  # noqa: F401
+try:
+    from langgraph.graph import StateGraph, MessagesState, START
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+    from langgraph.graph.message import add_messages
     from langchain_core.messages import (
         trim_messages,
         HumanMessage,
@@ -238,9 +238,9 @@ except Exception:
 try:
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 except Exception:
-    HumanMessage = None  # type: ignore
-    SystemMessage = None  # type: ignore
-    AIMessage = None  # type: ignore
+    HumanMessage = None
+    SystemMessage = None
+    AIMessage = None
 
 
 # Unified message factory to avoid branching at call sites
@@ -286,7 +286,7 @@ def _resolve_system_prompt(llm_type: Optional[str]) -> Optional[str]:
 _compiled_graph = None  # Mongo-backed compiled graph
 _compiled_graph_mode = None  # "mongo" or "memory"
 _mongo_checkpointer_cm = None  # context manager kept open for process lifetime
-_mongo_checkpointer = None  # active AsyncMongoDBSaver obtained from __aenter__
+_mongo_checkpointer = None  # active MongoDBSaver instance
 _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
 _graph_init_lock = asyncio.Lock()
 
@@ -388,12 +388,14 @@ Please continue the conversation using this summary as context for understanding
 
         # Try Mongo-backed checkpointer first, keep it open
         try:
+            from pymongo import MongoClient
+            
             uri = get_mongodb_uri()
-            cm = AsyncMongoDBSaver.from_conn_string(uri)
-            checkpointer = await cm.__aenter__()
+            client = MongoClient(uri)
+            checkpointer = MongoDBSaver(client)
             graph = builder.compile(checkpointer=checkpointer)
 
-            _mongo_checkpointer_cm = cm
+            _mongo_checkpointer_cm = None
             _mongo_checkpointer = checkpointer
             _compiled_graph = graph
             _compiled_graph_mode = "mongo"
