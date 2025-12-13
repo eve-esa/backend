@@ -8,14 +8,22 @@ from typing import AsyncGenerator, List, Any
 import os
 
 from langchain_openai import ChatOpenAI
-from langchain_mistralai import ChatMistralAI
 
 from src.config import (
     Config,
-    RUNPOD_API_KEY,
-    MISTRAL_API_KEY,
+    MAIN_MODEL_API_KEY,
+    FALLBACK_MODEL_API_KEY,
     IS_PROD,
     SATCOM_RUNPOD_API_KEY,
+    MAIN_MODEL_URL,
+    FALLBACK_MODEL_URL,
+    MAIN_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
+    MODEL_TIMEOUT,
+    SATCOM_SMALL_MODEL_NAME,
+    SATCOM_LARGE_MODEL_NAME,
+    SATCOM_SMALL_BASE_URL,
+    SATCOM_LARGE_BASE_URL,
 )
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
@@ -25,9 +33,9 @@ from src.utils.helpers import (
     str_token_counter,
     trim_text_to_token_limit,
 )
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain.chains.summarize import load_summarize_chain
+from langchain_classic.chains.summarize import load_summarize_chain
 from langchain_core.messages import SystemMessage, HumanMessage
 
 
@@ -37,10 +45,13 @@ logger = logging.getLogger(__name__)
 class LLMType(Enum):
     """Enum for supported LLM types."""
 
-    Runpod = "runpod"
-    Mistral = "mistral"
+    Main = "main"
+    Fallback = "fallback"
     Satcom_Small = "satcom_small"
     Satcom_Large = "satcom_large"
+    # Legacy aliases for backward compatibility
+    Runpod = "main"
+    Mistral = "fallback"
 
 
 class LLMManager:
@@ -84,50 +95,33 @@ class LLMManager:
         pass
 
     def _init_langchain_clients(self) -> None:
-        """Initialize LangChain ChatOpenAI client configured for Runpod OpenAI-compatible endpoint."""
+        """Initialize LangChain ChatOpenAI client configured for Main and Fallback OpenAI-compatible endpoints."""
         try:
-            runpod_endpoint_id = self.config.get_instruct_llm_id()
-            if not runpod_endpoint_id:
-                raise ValueError("Runpod endpoint id not configured")
-
-            # Build OpenAI-compatible base URL for Runpod vLLM worker
-            self._runpod_base_url = (
-                f"https://api.runpod.ai/v2/{runpod_endpoint_id}/openai/v1"
-            )
-
-            # Model name can be provided via env RUNPOD_MODEL_NAME, else rely on worker override
-            self._runpod_model_name = os.getenv("RUNPOD_MODEL_NAME", "eve-esa/eve_v0.1")
-
+            # Main model configuration
+            if not MAIN_MODEL_URL:
+                raise ValueError("MAIN_MODEL_URL environment variable not configured")            
+            self._main_base_url = MAIN_MODEL_URL
+            # Model name can be provided via env MAIN_MODEL_NAME, else use config
+            self._main_model_name = MAIN_MODEL_NAME
             # Lazily initialized; create on first use to avoid unnecessary startup cost
-            self._runpod_chat_openai: ChatOpenAI | None = None
+            self._main_chat_openai: ChatOpenAI | None = None
 
             # Initialize Satcom client
-            satcom_small_endpoint_id = self.config.get_satcom_small_llm_id()
-            if not satcom_small_endpoint_id:
-                raise ValueError("Satcom small endpoint id not configured")
-            self._satcom_small_base_url = (
-                f"https://api.runpod.ai/v2/{satcom_small_endpoint_id}/openai/v1"
-            )
-            self._satcom_small_model_name = os.getenv(
-                "SATCOM_SMALL_MODEL_NAME",
-                os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"),
-            )
-            satcom_large_endpoint_id = self.config.get_satcom_large_llm_id()
-            if not satcom_large_endpoint_id:
-                raise ValueError("Satcom large endpoint id not configured")
-            self._satcom_large_base_url = (
-                f"https://api.runpod.ai/v2/{satcom_large_endpoint_id}/openai/v1"
-            )
-            self._satcom_large_model_name = os.getenv(
-                "SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b"
-            )
+            if not SATCOM_SMALL_BASE_URL:
+                raise ValueError("SATCOM_SMALL_BASE_URL environment variable not configured")
+            if not SATCOM_LARGE_BASE_URL:
+                raise ValueError("SATCOM_LARGE_BASE_URL environment variable not configured")
+            self._satcom_small_base_url = SATCOM_SMALL_BASE_URL
+            self._satcom_small_model_name = SATCOM_SMALL_MODEL_NAME
+            self._satcom_large_base_url = SATCOM_LARGE_BASE_URL
+            self._satcom_large_model_name = SATCOM_LARGE_MODEL_NAME
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
         except Exception as e:
-            logger.error(f"Failed to initialize LangChain Runpod client: {e}")
-            self._runpod_base_url = None
-            self._runpod_model_name = None
-            self._runpod_chat_openai = None
+            logger.error(f"Failed to initialize LangChain Main client: {e}")
+            self._main_base_url = None
+            self._main_model_name = None
+            self._main_chat_openai = None
             self._satcom_small_base_url = None
             self._satcom_large_base_url = None
             self._satcom_small_model_name = None
@@ -135,55 +129,59 @@ class LLMManager:
             self._satcom_small_chat_openai = None
             self._satcom_large_chat_openai = None
 
-        # Configure Mistral native client lazily
+        # Configure Fallback client lazily
         try:
-            # Mistral provides an OpenAI-compatible Chat Completions API
-            self._mistral_base_url = os.getenv(
-                "MISTRAL_BASE_URL", "https://api.mistral.ai/v1"
-            )
-            self._mistral_model_name = self.config.get_mistral_model()
-            self._mistral_chat: ChatMistralAI | None = None
+            if not FALLBACK_MODEL_URL:
+                raise ValueError("FALLBACK_MODEL_URL environment variable not configured")
+            
+            # Fallback model uses OpenAI-compatible API
+            self._fallback_base_url = FALLBACK_MODEL_URL
+            # Model name can be provided via env FALLBACK_MODEL_NAME, else use config
+            self._fallback_model_name = FALLBACK_MODEL_NAME
+            self._fallback_chat: ChatOpenAI | None = None
         except Exception as e:
-            logger.error(f"Failed to initialize Mistral fallback client config: {e}")
-            self._mistral_base_url = None
-            self._mistral_model_name = None
-            self._mistral_chat = None
+            logger.error(f"Failed to initialize Fallback client config: {e}")
+            self._fallback_base_url = None
+            self._fallback_model_name = None
+            self._fallback_chat = None
 
     def set_selected_llm_type(self, llm_type: str) -> None:
         """Set the selected LLM type."""
         self._selected_llm_type = llm_type
 
-    def _get_runpod_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for Runpod."""
-        if self._runpod_chat_openai is None:
-            if not self._runpod_base_url:
-                raise RuntimeError("Runpod base URL is not configured")
-            if not RUNPOD_API_KEY:
-                raise RuntimeError("RUNPOD_API_KEY is not set")
-            instruct_llm_timeout = self.config.get_instruct_llm_timeout()
-            self._runpod_chat_openai = ChatOpenAI(
-                api_key=RUNPOD_API_KEY,
-                base_url=self._runpod_base_url,
-                model=self._runpod_model_name,
+    def _get_main_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Main model."""
+        if self._main_chat_openai is None:
+            if not self._main_base_url:
+                raise RuntimeError("Main model base URL is not configured")
+            if not MAIN_MODEL_API_KEY:
+                raise RuntimeError("MAIN_MODEL_API_KEY (or RUNPOD_API_KEY) is not set (required for main model)")
+            self._main_chat_openai = ChatOpenAI(
+                api_key=MAIN_MODEL_API_KEY,
+                base_url=self._main_base_url,
+                model=self._main_model_name,
                 temperature=0.3,
-                timeout=instruct_llm_timeout,
+                timeout=MODEL_TIMEOUT,
                 max_retries=0,
             )
-        return self._runpod_chat_openai
+        return self._main_chat_openai
 
-    def _get_mistral_llm(self) -> ChatMistralAI:
-        """Return a configured ChatMistralAI client for Mistral (fallback)."""
-        if self._mistral_chat is None:
-            if not MISTRAL_API_KEY:
-                raise RuntimeError("MISTRAL_API_KEY is not set")
-            mistral_timeout = self.config.get_mistral_timeout()
-            self._mistral_chat = ChatMistralAI(
-                api_key=MISTRAL_API_KEY,
-                model=self._mistral_model_name or "mistral-medium-latest",
+    def _get_fallback_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Fallback model (OpenAI-compatible)."""
+        if self._fallback_chat is None:
+            if not self._fallback_base_url:
+                raise RuntimeError("Fallback model base URL is not configured")
+            if not FALLBACK_MODEL_API_KEY:
+                raise RuntimeError("FALLBACK_MODEL_API_KEY is not set (required for fallback model)")
+            self._fallback_chat = ChatOpenAI(
+                api_key=FALLBACK_MODEL_API_KEY,
+                base_url=self._fallback_base_url,
+                model=self._fallback_model_name,
                 temperature=0.3,
-                timeout=mistral_timeout,
+                timeout=MODEL_TIMEOUT,
+                max_retries=0,
             )
-        return self._mistral_chat
+        return self._fallback_chat
 
     def _get_satcom_small_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for Satcom Small."""
@@ -192,13 +190,12 @@ class LLMManager:
                 raise RuntimeError("Satcom small base URL is not configured")
             if not SATCOM_RUNPOD_API_KEY:
                 raise RuntimeError("SATCOM_API_KEY is not set")
-            satcom_small_llm_timeout = self.config.get_satcom_small_llm_timeout()
             self._satcom_small_chat_openai = ChatOpenAI(
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_small_base_url,
                 model=self._satcom_small_model_name,
                 temperature=0.3,
-                timeout=satcom_small_llm_timeout,
+                timeout=MODEL_TIMEOUT,
                 max_retries=0,
             )
         return self._satcom_small_chat_openai
@@ -210,13 +207,12 @@ class LLMManager:
                 raise RuntimeError("Satcom large base URL is not configured")
             if not SATCOM_RUNPOD_API_KEY:
                 raise RuntimeError("SATCOM_API_KEY is not set")
-            satcom_large_llm_timeout = self.config.get_satcom_large_llm_timeout()
             self._satcom_large_chat_openai = ChatOpenAI(
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_large_base_url,
                 model=self._satcom_large_model_name,
                 temperature=0.3,
-                timeout=satcom_large_llm_timeout,
+                timeout=MODEL_TIMEOUT,
                 max_retries=0,
             )
         return self._satcom_large_chat_openai
@@ -224,16 +220,23 @@ class LLMManager:
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
 
-        Defaults depend on environment: Runpod on staging, Mistral on prod.
-        Transparent fallback to Mistral if Runpod selection fails.
+        Defaults depend on environment: Main on staging, Fallback on prod.
+        Transparent fallback to Fallback if Main selection fails.
+        Supports legacy 'runpod' and 'mistral' values for backward compatibility.
         """
         try:
-            if llm_type == LLMType.Mistral.value:
-                self._selected_llm_type = LLMType.Mistral.value
-                return self._get_mistral_llm()
-            elif llm_type == LLMType.Runpod.value:
-                self._selected_llm_type = LLMType.Runpod.value
-                return self._get_runpod_llm()
+            # Handle legacy values
+            if llm_type == "runpod":
+                llm_type = "main"
+            elif llm_type == "mistral":
+                llm_type = "fallback"
+            
+            if llm_type == LLMType.Fallback.value or llm_type == LLMType.Mistral.value:
+                self._selected_llm_type = LLMType.Fallback.value
+                return self._get_fallback_llm()
+            elif llm_type == LLMType.Main.value or llm_type == LLMType.Runpod.value:
+                self._selected_llm_type = LLMType.Main.value
+                return self._get_main_llm()
             elif llm_type == LLMType.Satcom_Small.value:
                 self._selected_llm_type = LLMType.Satcom_Small.value
                 return self._get_satcom_small_llm()
@@ -242,35 +245,35 @@ class LLMManager:
                 return self._get_satcom_large_llm()
             else:
                 if llm_type is None and IS_PROD:
-                    self._selected_llm_type = LLMType.Mistral.value
-                    return self._get_mistral_llm()
+                    self._selected_llm_type = LLMType.Fallback.value
+                    return self._get_fallback_llm()
                 elif llm_type is None and not IS_PROD:
-                    self._selected_llm_type = LLMType.Runpod.value
-                    return self._get_runpod_llm()
+                    self._selected_llm_type = LLMType.Main.value
+                    return self._get_main_llm()
                 else:
-                    raise RuntimeError("Invalid model selection")
+                    raise RuntimeError(f"Invalid model selection: {llm_type}")
         except Exception as e:
             logger.error(f"Failed to get client for model: {e}")
-            self._selected_llm_type = LLMType.Mistral.value
-            return self._get_mistral_llm()
+            self._selected_llm_type = LLMType.Fallback.value
+            return self._get_fallback_llm()
 
     def get_selected_llm_type(self) -> str:
         """Return the selected LLM type."""
         return self._selected_llm_type
 
     def get_model(self) -> ChatOpenAI:
-        """Public accessor for the primary ChatOpenAI client with fallback to Mistral."""
+        """Public accessor for the primary ChatOpenAI client with fallback to Fallback."""
         try:
-            return self._get_runpod_llm()
+            return self._get_main_llm()
         except Exception as e:
             logger.warning(
-                f"Falling back to Mistral ChatMistralAI due to Runpod error: {e}"
+                f"Falling back to Fallback model due to Main model error: {e}"
             )
-            return self._get_mistral_llm()
-
-    def get_mistral_model(self) -> ChatMistralAI:
-        """Public accessor for the Mistral model."""
-        return self._get_mistral_llm()
+            return self._get_fallback_llm()
+    
+    def get_fallback_llm(self) -> ChatOpenAI:
+        """Public accessor for the fallback ChatOpenAI client."""
+        return self._get_fallback_llm()
 
     def __call__(self, *args, **kwargs):
         """Make the class callable, delegating to generate_answer."""
@@ -360,7 +363,7 @@ class LLMManager:
 
     def _call_eve_instruct(self, prompt: str, max_new_tokens: int = 150) -> str:
         """
-        Call the Eve Instruct model via Runpod using LangChain ChatOpenAI (OpenAI-compatible API).
+        Call the Eve Instruct model via Main model using LangChain ChatOpenAI (OpenAI-compatible API).
 
         Args:
             prompt: The formatted prompt
@@ -374,7 +377,7 @@ class LLMManager:
             Exception: For other errors
         """
         try:
-            base_llm = self._get_runpod_llm()
+            base_llm = self._get_main_llm()
             llm = base_llm.bind(max_tokens=max_new_tokens)
             system_and_prompt = prompt
             current_system_prompt = self._get_current_system_prompt()
@@ -385,17 +388,17 @@ class LLMManager:
             response = llm.invoke(system_and_prompt)
             return getattr(response, "content", str(response))
         except Exception as e:
-            logger.error(f"Eve Instruct Runpod API call failed: {str(e)}")
+            logger.error(f"Eve Instruct Main model API call failed: {str(e)}")
             raise
 
-    async def _call_eve_instruct_mistral(
+    async def _call_eve_instruct_fallback(
         self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
     ) -> str:
         """
-        Call the Eve Instruct model via Mistral using LangChain ChatMistralAI.
+        Call the Eve Instruct model via Fallback Model using LangChain ChatOpenAI.
         """
         try:
-            base_llm = self._get_mistral_llm()
+            base_llm = self._get_fallback_llm()
             bind_kwargs = {}
             # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
@@ -413,7 +416,7 @@ class LLMManager:
             content = getattr(response, "content", str(response))
             return content
         except Exception as e:
-            logger.error(f"Mistral model call failed: {str(e)}")
+            logger.error(f"Fallback model call failed: {str(e)}")
             raise
 
     async def _call_eve_instruct_async(
@@ -421,7 +424,7 @@ class LLMManager:
     ) -> str:
         """Async version using LangChain ChatOpenAI."""
         try:
-            base_llm = self._get_runpod_llm()
+            base_llm = self._get_main_llm()
             bind_kwargs = {}
             # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
@@ -438,7 +441,7 @@ class LLMManager:
             return content
         except Exception as e:
             logger.error(
-                f"Eve Instruct async API call failed: {str(e)}. Trying Mistral fallback."
+                f"Eve Instruct async API call failed: {str(e)}. Trying Fallback model."
             )
             raise
 
@@ -469,7 +472,7 @@ class LLMManager:
             resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
             return getattr(resp, "content", str(resp))
         except Exception:
-            llm = self.get_mistral_model()
+            llm = self._get_fallback_llm()
             resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
             return getattr(resp, "content", str(resp))
 
@@ -499,7 +502,7 @@ class LLMManager:
             )
             return trimmed_context
         except Exception:
-            llm = self.get_mistral_model()
+            llm = self._get_fallback_llm()
             chain = load_summarize_chain(llm, chain_type="map_reduce")
             summary = chain.invoke(docs)
             trimmed_context = trim_text_to_token_limit(
@@ -515,7 +518,7 @@ class LLMManager:
         temperature: float | None = None,
     ) -> str:
         """
-        Generate an answer using the runpod model.
+        Generate an answer using the main model.
 
         Args:
             query: The user's question
@@ -542,10 +545,10 @@ class LLMManager:
             )
 
         except Exception as e:
-            logger.error(f"Failed to generate answer using runpod model: {str(e)}")
+            logger.error(f"Failed to generate answer using main model: {str(e)}")
             raise
 
-    async def generate_answer_mistral(
+    async def generate_answer_fallback(
         self,
         query: str,
         context: str,
@@ -554,7 +557,7 @@ class LLMManager:
         conversation_context: str = "",
     ) -> tuple[str, str]:
         """
-        Generate an answer using the mistral model.
+        Generate an answer using the fallback model (legacy method name).
 
         Args:
             query: The user's question
@@ -586,16 +589,16 @@ class LLMManager:
                 prompt = self._generate_prompt(query=query, context=context)
 
             max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
-            answer = await self._call_eve_instruct_mistral(
+            answer = await self._call_eve_instruct_fallback(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             )
             return answer, prompt
 
         except Exception as e:
-            logger.error(f"Failed to generate answer using mistral model: {str(e)}")
+            logger.error(f"Failed to generate answer using fallback model: {str(e)}")
             raise
 
-    async def generate_answer_mistral_stream(
+    async def generate_answer_fallback_stream(
         self,
         query: str,
         context: str,
@@ -620,20 +623,20 @@ class LLMManager:
                 prompt = self._generate_prompt(query=query, context=context)
 
             max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
-            async for chunk in self._call_eve_instruct_mistral_stream(
+            async for chunk in self._call_eve_instruct_fallback_stream(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
             ):
                 yield chunk, prompt
         except Exception as e:
-            logger.error(f"Failed to generate answer using mistral model: {str(e)}")
+            logger.error(f"Failed to generate answer using fallback model: {str(e)}")
             raise
 
-    async def _call_eve_instruct_mistral_stream(
+    async def _call_eve_instruct_fallback_stream(
         self, prompt: str, max_new_tokens: int = 150, temperature: float | None = None
     ) -> AsyncGenerator[str, None]:
-        """Stream tokens from the Mistral model via LangChain ChatMistralAI."""
+        """Stream tokens from the Fallback model via LangChain ChatOpenAI."""
         try:
-            base_llm = self._get_mistral_llm()
+            base_llm = self._get_fallback_llm()
             bind_kwargs = {}
             # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
@@ -659,5 +662,5 @@ class LLMManager:
                 except Exception:
                     continue
         except Exception as e:
-            logger.error(f"Mistral streaming call failed: {str(e)}")
+            logger.error(f"Fallback streaming call failed: {str(e)}")
             raise

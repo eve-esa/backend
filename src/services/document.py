@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from fastapi import UploadFile
 from anyio import to_thread
 from langchain_core.documents import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.utils.helpers import save_upload_file_to_temp

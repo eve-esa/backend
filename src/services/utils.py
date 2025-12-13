@@ -11,25 +11,14 @@ import hashlib
 import logging
 import tempfile
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import List
 
 import runpod
 from fastapi import UploadFile
 
-from langchain_core.embeddings import Embeddings, FakeEmbeddings
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_mistralai import MistralAIEmbeddings
-from langchain_openai import OpenAIEmbeddings
-
-from src.utils.embeddings import RunPodEmbeddings
-from src.config import MISTRAL_API_KEY, OPENAI_API_KEY, RUNPOD_API_KEY
-
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-# Configure RunPod API key
-runpod.api_key = RUNPOD_API_KEY
 
 # Constants
 NASA_MODEL = "nasa-impact/nasa-smd-ibm-st-v2"
@@ -88,75 +77,6 @@ async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
     except Exception as e:
         logger.error(f"Failed to save uploaded file: {str(e)}")
         raise IOError(f"Failed to save uploaded file: {str(e)}") from e
-
-
-def get_embeddings_model(
-    model_name: str, return_embeddings_size: bool = False
-) -> Union[Embeddings, Tuple[Embeddings, int]]:
-    """
-    Get an embeddings model based on the model name.
-
-    Args:
-        model: Name of the embedding model to use
-        return_embeddings_size: Whether to also return the embedding dimension
-
-    Returns:
-        Union[Embeddings, Tuple[Embeddings, int]]:
-            The embeddings model and optionally its dimension
-
-    Raises:
-        ValueError: If an unsupported model is specified
-    """
-    # Handle NASA model specially to prevent local loading
-    model = model_name
-    if model == NASA_MODEL:
-        logger.info(f"Using RunPod proxy for NASA embedding model: {model}")
-        embeddings = RunPodEmbeddings(model_name=model, embedding_size=768)
-        embeddings_size = embeddings.embedding_size
-
-    # Handle fake embeddings (for testing)
-    elif model == EmbeddingModelType.FAKE.value:
-        logger.info("Using fake embeddings for testing")
-        embeddings = FakeEmbeddings(size=4096)
-        embeddings_size = 4096
-
-    # Handle Mistral embeddings
-    elif model == EmbeddingModelType.MISTRAL.value:
-        logger.info("Using Mistral embeddings")
-        embeddings = MistralAIEmbeddings(model=model, api_key=MISTRAL_API_KEY)
-        embeddings_size = 1024
-
-    # Handle OpenAI embeddings
-    elif model in OPENAI_EMBEDDING_DIMENSIONS:
-        logger.info(f"Using OpenAI embeddings model: {model}")
-        embeddings = OpenAIEmbeddings(model=model, api_key=OPENAI_API_KEY)
-        embeddings_size = OPENAI_EMBEDDING_DIMENSIONS[model]
-
-    # Handle Hugging Face embeddings (default case)
-    else:
-        logger.info(f"Using Hugging Face embeddings model: {model}")
-
-        # TODO - do not load the model into memory get it from the config file
-        # embeddings = HuggingFaceEmbeddings(model_name=model)
-
-        try:
-            # Get embedding size from the model
-            # embeddings_size = embeddings.client.get_sentence_embedding_dimension()
-            pass
-        except AttributeError:
-            # Fallback if client structure is different
-            try:
-                embeddings_size = embeddings._client[1].word_embedding_dimension
-            except (AttributeError, IndexError):
-                logger.warning(
-                    f"Could not determine embedding size for {model}, using default"
-                )
-                embeddings_size = 768
-
-    if return_embeddings_size:
-        return embeddings, embeddings_size
-    return embeddings
-
 
 async def runpod_api_request(
     endpoint_id: str, model: str, user_input: str, timeout: int = 60

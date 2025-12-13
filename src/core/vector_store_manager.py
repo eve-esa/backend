@@ -38,7 +38,7 @@ from src.constants import (
     EVE_PUBLIC_COLLECTION_NAME,
     PUBLIC_COLLECTIONS,
 )
-from src.utils.helpers import EmbeddingModelType, get_embeddings_model
+from src.utils.helpers import get_embeddings_model
 from src.config import (
     INFERENCE_API_KEY,
     Config,
