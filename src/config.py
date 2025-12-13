@@ -14,14 +14,27 @@ QDRANT_URL = os.getenv("QDRANT_URL").strip()
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY").strip()
 SATCOM_QDRANT_URL = os.getenv("SATCOM_QDRANT_URL").strip()
 SATCOM_QDRANT_API_KEY = os.getenv("SATCOM_QDRANT_API_KEY").strip()
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
-HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN").strip()
-RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY").strip()
 DEEPINFRA_API_TOKEN = os.getenv("DEEPINFRA_API_TOKEN", "").strip()
 INFERENCE_API_KEY = os.getenv("INFERENCE_API_KEY", "").strip()
 SILICONFLOW_API_TOKEN = os.getenv("SILICONFLOW_API_TOKEN", "").strip()
 SATCOM_RUNPOD_API_KEY = os.getenv("SATCOM_RUNPOD_API_KEY", "").strip()
+
+# Main and Fallback LLM URLs (OpenAI-compatible format)
+MAIN_MODEL_URL = os.getenv("MAIN_MODEL_URL", "").strip()
+FALLBACK_MODEL_URL = os.getenv("FALLBACK_MODEL_URL", "").strip()
+
+MAIN_MODEL_API_KEY = os.getenv("MAIN_MODEL_API_KEY", "").strip()
+FALLBACK_MODEL_API_KEY = os.getenv("FALLBACK_MODEL_API_KEY", "").strip()
+
+MAIN_MODEL_NAME = os.getenv("MAIN_MODEL_NAME", "eve-esa/eve_v0.1").strip()
+FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-medium-latest").strip()
+
+MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
+
+SATCOM_SMALL_MODEL_NAME = os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b").strip()
+SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b").strip()
+SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
+SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
@@ -63,9 +76,6 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
-runpod.api_key = RUNPOD_API_KEY
-
-
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers
@@ -99,42 +109,6 @@ class Config:
             return value
         except (KeyError, TypeError):
             return default
-
-    def get_instruct_llm_id(self):
-        return self.get("runpod", "instruct_llm", "id")
-
-    def get_instruct_llm_timeout(self):
-        return self.get("runpod", "instruct_llm", "timeout")
-
-    def get_indus_embedder_id(self):
-        return self.get("runpod", "indus_embedder", "id")
-
-    def get_indus_embedder_timeout(self):
-        return self.get("runpod", "indus_embedder", "timeout")
-
-    def get_completion_llm_id(self):
-        return self.get("runpod", "instruct_llm", "id")
-
-    def get_completion_llm_timeout(self):
-        return self.get("runpod", "instruct_llm", "llm")
-
-    def get_mistral_model(self):
-        return self.get("mistral", "model")
-
-    def get_mistral_timeout(self):
-        return self.get("mistral", "timeout")
-
-    def get_satcom_small_llm_id(self):
-        return self.get("runpod", "satcom_small_llm", "id")
-
-    def get_satcom_small_llm_timeout(self):
-        return self.get("runpod", "satcom_small_llm", "timeout")
-
-    def get_satcom_large_llm_id(self):
-        return self.get("runpod", "satcom_large_llm", "id")
-
-    def get_satcom_large_llm_timeout(self):
-        return self.get("runpod", "satcom_large_llm", "timeout")
 
     # MCP
     def get_mcp_servers(self) -> Dict[str, Dict[str, Any]]:
@@ -172,12 +146,6 @@ class Config:
             first_server = next(iter(servers.values()))
             return first_server.get("headers", {})
         return {}
-
-    def get_reranker_id(self):
-        return self.get("runpod", "reranker", "id")
-
-    def get_reranker_timeout(self):
-        return self.get("runpod", "reranker", "timeout")
 
 
 # Expose a module-level config instance for convenient imports

@@ -1,24 +1,3 @@
-runpod:
-  instruct_llm:
-    id: "2f9o93xc90871m"
-    timeout: 13 # seconds in ChatOpenAI
-  indus_embedder:
-    id: "bqwuhwmnb3bdx0"
-    timeout: 13
-  reranker:
-    id: "4947q1tk0d2lle"
-    timeout: 13
-  satcom_small_llm:
-    id: "ucttr8up9sxh0k"
-    timeout: 13 # seconds in ChatOpenAI
-  satcom_large_llm:
-    id: "zyy9iu4i7vmcxc"
-    timeout: 13 # seconds in ChatOpenAI
-
-mistral:
-  model: "mistral-medium-latest"
-  timeout: 13 # seconds
-
 mcp:
   servers:
     eve-mcp-demo:
