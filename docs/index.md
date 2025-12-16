@@ -10,7 +10,7 @@ For setup, Docker usage, local development, and deployment details, refer to [RE
 - **MongoDB/DocumentDB**: Primary datastore for users, collections, documents, conversations, messages
 - **Qdrant**: Vector store for embeddings and retrieval
 - **LLM providers**: Pluggable via `src/core/llm_manager.py`
-- **Docs**: MkDocs Material + mkdocstrings (Sphinx-style docstrings)
+- **Docs**: MkDocs Material + mkdocstrings (Google-style docstrings)
 
 ### Directory structure
 
@@ -31,19 +31,19 @@ docs/                 # Site content (this page, api references)
 ### Key workflows
 
 - **Authentication**
-  - Signup, email activation, login, refresh
-  - Endpoints in `routers.auth` and `routers.forgot_password`
+    - Signup, email activation, login, refresh
+    - Endpoints in `routers.auth` and `routers.forgot_password`
 - **Collections & Documents**
-  - Create Qdrant collections, upload documents, delete documents
-  - Ingestion triggers parsing, chunking, embedding, and vector upsert
-  - Endpoints in `routers.collection` and `routers.document`
+    - Create Qdrant collections, upload documents, delete documents
+    - Ingestion triggers parsing, chunking, embedding, and vector upsert
+    - Endpoints in `routers.collection` and `routers.document`
 - **Conversations & Messages**
-  - Create conversations, post messages, stream responses (SSE)
-  - Retry message generation, update feedback/annotations
-  - Endpoints in `routers.conversation` and `routers.message`
+    - Create conversations, post messages, stream responses (SSE)
+    - Retry message generation, update feedback/annotations
+    - Endpoints in `routers.conversation` and `routers.message`
 - **Hallucination Detection**
-  - Synchronous detection and streaming modes
-  - Annotates message metadata with label, reason, timings
+    - Synchronous detection and streaming modes
+    - Annotates message metadata with label, reason, timings
 
 ### API surface (reference)
 
@@ -62,18 +62,17 @@ docs/                 # Site content (this page, api references)
 3. Optionally extract year range from filters for MCP usage
 4. If starting a new chat, create `Conversation` first; then create placeholder `Message` record
 5. Run the answer generation pipeline:
-   - Build context (RAG decision, retrieval, reranking)
-   - Generate answer from LLM and record timings and prompt metadata
+    - Build context (RAG decision, retrieval, reranking)
+    - Generate answer from LLM and record timings and prompt metadata
 6. Update `Message` output (answer), documents, flags, and latencies
 7. Optionally schedule rollup/trim in background
 8. For streaming endpoints, publish tokens and lifecycle events via bus
 
 ### Documentation notes
 
-- Docstrings are Sphinx-style with `:param`, `:type`, `:return`, `:rtype`, `:raises`.
+- Docstrings are Google-style with `Args:`, `Returns:`, `Raises:`.
 - Module reference pages in `docs/` use:
 
 ```markdown
 ::: routers.<module>
-handler: python
 ```
