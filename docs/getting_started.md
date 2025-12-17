@@ -27,9 +27,11 @@ python3.12 --version
 ```
 
 **Windows:**
+
 1. Download Python 3.12+ from the [official Python website](https://www.python.org/downloads/)
 2. Run the installer and check "Add Python to PATH"
 3. Verify installation:
+
 ```cmd
 python --version
 ```
@@ -56,6 +58,7 @@ sudo systemctl enable mongod
 ```
 
 **Windows:**
+
 1. Download MongoDB Community Server from the [official MongoDB website](https://www.mongodb.com/try/download/community)
 2. Run the installer and follow the setup wizard
 3. MongoDB will be installed as a Windows service and start automatically
@@ -98,11 +101,13 @@ docker compose version
 ```
 
 **Windows:**
+
 1. Download Docker Desktop from the [official Docker website](https://www.docker.com/products/docker-desktop/)
 2. Run the installer and follow the setup wizard
 3. Restart your computer if prompted
 4. Docker Desktop includes both Docker and Docker Compose
 5. Verify installation:
+
 ```cmd
 docker --version
 docker compose version
@@ -227,6 +232,7 @@ IS_PROD=false
 #### Qdrant URL and API Key
 
 **Qdrant Cloud (Recommended):**
+
 1. Sign up for a free account at [Qdrant Cloud](https://cloud.qdrant.io/)
 2. Create a new cluster
 3. Copy the cluster URL (e.g., `https://xxxxx-xxxxx-xxxxx.qdrant.io`)
@@ -234,6 +240,7 @@ IS_PROD=false
 5. Use the cluster URL as `QDRANT_URL` and the API key as `QDRANT_API_KEY`
 
 **Self-hosted Qdrant:**
+
 - If running Qdrant locally, use `http://localhost:6333` as `QDRANT_URL`
 - For self-hosted instances, API key may not be required (leave empty or check your Qdrant configuration)
 
@@ -260,6 +267,7 @@ openssl rand -base64 32
 ```
 
 **Online Generator:**
+
 - Use a secure random string generator like [randomkeygen.com](https://randomkeygen.com/)
 - Copy a 256-bit key and use it as `JWT_SECRET_KEY`
 
@@ -346,6 +354,7 @@ The `INFERENCE_API_KEY` is used for embedding queries with the Qwen 3.4B embeddi
 #### Redis URL
 
 **Redis Cloud (Recommended):**
+
 1. Sign up for a free account at [Redis Cloud](https://redis.com/try-free/)
 2. Create a new database
 3. Copy the connection URL (format: `redis://:password@host:port`)

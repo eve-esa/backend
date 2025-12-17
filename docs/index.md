@@ -1,8 +1,8 @@
 ## EVE Backend
 
-A FastAPI-based backend service for chat with Retrieval-Augmented Generation (RAG). It provides authentication, collections and document ingestion, conversation/message management, streaming responses, and a hallucination detection pipeline. Documentation is generated via MkDocs + mkdocstrings.
+A FastAPI-based backend service for chat with Retrieval-Augmented Generation (RAG). It provides authentication, collections and document ingestion, conversation/message management, streaming responses, and a hallucination detection pipeline.
 
-For setup, Docker usage, local development, and deployment details, refer to [README.md](../README.md).
+For setup, Docker usage, local development, and deployment details, refer to [README.md](https://github.com/eve-esa/backend/blob/main/README.md).
 
 ### Architecture
 
