@@ -28,7 +28,6 @@ from src.utils.helpers import (
     get_mongodb_uri,
     build_context,
 )
-from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import (
     DEEPINFRA_API_TOKEN,
@@ -40,8 +39,6 @@ from src.config import (
     MODEL_TIMEOUT,
     config,
 )
-from src.hallucination_pipeline.loop import run_hallucination_loop
-from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.template_loader import get_template
 from src.utils.siliconflow_reranker import SiliconFlowReranker

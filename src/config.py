@@ -31,6 +31,12 @@ FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-medium-latest").
 
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
 
+EMBEDDING_URL = os.getenv("EMBEDDING_URL", "https://api.deepinfra.com/v1/openai").strip()
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "").strip()
+
+EMBEDDING_FALLBACK_URL = os.getenv("EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1").strip()
+EMBEDDING_FALLBACK_API_KEY = os.getenv("EMBEDDING_FALLBACK_API_KEY", "").strip()
+
 SATCOM_SMALL_MODEL_NAME = os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b").strip()
 SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b").strip()
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
