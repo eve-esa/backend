@@ -174,7 +174,7 @@ async def persist_message_state(
     prompts: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Any]] = None,
     stopped: Optional[bool] = None,
-    error: Optional[str] = None,
+    error: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -204,7 +204,7 @@ async def persist_message_state(
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
         if error is not None:
-            existing_metadata["error"] = error
+            existing_metadata["error"] = {**(existing_metadata.get("error", {}) or {}), **(error or {})}
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -794,12 +794,12 @@ async def get_rag_context(
     vector_store: VectorStoreManager,
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
-) -> tuple[list, Dict[str, Optional[float]]]:
+) -> tuple[list, Dict[str, Optional[float]], Optional[str]]:
     """Get RAG context from vector store."""
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
     # Retrieve with latency measurements
-    results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
+    results, vs_latencies, vec_err = await vector_store.retrieve_documents_with_latencies(
         collection_names=request.collection_ids,
         query=request.query,
         k=request.k * 2,
@@ -815,7 +815,7 @@ async def get_rag_context(
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
 
-    return results, vs_latencies
+    return results, vs_latencies, vec_err
 
 
 async def setup_rag_and_context(
@@ -830,6 +830,7 @@ async def setup_rag_and_context(
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+        vec_errors: Dict[str, Optional[str]] = {}
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
@@ -845,7 +846,7 @@ async def setup_rag_and_context(
             )
             collection_ids = request.collection_ids
             request.collection_ids = ["satcom-chunks-collection"]
-            satcom_results, satcom_lat = await get_rag_context(
+            satcom_results, satcom_lat, satcom_vec_err = await get_rag_context(
                 satcom_vector_store, request, cancel_event=cancel_event
             )
             request.collection_ids = [
@@ -865,10 +866,10 @@ async def setup_rag_and_context(
                 mcp_future = tg.create_task(
                     get_mcp_context(request, cancel_event=cancel_event)
                 )
-                (results, rag_lat) = await rag_future
+                (results, rag_lat, main_vec_err) = await rag_future
                 (mcp_results, mcp_lat) = await mcp_future
         else:
-            results, rag_lat = await get_rag_context(
+            results, rag_lat, main_vec_err = await get_rag_context(
                 vector_store, request, cancel_event=cancel_event
             )
             mcp_results, mcp_lat = [], {}
@@ -917,11 +918,15 @@ async def setup_rag_and_context(
 
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})
+        vec_errors.update({
+            "main_vec_err": main_vec_err,
+            "satcom_vec_err": satcom_vec_err,
+        })
     except* asyncio.CancelledError:
         # Propagate cooperative cancellation cleanly out of TaskGroup
         raise
 
-    return context, results, latencies, formated_results
+    return context, results, latencies, formated_results, vec_errors
 
 
 async def check_policy(
@@ -987,7 +992,7 @@ async def generate_answer(
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies = "", [], {}
+        context, results, latencies, vec_errors = "", [], {}, {}
         retrieved_docs: List[Dict[str, Any]] = []
         if (
             len(request.collection_ids) > 0
@@ -995,7 +1000,7 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs = (
+                context, results, latencies, retrieved_docs, _vec_errors = (
                     await setup_rag_and_context(request)
                 )
             except Exception as e:
@@ -1282,7 +1287,7 @@ async def generate_answer_stream_generator_helper(
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, retrieved_docs = "", [], {}, []
+        context, results, latencies, retrieved_docs, vec_errors = "", [], {}, [], {}
         if (
             len(request.collection_ids) > 0
             and request.k > 0
@@ -1290,7 +1295,7 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies, retrieved_docs = await cancel_aware(
+                context, results, latencies, retrieved_docs, vec_errors = await cancel_aware(
                     setup_rag_and_context(request, cancel_event=cancel_event)
                 )
                 if len(results) == 0:
@@ -1323,6 +1328,11 @@ async def generate_answer_stream_generator_helper(
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
                 retrieved_docs = []
+                await persist_message_state(
+                    message_id,
+                    stopped=True,
+                    error={'rag_errors': str(e)},
+                )
 
         if cancelled():
             await persist_message_state(
@@ -1563,6 +1573,7 @@ async def generate_answer_stream_generator_helper(
             latencies=latencies,
             prompts=prompts,
             retrieved_docs=retrieved_docs,
+            error={'main_embedding_error': vec_errors},
         )
 
         if background_tasks:
@@ -1605,7 +1616,7 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
-            error=str(e),
+            error={'streaming_error': str(e)},
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"

@@ -354,7 +354,7 @@ class VectorStoreManager:
         metadatas = [doc.metadata for doc in documents]
 
         # Generate embeddings for this batch
-        embeddings = await self.generate_query_vector(texts, self.embeddings_model)
+        embeddings, _ = await self.generate_query_vector(texts, self.embeddings_model)
 
         # Create points for Qdrant
         points = []
@@ -617,7 +617,7 @@ class VectorStoreManager:
 
     async def generate_query_vector(
         self, query: str, embeddings_model: str
-    ) -> List[float]:
+    ) -> Tuple[List[float], Optional[str]]:
         """
         Generate an embedding vector for a query.
 
@@ -638,7 +638,7 @@ class VectorStoreManager:
             response = openai.embeddings.create(
                 input=query, model=embeddings_model
             )
-            return response.data[0].embedding
+            return response.data[0].embedding, None
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")
@@ -648,7 +648,7 @@ class VectorStoreManager:
             response = openai.embeddings.create(
                 input=query, model='qwen/qwen3-embedding-4b'
             )
-            return response.data[0].embedding
+            return response.data[0].embedding, str(e)
 
     async def retrieve_documents_from_query(
         self,
@@ -682,7 +682,7 @@ class VectorStoreManager:
 
         try:
             # Generate embedding vector for the query
-            query_vector = await self.generate_query_vector(query, model)
+            query_vector, _ = await self.generate_query_vector(query, model)
             query_filter = Filter(**filters) if filters else None
 
             # Retrieve k per collection (caller may further rerank/filter)
@@ -698,7 +698,7 @@ class VectorStoreManager:
                 f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
                 f"(filtered from {len(all_results)} total matches)"
             )
-            return all_results
+            return all_results, vec_err
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
@@ -715,7 +715,7 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
-    ) -> tuple[List[Any], Dict[str, Optional[float]]]:
+    ) -> tuple[List[Any], Dict[str, Optional[float]], Optional[str]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
 
@@ -732,7 +732,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             t0 = time.perf_counter()
-            query_vector = await self.generate_query_vector(query, model)
+            query_vector, vec_err = await self.generate_query_vector(query, model)
             embedding_latency = time.perf_counter() - t0
 
             query_filter = Filter(**filters) if filters else None
@@ -758,7 +758,7 @@ class VectorStoreManager:
                 "query_embedding_latency": embedding_latency,
                 "qdrant_retrieval_latency": retrieval_latency,
             }
-            return all_results, latencies
+            return all_results, latencies, vec_err
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
