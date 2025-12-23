@@ -12,8 +12,6 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from fastapi import UploadFile
-from anyio import to_thread
-from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.core.vector_store_manager import VectorStoreManager
@@ -183,11 +181,7 @@ class DocumentService:
                 )
 
             if valid_documents:
-                await to_thread.run_sync(
-                    vector_store.add_document_list,
-                    collection_name,
-                    valid_documents,
-                )
+                await vector_store.add_document_list(collection_name, valid_documents)
 
                 return DocumentResult(
                     success=True,
@@ -237,7 +231,7 @@ class DocumentService:
         """
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
-            results = await vector_store.retrieve_documents_from_query(
+            results, _ = await vector_store.retrieve_documents_from_query(
                 collection_names=[collection_name],
                 query=request.query,
                 k=request.k,

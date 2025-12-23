@@ -80,57 +80,6 @@ async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
         logger.error(f"Failed to save uploaded file: {str(e)}")
         raise IOError(f"Failed to save uploaded file: {str(e)}") from e
 
-
-def get_embeddings_model(
-    model_name: str, return_embeddings_size: bool = False
-) -> Union[Embeddings, Tuple[Embeddings, int]]:
-    """
-    Get an embeddings model based on the model name.
-
-    Args:
-        model: Name of the embedding model to use
-        return_embeddings_size: Whether to also return the embedding dimension
-
-    Returns:
-        Union[Embeddings, Tuple[Embeddings, int]]:
-            The embeddings model and optionally its dimension
-
-    Raises:
-        ValueError: If an unsupported model is specified
-    """
-    # Handle NASA model specially to prevent local loading
-    model = model_name
-    if model == DEFAULT_EMBEDDING_MODEL:
-        logger.info(f"Using DeepInfra for Qwen 3.4B embedding model: {model}")
-        api_token = DEEPINFRA_API_TOKEN
-        if not api_token:
-            logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
-            return None
-
-        embeddings = DeepInfraEmbeddings(
-            model_id=model,
-            deepinfra_api_token=api_token,
-        )
-        embeddings_size = 2560
-
-    elif model == EmbeddingModelType.QWEN_3_4B_INFERENCE.value:
-        logger.info(f"Using Inference for Qwen 3.4B embedding model: {model}")
-        api_token = INFERENCE_API_KEY
-        if not api_token:
-            logger.warning("INFERENCE_API_KEY environment variable not set")
-            return None
-        embeddings = OpenAIEmbeddings(
-            base_url="https://api.inference.net/v1",
-            model=model,
-            api_key=api_token,
-        )
-        embeddings_size = 2560
-
-    if return_embeddings_size:
-        return embeddings, embeddings_size
-    return embeddings
-
-
 def _field(obj: Any, key: str, default: Any = None) -> Any:
     """Return value for key from dict-like or attribute-like object."""
     if isinstance(obj, dict):

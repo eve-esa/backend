@@ -149,7 +149,7 @@ async def vector_db_retrieve_context(
     manager = VectorStoreManager()
 
     try:
-        results, _lat = await manager.retrieve_documents_with_latencies(
+        results, _lat, _vec_err = await manager.retrieve_documents_with_latencies(
             collection_names=collection_ids,
             query=query,
             k=k,
