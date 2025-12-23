@@ -135,14 +135,22 @@ QDRANT_URL=
 QDRANT_API_KEY=
 
 # LLM Model URLs (OpenAI-compatible format)
-MAIN_MODEL_URL=
-FALLBACK_MODEL_URL=
+MAIN_MODEL_URL=https://api.runpod.ai/v2/2f9o93xc90871m/openai/v1
+FALLBACK_MODEL_URL=https://api.mistral.ai/v1
 # Optional: Override model names (defaults from config.yaml)
 MAIN_MODEL_NAME=
 FALLBACK_MODEL_NAME=
 
 MAIN_MODEL_API_KEY=
 FALLBACK_MODEL_API_KEY=
+
+MODEL_TIMEOUT=13
+
+EMBEDDING_URL=https://api.deepinfra.com/v1/openai
+EMBEDDING_API_KEY=
+
+EMBEDDING_FALLBACK_URL=https://api.siliconflow.com/v1
+EMBEDDING_FALLBACK_API_KEY=
 
 # MongoDB Configuration
 MONGO_HOST=localhost
@@ -177,6 +185,8 @@ SCRAPING_DOG_API_KEY=
 
 SATCOM_SMALL_MODEL_NAME=esa-sceva/satcom-chat-8b
 SATCOM_LARGE_MODEL_NAME=esa-sceva/satcom-chat-70b
+SATCOM_LARGE_BASE_URL=https://api.runpod.ai/v2/zyy9iu4i7vmcxc/openai/v1
+SATCOM_SMALL_BASE_URL=https://api.runpod.ai/v2/ucttr8up9sxh0k/openai/v1
 SATCOM_RUNPOD_API_KEY=
 
 SATCOM_QDRANT_URL=
@@ -199,6 +209,11 @@ IS_PROD=false
 | `FALLBACK_MODEL_NAME` | No | Model name for the fallback model (defaults to value in config.yaml). |
 | `MAIN_MODEL_API_KEY` | No | API key for the main model (falls back to `RUNPOD_API_KEY` if not set). |
 | `FALLBACK_MODEL_API_KEY` | No | API key for the fallback model (falls back to `MISTRAL_API_KEY` if not set). |
+| `MODEL_TIMEOUT` | Yes | Timeout for OpenAI setting |
+| `EMBEDDING_URL` | Yes | Main Embedding Model(Qwen/Qwen3-Embedding-4B) provider url, OpenAI capatible (e.g., `https://api.deepinfra.com/v1/openai`) |
+| `EMBEDDING_API_KEY` | Yes | Main Embedding Model provider API token |
+| `EMBEDDING_FALLBACK_URL` | Yes | Fallback Embedding Model provider url, OpenAI capatible (e.g., https://api.siliconflow.com/v1) |
+| `EMBEDDING_FALLBACK_API_KEY` | Yes | Fallback Embedding Model provider API token |
 | `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for reranking retrieved documents. |
 | `INFERENCE_API_KEY` | Yes | Inference API key for embedding queries, used as a fallback. |
 | `SILICONFLOW_API_TOKEN` | Yes | SiliconFlow API token for reranking, used as a fallback. |
