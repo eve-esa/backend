@@ -646,7 +646,7 @@ class VectorStoreManager:
                 api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
             )
             response = openai.embeddings.create(
-                input=query, model='qwen/qwen3-embedding-4b'
+                input=query, model=embeddings_model
             )
             return response.data[0].embedding, str(e)
 
