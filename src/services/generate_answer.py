@@ -836,6 +836,8 @@ async def setup_rag_and_context(
         mcp_lat: Dict[str, Optional[float]] = {}
         satcom_results: List[Any] = []
         satcom_lat: Dict[str, Optional[float]] = {}
+        main_vec_err: Optional[str] = None
+        satcom_vec_err: Optional[str] = None
 
         # temporary for satcom collection
         if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
