@@ -14,17 +14,13 @@ from src.core.llm_manager import LLMManager, LLMType
 from src.constants import (
     DEFAULT_QUERY,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_LLM,
     DEFAULT_K,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_TEMPERATURE,
     MCP_MAX_TOP_N,
-    MODEL_CONTEXT_SIZE,
     POLICY_NOT_ANSWER,
     POLICY_PROMPT,
-    RERANKER_MODEL,
-    TOKEN_OVERFLOW_LIMIT,
 )
 from src.utils.helpers import (
     build_conversation_context,
@@ -32,7 +28,6 @@ from src.utils.helpers import (
     get_mongodb_uri,
     build_context,
 )
-from src.utils.runpod_utils import get_reranked_documents_from_runpod
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.config import (
     DEEPINFRA_API_TOKEN,
@@ -41,10 +36,9 @@ from src.config import (
     SILICONFLOW_API_TOKEN,
     SATCOM_QDRANT_URL,
     SATCOM_QDRANT_API_KEY,
+    MODEL_TIMEOUT,
     config,
 )
-from src.hallucination_pipeline.loop import run_hallucination_loop
-from src.hallucination_pipeline.schemas import generation_schema
 from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.template_loader import get_template
 from src.utils.siliconflow_reranker import SiliconFlowReranker
@@ -102,7 +96,8 @@ class GenerationRequest(BaseModel):
     llm_type: Optional[str] = Field(
         default=None,
         description=(
-            "LLM type to use. Options: 'runpod', 'mistral', 'satcom_small', 'satcom_large'. "
+            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large'. "
+            "Legacy options 'runpod' and 'mistral' are also supported. "
             "Defaults to None, which means environment-based behavior."
         ),
     )
@@ -179,7 +174,7 @@ async def persist_message_state(
     prompts: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Any]] = None,
     stopped: Optional[bool] = None,
-    error: Optional[str] = None,
+    error: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -209,7 +204,7 @@ async def persist_message_state(
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
         if error is not None:
-            existing_metadata["error"] = error
+            existing_metadata["error"] = {**(existing_metadata.get("error", {}) or {}), **(error or {})}
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -220,10 +215,10 @@ async def persist_message_state(
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
 _langgraph_available = False
-try:  # type: ignore
-    from langgraph.graph import StateGraph, MessagesState, START  # noqa: F401
-    from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver  # noqa: F401
-    from langgraph.graph.message import add_messages  # noqa: F401
+try:
+    from langgraph.graph import StateGraph, MessagesState, START
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+    from langgraph.graph.message import add_messages
     from langchain_core.messages import (
         trim_messages,
         HumanMessage,
@@ -240,9 +235,9 @@ except Exception:
 try:
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 except Exception:
-    HumanMessage = None  # type: ignore
-    SystemMessage = None  # type: ignore
-    AIMessage = None  # type: ignore
+    HumanMessage = None
+    SystemMessage = None
+    AIMessage = None
 
 
 # Unified message factory to avoid branching at call sites
@@ -288,7 +283,7 @@ def _resolve_system_prompt(llm_type: Optional[str]) -> Optional[str]:
 _compiled_graph = None  # Mongo-backed compiled graph
 _compiled_graph_mode = None  # "mongo" or "memory"
 _mongo_checkpointer_cm = None  # context manager kept open for process lifetime
-_mongo_checkpointer = None  # active AsyncMongoDBSaver obtained from __aenter__
+_mongo_checkpointer = None  # active MongoDBSaver instance
 _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
 _graph_init_lock = asyncio.Lock()
 
@@ -390,12 +385,14 @@ Please continue the conversation using this summary as context for understanding
 
         # Try Mongo-backed checkpointer first, keep it open
         try:
+            from pymongo import MongoClient
+            
             uri = get_mongodb_uri()
-            cm = AsyncMongoDBSaver.from_conn_string(uri)
-            checkpointer = await cm.__aenter__()
+            client = MongoClient(uri)
+            checkpointer = MongoDBSaver(client)
             graph = builder.compile(checkpointer=checkpointer)
 
-            _mongo_checkpointer_cm = cm
+            _mongo_checkpointer_cm = None
             _mongo_checkpointer = checkpointer
             _compiled_graph = graph
             _compiled_graph_mode = "mongo"
@@ -514,53 +511,6 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
         seen.add(key)
         deduped.append(it)
     return deduped
-
-
-# _build_context moved to src.utils.helpers
-
-
-async def _maybe_rerank_runpod(
-    candidate_texts: List[str], query: str
-) -> List[dict] | None:
-    """Call RunPod reranker if configured.
-
-    Returns results with 'relevance_score' and 'index' fields.
-    Use _sort_runpod_reranked_results() to process these results.
-    """
-    endpoint_id = config.get_reranker_id()
-    if not (endpoint_id) or candidate_texts is None or len(candidate_texts) == 0:
-        return None
-
-    try:
-        results = await get_reranked_documents_from_runpod(
-            endpoint_id=endpoint_id,
-            docs=candidate_texts,
-            query=query,
-            model=RERANKER_MODEL or "BAAI/bge-reranker-large",
-            timeout=config.get_reranker_timeout(),
-        )
-        # sort results by relevance_score
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        return results
-    except Exception as e:
-        logger.warning(f"Reranker failed, using vector similarity order: {e}")
-        return None
-
-
-def _sort_runpod_reranked_results(
-    reranked: List[dict], candidate_indices: List[int]
-) -> List[int]:
-    """Sort results from RunPod reranker.
-
-    RunPod returns results with 'relevance_score' and 'index' fields.
-    Results are already sorted by relevance_score in descending order.
-    """
-    ordered_indices = [
-        candidate_indices[item.get("index", i)]
-        for i, item in enumerate(reranked)
-        if isinstance(item, dict)
-    ]
-    return ordered_indices
 
 
 def _maybe_rerank_deepinfra(
@@ -829,12 +779,12 @@ async def should_use_rag(
         return None, prompt, False
     except Exception as e:
         logger.error(f"Failed to decide should_use_rag: {e}")
-        mistral_llm = llm_manager.get_mistral_model()
-        structured_mistral_llm = mistral_llm.bind(temperature=0).with_structured_output(
+        fallback_llm = llm_manager.get_fallback_llm()
+        structured_fallback_llm = fallback_llm.bind(temperature=0).with_structured_output(
             ShouldUseRagDecision
         )
-        result = await structured_mistral_llm.ainvoke(prompt)
-        logger.info(f"should_use_rag result from mistral: {result}")
+        result = await structured_fallback_llm.ainvoke(prompt)
+        logger.info(f"should_use_rag result from fallback model: {result}")
         if isinstance(result, ShouldUseRagDecision):
             return result, prompt, True
         return None, prompt, True
@@ -844,12 +794,12 @@ async def get_rag_context(
     vector_store: VectorStoreManager,
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
-) -> tuple[list, Dict[str, Optional[float]]]:
+) -> tuple[list, Dict[str, Optional[float]], Optional[str]]:
     """Get RAG context from vector store."""
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
     # Retrieve with latency measurements
-    results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
+    results, vs_latencies, vec_err = await vector_store.retrieve_documents_with_latencies(
         collection_names=request.collection_ids,
         query=request.query,
         k=request.k * 2,
@@ -865,7 +815,7 @@ async def get_rag_context(
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
 
-    return results, vs_latencies
+    return results, vs_latencies, vec_err
 
 
 async def setup_rag_and_context(
@@ -880,6 +830,7 @@ async def setup_rag_and_context(
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+        vec_errors: Dict[str, Optional[str]] = {}
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
@@ -895,7 +846,7 @@ async def setup_rag_and_context(
             )
             collection_ids = request.collection_ids
             request.collection_ids = ["satcom-chunks-collection"]
-            satcom_results, satcom_lat = await get_rag_context(
+            satcom_results, satcom_lat, satcom_vec_err = await get_rag_context(
                 satcom_vector_store, request, cancel_event=cancel_event
             )
             request.collection_ids = [
@@ -915,10 +866,10 @@ async def setup_rag_and_context(
                 mcp_future = tg.create_task(
                     get_mcp_context(request, cancel_event=cancel_event)
                 )
-                (results, rag_lat) = await rag_future
+                (results, rag_lat, main_vec_err) = await rag_future
                 (mcp_results, mcp_lat) = await mcp_future
         else:
-            results, rag_lat = await get_rag_context(
+            results, rag_lat, main_vec_err = await get_rag_context(
                 vector_store, request, cancel_event=cancel_event
             )
             mcp_results, mcp_lat = [], {}
@@ -967,11 +918,15 @@ async def setup_rag_and_context(
 
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})
+        vec_errors.update({
+            "main_vec_err": main_vec_err,
+            "satcom_vec_err": satcom_vec_err,
+        })
     except* asyncio.CancelledError:
         # Propagate cooperative cancellation cleanly out of TaskGroup
         raise
 
-    return context, results, latencies, formated_results
+    return context, results, latencies, formated_results, vec_errors
 
 
 async def check_policy(
@@ -993,12 +948,12 @@ async def check_policy(
         return policy_result, policy_prompt
     except Exception as e:
         logger.warning(f"Failed to check policy with main model: {e}")
-        base_llm = llm_manager.get_mistral_model()
+        base_llm = llm_manager.get_fallback_llm()
         structured_llm = base_llm.bind(temperature=0).with_structured_output(
             PolicyCheck
         )
         policy_result = await structured_llm.ainvoke(policy_prompt)
-        logger.info(f"policy_result from mistral: {policy_result}")
+        logger.info(f"policy_result from fallback model: {policy_result}")
         return policy_result, policy_prompt
 
 
@@ -1037,7 +992,7 @@ async def generate_answer(
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies = "", [], {}
+        context, results, latencies, vec_errors = "", [], {}, {}
         retrieved_docs: List[Dict[str, Any]] = []
         if (
             len(request.collection_ids) > 0
@@ -1045,7 +1000,7 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs = (
+                context, results, latencies, retrieved_docs, _vec_errors = (
                     await setup_rag_and_context(request)
                 )
             except Exception as e:
@@ -1098,7 +1053,7 @@ async def generate_answer(
         # Use LangGraph with MongoDB checkpointer for short-term memory if available
         final_answer: Optional[str] = None
         base_gen_latency: Optional[float] = None
-        mistral_gen_latency: Optional[float] = None
+        fallback_gen_latency: Optional[float] = None
         use_langgraph = False
         if _langgraph_available and conversation_id and not is_main_LLM_fail:
             try:
@@ -1130,17 +1085,17 @@ async def generate_answer(
                 )
                 use_langgraph = False
         if not use_langgraph:
-            logger.info("starting to fallback using mistral model")
+            logger.info("starting to fallback using fallback model")
             gen_start = time.perf_counter()
 
-            final_answer, generation_prompt = await llm_manager.generate_answer_mistral(
+            final_answer, generation_prompt = await llm_manager.generate_answer_fallback(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
                 conversation_context=conversation_context,
             )
-            mistral_gen_latency = time.perf_counter() - gen_start
+            fallback_gen_latency = time.perf_counter() - gen_start
             user_content = generation_prompt
 
         total_latency = time.perf_counter() - total_start
@@ -1149,7 +1104,7 @@ async def generate_answer(
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
-            "fallback_latency": mistral_gen_latency,
+            "fallback_latency": fallback_gen_latency,
             "total_latency": total_latency,
         }
         prompts = {
@@ -1332,7 +1287,7 @@ async def generate_answer_stream_generator_helper(
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, retrieved_docs = "", [], {}, []
+        context, results, latencies, retrieved_docs, vec_errors = "", [], {}, [], {}
         if (
             len(request.collection_ids) > 0
             and request.k > 0
@@ -1340,7 +1295,7 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies, retrieved_docs = await cancel_aware(
+                context, results, latencies, retrieved_docs, vec_errors = await cancel_aware(
                     setup_rag_and_context(request, cancel_event=cancel_event)
                 )
                 if len(results) == 0:
@@ -1373,6 +1328,11 @@ async def generate_answer_stream_generator_helper(
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
                 retrieved_docs = []
+                await persist_message_state(
+                    message_id,
+                    stopped=True,
+                    error={'rag_errors': str(e)},
+                )
 
         if cancelled():
             await persist_message_state(
@@ -1419,8 +1379,7 @@ async def generate_answer_stream_generator_helper(
         # Stream generation
         accumulated = []
 
-        # Choose streaming source (LangGraph memory if available → fallback mistral stream)
-        mistral_gen_latency: Optional[float] = None
+        fallback_gen_latency: Optional[float] = None
         base_gen_latency: Optional[float] = None
         first_token_latency: Optional[float] = None
 
@@ -1450,7 +1409,7 @@ async def generate_answer_stream_generator_helper(
                     }
 
                     logger.info("Using LangGraph astream for streaming")
-                    llm_instruct_timeout = llm_manager.config.get_instruct_llm_timeout()
+                    llm_instruct_timeout = MODEL_TIMEOUT
                     try:
                         # Create the async generator once so we can pull the first token with a timeout
                         astream = graph.astream(
@@ -1517,7 +1476,7 @@ async def generate_answer_stream_generator_helper(
                         used_stream = True
                     except TimeoutError:
                         logger.warning(
-                            f"LangGraph streaming timed out, falling back to Mistral streaming"
+                            f"LangGraph streaming timed out, falling back to fallback model streaming"
                         )
                         used_stream = False
                     finally:
@@ -1526,20 +1485,20 @@ async def generate_answer_stream_generator_helper(
                             await graph.aclose()
                 else:
                     logger.warning(
-                        "LangGraph graph is None, falling back to Mistral streaming"
+                        "LangGraph graph is None, falling back to fallback model streaming"
                     )
             except Exception as e:
                 logger.warning(
-                    f"Optimized LangGraph streaming failed, falling back: {e}"
+                    f"Optimized LangGraph streaming failed, falling back to fallback model streaming: {e}"
                 )
 
-        # Fallback to Mistral streaming if LangGraph didn't work or yielded no tokens
-        mistral_token_yielded = 0
-        mistral_first_token_latency: Optional[float] = None
+        # Fallback to fallback model streaming if LangGraph didn't work or yielded no tokens
+        fallback_token_yielded = 0
+        fallback_first_token_latency: Optional[float] = None
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
-            logger.info(f"Using Mistral streaming fallback")
-            gen = llm_manager.generate_answer_mistral_stream(
+            logger.info(f"Using fallback model streaming")
+            gen = llm_manager.generate_answer_fallback_stream(
                 query=request.query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
@@ -1547,10 +1506,10 @@ async def generate_answer_stream_generator_helper(
                 conversation_context=conversation_context,
             )
             try:
-                async for token, mistral_generation_prompt in gen:
+                async for token, fallback_generation_prompt in gen:
                     if cancelled():
                         with contextlib.suppress(Exception):
-                            logger.info("Mistral streaming cancelled")
+                            logger.info("fallback streaming cancelled")
                             await gen.aclose()
                             await persist_message_state(
                                 message_id,
@@ -1560,8 +1519,8 @@ async def generate_answer_stream_generator_helper(
                                 use_rag=rag_decision_result.use_rag,
                                 latencies={
                                     "rag_decision_latency": rag_decision_latency,
-                                    "mistral_first_token_latency": mistral_first_token_latency,
-                                    "fallback_latency": time.perf_counter() - gen_start,
+                                    "fallback_first_token_latency": fallback_first_token_latency,
+                                    "fallback_latency": fallback_gen_latency,
                                     "total_latency": time.perf_counter() - total_start,
                                 },
                                 prompts={
@@ -1578,16 +1537,16 @@ async def generate_answer_stream_generator_helper(
                     else:
                         yield f"data: {token}\n\n"
                     accumulated.append(str(token))
-                    mistral_token_yielded += 1
-                    if mistral_token_yielded == 1:
-                        mistral_first_token_latency = time.perf_counter() - total_start
+                    fallback_token_yielded += 1
+                    if fallback_token_yielded == 1:
+                        fallback_first_token_latency = time.perf_counter() - total_start
             finally:
                 with contextlib.suppress(Exception):
                     await gen.aclose()
 
-            mistral_gen_latency = time.perf_counter() - gen_start
+            fallback_gen_latency = time.perf_counter() - gen_start
             used_stream = True
-            user_content = mistral_generation_prompt
+            user_content = fallback_generation_prompt
 
         answer = "".join(accumulated)
 
@@ -1596,9 +1555,9 @@ async def generate_answer_stream_generator_helper(
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "first_token_latency": first_token_latency,
-            "mistral_first_token_latency": mistral_first_token_latency,
+            "fallback_first_token_latency": fallback_first_token_latency,
             "base_generation_latency": base_gen_latency,
-            "fallback_latency": mistral_gen_latency,
+            "fallback_latency": fallback_gen_latency,
             "total_latency": total_latency,
         }
         prompts = {
@@ -1614,6 +1573,7 @@ async def generate_answer_stream_generator_helper(
             latencies=latencies,
             prompts=prompts,
             retrieved_docs=retrieved_docs,
+            error={'main_embedding_error': vec_errors},
         )
 
         if background_tasks:
@@ -1656,7 +1616,7 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
-            error=str(e),
+            error={'streaming_error': str(e)},
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"

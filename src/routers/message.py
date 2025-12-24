@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from pydantic import BaseModel, Field
-from src.config import IS_PROD
+from src.config import IS_PROD, MODEL_TIMEOUT
 from src.constants import (
     PUBLIC_COLLECTIONS,
     STAGING_PUBLIC_COLLECTIONS,
@@ -1128,9 +1128,7 @@ async def stream_hallucination(
             try:
                 astream = llm.astream(prompt)
                 # Enforce first token timeout similar to generate_answer
-                llm_instruct_timeout = (
-                    detector.llm_manager.config.get_instruct_llm_timeout()
-                )
+                llm_instruct_timeout = MODEL_TIMEOUT
                 async with asyncio.timeout(llm_instruct_timeout):
                     first = await astream.__anext__()
                     first_text = getattr(first, "content", None)

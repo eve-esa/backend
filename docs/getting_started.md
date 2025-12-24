@@ -27,9 +27,11 @@ python3.12 --version
 ```
 
 **Windows:**
+
 1. Download Python 3.12+ from the [official Python website](https://www.python.org/downloads/)
 2. Run the installer and check "Add Python to PATH"
 3. Verify installation:
+
 ```cmd
 python --version
 ```
@@ -56,6 +58,7 @@ sudo systemctl enable mongod
 ```
 
 **Windows:**
+
 1. Download MongoDB Community Server from the [official MongoDB website](https://www.mongodb.com/try/download/community)
 2. Run the installer and follow the setup wizard
 3. MongoDB will be installed as a Windows service and start automatically
@@ -98,11 +101,13 @@ docker compose version
 ```
 
 **Windows:**
+
 1. Download Docker Desktop from the [official Docker website](https://www.docker.com/products/docker-desktop/)
 2. Run the installer and follow the setup wizard
 3. Restart your computer if prompted
 4. Docker Desktop includes both Docker and Docker Compose
 5. Verify installation:
+
 ```cmd
 docker --version
 docker compose version
@@ -129,9 +134,23 @@ Create a `.env` file in the root of the project with the following content:
 QDRANT_URL=
 QDRANT_API_KEY=
 
-# API Keys
-MISTRAL_API_KEY=
-RUNPOD_API_KEY=
+# LLM Model URLs (OpenAI-compatible format)
+MAIN_MODEL_URL=https://api.runpod.ai/v2/2f9o93xc90871m/openai/v1
+FALLBACK_MODEL_URL=https://api.mistral.ai/v1
+# Optional: Override model names (defaults from config.yaml)
+MAIN_MODEL_NAME=
+FALLBACK_MODEL_NAME=
+
+MAIN_MODEL_API_KEY=
+FALLBACK_MODEL_API_KEY=
+
+MODEL_TIMEOUT=13
+
+EMBEDDING_URL=https://api.deepinfra.com/v1/openai
+EMBEDDING_API_KEY=
+
+EMBEDDING_FALLBACK_URL=https://api.siliconflow.com/v1
+EMBEDDING_FALLBACK_API_KEY=
 
 # MongoDB Configuration
 MONGO_HOST=localhost
@@ -166,6 +185,8 @@ SCRAPING_DOG_API_KEY=
 
 SATCOM_SMALL_MODEL_NAME=esa-sceva/satcom-chat-8b
 SATCOM_LARGE_MODEL_NAME=esa-sceva/satcom-chat-70b
+SATCOM_LARGE_BASE_URL=https://api.runpod.ai/v2/zyy9iu4i7vmcxc/openai/v1
+SATCOM_SMALL_BASE_URL=https://api.runpod.ai/v2/ucttr8up9sxh0k/openai/v1
 SATCOM_RUNPOD_API_KEY=
 
 SATCOM_QDRANT_URL=
@@ -182,8 +203,17 @@ IS_PROD=false
 | `QDRANT_API_KEY` | Yes | API key for the primary Qdrant instance. |
 | `SATCOM_QDRANT_URL` | No | Base URL for the Satcom-specific Qdrant instance that is used when SatcomLLM is selected on staging. |
 | `SATCOM_QDRANT_API_KEY` | No | API key for the Satcom-specific Qdrant instance that is used when SatcomLLM is selected on staging. |
-| `MISTRAL_API_KEY` | Yes | API key for Mistral models that is used as a fallback for the main Runpod model. |
-| `RUNPOD_API_KEY` | Yes | API key for the main Runpod LLM. |
+| `MAIN_MODEL_URL` | Yes | OpenAI-compatible URL for the main LLM model (e.g., `https://api.runpod.ai/v2/{endpoint_id}/openai/v1` or `http://localhost:8000/v1`). |
+| `FALLBACK_MODEL_URL` | Yes | OpenAI-compatible URL for the fallback LLM model (e.g., `https://api.mistral.ai/v1` or any OpenAI-compatible endpoint). |
+| `MAIN_MODEL_NAME` | No | Model name for the main model (defaults to value in config.yaml). |
+| `FALLBACK_MODEL_NAME` | No | Model name for the fallback model (defaults to value in config.yaml). |
+| `MAIN_MODEL_API_KEY` | No | API key for the main model (falls back to `RUNPOD_API_KEY` if not set). |
+| `FALLBACK_MODEL_API_KEY` | No | API key for the fallback model (falls back to `MISTRAL_API_KEY` if not set). |
+| `MODEL_TIMEOUT` | Yes | Timeout for OpenAI setting |
+| `EMBEDDING_URL` | Yes | Main Embedding Model(Qwen/Qwen3-Embedding-4B) provider url, OpenAI capatible (e.g., `https://api.deepinfra.com/v1/openai`) |
+| `EMBEDDING_API_KEY` | Yes | Main Embedding Model provider API token |
+| `EMBEDDING_FALLBACK_URL` | Yes | Fallback Embedding Model provider url, OpenAI capatible (e.g., https://api.siliconflow.com/v1) |
+| `EMBEDDING_FALLBACK_API_KEY` | Yes | Fallback Embedding Model provider API token |
 | `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for reranking retrieved documents. |
 | `INFERENCE_API_KEY` | Yes | Inference API key for embedding queries, used as a fallback. |
 | `SILICONFLOW_API_TOKEN` | Yes | SiliconFlow API token for reranking, used as a fallback. |
@@ -217,6 +247,7 @@ IS_PROD=false
 #### Qdrant URL and API Key
 
 **Qdrant Cloud (Recommended):**
+
 1. Sign up for a free account at [Qdrant Cloud](https://cloud.qdrant.io/)
 2. Create a new cluster
 3. Copy the cluster URL (e.g., `https://xxxxx-xxxxx-xxxxx.qdrant.io`)
@@ -224,6 +255,7 @@ IS_PROD=false
 5. Use the cluster URL as `QDRANT_URL` and the API key as `QDRANT_API_KEY`
 
 **Self-hosted Qdrant:**
+
 - If running Qdrant locally, use `http://localhost:6333` as `QDRANT_URL`
 - For self-hosted instances, API key may not be required (leave empty or check your Qdrant configuration)
 
@@ -250,6 +282,7 @@ openssl rand -base64 32
 ```
 
 **Online Generator:**
+
 - Use a secure random string generator like [randomkeygen.com](https://randomkeygen.com/)
 - Copy a 256-bit key and use it as `JWT_SECRET_KEY`
 
@@ -274,6 +307,32 @@ openssl rand -base64 32
 5. Copy the key and use it as `MISTRAL_API_KEY`
 
 **Reference:** [Mistral AI API Documentation](https://docs.mistral.ai/)
+
+#### Main and Fallback Model URLs
+
+The system uses two LLM models: **MAIN** (primary) and **FALLBACK** (backup). Both must be configured with OpenAI-compatible API endpoints.
+
+**For RunPod endpoints:**
+```
+MAIN_MODEL_URL=https://api.runpod.ai/v2/{endpoint_id}/openai/v1
+```
+Replace `{endpoint_id}` with your RunPod endpoint ID (e.g., `2f9o93xc90871m`).
+
+**For localhost/self-hosted models:**
+```
+MAIN_MODEL_URL=http://localhost:8000/v1
+```
+Use the base URL of your OpenAI-compatible API endpoint.
+
+**For Mistral (fallback):**
+```
+FALLBACK_MODEL_URL=https://api.mistral.ai/v1
+```
+
+**For other OpenAI-compatible services:**
+Simply use the base URL of the service's OpenAI-compatible endpoint.
+
+**Note:** Both URLs must be in OpenAI-compatible format. The model names can be optionally overridden using `MAIN_MODEL_NAME` and `FALLBACK_MODEL_NAME` environment variables, otherwise they default to values in `config.yaml`.
 
 #### DeepInfra API Token
 
@@ -310,6 +369,7 @@ The `INFERENCE_API_KEY` is used for embedding queries with the Qwen 3.4B embeddi
 #### Redis URL
 
 **Redis Cloud (Recommended):**
+
 1. Sign up for a free account at [Redis Cloud](https://redis.com/try-free/)
 2. Create a new database
 3. Copy the connection URL (format: `redis://:password@host:port`)

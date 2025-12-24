@@ -7,19 +7,15 @@ document storage, and similarity search operations.
 """
 
 import logging
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 from types import SimpleNamespace
 from uuid import uuid4
 import asyncio
 
 from openai import OpenAI
-from urllib3 import response
 
 from src.database.models.collection import Collection
 from langchain_core.documents import Document
-from langchain_qdrant import QdrantVectorStore
-from langchain_qdrant.qdrant import QdrantVectorStoreError
 
 from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
@@ -31,31 +27,27 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
-from src.core.llm_manager import LLMManager
-
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
     EVE_PUBLIC_COLLECTION_NAME,
     PUBLIC_COLLECTIONS,
 )
-from src.utils.helpers import EmbeddingModelType, get_embeddings_model
 from src.config import (
-    INFERENCE_API_KEY,
     Config,
     QDRANT_URL,
     QDRANT_API_KEY,
+    EMBEDDING_API_KEY,
+    EMBEDDING_URL,
+    EMBEDDING_FALLBACK_API_KEY,
+    EMBEDDING_FALLBACK_URL,
 )
+from src.utils.helpers import EmbeddingModelType
 
 # Setup logging
 logger = logging.getLogger(__name__)
 
 # Initialize configuration
 config = Config()
-
-
-# Import the RunPod function from utils to avoid circular imports
-from src.utils.runpod_utils import get_embedding_from_runpod
-
 
 class VectorStoreManager:
     """
@@ -89,9 +81,7 @@ class VectorStoreManager:
             timeout=120.0,  # 2 minutes timeout for operations
         )
         self.embeddings_model = embeddings_model
-        self.embeddings, self.embeddings_size = get_embeddings_model(
-            model_name=embeddings_model, return_embeddings_size=True
-        )
+        self.embedding_size = 2560
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def create_collection(self, collection_name: str) -> bool:
@@ -258,7 +248,7 @@ class VectorStoreManager:
             logger.error(f"Failed to delete collection '{collection_name}': {e}")
             raise RuntimeError(f"Failed to delete collection: {str(e)}") from e
 
-    def add_document_list(
+    async def add_document_list(
         self, collection_name: str, document_list: List[Document]
     ) -> List[str]:
         """
@@ -282,27 +272,13 @@ class VectorStoreManager:
         uuids = [str(uuid4()) for _ in range(len(document_list))]
 
         try:
-            vector_store = QdrantVectorStore(
-                client=self.client,
-                collection_name=collection_name,
-                embedding=self.embeddings,
-            )
-
             # Use batch writing to prevent timeout issues
             # Batch size 32 matches RunPod Infinity Embedding BATCH_SIZES=32 configuration
-            self._add_documents_in_batches(
-                vector_store, document_list, uuids, batch_size=32
+            await self._add_documents_in_batches(
+                collection_name, document_list, uuids, batch_size=32
             )
             logger.info(f"Added {len(document_list)} documents to '{collection_name}'")
             return uuids
-
-        except QdrantVectorStoreError as e:
-            error_message = (
-                f"Embedding model mismatch or collection configuration issue: {str(e)}. "
-                f"Ensure the embedding model matches the one used for '{collection_name}'."
-            )
-            logger.error(error_message)
-            raise ValueError(error_message) from e
 
         except Exception as e:
             logger.error(f"Error adding documents to '{collection_name}': {e}")
@@ -310,9 +286,9 @@ class VectorStoreManager:
                 f"Failed to add documents to '{collection_name}': {str(e)}"
             ) from e
 
-    def _add_documents_in_batches(
+    async def _add_documents_in_batches(
         self,
-        vector_store: QdrantVectorStore,
+        collection_name: str,
         documents: List[Document],
         uuids: List[str],
         batch_size: int = 32,
@@ -345,8 +321,8 @@ class VectorStoreManager:
 
             try:
                 # Use direct Qdrant client operations instead of LangChain wrapper
-                self._add_documents_directly(
-                    batch_documents, batch_uuids, vector_store.collection_name
+                await self._add_documents_directly(
+                    batch_documents, batch_uuids, collection_name
                 )
                 logger.info(f"Successfully added batch {batch_num}/{total_batches}")
 
@@ -360,7 +336,7 @@ class VectorStoreManager:
                 )
                 raise RuntimeError(f"Failed to add batch {batch_num}: {str(e)}") from e
 
-    def _add_documents_directly(
+    async def _add_documents_directly(
         self, documents: List[Document], uuids: List[str], collection_name: str
     ) -> None:
         """
@@ -378,7 +354,7 @@ class VectorStoreManager:
         metadatas = [doc.metadata for doc in documents]
 
         # Generate embeddings for this batch
-        embeddings = self.embeddings.embed_documents(texts)
+        embeddings, _ = await self.generate_query_vector(texts, self.embeddings_model)
 
         # Create points for Qdrant
         points = []
@@ -641,7 +617,7 @@ class VectorStoreManager:
 
     async def generate_query_vector(
         self, query: str, embeddings_model: str
-    ) -> List[float]:
+    ) -> Tuple[List[float], Optional[str]]:
         """
         Generate an embedding vector for a query.
 
@@ -656,34 +632,23 @@ class VectorStoreManager:
             RuntimeError: If embedding generation fails
         """
         try:
-            embeddings = get_embeddings_model(embeddings_model)
-            if hasattr(embeddings, "aembed_query"):
-                logger.info(f"Get embedding from async")
-                result = await asyncio.wait_for(
-                    embeddings.aembed_query(query), timeout=5  # seconds
-                )
-                return result
-            else:
-                return embeddings.embed_query(query)
+            openai = OpenAI(
+                api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL
+            )
+            response = openai.embeddings.create(
+                input=query, model=embeddings_model
+            )
+            return response.data[0].embedding, None
 
         except Exception as e:
             logger.error(f"Failed to generate query vector: {e}")
-            # embeddings = get_embeddings_model("qwen/qwen3-embedding-4b")
-            # if hasattr(embeddings, "aembed_query"):
-            #     logger.info(f"Get embedding from async")
-            #     result = await asyncio.wait_for(
-            #         embeddings.aembed_query(query), timeout=5  # seconds
-            #     )
-            #     return result
-            # else:
-            #     return embeddings.embed_query(query)
-            client = OpenAI(
-                api_key=INFERENCE_API_KEY, base_url="https://api.inference.net/v1"
+            openai = OpenAI(
+                api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
             )
-            response = client.embeddings.create(
-                input=query, model="qwen/qwen3-embedding-4b"
+            response = openai.embeddings.create(
+                input=query, model=embeddings_model
             )
-            return response.data[0].embedding
+            return response.data[0].embedding, str(e)
 
     async def retrieve_documents_from_query(
         self,
@@ -717,7 +682,7 @@ class VectorStoreManager:
 
         try:
             # Generate embedding vector for the query
-            query_vector = await self.generate_query_vector(query, model)
+            query_vector, _ = await self.generate_query_vector(query, model)
             query_filter = Filter(**filters) if filters else None
 
             # Retrieve k per collection (caller may further rerank/filter)
@@ -733,7 +698,7 @@ class VectorStoreManager:
                 f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
                 f"(filtered from {len(all_results)} total matches)"
             )
-            return all_results
+            return all_results, vec_err
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
@@ -750,7 +715,7 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
-    ) -> tuple[List[Any], Dict[str, Optional[float]]]:
+    ) -> tuple[List[Any], Dict[str, Optional[float]], Optional[str]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
 
@@ -767,7 +732,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             t0 = time.perf_counter()
-            query_vector = await self.generate_query_vector(query, model)
+            query_vector, vec_err = await self.generate_query_vector(query, model)
             embedding_latency = time.perf_counter() - t0
 
             query_filter = Filter(**filters) if filters else None
@@ -793,7 +758,7 @@ class VectorStoreManager:
                 "query_embedding_latency": embedding_latency,
                 "qdrant_retrieval_latency": retrieval_latency,
             }
-            return all_results, latencies
+            return all_results, latencies, vec_err
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
