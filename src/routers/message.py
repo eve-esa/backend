@@ -693,7 +693,7 @@ async def create_message_stream(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                existing_metadata["error"] = {'router_error': str(getattr(http_exc, "detail", http_exc))}
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
@@ -703,7 +703,7 @@ async def create_message_stream(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(e)
+                existing_metadata["error"] = {'router_error': str(e)}
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
