@@ -17,30 +17,33 @@ class ScrapingDogCrawler:
         self.base_url = "https://api.scrapingdog.com/google"
 
     def _search_scrapingdog(self, query: str, top_k: int) -> List[Tuple[str, str]]:
-        q = f"({self.domain_query}) {query}"
-        params = {
-            "api_key": self.api_key,
-            "query": q,
-            "country": "us",
-            "advance_search": "true",
-            "domain": "google.com",
-        }
-        response = requests.get(self.base_url, params=params)
-        if response.status_code != 200:
-            print(f"Request failed with {response.status_code}")
-            return []
-        data = response.json()
-        organic_results = data.get("organic_results", [])
-        urls = []
-        for r in organic_results:
-            title = r.get("title", "")
-            link = r.get("link", "")
-            if link.lower().endswith(".pdf") or ".pdf?" in link.lower():  # skip pdfs
-                print(f"Skipping PDF: {link}")
-                continue
-            urls.append((title, link))
-        print(f"ScrapingDog returned {len(urls)} URLs")
-        return urls[:top_k]
+        try:
+            q = f"({self.domain_query}) {query}"
+            params = {
+                "api_key": self.api_key,
+                "query": q,
+                "country": "us",
+                "advance_search": "true",
+                "domain": "google.com",
+            }
+            response = requests.get(self.base_url, params=params)
+            if response.status_code != 200:
+                raise Exception(f"scrapingdog returned error: {response.json()}")
+
+            data = response.json()
+            organic_results = data.get("organic_results", [])
+            urls = []
+            for r in organic_results:
+                title = r.get("title", "")
+                link = r.get("link", "")
+                if link.lower().endswith(".pdf") or ".pdf?" in link.lower():  # skip pdfs
+                    print(f"Skipping PDF: {link}")
+                    continue
+                urls.append((title, link))
+            print(f"ScrapingDog returned {len(urls)} URLs")
+            return urls[:top_k]
+        except Exception:
+            raise
 
     async def _extract_single(
         self, client: httpx.AsyncClient, title_url: Tuple[str, str]
@@ -60,7 +63,7 @@ class ScrapingDogCrawler:
                     "text": text,
                 }
         except Exception as e:
-            print(f"Failed {url}: {e}")
+            raise Exception(f"Failed to extract single URL: {url}: {e}") from e
         return None
 
     async def _extract_text(
@@ -79,13 +82,22 @@ class ScrapingDogCrawler:
 
             tasks = [extract(t) for t in urls]
             for coro in asyncio.as_completed(tasks):
-                result = await coro
-                if result:
-                    results.append(result)
+                try:
+                    result = await coro
+                    if result:
+                        results.append(result)
+                except Exception:
+                    raise
         return results
 
     async def run(self, query: str, top_k: int = 5):
-        urls = self._search_scrapingdog(query, top_k)
+        try:
+            urls = self._search_scrapingdog(query, top_k)
+        except Exception as e:
+            raise
         if not urls:
             return []
-        return await self._extract_text(urls)
+        try:
+            return await self._extract_text(urls)
+        except Exception as e:
+            raise
