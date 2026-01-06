@@ -518,7 +518,7 @@ def _maybe_rerank_deepinfra(
 ) -> dict | None:
     """Call DeepInfra reranker if configured with timeout, else fall back to SiliconFlow."""
     if not candidate_texts or len(candidate_texts) == 0:
-        return None
+        return []
 
     # --- Try DeepInfra first ---
     api_token = DEEPINFRA_API_TOKEN
@@ -545,7 +545,7 @@ def _maybe_rerank_deepinfra(
     api_token = SILICONFLOW_API_TOKEN
     if not api_token:
         logger.warning("SILICONFLOW_API_TOKEN environment variable not set")
-        return None
+        return []
 
     try:
         reranker = SiliconFlowReranker(api_token)
@@ -553,13 +553,13 @@ def _maybe_rerank_deepinfra(
         return results
     except Exception:
         logger.warning("SiliconFlow reranker failed", exc_info=True)
-        return None
+        return []
 
 
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
-) -> tuple[list, Dict[str, Optional[float]]]:
+) -> tuple[list, Dict[str, Optional[float]], Optional[str]]:
     """Call MCP semantic search and return (results, latencies)."""
     mcp_client = MultiServerMCPClientService.get_shared()
 
@@ -695,12 +695,7 @@ async def get_mcp_context(
         is_error = bool(raw.get("is_error"))
         content_items = raw.get("content", []) or []
     if is_error:
-        return (
-            [],
-            {
-                "mcp_retrieval_latency": mcp_retrieval_latency,
-            },
-        )
+        return [], {}, raw.get("error", "MCP retrieval failed")
 
     def _ensure_list(obj: Any) -> List[Any]:
         if obj is None:
@@ -743,7 +738,7 @@ async def get_mcp_context(
 
     logger.info(f"retrieved {len(extracted)} documents from MCP")
 
-    return extracted, latencies
+    return extracted, latencies, None
 
 
 async def should_use_rag(
@@ -834,6 +829,7 @@ async def setup_rag_and_context(
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
+        mcp_err: Optional[str] = None
         satcom_results: List[Any] = []
         satcom_lat: Dict[str, Optional[float]] = {}
         main_vec_err: Optional[str] = None
@@ -869,12 +865,12 @@ async def setup_rag_and_context(
                     get_mcp_context(request, cancel_event=cancel_event)
                 )
                 (results, rag_lat, main_vec_err) = await rag_future
-                (mcp_results, mcp_lat) = await mcp_future
+                (mcp_results, mcp_lat, mcp_err) = await mcp_future
         else:
             results, rag_lat, main_vec_err = await get_rag_context(
                 vector_store, request, cancel_event=cancel_event
             )
-            mcp_results, mcp_lat = [], {}
+            mcp_results, mcp_lat, mcp_err = [], {}, None
 
         merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
@@ -928,7 +924,7 @@ async def setup_rag_and_context(
         # Propagate cooperative cancellation cleanly out of TaskGroup
         raise
 
-    return context, results, latencies, formated_results, vec_errors
+    return context, results, latencies, formated_results, vec_errors, mcp_err
 
 
 async def check_policy(
@@ -994,7 +990,7 @@ async def generate_answer(
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, vec_errors = "", [], {}, {}
+        context, results, latencies, vec_errors, mcp_err = "", [], {}, {}, None
         retrieved_docs: List[Dict[str, Any]] = []
         if (
             len(request.collection_ids) > 0
@@ -1002,7 +998,7 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs, _vec_errors = (
+                context, results, latencies, retrieved_docs, _vec_errors, _mcp_err = (
                     await setup_rag_and_context(request)
                 )
             except Exception as e:
@@ -1289,7 +1285,7 @@ async def generate_answer_stream_generator_helper(
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, retrieved_docs, vec_errors = "", [], {}, [], {}
+        context, results, latencies, retrieved_docs, vec_errors, mcp_err, scraping_dog_err = "", [], {}, [], {}, None, None
         if (
             len(request.collection_ids) > 0
             and request.k > 0
@@ -1297,7 +1293,7 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies, retrieved_docs, vec_errors = await cancel_aware(
+                context, results, latencies, retrieved_docs, vec_errors, mcp_err = await cancel_aware(
                     setup_rag_and_context(request, cancel_event=cancel_event)
                 )
                 if len(results) == 0:
@@ -1316,15 +1312,21 @@ async def generate_answer_stream_generator_helper(
                 )
                 yield f"data: {json.dumps({'type':'stopped'})}\n\n"
                 return
-            except Exception as e:
-                logger.warning(f"Failed to setup RAG and context: {e}")
+            except Exception as er:
+                logger.warning(f"Failed to setup RAG and context: {str(er)}")
                 scraping_dog_start = time.perf_counter()
-                scraping_dog_crawler = ScrapingDogCrawler(
-                    all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
-                )
-                results = await cancel_aware(
-                    scraping_dog_crawler.run(request.query, request.k)
-                )
+                try:
+                    scraping_dog_crawler = ScrapingDogCrawler(
+                        all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
+                    )
+                    results = await cancel_aware(
+                        scraping_dog_crawler.run(request.query, request.k)
+                    )
+                except Exception as es:
+                    logger.warning(f"Failed to run scraping dog crawler: {str(es)}")
+                    results = []
+                    scraping_dog_err = f"Failed to run scraping dog crawler: {str(es)}"
+
                 context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
@@ -1333,7 +1335,7 @@ async def generate_answer_stream_generator_helper(
                 await persist_message_state(
                     message_id,
                     stopped=True,
-                    error={'rag_errors': str(e)},
+                    error={'rag_errors': str(er)},
                 )
 
         if cancelled():
@@ -1575,7 +1577,11 @@ async def generate_answer_stream_generator_helper(
             latencies=latencies,
             prompts=prompts,
             retrieved_docs=retrieved_docs,
-            error={'main_embedding_error': vec_errors},
+            error={
+                'main_embedding_error': vec_errors, 
+                'mcp_error': mcp_err, 
+                'scraping_dog_error': scraping_dog_err,
+            },
         )
 
         if background_tasks:
