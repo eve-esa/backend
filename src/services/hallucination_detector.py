@@ -51,11 +51,11 @@ class HallucinationDetector:
         prompt = rewriting_template.format(question=query, answer=answer, reason=reason)
         try:
             llm = self.llm_manager.get_client_for_model(llm_type)
-            structured_model = llm.with_structured_output(RewriteResult)  # type: ignore[attr-defined]
+            structured_model = llm.with_structured_output(RewriteResult)
             response = await structured_model.ainvoke(prompt)
         except Exception:
-            llm = self.llm_manager.get_mistral_model()
-            structured_model = llm.with_structured_output(RewriteResult)  # type: ignore[attr-defined]
+            llm = self.llm_manager.get_fallback_llm()
+            structured_model = llm.with_structured_output(RewriteResult)
             response = await structured_model.ainvoke(prompt)
         return response.question, response.rewritten_question
 
@@ -78,11 +78,11 @@ class HallucinationDetector:
         )
         try:
             llm = self.llm_manager.get_client_for_model(llm_type)
-            structured_model = llm.with_structured_output(HallucinationResult)  # type: ignore[attr-defined]
+            structured_model = llm.with_structured_output(HallucinationResult)
             response = await structured_model.ainvoke(prompt)
         except Exception:
-            llm = self.llm_manager.get_mistral_model()
-            structured_model = llm.with_structured_output(HallucinationResult)  # type: ignore[attr-defined]
+            llm = self.llm_manager.get_fallback_llm()
+            structured_model = llm.with_structured_output(HallucinationResult)
             response = await structured_model.ainvoke(prompt)
         return response.label, response.reason
 
@@ -92,11 +92,11 @@ class HallucinationDetector:
         )
         try:
             llm = self.llm_manager.get_client_for_model(llm_type)
-            structured_model = llm.with_structured_output(LLMResult)  # type: ignore[attr-defined]
+            structured_model = llm.with_structured_output(LLMResult)
             response = await structured_model.ainvoke(prompt.format(query=query))
         except Exception:
-            llm = self.llm_manager.get_mistral_model()
-            structured_model = llm.with_structured_output(LLMResult)  # type: ignore[attr-defined]
+            llm = self.llm_manager.get_fallback_llm()
+            structured_model = llm.with_structured_output(LLMResult)
             response = await structured_model.ainvoke(prompt.format(query=query))
         return response.response
 

@@ -24,6 +24,8 @@ from src.config import (
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_BASE_URL,
     SATCOM_LARGE_BASE_URL,
+    SHIP_BASE_URL,
+    SHIP_MODEL_NAME,
 )
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
@@ -49,6 +51,7 @@ class LLMType(Enum):
     Fallback = "fallback"
     Satcom_Small = "satcom_small"
     Satcom_Large = "satcom_large"
+    Ship = "ship"
     # Legacy aliases for backward compatibility
     Runpod = "main"
     Mistral = "fallback"
@@ -117,6 +120,15 @@ class LLMManager:
             self._satcom_large_model_name = SATCOM_LARGE_MODEL_NAME
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
+
+            # Initialize Ship client
+            if not SHIP_BASE_URL:
+                raise ValueError("SHIP_BASE_URL environment variable not configured")
+            if not SHIP_MODEL_NAME:
+                raise ValueError("SHIP_MODEL_NAME environment variable not configured")
+            self._ship_base_url = SHIP_BASE_URL
+            self._ship_model_name = SHIP_MODEL_NAME
+            self._ship_chat_openai: ChatOpenAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize LangChain Main client: {e}")
             self._main_base_url = None
@@ -128,6 +140,9 @@ class LLMManager:
             self._satcom_large_model_name = None
             self._satcom_small_chat_openai = None
             self._satcom_large_chat_openai = None
+            self._ship_base_url = None
+            self._ship_model_name = None
+            self._ship_chat_openai = None
 
         # Configure Fallback client lazily
         try:
@@ -216,6 +231,23 @@ class LLMManager:
                 max_retries=0,
             )
         return self._satcom_large_chat_openai
+    
+    def _get_ship_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for Ship."""
+        if self._ship_chat_openai is None:
+            if not self._ship_base_url:
+                raise RuntimeError("Ship base URL is not configured")
+            if not MAIN_MODEL_API_KEY:
+                raise RuntimeError("MAIN_MODEL_API_KEY is not set")
+            self._ship_chat_openai = ChatOpenAI(
+                api_key=MAIN_MODEL_API_KEY,
+                base_url=self._ship_base_url,
+                model=self._ship_model_name,
+                temperature=0.3,
+                timeout=MODEL_TIMEOUT,
+                max_retries=0,
+            )
+        return self._ship_chat_openai
 
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
@@ -243,6 +275,9 @@ class LLMManager:
             elif llm_type == LLMType.Satcom_Large.value:
                 self._selected_llm_type = LLMType.Satcom_Large.value
                 return self._get_satcom_large_llm()
+            elif llm_type == LLMType.Ship.value:
+                self._selected_llm_type = LLMType.Ship.value
+                return self._get_ship_llm()
             else:
                 if llm_type is None and IS_PROD:
                     self._selected_llm_type = LLMType.Fallback.value
