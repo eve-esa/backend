@@ -29,6 +29,7 @@ extra:
   generator: false
 
 plugins:
+  - swagger-ui-tag
   - search
   - mkdocstrings:
       handlers:
