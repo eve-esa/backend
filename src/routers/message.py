@@ -1312,3 +1312,84 @@ async def stream_hallucination(
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
     return response
+
+# This endpoint is for testing purposes only
+@router.post("/generate")
+async def generate(
+    request: GenerationRequest,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    message = None
+    try:
+        # Normalize and validate requested public collections against allowed lists
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
+
+        # lookup query to check if some of the collection ids from other users are in the request.collection_ids
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        request.collection_ids = request.collection_ids + request.public_collections
+
+        # All user collections are used by default
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if len(user_collections) > 0:
+            request.collection_ids = request.collection_ids + [
+                c.id for c in user_collections
+            ]
+        # remove "Wiley AI Gateway" from collection_ids
+        request.collection_ids = [
+            c for c in request.collection_ids if c != "Wiley AI Gateway"
+        ]
+        logger.info(f"Collection IDs: {request.collection_ids}")
+
+        # Extract year range from filters for MCP usage
+        try:
+            request.year = extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        answer, results, is_rag, latencies, prompts, retrieved_docs = (
+            await generate_answer(request)
+        )
+
+        documents_data = []
+        if results:
+            documents_data = [extract_document_data(result) for result in results]
+
+        return {
+            "answer": answer,
+            "documents": documents_data,
+            "use_rag": is_rag,
+            "latencies": latencies,
+            "prompts": prompts,
+            "retrieved_docs": retrieved_docs,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

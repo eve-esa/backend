@@ -110,7 +110,6 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of public collection names to include in the search",
     )
-    hallucination_loop_flag: bool = False  # For testing purposes
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
