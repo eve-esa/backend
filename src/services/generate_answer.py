@@ -1053,7 +1053,7 @@ async def generate_answer(
         base_gen_latency: Optional[float] = None
         fallback_gen_latency: Optional[float] = None
         use_langgraph = False
-        if _langgraph_available and conversation_id and not is_main_LLM_fail:
+        if _langgraph_available and not is_main_LLM_fail:
             try:
                 # Single invoke to append assistant response to memory (async)
                 gen_start = time.perf_counter()
