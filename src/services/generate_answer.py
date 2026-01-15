@@ -1213,6 +1213,7 @@ async def generate_answer_stream_generator_helper(
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
+    origin_query = request.query
 
     try:
         logger.info(
@@ -1376,7 +1377,7 @@ async def generate_answer_stream_generator_helper(
                 )
         user_content = tmpl.format(
             context=context or "",
-            query=request.query or "",
+            query=origin_query or "",
         )
 
         # Stream generation
