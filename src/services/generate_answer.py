@@ -1087,7 +1087,7 @@ async def generate_answer(
             gen_start = time.perf_counter()
 
             final_answer, generation_prompt = await llm_manager.generate_answer_fallback(
-                query=request.query,
+                query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
@@ -1504,7 +1504,7 @@ async def generate_answer_stream_generator_helper(
             gen_start = time.perf_counter()
             logger.info(f"Using fallback model streaming")
             gen = llm_manager.generate_answer_fallback_stream(
-                query=request.query,
+                query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
