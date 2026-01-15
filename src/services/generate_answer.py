@@ -960,6 +960,7 @@ async def generate_answer(
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
     llm_manager = get_shared_llm_manager()
+    origin_query = request.query
 
     try:
         # Check if the query violates EO policies
@@ -1041,7 +1042,7 @@ async def generate_answer(
                 )
         user_content = tmpl.format(
             context=context or "",
-            query=request.query or "",
+            query=origin_query or "",
         )
 
         # Append the templated user message
