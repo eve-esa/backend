@@ -163,6 +163,26 @@ def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
     return content
 
 
+def _filter_null_values(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively filter out null values from a dictionary.
+    Returns a new dictionary with only non-null values.
+    """
+    if not isinstance(data, dict):
+        return data
+    result = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            filtered = _filter_null_values(value)
+            if filtered:
+                result[key] = filtered
+        else:
+            result[key] = value
+    return result
+
+
 async def persist_message_state(
     message_id: str,
     *,
@@ -180,6 +200,7 @@ async def persist_message_state(
     - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
+    - Filters out null values from error dictionaries before saving.
     """
     try:
         from src.database.models.message import Message as MessageModel
@@ -203,7 +224,10 @@ async def persist_message_state(
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
         if error is not None:
-            existing_metadata["error"] = {**(existing_metadata.get("error", {}) or {}), **(error or {})}
+            filtered_error = _filter_null_values(error)
+            if filtered_error:
+                existing_error = existing_metadata.get("error", {}) or {}
+                existing_metadata["error"] = {**existing_error, **filtered_error}
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -659,7 +683,7 @@ async def get_mcp_context(
     mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-
+    print("mcp_raw data----------------------------------", raw)
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
         try:
