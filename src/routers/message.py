@@ -22,12 +22,15 @@ from fastapi.responses import StreamingResponse
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 import logging
-from src.services.generate_answer import generate_answer_json_stream_generator
 from src.utils.helpers import (
     extract_document_data,
     extract_year_range_from_filters,
     build_context,
+    get_co2_usage_kg,
+    pluralize,
 )
+from src.database.models.co2eq_comparison import CO2EQComparison
+from src.schemas.co2 import CO2EquivalenceComparison, CO2EquivalenceResult
 import time
 from typing import Optional, Dict
 from pydantic import BaseModel
@@ -41,6 +44,79 @@ from src.services.cancel_manager import get_cancel_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def get_lower_bound(usage_kg: float) -> Optional[CO2EquivalenceComparison]:
+    """Find the largest co2eq_kg <= usage_kg."""
+    try:
+        col = CO2EQComparison.get_collection()
+        
+        query = {"enabled": True, "co2eq_kg": {"$lte": usage_kg}}
+        doc = await col.find_one(
+            query,
+            sort=[("co2eq_kg", -1)],
+            projection={"_id": 0}
+        )
+        
+        if doc:
+            return CO2EquivalenceComparison(**doc)
+        return None
+    except Exception as e:
+        logger.error(f"Error in get_lower_bound: {str(e)}", exc_info=True)
+        return None
+
+
+async def closest_with_direction(usage_kg: float) -> Optional[CO2EquivalenceComparison]:
+    """
+    Returns either lower bound or upper bound if lower is missing (usage smaller than min >0).
+    """
+    try:
+        lower = await get_lower_bound(usage_kg)
+        if lower and lower.co2eq_kg > 0:
+            return lower
+
+        col = CO2EQComparison.get_collection()
+        upper_doc = await col.find_one(
+            {"enabled": True, "co2eq_kg": {"$gt": usage_kg}},
+            sort=[("co2eq_kg", 1)],
+            projection={"_id": 0}
+        )
+        if upper_doc:
+            return CO2EquivalenceComparison(**upper_doc)
+        return None
+    except Exception as e:
+        logger.error(f"Error in closest_with_direction: {str(e)}", exc_info=True)
+        return None
+
+
+async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
+    """Build an equivalence sentence for CO2 usage."""
+    doc = await closest_with_direction(usage_kg)
+    if not doc:
+        raise RuntimeError("No comparison items in DB")
+    base = doc.co2eq_kg
+    title = doc.title
+
+    if base == 0:
+        text = f""
+        return CO2EquivalenceResult(
+            title=title,
+            co2eq_kg=base,
+            equivalent_count=None,
+            text=text
+        )
+
+    count = max(1, int(round(usage_kg / base)))
+    unit = pluralize(count, doc.unit_singular, doc.unit_plural)
+
+    text = f"This is equivalent to: {count} {unit}"
+
+    return CO2EquivalenceResult(
+        title=title,
+        co2eq_kg=base,
+        equivalent_count=count,
+        text=text
+    )
 
 
 class SourceLogsRequest(BaseModel):
@@ -161,6 +237,8 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
                 "input_characters": 0,
                 "output_characters": 0,
                 "total_characters": 0,
+                "co2eq_kg": 0.0,
+                "text": "",
             }
 
         pipeline = [
@@ -201,14 +279,32 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
         results = await cursor.to_list(length=1)
 
         if results:
-            return results[0]
+            stats = results[0]
+        else:
+            stats = {
+                "message_count": 0,
+                "input_characters": 0,
+                "output_characters": 0,
+                "total_characters": 0,
+            }
 
-        return {
-            "message_count": 0,
-            "input_characters": 0,
-            "output_characters": 0,
-            "total_characters": 0,
-        }
+        
+        total_chars = stats.get("total_characters", 0)
+        usage_kg = get_co2_usage_kg(total_chars=total_chars)
+
+        # Get CO2 equivalence data
+        text = ""
+        try:
+            equivalence_data = await build_equivalence_sentence(usage_kg)
+            text = equivalence_data.text
+        except Exception as e:
+            logger.error(f"Failed to get CO2 equivalence data: {str(e)}", exc_info=True)
+
+        # Add CO2 data to response
+        stats["co2eq_kg"] = usage_kg
+        stats["text"] = text
+
+        return stats
     except HTTPException:
         raise
     except Exception as e:
@@ -1216,3 +1312,84 @@ async def stream_hallucination(
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
     return response
+
+# This endpoint is for testing purposes only
+@router.post("/generate")
+async def generate(
+    request: GenerationRequest,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    message = None
+    try:
+        # Normalize and validate requested public collections against allowed lists
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
+
+        # lookup query to check if some of the collection ids from other users are in the request.collection_ids
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        request.collection_ids = request.collection_ids + request.public_collections
+
+        # All user collections are used by default
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if len(user_collections) > 0:
+            request.collection_ids = request.collection_ids + [
+                c.id for c in user_collections
+            ]
+        # remove "Wiley AI Gateway" from collection_ids
+        request.collection_ids = [
+            c for c in request.collection_ids if c != "Wiley AI Gateway"
+        ]
+        logger.info(f"Collection IDs: {request.collection_ids}")
+
+        # Extract year range from filters for MCP usage
+        try:
+            request.year = extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        answer, results, is_rag, latencies, prompts, retrieved_docs = (
+            await generate_answer(request)
+        )
+
+        documents_data = []
+        if results:
+            documents_data = [extract_document_data(result) for result in results]
+
+        return {
+            "answer": answer,
+            "documents": documents_data,
+            "use_rag": is_rag,
+            "latencies": latencies,
+            "prompts": prompts,
+            "retrieved_docs": retrieved_docs,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

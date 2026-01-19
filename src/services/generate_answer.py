@@ -96,7 +96,7 @@ class GenerationRequest(BaseModel):
     llm_type: Optional[str] = Field(
         default=None,
         description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large'. "
+            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large'. 'ship'"
             "Legacy options 'runpod' and 'mistral' are also supported. "
             "Defaults to None, which means environment-based behavior."
         ),
@@ -110,7 +110,6 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of public collection names to include in the search",
     )
-    hallucination_loop_flag: bool = False  # For testing purposes
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
@@ -164,6 +163,26 @@ def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
     return content
 
 
+def _filter_null_values(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively filter out null values from a dictionary.
+    Returns a new dictionary with only non-null values.
+    """
+    if not isinstance(data, dict):
+        return data
+    result = {}
+    for key, value in data.items():
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            filtered = _filter_null_values(value)
+            if filtered:
+                result[key] = filtered
+        else:
+            result[key] = value
+    return result
+
+
 async def persist_message_state(
     message_id: str,
     *,
@@ -181,6 +200,7 @@ async def persist_message_state(
     - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
+    - Filters out null values from error dictionaries before saving.
     """
     try:
         from src.database.models.message import Message as MessageModel
@@ -204,7 +224,10 @@ async def persist_message_state(
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
         if error is not None:
-            existing_metadata["error"] = {**(existing_metadata.get("error", {}) or {}), **(error or {})}
+            filtered_error = _filter_null_values(error)
+            if filtered_error:
+                existing_error = existing_metadata.get("error", {}) or {}
+                existing_metadata["error"] = {**existing_error, **filtered_error}
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -660,7 +683,7 @@ async def get_mcp_context(
     mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-
+    print("mcp_raw data----------------------------------", raw)
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
         try:
@@ -961,6 +984,7 @@ async def generate_answer(
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
     llm_manager = get_shared_llm_manager()
+    origin_query = request.query
 
     try:
         # Check if the query violates EO policies
@@ -1042,7 +1066,7 @@ async def generate_answer(
                 )
         user_content = tmpl.format(
             context=context or "",
-            query=request.query or "",
+            query=origin_query or "",
         )
 
         # Append the templated user message
@@ -1053,7 +1077,7 @@ async def generate_answer(
         base_gen_latency: Optional[float] = None
         fallback_gen_latency: Optional[float] = None
         use_langgraph = False
-        if _langgraph_available and conversation_id and not is_main_LLM_fail:
+        if _langgraph_available and not is_main_LLM_fail:
             try:
                 # Single invoke to append assistant response to memory (async)
                 gen_start = time.perf_counter()
@@ -1087,7 +1111,7 @@ async def generate_answer(
             gen_start = time.perf_counter()
 
             final_answer, generation_prompt = await llm_manager.generate_answer_fallback(
-                query=request.query,
+                query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,
@@ -1214,6 +1238,7 @@ async def generate_answer_stream_generator_helper(
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
+    origin_query = request.query
 
     try:
         logger.info(
@@ -1377,7 +1402,7 @@ async def generate_answer_stream_generator_helper(
                 )
         user_content = tmpl.format(
             context=context or "",
-            query=request.query or "",
+            query=origin_query or "",
         )
 
         # Stream generation
@@ -1503,7 +1528,7 @@ async def generate_answer_stream_generator_helper(
             gen_start = time.perf_counter()
             logger.info(f"Using fallback model streaming")
             gen = llm_manager.generate_answer_fallback_stream(
-                query=request.query,
+                query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
                 temperature=request.temperature,

@@ -438,6 +438,7 @@ class LLMManager:
             # bind_kwargs = {"max_tokens": max_new_tokens}
             if temperature is not None:
                 bind_kwargs["temperature"] = temperature
+                bind_kwargs["timeout"] = 150
             llm = base_llm.bind(**bind_kwargs)
             current_system_prompt = self._get_current_system_prompt()
             if current_system_prompt:

@@ -9,13 +9,10 @@ to RunPod for embeddings generation.
 import logging
 import tempfile
 from enum import Enum
-from typing import Any, Optional, Tuple, Union, List, Dict
+from typing import Any, Optional, List, Dict
 
 from fastapi import UploadFile
 
-from langchain_core.embeddings import Embeddings
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import DeepInfraEmbeddings
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
@@ -26,16 +23,14 @@ from langchain_core.messages import (
 import tiktoken
 
 from src.config import (
-    INFERENCE_API_KEY,
     MONGO_HOST,
     MONGO_PORT,
     MONGO_USERNAME,
     MONGO_PASSWORD,
     MONGO_DATABASE,
     MONGO_PARAMS,
-    DEEPINFRA_API_TOKEN,
 )
-from src.constants import DEFAULT_EMBEDDING_MODEL, TOKEN_OVERFLOW_LIMIT
+from src.constants import TOKEN_OVERFLOW_LIMIT
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -495,6 +490,27 @@ class MarkdownTableStreamNormalizer:
         self._in_table = False
         return outputs
 
+def pluralize(n: int, singular: str, plural: str) -> str:
+    """Return singular or plural form based on count."""
+    return singular if n == 1 else plural
+
+
+def get_co2_usage_kg(total_chars: int) -> float:
+    """Calculate CO2 usage from total characters."""
+    # Calculate CO2 usage from total characters
+    # Assumptions:
+    # - Roughly 4 characters per token
+    # - ~0.000078 grams CO2 per token
+    # - Convert grams to kg
+    CHARS_PER_TOKEN = 4
+    CO2_PER_TOKEN_GRAM = 0.000078
+    GRAM_PER_KG = 1000
+    return (
+        (total_chars / CHARS_PER_TOKEN) * (CO2_PER_TOKEN_GRAM / GRAM_PER_KG)
+        if isinstance(total_chars, (int, float)) and total_chars > 0
+        else 0.0
+    )
+    
 
 def get_mongodb_uri() -> str:
     """Build MongoDB URI from environment, appending MONGO_PARAMS if provided."""
