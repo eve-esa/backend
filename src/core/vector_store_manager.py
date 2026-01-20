@@ -81,7 +81,7 @@ class VectorStoreManager:
             timeout=120.0,  # 2 minutes timeout for operations
         )
         self.embeddings_model = embeddings_model
-        self.embedding_size = 2560
+        self.embeddings_size = 2560
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def create_collection(self, collection_name: str) -> bool:
