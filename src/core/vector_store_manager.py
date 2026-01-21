@@ -354,8 +354,7 @@ class VectorStoreManager:
         metadatas = [doc.metadata for doc in documents]
 
         # Generate embeddings for this batch
-        embeddings, _ = await self.generate_query_vector(texts, self.embeddings_model)
-
+        embeddings, _ = await self.generate_batch_embeddings(texts, self.embeddings_model)
         # Create points for Qdrant
         points = []
         for i, (text, metadata, embedding, uuid) in enumerate(
@@ -649,6 +648,46 @@ class VectorStoreManager:
                 input=query, model=embeddings_model
             )
             return response.data[0].embedding, str(e)
+
+    async def generate_batch_embeddings(
+        self, texts: List[str], embeddings_model: str
+    ) -> Tuple[List[List[float]], Optional[str]]:
+        """
+        Generate embedding vectors for multiple texts in batch.
+
+        Args:
+            texts: List of texts to embed
+            embeddings_model: Model to use for embedding generation
+
+        Returns:
+            Tuple[List[List[float]], Optional[str]]: List of embedding vectors and optional error message
+
+        Raises:
+            RuntimeError: If embedding generation fails
+        """
+        if not texts:
+            return [], None
+
+        try:
+            openai = OpenAI(
+                api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL
+            )
+            response = openai.embeddings.create(
+                input=texts, model=embeddings_model
+            )
+            embeddings = [item.embedding for item in response.data]
+            return embeddings, None
+
+        except Exception as e:
+            logger.error(f"Failed to generate batch embeddings: {e}")
+            openai = OpenAI(
+                api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
+            )
+            response = openai.embeddings.create(
+                input=texts, model=embeddings_model
+            )
+            embeddings = [item.embedding for item in response.data]
+            return embeddings, str(e)
 
     async def retrieve_documents_from_query(
         self,
