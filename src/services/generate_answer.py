@@ -683,7 +683,6 @@ async def get_mcp_context(
     mcp_start = time.perf_counter()
     raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-    print("mcp_raw data----------------------------------", raw)
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
         try:
