@@ -537,7 +537,7 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
 
 
 def _maybe_rerank_deepinfra(
-    candidate_texts: List[str], query: str, timeout: int = 5
+    candidate_texts: List[str], query: str, timeout: int = 10
 ) -> dict | None:
     """Call DeepInfra reranker if configured with timeout, else fall back to SiliconFlow."""
     if not candidate_texts or len(candidate_texts) == 0:
