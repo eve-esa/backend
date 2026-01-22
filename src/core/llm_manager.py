@@ -505,11 +505,11 @@ class LLMManager:
         ]
         try:
             llm = self.get_client_for_model(self._selected_llm_type)
-            resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
+            resp = await llm.ainvoke(messages)
             return getattr(resp, "content", str(resp))
         except Exception:
             llm = self._get_fallback_llm()
-            resp = await llm.bind(max_tokens=max_tokens).ainvoke(messages)
+            resp = await llm.ainvoke(messages)
             return getattr(resp, "content", str(resp))
 
     async def summarize_context_with_map_reduce(
