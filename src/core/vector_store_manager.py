@@ -41,7 +41,7 @@ from src.config import (
     EMBEDDING_FALLBACK_API_KEY,
     EMBEDDING_FALLBACK_URL,
 )
-from src.utils.helpers import EmbeddingModelType
+from src.utils.error_logger import get_error_logger, Component, PipelineStage
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -640,14 +640,32 @@ class VectorStoreManager:
             return response.data[0].embedding, None
 
         except Exception as e:
-            logger.error(f"Failed to generate query vector: {e}")
-            openai = OpenAI(
-                api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
+            logger.error(f"Failed to generate query vector from main model: {e}")
+            error_logger = get_error_logger()
+            await error_logger.log_error_sync(
+                error=e,
+                component=Component.RETRIEVAL,
+                pipeline_stage=PipelineStage.RETRIEVAL,
+                description="Failed to generate query vector from main model",
+                error_type=type(e).__name__,
             )
-            response = openai.embeddings.create(
-                input=query, model=embeddings_model
-            )
-            return response.data[0].embedding, str(e)
+            try:
+                openai = OpenAI(
+                    api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
+                )
+                response = openai.embeddings.create(
+                    input=query, model=embeddings_model
+                )
+                return response.data[0].embedding, str(e)
+            except Exception as e:
+                logger.error(f"Failed to generate query vector from fallback model: {e}")
+                await error_logger.log_error_sync(
+                    error=e,
+                    component=Component.RETRIEVAL_FALLBACK,
+                    pipeline_stage=PipelineStage.RETRIEVAL,
+                    description="Failed to generate query vector from fallback model",
+                    error_type=type(e).__name__,
+                )
 
     async def generate_batch_embeddings(
         self, texts: List[str], embeddings_model: str
@@ -737,7 +755,7 @@ class VectorStoreManager:
                 f"Retrieved {len(all_results)} documents from {len(collection_names)} collections "
                 f"(filtered from {len(all_results)} total matches)"
             )
-            return all_results, vec_err
+            return all_results
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
@@ -754,7 +772,7 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
-    ) -> tuple[List[Any], Dict[str, Optional[float]], Optional[str]]:
+    ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
 
@@ -771,7 +789,7 @@ class VectorStoreManager:
         try:
             # Generate embedding vector for the query
             t0 = time.perf_counter()
-            query_vector, vec_err = await self.generate_query_vector(query, model)
+            query_vector, _ = await self.generate_query_vector(query, model)
             embedding_latency = time.perf_counter() - t0
 
             query_filter = Filter(**filters) if filters else None
@@ -797,7 +815,7 @@ class VectorStoreManager:
                 "query_embedding_latency": embedding_latency,
                 "qdrant_retrieval_latency": retrieval_latency,
             }
-            return all_results, latencies, vec_err
+            return all_results, latencies
 
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
