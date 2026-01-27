@@ -40,6 +40,14 @@ import json
 from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
 from src.services.cancel_manager import get_cancel_manager
+from src.utils.error_logger import (
+    Component,
+    PipelineStage,
+    set_user_context,
+    set_conversation_context,
+    set_message_context,
+    get_error_logger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +345,9 @@ async def create_message(
     Raises:
         HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
     """
+    set_user_context(requesting_user.id)
+    set_conversation_context(conversation_id)
+    
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -412,6 +423,8 @@ async def create_message(
             request_input=request,
             metadata={},
         )
+        
+        set_message_context(message.id)
 
         answer, results, is_rag, latencies, prompts, retrieved_docs = (
             await generate_answer(request, conversation_id=conversation_id)
@@ -676,6 +689,9 @@ async def create_message_stream(
     Raises:
         HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
     """
+    set_user_context(requesting_user.id)
+    set_conversation_context(conversation_id)
+    
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -751,6 +767,8 @@ async def create_message_stream(
             request_input=request,
             metadata={},
         )
+        
+        set_message_context(message.id)
 
         # Start decoupled background job that publishes to bus
         cancel_mgr = get_cancel_manager()
@@ -787,23 +805,25 @@ async def create_message_stream(
         return response
     except HTTPException as http_exc:
         if message:
-            try:
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = {'router_error': str(getattr(http_exc, "detail", http_exc))}
-                message.metadata = existing_metadata
-                await message.save()
-            except Exception:
-                pass
-        raise
+            error_logger = get_error_logger()
+            await error_logger.log_error_sync(
+                error=http_exc,
+                component=Component.ROUTER,
+                pipeline_stage=PipelineStage.ROUTER,
+                description="HTTPException in create_message_stream",
+                error_type=type(http_exc).__name__,
+            )
+        raise http_exc
     except Exception as e:
         if message:
-            try:
-                existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = {'router_error': str(e)}
-                message.metadata = existing_metadata
-                await message.save()
-            except Exception:
-                pass
+            error_logger = get_error_logger()
+            await error_logger.log_error_sync(
+                error=e,
+                component=Component.ROUTER,
+                pipeline_stage=PipelineStage.ROUTER,
+                description="Exception in create_message_stream",
+                error_type=type(e).__name__,
+            )
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
