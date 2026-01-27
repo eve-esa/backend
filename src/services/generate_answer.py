@@ -51,6 +51,11 @@ import contextlib
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.constants import SCRAPING_DOG_ALL_URLS
 from src.services.stream_bus import get_stream_bus
+from src.utils.error_logger import (
+    get_error_logger,
+    Component,
+    PipelineStage,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -536,12 +541,14 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
     return deduped
 
 
-def _maybe_rerank_deepinfra(
+async def _maybe_rerank_deepinfra(
     candidate_texts: List[str], query: str, timeout: int = 10
 ) -> dict | None:
     """Call DeepInfra reranker if configured with timeout, else fall back to SiliconFlow."""
     if not candidate_texts or len(candidate_texts) == 0:
         return []
+
+    error_logger = get_error_logger()
 
     # --- Try DeepInfra first ---
     api_token = DEEPINFRA_API_TOKEN
@@ -555,11 +562,25 @@ def _maybe_rerank_deepinfra(
         try:
             results = future.result(timeout=timeout)
             return results
-        except FutureTimeoutError:
+        except FutureTimeoutError as e:
             logger.warning("DeepInfra reranker timed out after %s seconds", timeout)
+            await error_logger.log_error(
+                error=e,
+                component=Component.RE_RANKER,
+                pipeline_stage=PipelineStage.RETRIEVAL,
+                description="DeepInfra reranker timed out",
+                error_type=type(e).__name__,
+            )
             future.cancel()
-        except Exception:
+        except Exception as e:
             logger.warning("DeepInfra reranker failed", exc_info=True)
+            await error_logger.log_error(
+                error=e,
+                component=Component.RE_RANKER,
+                pipeline_stage=PipelineStage.RETRIEVAL,
+                description="DeepInfra reranker failed",
+                error_type=type(e).__name__,
+            )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -574,16 +595,24 @@ def _maybe_rerank_deepinfra(
         reranker = SiliconFlowReranker(api_token)
         results = reranker.rerank([query], candidate_texts)
         return results
-    except Exception:
+    except Exception as e:
         logger.warning("SiliconFlow reranker failed", exc_info=True)
+        await error_logger.log_error(
+            error=e,
+            component=Component.RE_RANKER,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="SiliconFlow reranker failed",
+            error_type=type(e).__name__,
+        )
         return []
 
 
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
-) -> tuple[list, Dict[str, Optional[float]], Optional[str]]:
+) -> tuple[list, Dict[str, Optional[float]]]:
     """Call MCP semantic search and return (results, latencies)."""
+    error_logger = get_error_logger()
     mcp_client = MultiServerMCPClientService.get_shared()
 
     # If frontend provided filters that include anything other than year,
@@ -685,6 +714,15 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
+        error_msg = raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
+        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="MCP auth error",
+            error_type=type(error_obj).__name__,
+        )
         try:
             await mcp_client.close()
         except Exception:
@@ -717,7 +755,16 @@ async def get_mcp_context(
         is_error = bool(raw.get("is_error"))
         content_items = raw.get("content", []) or []
     if is_error:
-        return [], {}, raw.get("error", "MCP retrieval failed")
+        error_msg = raw.get("error", "MCP retrieval failed") if isinstance(raw, dict) else str(raw)
+        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="MCP retrieval failed",
+            error_type=type(error_obj).__name__,
+        )
+        return [], {}
 
     def _ensure_list(obj: Any) -> List[Any]:
         if obj is None:
@@ -760,7 +807,7 @@ async def get_mcp_context(
 
     logger.info(f"retrieved {len(extracted)} documents from MCP")
 
-    return extracted, latencies, None
+    return extracted, latencies
 
 
 async def should_use_rag(
@@ -774,6 +821,7 @@ async def should_use_rag(
     Returns True for scientific/technical queries; False for casual/generic ones.
     Defaults to True on uncertainty/errors.
     """
+    error_logger = get_error_logger()
     try:
         if llm_type in (LLMType.Satcom_Small.value, LLMType.Satcom_Large.value):
             tmpl = get_template("is_rag_prompt", filename="satcom/prompts.yaml")
@@ -796,35 +844,65 @@ async def should_use_rag(
         return None, prompt, False
     except Exception as e:
         logger.error(f"Failed to decide should_use_rag: {e}")
-        fallback_llm = llm_manager.get_fallback_llm()
-        structured_fallback_llm = fallback_llm.bind(temperature=0).with_structured_output(
-            ShouldUseRagDecision
+        await error_logger.log_error(
+            error=e,
+            component=Component.LLM,
+            pipeline_stage=PipelineStage.RE_QUERYING,
+            description="Failed to decide should_use_rag with main LLM",
+            error_type=type(e).__name__,
         )
-        result = await structured_fallback_llm.ainvoke(prompt)
-        logger.info(f"should_use_rag result from fallback model: {result}")
-        if isinstance(result, ShouldUseRagDecision):
-            return result, prompt, True
-        return None, prompt, True
+        try:
+            fallback_llm = llm_manager.get_fallback_llm()
+            structured_fallback_llm = fallback_llm.bind(temperature=0).with_structured_output(
+                ShouldUseRagDecision
+            )
+            result = await structured_fallback_llm.ainvoke(prompt)
+            logger.info(f"should_use_rag result from fallback model: {result}")
+            if isinstance(result, ShouldUseRagDecision):
+                return result, prompt, True
+            return None, prompt, True
+        except Exception as e:
+            logger.error(f"Failed to decide should_use_rag with fallback model: {e}")
+            await error_logger.log_error(
+                error=e,
+                component=Component.LLM_FALLBACK,
+                pipeline_stage=PipelineStage.RE_QUERYING,
+                description="Failed to decide should_use_rag with fallback model",
+                error_type=type(e).__name__,
+            )
+            return None, prompt, False
 
 
 async def get_rag_context(
     vector_store: VectorStoreManager,
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
-) -> tuple[list, Dict[str, Optional[float]], Optional[str]]:
+) -> tuple[list, Dict[str, Optional[float]]]:
     """Get RAG context from vector store."""
+    error_logger = get_error_logger()
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
-    # Retrieve with latency measurements
-    results, vs_latencies, vec_err = await vector_store.retrieve_documents_with_latencies(
-        collection_names=request.collection_ids,
-        query=request.query,
-        k=request.k * 2,
-        score_threshold=request.score_threshold,
-        embeddings_model=request.embeddings_model,
-        filters=request.filters,
-        private_collections_map=request.private_collections_map,
-    )
+    try:
+        # Retrieve with latency measurements
+        results, vs_latencies = await vector_store.retrieve_documents_with_latencies(
+            collection_names=request.collection_ids,
+            query=request.query,
+            k=request.k * 2,
+            score_threshold=request.score_threshold,
+            embeddings_model=request.embeddings_model,
+            filters=request.filters,
+            private_collections_map=request.private_collections_map,
+        )
+    except Exception as e:
+        logger.error(f"Failed to get RAG context from vector store: {e}")
+        await error_logger.log_error(
+            error=e,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="Failed to get RAG context from vector store",
+            error_type=type(e).__name__,
+        )
+        return [], {}
 
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
@@ -832,7 +910,7 @@ async def get_rag_context(
     if not results:
         logger.warning(f"No documents found for query: {request.query}")
 
-    return results, vs_latencies, vec_err
+    return results, vs_latencies
 
 
 async def setup_rag_and_context(
@@ -847,16 +925,12 @@ async def setup_rag_and_context(
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
-        vec_errors: Dict[str, Optional[str]] = {}
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
-        mcp_err: Optional[str] = None
         satcom_results: List[Any] = []
         satcom_lat: Dict[str, Optional[float]] = {}
-        main_vec_err: Optional[str] = None
-        satcom_vec_err: Optional[str] = None
-
+        
         # temporary for satcom collection
         if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
             satcom_vector_store = VectorStoreManager(
@@ -866,7 +940,7 @@ async def setup_rag_and_context(
             )
             collection_ids = request.collection_ids
             request.collection_ids = ["satcom-chunks-collection"]
-            satcom_results, satcom_lat, satcom_vec_err = await get_rag_context(
+            satcom_results, satcom_lat = await get_rag_context(
                 satcom_vector_store, request, cancel_event=cancel_event
             )
             request.collection_ids = [
@@ -886,13 +960,13 @@ async def setup_rag_and_context(
                 mcp_future = tg.create_task(
                     get_mcp_context(request, cancel_event=cancel_event)
                 )
-                (results, rag_lat, main_vec_err) = await rag_future
-                (mcp_results, mcp_lat, mcp_err) = await mcp_future
+                (results, rag_lat) = await rag_future
+                (mcp_results, mcp_lat) = await mcp_future
         else:
-            results, rag_lat, main_vec_err = await get_rag_context(
+            results, rag_lat = await get_rag_context(
                 vector_store, request, cancel_event=cancel_event
             )
-            mcp_results, mcp_lat, mcp_err = [], {}, None
+            mcp_results, mcp_lat = [], {}
 
         merged_results = list(results) + list(mcp_results) + list(satcom_results)
         # Build candidate texts with mapping to original indices
@@ -917,7 +991,7 @@ async def setup_rag_and_context(
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         latency = time.perf_counter()
-        reranked = _maybe_rerank_deepinfra(candidate_texts, request.query)
+        reranked = await _maybe_rerank_deepinfra(candidate_texts, request.query)
         latencies["reranking_latency"] = time.perf_counter() - latency
         # Attach reranking_score to each result
         formated_results = [extract_document_data(e) for e in merged_results]
@@ -938,15 +1012,11 @@ async def setup_rag_and_context(
 
         latencies.update(rag_lat or {})
         latencies.update(mcp_lat or {})
-        vec_errors.update({
-            "main_vec_err": main_vec_err,
-            "satcom_vec_err": satcom_vec_err,
-        })
     except* asyncio.CancelledError:
         # Propagate cooperative cancellation cleanly out of TaskGroup
         raise
 
-    return context, results, latencies, formated_results, vec_errors, mcp_err
+    return context, results, latencies, formated_results
 
 
 async def check_policy(
@@ -982,6 +1052,7 @@ async def generate_answer(
     conversation_id: Optional[str] = None,
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
+    error_logger = get_error_logger()
     llm_manager = get_shared_llm_manager()
     origin_query = request.query
 
@@ -1013,7 +1084,7 @@ async def generate_answer(
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, vec_errors, mcp_err = "", [], {}, {}, None
+        context, results, latencies = "", [], {}
         retrieved_docs: List[Dict[str, Any]] = []
         if (
             len(request.collection_ids) > 0
@@ -1021,11 +1092,18 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs, _vec_errors, _mcp_err = (
+                context, results, latencies, retrieved_docs = (
                     await setup_rag_and_context(request)
                 )
             except Exception as e:
                 logger.warning(f"Failed to setup RAG and context")
+                await error_logger.log_error(
+                    error=e,
+                    component=Component.RETRIEVAL,
+                    pipeline_stage=PipelineStage.RETRIEVAL,
+                    description="Failed to setup RAG and context, falling back to scraping dog",
+                    error_type=type(e).__name__,
+                )
                 scraping_dog_start = time.perf_counter()
                 scraping_dog_crawler = ScrapingDogCrawler(
                     all_urls=SCRAPING_DOG_ALL_URLS, api_key=SCRAPING_DOG_API_KEY
@@ -1104,6 +1182,13 @@ async def generate_answer(
                 logger.warning(
                     f"LangGraph invocation failed, falling back to direct generation: {e}"
                 )
+                await error_logger.log_error(
+                    error=e,
+                    component=Component.LLM,
+                    pipeline_stage=PipelineStage.GENERATION,
+                    description="LangGraph invocation failed, falling back to direct generation",
+                    error_type=type(e).__name__,
+                )
                 use_langgraph = False
         if not use_langgraph:
             logger.info("starting to fallback using fallback model")
@@ -1145,6 +1230,13 @@ async def generate_answer(
         )
 
     except Exception as e:
+        await error_logger.log_error(
+            error=e,
+            component=Component.LLM,
+            pipeline_stage=PipelineStage.GENERATION,
+            description="Error during answer generation",
+            error_type=type(e).__name__,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1235,6 +1327,7 @@ async def generate_answer_stream_generator_helper(
     cancel_event: Optional[asyncio.Event] = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
+    error_logger = get_error_logger()
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
     origin_query = request.query
@@ -1309,7 +1402,7 @@ async def generate_answer_stream_generator_helper(
                 yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
-        context, results, latencies, retrieved_docs, vec_errors, mcp_err, scraping_dog_err = "", [], {}, [], {}, None, None
+        context, results, latencies, retrieved_docs = "", [], {}, []
         if (
             len(request.collection_ids) > 0
             and request.k > 0
@@ -1317,7 +1410,7 @@ async def generate_answer_stream_generator_helper(
         ):
             yield f"data: {json.dumps({'type': 'status', 'content': 'Retrieving relevant documents…'})}\n\n"
             try:
-                context, results, latencies, retrieved_docs, vec_errors, mcp_err = await cancel_aware(
+                context, results, latencies, retrieved_docs = await cancel_aware(
                     setup_rag_and_context(request, cancel_event=cancel_event)
                 )
                 if len(results) == 0:
@@ -1338,6 +1431,13 @@ async def generate_answer_stream_generator_helper(
                 return
             except Exception as er:
                 logger.warning(f"Failed to setup RAG and context: {str(er)}")
+                await error_logger.log_error(
+                    error=er,
+                    component=Component.RETRIEVAL,
+                    pipeline_stage=PipelineStage.RETRIEVAL,
+                    description="Failed to setup RAG and context in streaming, falling back to scraping dog",
+                    error_type=type(er).__name__,
+                )
                 scraping_dog_start = time.perf_counter()
                 try:
                     scraping_dog_crawler = ScrapingDogCrawler(
@@ -1349,18 +1449,18 @@ async def generate_answer_stream_generator_helper(
                 except Exception as es:
                     logger.warning(f"Failed to run scraping dog crawler: {str(es)}")
                     results = []
-                    scraping_dog_err = f"Failed to run scraping dog crawler: {str(es)}"
-
+                    await error_logger.log_error(
+                        error=es,
+                        component=Component.RETRIEVAL,
+                        pipeline_stage=PipelineStage.RETRIEVAL,
+                        description="Failed to run scraping dog crawler",
+                        error_type=type(es).__name__,
+                    )
                 context = build_context(results)
                 latencies = {
                     "scraping_dog_latency": time.perf_counter() - scraping_dog_start,
                 }
                 retrieved_docs = []
-                await persist_message_state(
-                    message_id,
-                    stopped=True,
-                    error={'rag_errors': str(er)},
-                )
 
         if cancelled():
             await persist_message_state(
@@ -1502,9 +1602,16 @@ async def generate_answer_stream_generator_helper(
                             f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
                         )
                         used_stream = True
-                    except TimeoutError:
+                    except TimeoutError as e:
                         logger.warning(
                             f"LangGraph streaming timed out, falling back to fallback model streaming"
+                        )
+                        await error_logger.log_error(
+                            error=e,
+                            component=Component.LLM,
+                            pipeline_stage=PipelineStage.GENERATION,
+                            description="LangGraph streaming timed out",
+                            error_type=type(e).__name__,
                         )
                         used_stream = False
                     finally:
@@ -1519,7 +1626,13 @@ async def generate_answer_stream_generator_helper(
                 logger.warning(
                     f"Optimized LangGraph streaming failed, falling back to fallback model streaming: {e}"
                 )
-
+                await error_logger.log_error(
+                    error=e,
+                    component=Component.LLM,
+                    pipeline_stage=PipelineStage.GENERATION,
+                    description="Optimized LangGraph streaming failed",
+                    error_type=type(e).__name__,
+                )
         # Fallback to fallback model streaming if LangGraph didn't work or yielded no tokens
         fallback_token_yielded = 0
         fallback_first_token_latency: Optional[float] = None
@@ -1600,12 +1713,7 @@ async def generate_answer_stream_generator_helper(
             use_rag=rag_decision_result.use_rag,
             latencies=latencies,
             prompts=prompts,
-            retrieved_docs=retrieved_docs,
-            error={
-                'main_embedding_error': vec_errors, 
-                'mcp_error': mcp_err, 
-                'scraping_dog_error': scraping_dog_err,
-            },
+            retrieved_docs=retrieved_docs
         )
 
         if background_tasks:
@@ -1639,6 +1747,13 @@ async def generate_answer_stream_generator_helper(
         return
     except Exception as e:
         logger.error(f"Error during generation: {e}")
+        await error_logger.log_error(
+            error=e,
+            component=Component.LLM,
+            pipeline_stage=PipelineStage.GENERATION,
+            description="Error during streaming generation",
+            error_type=type(e).__name__,
+        )
         err_payload = {"type": "error", "message": str(e)}
         await persist_message_state(
             message_id,
@@ -1647,8 +1762,7 @@ async def generate_answer_stream_generator_helper(
             use_rag=(locals().get("rag_decision_result").use_rag),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
-            retrieved_docs=locals().get("retrieved_docs") or [],
-            error={'streaming_error': str(e)},
+            retrieved_docs=locals().get("retrieved_docs") or []
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"
