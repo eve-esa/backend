@@ -217,4 +217,14 @@ is_rag_prompt: |
 
   Last query:
   {query}
+
+  ### Output Format
+
+  Provide your response with three fields:
+  1. `use_rag`: A boolean (true/false) indicating whether RAG should be used
+  2. `reason`: A brief justification for your decision
+  3. `requery`: The rewritten/refined query string from section 1 above. This MUST be an actual query string (e.g., "Φsat calibration method" or "how to calibrate Φsat"), NOT the word "RAG" or any other value. The requery field should contain the optimized search query you created following the rewriting rules.
+
+  Important: The `requery` field must always contain a rewritten query string, never the word "RAG" or any other non-query value.
+
   Answer:
