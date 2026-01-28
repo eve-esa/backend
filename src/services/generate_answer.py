@@ -83,7 +83,7 @@ class ShouldUseRagDecision(BaseModel):
     )
     reason: str = Field(description="Brief justification for the decision.")
     requery: str = Field(
-        description="Get new rewritten query from last query and conversation history."
+        description="The rewritten/refined query string based on the last query and conversation history. This should be a clear, concise query string suitable for retrieval/search, NOT the word 'RAG' or any other value. Follow the rewriting rules provided in the prompt to create an optimized search query."
     )
 
 
