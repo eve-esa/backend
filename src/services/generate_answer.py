@@ -828,14 +828,15 @@ async def should_use_rag(
         else:
             tmpl = get_template("is_rag_prompt", filename="prompts.yaml")
         prompt = tmpl.format(conversation=conversation, query=query)
-        base_llm = llm_manager.get_client_for_model(llm_type)
+        base_llm = llm_manager.get_client_for_model(LLMType.Mistral.value)
         logger.info(
             f"deciding should_use_rag with selected model: {llm_manager.get_selected_llm_type()}"
         )
 
-        structured_llm = base_llm.bind(temperature=0).with_structured_output(
-            ShouldUseRagDecision
-        )
+        structured_llm = base_llm.bind(
+            temperature=0,
+            response_format={"type": "json_object"},
+        ).with_structured_output(ShouldUseRagDecision)
         result = await structured_llm.ainvoke(prompt)
         logger.info(f"should_use_rag result: {result}")
         # with_structured_output returns a Pydantic object matching the schema
