@@ -8,7 +8,7 @@ from src.core.llm_manager import LLMType
 
 # Mock the generate_answer for test speed reasons, remove the mock when actually want to test the answer generation from the LLM
 async def mock_generate_answer(request, conversation_id=None):
-    return "Test answer", [], False, None, {}
+    return "Test answer", [], False, {}, {}, []
 
 
 @pytest.mark.asyncio
