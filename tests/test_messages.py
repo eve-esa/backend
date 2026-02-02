@@ -3,6 +3,7 @@ import pytest
 from tests.utils.utils import create_test_user_and_token
 from tests.utils.cleaner import cleanup_models
 from src.database.models.message import Message
+from src.core.llm_manager import LLMType
 
 
 # Mock the generate_answer for test speed reasons, remove the mock when actually want to test the answer generation from the LLM
@@ -27,7 +28,20 @@ async def test_message_flow(async_client, monkeypatch):
         assert conv_resp.status_code == 200
         conv_id = conv_resp.json()["id"]
 
-        create_msg_payload = {"query": "Hello"}
+        create_msg_payload = {
+            "query": "Hello",
+            "score_threshold": 0.6,
+            "temperature": 0.0645,
+            "k": 10,
+            "filters": {
+                "should": None, 
+                "min_should": None,
+                "must": [],
+                "must_not": None
+            },
+            "llm_type": LLMType.Ship.value,
+            "public_collections": [ ]
+        }
         msg_resp = await async_client.post(
             f"/conversations/{conv_id}/messages",
             json=create_msg_payload,
