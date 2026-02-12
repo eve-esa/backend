@@ -1413,3 +1413,87 @@ async def generate(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/retrieve")
+async def retrieve(
+    request: GenerationRequest,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Run the entire retrieval pipeline and return all documents.
+
+    Executes the RAG retrieval pipeline using setup_rag_and_context and returns
+    all retrieved documents along with formatted results.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Dictionary containing:
+            - docs: All formatted documents from the retrieval pipeline
+            - formatted_results: Same as docs (all formatted results)
+            - context: Built context string
+            - latencies: Timing information for retrieval operations
+    """
+    try:
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
+
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        request.collection_ids = request.collection_ids + request.public_collections
+
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if len(user_collections) > 0:
+            request.collection_ids = request.collection_ids + [
+                c.id for c in user_collections
+            ]
+        request.collection_ids = [
+            c for c in request.collection_ids if c != "Wiley AI Gateway"
+        ]
+        logger.info(f"Collection IDs: {request.collection_ids}")
+
+        try:
+            request.year = extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        _context, _results, latencies, formated_results = await setup_rag_and_context(
+            request
+        )
+
+        return {
+            "retrieved_docs": formated_results,
+            "latencies": latencies,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
