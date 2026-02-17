@@ -158,7 +158,7 @@
 - **query**: string
 - **year**: list[int] | null
 - **filters**: dict | null
-- **llm_type**: string | null (one of 'runpod', 'mistral', 'satcom_small', 'satcom_large')
+- **llm_type**: string | null (one of 'main', 'fallback', 'runpod', 'mistral', 'satcom_small', 'satcom_large', 'ship', 'eve_v05')
 - **embeddings_model**: string
 - **k**: int
 - **temperature**: float

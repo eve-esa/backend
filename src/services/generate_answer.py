@@ -101,7 +101,7 @@ class GenerationRequest(BaseModel):
     llm_type: Optional[str] = Field(
         default=None,
         description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large'. 'ship'"
+            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'ship', 'eve_v05'. "
             "Legacy options 'runpod' and 'mistral' are also supported. "
             "Defaults to None, which means environment-based behavior."
         ),
