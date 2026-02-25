@@ -54,7 +54,6 @@ services:
     command: >
       redis-server
       --appendonly yes
-      --requirepass O6VCMQHDjSU3R14C1Owa10IioqLffc9W
     volumes:
       - redis_data:/data
     networks:
