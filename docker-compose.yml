@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - 8080:8080
+      - 8000:8000
     command:
       [
         "uvicorn",
@@ -12,7 +12,7 @@ services:
         "--host",
         "0.0.0.0",
         "--port",
-        "8080",
+        "8000",
         "--reload",
         "--reload-dir",
         "/code",
@@ -23,6 +23,7 @@ services:
       - .:/code
     depends_on:
       - mongo
+      - redis
     networks:
       - app-network
 
@@ -45,6 +46,29 @@ services:
     networks:
       - app-network
 
+  redis:
+    image: redis:7
+    container_name: redis-server
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass O6VCMQHDjSU3R14C1Owa10IioqLffc9W
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  redis_data:
