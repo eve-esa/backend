@@ -12,8 +12,10 @@ from src.services.generate_answer import (
     GenerationRequest,
     generate_answer,
     maybe_rollup_and_trim_history,
+    setup_rag_and_context,
+    should_use_rag,
+    get_shared_llm_manager,
 )
-from src.services.generate_answer import setup_rag_and_context
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
@@ -1423,8 +1425,9 @@ async def retrieve(
     """
     Run the entire retrieval pipeline and return all documents.
 
-    Executes the RAG retrieval pipeline using setup_rag_and_context and returns
-    all retrieved documents along with formatted results.
+    Runs the requery/rewrite step (same as generate_answer) to refine the query
+    for retrieval, then executes the RAG retrieval pipeline using
+    setup_rag_and_context and returns all retrieved documents.
 
     Args:
         request (GenerationRequest): Generation parameters including query, collections, and model settings.
@@ -1432,10 +1435,10 @@ async def retrieve(
 
     Returns:
         Dictionary containing:
-            - docs: All formatted documents from the retrieval pipeline
-            - formatted_results: Same as docs (all formatted results)
-            - context: Built context string
-            - latencies: Timing information for retrieval operations
+            - retrieved_docs: All formatted documents from the retrieval pipeline
+            - latencies: Timing information (includes rewrite and retrieval operations)
+            - original_query: The query as sent in the request
+            - requery: The rewritten query used for retrieval (or original if rewrite skipped/failed)
     """
     try:
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
@@ -1487,13 +1490,39 @@ async def retrieve(
         except Exception:
             request.year = None
 
+        original_query = request.query
+        rewrite_latency = None
+        requery = None
+        try:
+            t_rewrite = time.perf_counter()
+            llm_manager = get_shared_llm_manager()
+            rag_decision_result, _rag_prompt, _ = await should_use_rag(
+                llm_manager,
+                request.query,
+                conversation="",
+                llm_type=request.llm_type,
+            )
+            rewrite_latency = time.perf_counter() - t_rewrite
+            if rag_decision_result and getattr(rag_decision_result, "requery", None):
+                requery = rag_decision_result.requery
+                request.query = requery
+        except Exception as e:
+            logger.warning(f"Requery/rewrite failed in /retrieve, using original query: {e}")
+            requery = None
+
         _context, _results, latencies, formated_results = await setup_rag_and_context(
             request
         )
 
+        if rewrite_latency is not None:
+            latencies = dict(latencies) if latencies else {}
+            latencies["rewrite"] = rewrite_latency
+
         return {
             "retrieved_docs": formated_results,
             "latencies": latencies,
+            "original_query": original_query,
+            "requery": requery or original_query,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
