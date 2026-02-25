@@ -101,7 +101,7 @@ class GenerationRequest(BaseModel):
     llm_type: Optional[str] = Field(
         default=None,
         description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large'. 'ship'"
+            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'ship', 'eve_v05'. "
             "Legacy options 'runpod' and 'mistral' are also supported. "
             "Defaults to None, which means environment-based behavior."
         ),
@@ -1061,10 +1061,6 @@ async def generate_answer(
         # Check if the query violates EO policies
         total_start = time.perf_counter()
         is_main_LLM_fail = False
-        policy_result, policy_prompt = await check_policy(request, llm_manager)
-        guardrail_latency = time.perf_counter() - total_start
-        if policy_result.violation:
-            return POLICY_NOT_ANSWER, [], False, {}, {}, {}
 
         # Get conversation history and summary for multi-turn context
         conversation_history, conversation_summary = (
@@ -1207,7 +1203,6 @@ async def generate_answer(
 
         total_latency = time.perf_counter() - total_start
         latencies = {
-            "guardrail_latency": guardrail_latency,
             "rag_decision_latency": rag_decision_latency,
             **(latencies or {}),
             "base_generation_latency": base_gen_latency,
@@ -1215,8 +1210,6 @@ async def generate_answer(
             "total_latency": total_latency,
         }
         prompts = {
-            "guardrail_prompt": policy_prompt,
-            "guardrail_result": policy_result,
             "is_rag_prompt": rag_decision_prompt,
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,

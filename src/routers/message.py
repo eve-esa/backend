@@ -12,8 +12,10 @@ from src.services.generate_answer import (
     GenerationRequest,
     generate_answer,
     maybe_rollup_and_trim_history,
+    setup_rag_and_context,
+    should_use_rag,
+    get_shared_llm_manager,
 )
-from src.services.generate_answer import setup_rag_and_context
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
@@ -1410,6 +1412,117 @@ async def generate(
             "latencies": latencies,
             "prompts": prompts,
             "retrieved_docs": retrieved_docs,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/retrieve")
+async def retrieve(
+    request: GenerationRequest,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Run the entire retrieval pipeline and return all documents.
+
+    Runs the requery/rewrite step (same as generate_answer) to refine the query
+    for retrieval, then executes the RAG retrieval pipeline using
+    setup_rag_and_context and returns all retrieved documents.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Dictionary containing:
+            - retrieved_docs: All formatted documents from the retrieval pipeline
+            - latencies: Timing information (includes rewrite and retrieval operations)
+            - original_query: The query as sent in the request
+            - requery: The rewritten query used for retrieval (or original if rewrite skipped/failed)
+    """
+    try:
+        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+        try:
+            allowed_names = {
+                item.get("name")
+                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+                if isinstance(item, dict) and item.get("name")
+            }
+        except Exception:
+            allowed_names = set()
+
+        public_collections = [
+            n for n in request.public_collections if n in allowed_names
+        ]
+        request.public_collections = public_collections
+
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        request.collection_ids = request.collection_ids + request.public_collections
+
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if len(user_collections) > 0:
+            request.collection_ids = request.collection_ids + [
+                c.id for c in user_collections
+            ]
+        request.collection_ids = [
+            c for c in request.collection_ids if c != "Wiley AI Gateway"
+        ]
+        logger.info(f"Collection IDs: {request.collection_ids}")
+
+        try:
+            request.year = extract_year_range_from_filters(request.filters)
+        except Exception:
+            request.year = None
+
+        original_query = request.query
+        rewrite_latency = None
+        requery = None
+        try:
+            t_rewrite = time.perf_counter()
+            llm_manager = get_shared_llm_manager()
+            rag_decision_result, _rag_prompt, _ = await should_use_rag(
+                llm_manager,
+                request.query,
+                conversation="",
+                llm_type=request.llm_type,
+            )
+            rewrite_latency = time.perf_counter() - t_rewrite
+            if rag_decision_result and getattr(rag_decision_result, "requery", None):
+                requery = rag_decision_result.requery
+                request.query = requery
+        except Exception as e:
+            logger.warning(f"Requery/rewrite failed in /retrieve, using original query: {e}")
+            requery = None
+
+        _context, _results, latencies, formated_results = await setup_rag_and_context(
+            request
+        )
+
+        if rewrite_latency is not None:
+            latencies = dict(latencies) if latencies else {}
+            latencies["rewrite"] = rewrite_latency
+
+        return {
+            "retrieved_docs": formated_results,
+            "latencies": latencies,
+            "original_query": original_query,
+            "requery": requery or original_query,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
