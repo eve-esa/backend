@@ -1335,12 +1335,38 @@ async def stream_hallucination(
     response.headers["X-Accel-Buffering"] = "no"
     return response
 
-# This endpoint is for testing purposes only
 @router.post("/generate")
 async def generate(
     request: GenerationRequest,
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
+    """
+    Run a one-off generation (testing only) and return the full answer and metadata.
+
+    Normalizes and validates requested public collections against allowed lists,
+    ensures the user does not reference other users' collections, merges the user's
+    collections and public collections (excluding "Wiley AI Gateway"), extracts year
+    range from filters, then runs the full generation pipeline via generate_answer
+    and returns the answer, documents, RAG flag, latencies, prompts, and retrieved docs.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections,
+            and model settings.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Dictionary containing:
+            - answer: Generated answer text.
+            - documents: Extracted document data from retrieval results.
+            - use_rag: Whether RAG was used for this generation.
+            - latencies: Timing information for pipeline steps.
+            - prompts: Prompt data from generation.
+            - retrieved_docs: Raw retrieved documents from RAG.
+
+    Raises:
+        HTTPException: 403 if the request references collections owned by other users.
+        HTTPException: 500 for server errors during generation.
+    """
     message = None
     try:
         # Normalize and validate requested public collections against allowed lists
