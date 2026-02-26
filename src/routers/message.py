@@ -148,9 +148,8 @@ class HallucinationDetectResponse(BaseModel):
     latencies: Optional[Dict[str, Optional[float]]] = None
 
 class GenerateLLMRequest(BaseModel):
-    """Request body for LLM-only generation (no RAG, no conversation)."""
+    """Request body for LLM-only generation (EVE-Instruct v5, no RAG, no conversation)."""
 
-    llm_type: str = Field(..., description="LLM type: main, fallback, satcom_small, satcom_large, ship, eve_v05")
     query: str = Field(..., description="User prompt to send to the LLM")
 
 @router.get("/conversations/messages/average-latencies")
@@ -1346,13 +1345,13 @@ async def generate_llm(
     request: GenerateLLMRequest,
 ) -> dict:
     """
-    Call the LLM with a single query. No RAG, no conversation context.
+    Call EVE-Instruct (v5) with a single query. No RAG, no conversation context.
 
-    Body: llm_type, query. Returns the model reply only.
+    Body: query. Returns the model reply only.
     """
     try:
         llm_manager = get_shared_llm_manager()
-        llm = llm_manager.get_client_for_model(request.llm_type)
+        llm = llm_manager.get_client_for_model("eve_v05")
         messages = [HumanMessage(content=request.query)]
         response = await llm.ainvoke(messages)
         content = getattr(response, "content", str(response))
