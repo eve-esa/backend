@@ -21,6 +21,7 @@ from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 import logging
@@ -146,6 +147,11 @@ class HallucinationDetectResponse(BaseModel):
     final_answer: Optional[str] = None
     latencies: Optional[Dict[str, Optional[float]]] = None
 
+class GenerateLLMRequest(BaseModel):
+    """Request body for LLM-only generation (no RAG, no conversation)."""
+
+    llm_type: str = Field(..., description="LLM type: main, fallback, satcom_small, satcom_large, ship, eve_v05")
+    query: str = Field(..., description="User prompt to send to the LLM")
 
 @router.get("/conversations/messages/average-latencies")
 async def get_average_latencies(
@@ -1334,6 +1340,27 @@ async def stream_hallucination(
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
     return response
+
+@router.post("/generate-llm")
+async def generate_llm(
+    request: GenerateLLMRequest,
+) -> dict:
+    """
+    Call the LLM with a single query. No RAG, no conversation context.
+
+    Body: llm_type, query. Returns the model reply only.
+    """
+    try:
+        llm_manager = get_shared_llm_manager()
+        llm = llm_manager.get_client_for_model(request.llm_type)
+        messages = [HumanMessage(content=request.query)]
+        response = await llm.ainvoke(messages)
+        content = getattr(response, "content", str(response))
+        return {"answer": content}
+    except Exception as e:
+        logger.exception("generate_llm failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/generate")
 async def generate(
