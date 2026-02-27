@@ -1472,7 +1472,7 @@ async def generate(
 @router.post("/retrieve")
 async def retrieve(
     request: GenerationRequest,
-    requesting_user: User = Depends(get_current_user),
+    # requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
     Run the entire retrieval pipeline and return all documents.
@@ -1508,30 +1508,30 @@ async def retrieve(
         ]
         request.public_collections = public_collections
 
-        other_users_collections = await CollectionModel.find_all(
-            filter_dict={
-                "id": {"$in": request.public_collections},
-                "user_id": {"$ne": requesting_user.id},
-            }
-        )
+        # other_users_collections = await CollectionModel.find_all(
+        #     filter_dict={
+        #         "id": {"$in": request.public_collections},
+        #         "user_id": {"$ne": requesting_user.id},
+        #     }
+        # )
 
-        if len(other_users_collections) > 0:
-            raise HTTPException(
-                status_code=403,
-                detail="You are not allowed to use collections from other users",
-            )
+        # if len(other_users_collections) > 0:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="You are not allowed to use collections from other users",
+        #     )
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
+        # user_collections = await CollectionModel.find_all(
+        #     filter_dict={"user_id": requesting_user.id}
+        # )
 
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
+        # request.private_collections_map = {c.id: c.name for c in user_collections}
+        # if len(user_collections) > 0:
+        #     request.collection_ids = request.collection_ids + [
+        #         c.id for c in user_collections
+        #     ]
         request.collection_ids = [
             c for c in request.collection_ids if c != "Wiley AI Gateway"
         ]
