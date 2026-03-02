@@ -36,26 +36,28 @@ python -m venv venv
 ### 3. Configure environment variables
 
 1. Copy the example file:
+
     ```bash
     cp .env.example .env
     ```
 
 2. Edit `.env` and at minimum configure values for:
-- **Qdrant / vector store**
-    - `QDRANT_URL`
-    - `QDRANT_API_KEY` (can be empty for local/self‑hosted Qdrant without auth)
-- **LLM endpoints**
-    - `MAIN_MODEL_URL`
-    - `MAIN_MODEL_API_KEY`
-- **Embeddings**
-    - `EMBEDDING_URL` (has a sensible default)
-    - `EMBEDDING_API_KEY`
-- **MongoDB**
-    - `MONGO_HOST` (usually `localhost`)
-    - `MONGO_PORT` (usually `27017`)
-    - `MONGO_DATABASE` (for example `eve-backend`)
-- **Auth**
-    - `JWT_SECRET_KEY`
+
+        - **Qdrant / vector store**
+            - `QDRANT_URL`
+            - `QDRANT_API_KEY` (can be empty for local/self‑hosted Qdrant without auth)
+        - **LLM endpoints**
+            - `MAIN_MODEL_URL`
+            - `MAIN_MODEL_API_KEY`
+        - **Embeddings**
+            - `EMBEDDING_URL` (has a sensible default)
+            - `EMBEDDING_API_KEY`
+        - **MongoDB**
+            - `MONGO_HOST` (usually `localhost`)
+            - `MONGO_PORT` (usually `27017`)
+            - `MONGO_DATABASE` (for example `eve-backend`)
+        - **Auth**
+            - `JWT_SECRET_KEY`
 
 Other variables in the table in the **Environment variable reference** section below are **optional** for basic local development and can be configured later as you enable more features (SMTP, Satcom, external rerankers, etc.).
 
