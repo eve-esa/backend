@@ -84,9 +84,9 @@ cd backend
 
 1. Copy the example file:
 
-  ```bash
-  cp .env.example .env
-  ```
+    ```bash
+    cp .env.example .env
+    ```
 
 2. Edit `.env` for a Docker environment. Pay attention to:
 
