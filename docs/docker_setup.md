@@ -84,36 +84,36 @@ cd backend
 
 1. Copy the example file:
 
-```bash
-cp .env.example .env
-```
+  ```bash
+  cp .env.example .env
+  ```
 
 2. Edit `.env` for a Docker environment. Pay attention to:
 
-- **MongoDB**
-  - When MongoDB is run as a Docker service in the same `docker-compose.yml`, set:
+    - **MongoDB**
+        - When MongoDB is run as a Docker service in the same `docker-compose.yml`, set:
 
-    ```env
-    MONGO_HOST=mongo
-    MONGO_PORT=27017
-    ```
+            ```env
+            MONGO_HOST=mongo
+            MONGO_PORT=27017
+            ```
 
-  - `MONGO_DATABASE` should match what you want for this stack (for example `eve-backend`).
+        - `MONGO_DATABASE` should match what you want for this stack (for example `eve-backend`).
 
-- **Qdrant / vector store**
-  - `QDRANT_URL`
-  - `QDRANT_API_KEY`
+    - **Qdrant / vector store**
+        - `QDRANT_URL`
+        - `QDRANT_API_KEY`
 
-- **LLM endpoints**
-  - `MAIN_MODEL_URL`
-  - `MAIN_MODEL_API_KEY`
+    - **LLM endpoints**
+        - `MAIN_MODEL_URL`
+        - `MAIN_MODEL_API_KEY`
 
-- **Embeddings**
-  - `EMBEDDING_URL`
-  - `EMBEDDING_API_KEY`
+    - **Embeddings**
+        - `EMBEDDING_URL`
+        - `EMBEDDING_API_KEY`
 
-- **Redis**
-  - `REDIS_URL`: the same value you would use for local setup
+    - **Redis**
+        - `REDIS_URL`: the same value you would use for local setup
 
 Other environment variables (SMTP, Satcom, JWT options, etc.) are documented in the **Environment variable reference** section in `local_setup.md`.
 
