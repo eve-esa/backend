@@ -42,9 +42,6 @@ SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
 SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
-SHIP_MODEL_NAME = os.getenv("SHIP_MODEL_NAME", "esa-sceva/ship-chat-70b").strip()
-SHIP_BASE_URL = os.getenv("SHIP_BASE_URL", "").strip()
-
 EVE_V05_MODEL_NAME = os.getenv("EVE_V05_MODEL_NAME", "eve-esa/eve_v0.5").strip()
 EVE_V05_BASE_URL = os.getenv("EVE_V05_BASE_URL", "").strip()
 

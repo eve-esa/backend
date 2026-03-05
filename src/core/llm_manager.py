@@ -24,8 +24,6 @@ from src.config import (
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_BASE_URL,
     SATCOM_LARGE_BASE_URL,
-    SHIP_BASE_URL,
-    SHIP_MODEL_NAME,
     EVE_V05_BASE_URL,
     EVE_V05_MODEL_NAME,
 )
@@ -53,7 +51,6 @@ class LLMType(Enum):
     Fallback = "fallback"
     Satcom_Small = "satcom_small"
     Satcom_Large = "satcom_large"
-    Ship = "ship"
     Eve_V05 = "eve_v05"
     # Legacy aliases for backward compatibility
     Runpod = "main"
@@ -124,15 +121,6 @@ class LLMManager:
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
 
-            # Initialize Ship client
-            if not SHIP_BASE_URL:
-                raise ValueError("SHIP_BASE_URL environment variable not configured")
-            if not SHIP_MODEL_NAME:
-                raise ValueError("SHIP_MODEL_NAME environment variable not configured")
-            self._ship_base_url = SHIP_BASE_URL
-            self._ship_model_name = SHIP_MODEL_NAME
-            self._ship_chat_openai: ChatOpenAI | None = None
-
             # Initialize EVE V0.5 client
             if not EVE_V05_BASE_URL:
                 raise ValueError("EVE_V05_BASE_URL environment variable not configured")
@@ -152,9 +140,6 @@ class LLMManager:
             self._satcom_large_model_name = None
             self._satcom_small_chat_openai = None
             self._satcom_large_chat_openai = None
-            self._ship_base_url = None
-            self._ship_model_name = None
-            self._ship_chat_openai = None
             self._eve_v05_base_url = None
             self._eve_v05_model_name = None
             self._eve_v05_chat_openai = None
@@ -246,23 +231,6 @@ class LLMManager:
                 max_retries=0,
             )
         return self._satcom_large_chat_openai
-    
-    def _get_ship_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for Ship."""
-        if self._ship_chat_openai is None:
-            if not self._ship_base_url:
-                raise RuntimeError("Ship base URL is not configured")
-            if not MAIN_MODEL_API_KEY:
-                raise RuntimeError("MAIN_MODEL_API_KEY is not set")
-            self._ship_chat_openai = ChatOpenAI(
-                api_key=MAIN_MODEL_API_KEY,
-                base_url=self._ship_base_url,
-                model=self._ship_model_name,
-                temperature=0.3,
-                timeout=MODEL_TIMEOUT,
-                max_retries=0,
-            )
-        return self._ship_chat_openai
 
     def _get_eve_v05_llm(self) -> ChatOpenAI:
         """Return a configured ChatOpenAI client for EVE V0.5."""
@@ -307,9 +275,6 @@ class LLMManager:
             elif llm_type == LLMType.Satcom_Large.value:
                 self._selected_llm_type = LLMType.Satcom_Large.value
                 return self._get_satcom_large_llm()
-            elif llm_type == LLMType.Ship.value:
-                self._selected_llm_type = LLMType.Ship.value
-                return self._get_ship_llm()
             elif llm_type == LLMType.Eve_V05.value:
                 self._selected_llm_type = LLMType.Eve_V05.value
                 return self._get_eve_v05_llm()
