@@ -1,135 +1,102 @@
-# Getting Started with Backend
+## Local development setup
 
-This guide will help you set up and run the backend on local machine or production.
+This guide walks you through running the backend directly on your machine (without Docker).
 
-## Prerequisites
-
-Before you begin, ensure you have the following installed:
+This guide assumes you have the main prerequisites installed:
 
 - Python 3.12+
 - MongoDB
-- Docker and Docker Compose
+- (Optional) Docker & Docker Compose for containerized setup — see [Docker setup](docker_setup.md) for install instructions
 
-### Installing Prerequisites
+If you need help installing Python or MongoDB, see the **Detailed installation commands for prerequisites** section at the bottom of this page.
 
-#### Python 3.12+
+### 1. Clone the repository
 
-**Ubuntu:**
 ```bash
-# Update package list
-sudo apt update
-
-# Install Python 3.12 and pip
-sudo apt install python3.12 python3.12-venv python3-pip
-
-# Verify installation
-python3.12 --version
+git clone https://github.com/eve-esa/backend.git
+cd backend
 ```
 
-**Windows:**
+### 2. Create and activate a virtual environment
 
-1. Download Python 3.12+ from the [official Python website](https://www.python.org/downloads/)
-2. Run the installer and check "Add Python to PATH"
-3. Verify installation:
+**macOS / Linux:**
 
-```cmd
-python --version
-```
-
-**Reference:** [Python Installation Guide](https://www.python.org/downloads/)
-
-#### MongoDB
-
-**Ubuntu:**
 ```bash
-# Import MongoDB public GPG key
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-
-# Add MongoDB repository
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-
-# Update package list and install MongoDB
-sudo apt update
-sudo apt install -y mongodb-org
-
-# Start MongoDB service
-sudo systemctl start mongod
-sudo systemctl enable mongod
-```
-
-**Windows:**
-
-1. Download MongoDB Community Server from the [official MongoDB website](https://www.mongodb.com/try/download/community)
-2. Run the installer and follow the setup wizard
-3. MongoDB will be installed as a Windows service and start automatically
-
-**Reference:** 
-- [MongoDB Installation Guide - Ubuntu](https://www.mongodb.com/docs/manual/installation/)
-- [MongoDB Installation Guide - Windows](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-windows/)
-
-#### Docker and Docker Compose
-
-**Ubuntu:**
-```bash
-# Remove old versions
-sudo apt remove docker docker-engine docker.io containerd runc
-
-# Install prerequisites
-sudo apt update
-sudo apt install ca-certificates curl gnupg lsb-release
-
-# Add Docker's official GPG key
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-
-# Add Docker repository
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# Install Docker Engine and Docker Compose
-sudo apt update
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# Add your user to docker group (to run without sudo)
-sudo usermod -aG docker $USER
-
-# Verify installation
-docker --version
-docker compose version
-```
-
-**Windows:**
-
-1. Download Docker Desktop from the [official Docker website](https://www.docker.com/products/docker-desktop/)
-2. Run the installer and follow the setup wizard
-3. Restart your computer if prompted
-4. Docker Desktop includes both Docker and Docker Compose
-5. Verify installation:
-
-```cmd
-docker --version
-docker compose version
-```
-
-**Reference:**
-- [Docker Installation Guide - Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-- [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/)
-
-## Local Development Setup
-### 1. Create Virtual Environment
-Create a virtual environment in the `venv` folder:
-```
 python3 -m venv venv
-```
-Activate the virtual environment:
-```
 source venv/bin/activate
 ```
-### 2. Environment Configuration
-Create a `.env` file in the root of the project with the following content:
+
+**Windows (PowerShell):**
+
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
 ```
+
+### 3. Configure environment variables
+
+1. Copy the example file:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+2. Edit `.env` and at minimum configure values for:
+
+        - **Qdrant / vector store**
+            - `QDRANT_URL`
+            - `QDRANT_API_KEY` (can be empty for local/self‑hosted Qdrant without auth)
+        - **LLM endpoints**
+            - `MAIN_MODEL_URL`
+            - `MAIN_MODEL_API_KEY`
+        - **Embeddings**
+            - `EMBEDDING_URL` (has a sensible default)
+            - `EMBEDDING_API_KEY`
+        - **MongoDB**
+            - `MONGO_HOST` (usually `localhost`)
+            - `MONGO_PORT` (usually `27017`)
+            - `MONGO_DATABASE` (for example `eve-backend`)
+        - **Auth**
+            - `JWT_SECRET_KEY`
+
+Other variables in the table in the **Environment variable reference** section below are **optional** for basic local development and can be configured later as you enable more features (SMTP, Satcom, external rerankers, etc.).
+
+### 4. Install dependencies
+
+With the virtual environment activated:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 5. Run MongoDB (local)
+
+Make sure MongoDB is running:
+
+- **macOS (Homebrew):** `brew services start mongodb-community@7.0`
+- **Ubuntu:** `sudo systemctl start mongod`
+- **Windows:** MongoDB service usually starts automatically after installation
+
+### 6. Start the backend
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+The API and interactive docs should now be available at:
+
+- `http://localhost:8000/docs`
+
+---
+
+### 7. Environment variable reference
+
+Below is a more complete example of `.env` and a description of the most important variables. This applies to both local development and Docker-based setups.
+
+```env
+PORT=8000 # for docker
+WORDER=2 # for docker
 # QDRANT Configuration
 QDRANT_URL=
 QDRANT_API_KEY=
@@ -192,13 +159,15 @@ SATCOM_RUNPOD_API_KEY=
 SATCOM_QDRANT_URL=
 SATCOM_QDRANT_API_KEY=
 
-REDIS_URL=
+REDIS_URL=redis://127.0.0.1:6379/0
 
 IS_PROD=false
 ```
 
 | Variable | Required | Description / Default |
 | --- | --- | --- |
+| `PORT` | Yes (for docker) | Backend PORT (default: `8000`) |
+| `WORKDER` | Yes (for docker) | Backend uvicon worker counts `2` |
 | `QDRANT_URL` | Yes | Base URL for the primary Qdrant instance. |
 | `QDRANT_API_KEY` | Yes | API key for the primary Qdrant instance. |
 | `SATCOM_QDRANT_URL` | No | Base URL for the Satcom-specific Qdrant instance that is used when SatcomLLM is selected on staging. |
@@ -214,9 +183,9 @@ IS_PROD=false
 | `EMBEDDING_API_KEY` | Yes | Main Embedding Model provider API token |
 | `EMBEDDING_FALLBACK_URL` | Yes | Fallback Embedding Model provider url, OpenAI capatible (e.g., https://api.siliconflow.com/v1) |
 | `EMBEDDING_FALLBACK_API_KEY` | Yes | Fallback Embedding Model provider API token |
-| `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for reranking retrieved documents. |
-| `INFERENCE_API_KEY` | Yes | Inference API key for embedding queries, used as a fallback. |
-| `SILICONFLOW_API_TOKEN` | Yes | SiliconFlow API token for reranking, used as a fallback. |
+| `DEEPINFRA_API_TOKEN` | No | DeepInfra API token for reranking retrieved documents (recommended for best retrieval quality, but backend still works without it). |
+| `INFERENCE_API_KEY` | No | Inference API key for embedding queries, used as a fallback only. |
+| `SILICONFLOW_API_TOKEN` | No | SiliconFlow API token for reranking, used as a fallback only. |
 | `SATCOM_RUNPOD_API_KEY` | No | Runpod key dedicated to Satcom workloads. |
 | `MONGO_HOST` | Yes | MongoDB host (default `localhost` or `mongo` in docker). |
 | `MONGO_PORT` | Yes | MongoDB port (default `27017`). |
@@ -239,10 +208,12 @@ IS_PROD=false
 | `SATCOM_SMALL_MODEL_NAME` | No | Model name for Satcom small LLM. |
 | `SATCOM_LARGE_MODEL_NAME` | No | Model name for Satcom large LLM. |
 | `SATCOM_RUNPOD_API_KEY` | No | API key for Satcom Runpod workloads. |
-| `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations. |
+| `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
 | `IS_PROD` | No | Set to `true` to enable production mode toggles. |
 
-### 2.1. Obtaining API Keys and Tokens
+---
+
+### 8. Obtaining API keys and tokens
 
 #### Qdrant URL and API Key
 
@@ -266,17 +237,20 @@ IS_PROD=false
 Generate a secure random string for JWT token signing. You can use one of these methods:
 
 **Using Python:**
+
 ```python
 import secrets
 print(secrets.token_urlsafe(32))
 ```
 
 **Using OpenSSL (Linux/Mac):**
+
 ```bash
 openssl rand -base64 32
 ```
 
 **Using PowerShell (Windows):**
+
 ```powershell
 [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
 ```
@@ -313,23 +287,29 @@ openssl rand -base64 32
 The system uses two LLM models: **MAIN** (primary) and **FALLBACK** (backup). Both must be configured with OpenAI-compatible API endpoints.
 
 **For RunPod endpoints:**
-```
+
+```env
 MAIN_MODEL_URL=https://api.runpod.ai/v2/{endpoint_id}/openai/v1
 ```
+
 Replace `{endpoint_id}` with your RunPod endpoint ID (e.g., `2f9o93xc90871m`).
 
 **For localhost/self-hosted models:**
-```
+
+```env
 MAIN_MODEL_URL=http://localhost:8000/v1
 ```
+
 Use the base URL of your OpenAI-compatible API endpoint.
 
 **For Mistral (fallback):**
-```
+
+```env
 FALLBACK_MODEL_URL=https://api.mistral.ai/v1
 ```
 
 **For other OpenAI-compatible services:**
+
 Simply use the base URL of the service's OpenAI-compatible endpoint.
 
 **Note:** Both URLs must be in OpenAI-compatible format. The model names can be optionally overridden using `MAIN_MODEL_NAME` and `FALLBACK_MODEL_NAME` environment variables, otherwise they default to values in `config.yaml`.
@@ -376,6 +356,7 @@ The `INFERENCE_API_KEY` is used for embedding queries with the Qwen 3.4B embeddi
 4. Use it as `REDIS_URL`
 
 **Local Redis:**
+
 - If running Redis locally: `redis://localhost:6379`
 - If Redis has a password: `redis://:password@localhost:6379`
 
@@ -390,23 +371,94 @@ The `INFERENCE_API_KEY` is used for embedding queries with the Qwen 3.4B embeddi
 
 **Reference:** [ScrapingDog Documentation](https://docs.scrapingdog.com/)
 
-### 3. Installation
-```
-pip install -r requirements.txt
-```
+---
 
-### 4. Start the Server
+### 9. Detailed installation commands for prerequisites (optional)
+
+If you prefer copy‑pasteable installation commands, the following sections provide example steps for Python and MongoDB on common platforms. For Docker and Docker Compose, see [Docker setup](docker_setup.md). Always cross‑check with the official documentation for the latest instructions.
+
+#### Python 3.12+
+
+**Ubuntu:**
 
 ```bash
-chmod +x start.sh
-./start.sh
+# Update package list
+sudo apt update
+
+# Install Python 3.12 and pip
+sudo apt install python3.12 python3.12-venv python3-pip
+
+# Verify installation
+python3.12 --version
 ```
 
-The server will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+**macOS (Homebrew):**
 
-### 5. Build and run the Containers
-To run this backend using Docker, fix `MONGO_HOST=localhost` to `MONGO_HOST=mongo` in `.env`.
+1. Install Homebrew if you don't have it yet (see [brew.sh](https://brew.sh)).
+2. Install Python:
+
 ```bash
-docker compose build
-docker compose up -d
+brew install python@3.12
 ```
+
+3. Verify installation:
+
+```bash
+python3 --version
+```
+
+**Windows:**
+
+1. Download Python 3.12+ from the [official Python website](https://www.python.org/downloads/)
+2. Run the installer and check "Add Python to PATH"
+3. Verify installation:
+
+```cmd
+python --version
+```
+
+**Reference:** [Python Installation Guide](https://www.python.org/downloads/)
+
+#### MongoDB
+
+**Ubuntu:**
+
+```bash
+# Import MongoDB public GPG key
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+
+# Add MongoDB repository
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+# Update package list and install MongoDB
+sudo apt update
+sudo apt install -y mongodb-org
+
+# Start MongoDB service
+sudo systemctl start mongod
+sudo systemctl enable mongod
+```
+
+**macOS (Homebrew):**
+
+```bash
+# Tap the official MongoDB Homebrew repo
+brew tap mongodb/brew
+
+# Install MongoDB Community Edition
+brew install mongodb-community@7.0
+
+# Start MongoDB as a background service
+brew services start mongodb-community@7.0
+```
+
+**Windows:**
+
+1. Download MongoDB Community Server from the [official MongoDB website](https://www.mongodb.com/try/download/community)
+2. Run the installer and follow the setup wizard
+3. MongoDB will be installed as a Windows service and start automatically
+
+**Reference:** 
+- [MongoDB Installation Guide - Ubuntu](https://www.mongodb.com/docs/manual/installation/)
+- [MongoDB Installation Guide - macOS](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-os-x/)
+- [MongoDB Installation Guide - Windows](https://www.mongodb.com/docs/manual/tutorial/install-mongodb-on-windows/)

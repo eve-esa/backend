@@ -21,6 +21,7 @@ from src.database.models.message import Message
 from src.database.models.collection import Collection as CollectionModel
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 import logging
@@ -146,6 +147,10 @@ class HallucinationDetectResponse(BaseModel):
     final_answer: Optional[str] = None
     latencies: Optional[Dict[str, Optional[float]]] = None
 
+class GenerateLLMRequest(BaseModel):
+    """Request body for LLM-only generation (EVE-Instruct v5, no RAG, no conversation)."""
+
+    query: str = Field(..., description="User prompt to send to the LLM")
 
 @router.get("/conversations/messages/average-latencies")
 async def get_average_latencies(
@@ -1335,12 +1340,59 @@ async def stream_hallucination(
     response.headers["X-Accel-Buffering"] = "no"
     return response
 
-# This endpoint is for testing purposes only
+@router.post("/generate-llm")
+async def generate_llm(
+    request: GenerateLLMRequest,
+) -> dict:
+    """
+    Call EVE-Instruct (v5) with a single query. No RAG, no conversation context.
+
+    Body: query. Returns the model reply only.
+    """
+    try:
+        llm_manager = get_shared_llm_manager()
+        llm = llm_manager.get_client_for_model("eve_v05")
+        messages = [HumanMessage(content=request.query)]
+        response = await llm.ainvoke(messages)
+        content = getattr(response, "content", str(response))
+        return {"answer": content}
+    except Exception as e:
+        logger.exception("generate_llm failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/generate")
 async def generate(
     request: GenerationRequest,
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
+    """
+    Run a one-off generation (testing only) and return the full answer and metadata.
+
+    Normalizes and validates requested public collections against allowed lists,
+    ensures the user does not reference other users' collections, merges the user's
+    collections and public collections (excluding "Wiley AI Gateway"), extracts year
+    range from filters, then runs the full generation pipeline via generate_answer
+    and returns the answer, documents, RAG flag, latencies, prompts, and retrieved docs.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections,
+            and model settings.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Dictionary containing:
+            - answer: Generated answer text.
+            - documents: Extracted document data from retrieval results.
+            - use_rag: Whether RAG was used for this generation.
+            - latencies: Timing information for pipeline steps.
+            - prompts: Prompt data from generation.
+            - retrieved_docs: Raw retrieved documents from RAG.
+
+    Raises:
+        HTTPException: 403 if the request references collections owned by other users.
+        HTTPException: 500 for server errors during generation.
+    """
     message = None
     try:
         # Normalize and validate requested public collections against allowed lists
@@ -1420,7 +1472,7 @@ async def generate(
 @router.post("/retrieve")
 async def retrieve(
     request: GenerationRequest,
-    requesting_user: User = Depends(get_current_user),
+    # requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
     Run the entire retrieval pipeline and return all documents.
@@ -1456,30 +1508,30 @@ async def retrieve(
         ]
         request.public_collections = public_collections
 
-        other_users_collections = await CollectionModel.find_all(
-            filter_dict={
-                "id": {"$in": request.public_collections},
-                "user_id": {"$ne": requesting_user.id},
-            }
-        )
+        # other_users_collections = await CollectionModel.find_all(
+        #     filter_dict={
+        #         "id": {"$in": request.public_collections},
+        #         "user_id": {"$ne": requesting_user.id},
+        #     }
+        # )
 
-        if len(other_users_collections) > 0:
-            raise HTTPException(
-                status_code=403,
-                detail="You are not allowed to use collections from other users",
-            )
+        # if len(other_users_collections) > 0:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="You are not allowed to use collections from other users",
+        #     )
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
+        # user_collections = await CollectionModel.find_all(
+        #     filter_dict={"user_id": requesting_user.id}
+        # )
 
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
+        # request.private_collections_map = {c.id: c.name for c in user_collections}
+        # if len(user_collections) > 0:
+        #     request.collection_ids = request.collection_ids + [
+        #         c.id for c in user_collections
+        #     ]
         request.collection_ids = [
             c for c in request.collection_ids if c != "Wiley AI Gateway"
         ]

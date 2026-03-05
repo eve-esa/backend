@@ -2,7 +2,12 @@
 
 A FastAPI-based backend service for chat with Retrieval-Augmented Generation (RAG). It provides authentication, collections and document ingestion, conversation/message management, streaming responses, and a hallucination detection pipeline.
 
-For setup, Docker usage, local development, and deployment details, refer to [README.md](https://github.com/eve-esa/backend/blob/main/README.md).
+For setup and running the backend, see:
+
+- [Local development & configuration](https://eve-esa.github.io/eve-guide/backend/docs/local_setup/) — prerequisites, environment variables, and running the backend directly on your machine
+- [Docker setup](https://eve-esa.github.io/eve-guide/backend/docs/docker_setup/) — run the backend with Docker Compose
+
+For additional deployment details, you can also refer to [README.md](https://github.com/eve-esa/backend/blob/main/README.md).
 
 ### Architecture
 
