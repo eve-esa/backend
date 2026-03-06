@@ -15,7 +15,6 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY").strip()
 SATCOM_QDRANT_URL = os.getenv("SATCOM_QDRANT_URL").strip()
 SATCOM_QDRANT_API_KEY = os.getenv("SATCOM_QDRANT_API_KEY").strip()
 DEEPINFRA_API_TOKEN = os.getenv("DEEPINFRA_API_TOKEN", "").strip()
-INFERENCE_API_KEY = os.getenv("INFERENCE_API_KEY", "").strip()
 SILICONFLOW_API_TOKEN = os.getenv("SILICONFLOW_API_TOKEN", "").strip()
 SATCOM_RUNPOD_API_KEY = os.getenv("SATCOM_RUNPOD_API_KEY", "").strip()
 
