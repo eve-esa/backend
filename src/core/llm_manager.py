@@ -49,7 +49,6 @@ class LLMType(Enum):
     Fallback = "fallback"
     Satcom_Small = "satcom_small"
     Satcom_Large = "satcom_large"
-    Eve_V05 = "eve_v05"
     # Legacy aliases for backward compatibility
     Runpod = "main"
     Mistral = "fallback"
@@ -244,9 +243,6 @@ class LLMManager:
             elif llm_type == LLMType.Satcom_Large.value:
                 self._selected_llm_type = LLMType.Satcom_Large.value
                 return self._get_satcom_large_llm()
-            elif llm_type == LLMType.Eve_V05.value:
-                self._selected_llm_type = LLMType.Eve_V05.value
-                return self._get_eve_v05_llm()
             else:
                 if llm_type is None and IS_PROD:
                     self._selected_llm_type = LLMType.Fallback.value
