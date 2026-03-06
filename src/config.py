@@ -15,7 +15,6 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY").strip()
 SATCOM_QDRANT_URL = os.getenv("SATCOM_QDRANT_URL").strip()
 SATCOM_QDRANT_API_KEY = os.getenv("SATCOM_QDRANT_API_KEY").strip()
 DEEPINFRA_API_TOKEN = os.getenv("DEEPINFRA_API_TOKEN", "").strip()
-INFERENCE_API_KEY = os.getenv("INFERENCE_API_KEY", "").strip()
 SILICONFLOW_API_TOKEN = os.getenv("SILICONFLOW_API_TOKEN", "").strip()
 SATCOM_RUNPOD_API_KEY = os.getenv("SATCOM_RUNPOD_API_KEY", "").strip()
 
@@ -41,9 +40,6 @@ SATCOM_SMALL_MODEL_NAME = os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom
 SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b").strip()
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
 SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
-
-EVE_V05_MODEL_NAME = os.getenv("EVE_V05_MODEL_NAME", "eve-esa/eve_v0.5").strip()
-EVE_V05_BASE_URL = os.getenv("EVE_V05_BASE_URL", "").strip()
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))

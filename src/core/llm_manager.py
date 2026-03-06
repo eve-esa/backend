@@ -24,8 +24,6 @@ from src.config import (
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_BASE_URL,
     SATCOM_LARGE_BASE_URL,
-    EVE_V05_BASE_URL,
-    EVE_V05_MODEL_NAME,
 )
 from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
@@ -120,15 +118,6 @@ class LLMManager:
             self._satcom_large_model_name = SATCOM_LARGE_MODEL_NAME
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
-
-            # Initialize EVE V0.5 client
-            if not EVE_V05_BASE_URL:
-                raise ValueError("EVE_V05_BASE_URL environment variable not configured")
-            if not EVE_V05_MODEL_NAME:
-                raise ValueError("EVE_V05_MODEL_NAME environment variable not configured")
-            self._eve_v05_base_url = EVE_V05_BASE_URL
-            self._eve_v05_model_name = EVE_V05_MODEL_NAME
-            self._eve_v05_chat_openai: ChatOpenAI | None = None
         except Exception as e:
             logger.error(f"Failed to initialize LangChain Main client: {e}")
             self._main_base_url = None
@@ -140,9 +129,6 @@ class LLMManager:
             self._satcom_large_model_name = None
             self._satcom_small_chat_openai = None
             self._satcom_large_chat_openai = None
-            self._eve_v05_base_url = None
-            self._eve_v05_model_name = None
-            self._eve_v05_chat_openai = None
 
         # Configure Fallback client lazily
         try:
@@ -231,23 +217,6 @@ class LLMManager:
                 max_retries=0,
             )
         return self._satcom_large_chat_openai
-
-    def _get_eve_v05_llm(self) -> ChatOpenAI:
-        """Return a configured ChatOpenAI client for EVE V0.5."""
-        if self._eve_v05_chat_openai is None:
-            if not self._eve_v05_base_url:
-                raise RuntimeError("EVE V0.5 base URL is not configured")
-            if not MAIN_MODEL_API_KEY:
-                raise RuntimeError("MAIN_MODEL_API_KEY is not set")
-            self._eve_v05_chat_openai = ChatOpenAI(
-                api_key=MAIN_MODEL_API_KEY,
-                base_url=self._eve_v05_base_url,
-                model=self._eve_v05_model_name,
-                temperature=0.3,
-                timeout=MODEL_TIMEOUT,
-                max_retries=0,
-            )
-        return self._eve_v05_chat_openai
 
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.

@@ -145,7 +145,6 @@ EMAIL_FROM_NAME=EVE
 CORS_ALLOWED_ORIGINS=http://localhost:5173
 
 DEEPINFRA_API_TOKEN=
-INFERENCE_API_KEY=
 SILICONFLOW_API_TOKEN=
 
 SCRAPING_DOG_API_KEY=
@@ -183,9 +182,8 @@ IS_PROD=false
 | `EMBEDDING_API_KEY` | Yes | Main Embedding Model provider API token |
 | `EMBEDDING_FALLBACK_URL` | Yes | Fallback Embedding Model provider url, OpenAI capatible (e.g., https://api.siliconflow.com/v1) |
 | `EMBEDDING_FALLBACK_API_KEY` | Yes | Fallback Embedding Model provider API token |
-| `DEEPINFRA_API_TOKEN` | No | DeepInfra API token for reranking retrieved documents (recommended for best retrieval quality, but backend still works without it). |
-| `INFERENCE_API_KEY` | No | Inference API key for embedding queries, used as a fallback only. |
-| `SILICONFLOW_API_TOKEN` | No | SiliconFlow API token for reranking, used as a fallback only. |
+| `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for embedding and reranking retrieved documents (recommended for best retrieval quality, but backend still works without it). |
+| `SILICONFLOW_API_TOKEN` | Yes | SiliconFlow API token for reranking, used as a fallback only. |
 | `SATCOM_RUNPOD_API_KEY` | No | Runpod key dedicated to Satcom workloads. |
 | `MONGO_HOST` | Yes | MongoDB host (default `localhost` or `mongo` in docker). |
 | `MONGO_PORT` | Yes | MongoDB port (default `27017`). |
@@ -213,167 +211,7 @@ IS_PROD=false
 
 ---
 
-### 8. Obtaining API keys and tokens
-
-#### Qdrant URL and API Key
-
-**Qdrant Cloud (Recommended):**
-
-1. Sign up for a free account at [Qdrant Cloud](https://cloud.qdrant.io/)
-2. Create a new cluster
-3. Copy the cluster URL (e.g., `https://xxxxx-xxxxx-xxxxx.qdrant.io`)
-4. Navigate to API Keys section and create a new API key
-5. Use the cluster URL as `QDRANT_URL` and the API key as `QDRANT_API_KEY`
-
-**Self-hosted Qdrant:**
-
-- If running Qdrant locally, use `http://localhost:6333` as `QDRANT_URL`
-- For self-hosted instances, API key may not be required (leave empty or check your Qdrant configuration)
-
-**Reference:** [Qdrant Cloud Documentation](https://qdrant.tech/documentation/cloud/)
-
-#### JWT Secret Key
-
-Generate a secure random string for JWT token signing. You can use one of these methods:
-
-**Using Python:**
-
-```python
-import secrets
-print(secrets.token_urlsafe(32))
-```
-
-**Using OpenSSL (Linux/Mac):**
-
-```bash
-openssl rand -base64 32
-```
-
-**Using PowerShell (Windows):**
-
-```powershell
-[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
-```
-
-**Online Generator:**
-
-- Use a secure random string generator like [randomkeygen.com](https://randomkeygen.com/)
-- Copy a 256-bit key and use it as `JWT_SECRET_KEY`
-
-**Important:** Keep this key secret and never commit it to version control.
-
-#### Runpod API Key
-
-1. Sign up for an account at [Runpod](https://www.runpod.io/)
-2. Navigate to your account settings
-3. Go to the API Keys section
-4. Create a new API key
-5. Copy the key and use it as `RUNPOD_API_KEY`
-
-**Reference:** [Runpod API Documentation](https://docs.runpod.io/serverless/endpoints/quick-start)
-
-#### Mistral API Key
-
-1. Sign up for an account at [Mistral AI](https://mistral.ai/)
-2. Navigate to your account dashboard
-3. Go to API Keys section
-4. Create a new API key
-5. Copy the key and use it as `MISTRAL_API_KEY`
-
-**Reference:** [Mistral AI API Documentation](https://docs.mistral.ai/)
-
-#### Main and Fallback Model URLs
-
-The system uses two LLM models: **MAIN** (primary) and **FALLBACK** (backup). Both must be configured with OpenAI-compatible API endpoints.
-
-**For RunPod endpoints:**
-
-```env
-MAIN_MODEL_URL=https://api.runpod.ai/v2/{endpoint_id}/openai/v1
-```
-
-Replace `{endpoint_id}` with your RunPod endpoint ID (e.g., `2f9o93xc90871m`).
-
-**For localhost/self-hosted models:**
-
-```env
-MAIN_MODEL_URL=http://localhost:8000/v1
-```
-
-Use the base URL of your OpenAI-compatible API endpoint.
-
-**For Mistral (fallback):**
-
-```env
-FALLBACK_MODEL_URL=https://api.mistral.ai/v1
-```
-
-**For other OpenAI-compatible services:**
-
-Simply use the base URL of the service's OpenAI-compatible endpoint.
-
-**Note:** Both URLs must be in OpenAI-compatible format. The model names can be optionally overridden using `MAIN_MODEL_NAME` and `FALLBACK_MODEL_NAME` environment variables, otherwise they default to values in `config.yaml`.
-
-#### DeepInfra API Token
-
-1. Sign up for an account at [DeepInfra](https://deepinfra.com/)
-2. Navigate to your dashboard
-3. Go to API Keys section
-4. Create a new API token
-5. Copy the token and use it as `DEEPINFRA_API_TOKEN`
-
-**Reference:** [DeepInfra API Documentation](https://deepinfra.com/docs)
-
-#### Inference API Key
-
-The `INFERENCE_API_KEY` is used for embedding queries with the Qwen 3.4B embedding model via Inference.net.
-
-1. Sign up for an account at [Inference.net](https://inference.net/register) (you can use GitHub, Google, or email)
-2. After registration, you'll be redirected to your dashboard
-3. Navigate to the API Keys section
-4. Click on "Create API Key" to generate a new key
-5. Copy the generated API key and use it as `INFERENCE_API_KEY`
-
-**Reference:** [Inference.net Documentation](https://docs.inference.net/quickstart)
-
-#### SiliconFlow API Token
-
-1. Sign up for an account at [SiliconFlow](https://siliconflow.cn/)
-2. Navigate to your account settings
-3. Go to API Keys section
-4. Create a new API token
-5. Copy the token and use it as `SILICONFLOW_API_TOKEN`
-
-**Reference:** [SiliconFlow Documentation](https://siliconflow.cn/docs)
-
-#### Redis URL
-
-**Redis Cloud (Recommended):**
-
-1. Sign up for a free account at [Redis Cloud](https://redis.com/try-free/)
-2. Create a new database
-3. Copy the connection URL (format: `redis://:password@host:port`)
-4. Use it as `REDIS_URL`
-
-**Local Redis:**
-
-- If running Redis locally: `redis://localhost:6379`
-- If Redis has a password: `redis://:password@localhost:6379`
-
-**Reference:** [Redis Cloud Documentation](https://redis.io/docs/cloud/)
-
-#### ScrapingDog API Key (Optional)
-
-1. Sign up for an account at [ScrapingDog](https://www.scrapingdog.com/)
-2. Navigate to your dashboard
-3. Copy your API key
-4. Use it as `SCRAPING_DOG_API_KEY`
-
-**Reference:** [ScrapingDog Documentation](https://docs.scrapingdog.com/)
-
----
-
-### 9. Detailed installation commands for prerequisites (optional)
+### 8. Detailed installation commands for prerequisites (optional)
 
 If you prefer copy‑pasteable installation commands, the following sections provide example steps for Python and MongoDB on common platforms. For Docker and Docker Compose, see [Docker setup](docker_setup.md). Always cross‑check with the official documentation for the latest instructions.
 
