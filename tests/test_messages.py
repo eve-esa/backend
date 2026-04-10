@@ -39,7 +39,7 @@ async def test_message_flow(async_client, monkeypatch):
                 "must": [],
                 "must_not": None
             },
-            "llm_type": LLMType.Ship.value,
+            "llm_type": LLMType.Main.value,
             "public_collections": [ ]
         }
         msg_resp = await async_client.post(
@@ -241,3 +241,13 @@ async def test_update_feedback_not_owner(async_client, monkeypatch):
         )
     finally:
         await cleanup_models([owner, intruder])
+
+
+
+@pytest.mark.asyncio
+async def test_generate_llm_requires_auth(async_client):
+    resp = await async_client.post(
+        "/generate-llm",
+        json={"query": "hello"},
+    )
+    assert resp.status_code == 403
