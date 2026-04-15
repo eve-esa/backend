@@ -8,13 +8,14 @@ from src.constants import (
     WILEY_PUBLIC_COLLECTIONS,
 )
 from src.schemas.message import MessageUpdate, CreateMessageResponse
+from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
-    GenerationRequest,
     generate_answer,
+    get_shared_llm_manager,
     maybe_rollup_and_trim_history,
+    run_generation_to_bus,
     setup_rag_and_context,
     should_use_rag,
-    get_shared_llm_manager,
 )
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
@@ -40,9 +41,13 @@ from pydantic import BaseModel
 from src.services.hallucination_detector import HallucinationDetector
 import asyncio
 import json
-from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
 from src.services.cancel_manager import get_cancel_manager
+from src.services.token_rate_limiter import (
+    consume_tokens_for_user,
+    count_tokens_for_texts,
+    enforce_token_budget_or_raise,
+)
 from src.utils.error_logger import (
     Component,
     PipelineStage,
@@ -366,6 +371,8 @@ async def create_message(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
+        original_query = request.query
 
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
@@ -454,6 +461,9 @@ async def create_message(
         )
         message.metadata = existing_metadata
         await message.save()
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(original_query, answer)
+        )
 
         # Schedule rollup as background task to avoid blocking response
         background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -541,6 +551,7 @@ async def retry(
                 status_code=400,
                 detail="This message cannot be retried",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         answer, results, is_rag, latencies, prompts, retrieved_docs = (
             await generate_answer(
@@ -565,6 +576,9 @@ async def retry(
         )
         message.metadata = existing_metadata
         await message.save()
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(message.input, answer)
+        )
 
         # Schedule rollup as background task to avoid blocking response
         background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -710,6 +724,7 @@ async def create_message_stream(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
@@ -788,6 +803,7 @@ async def create_message_stream(
                 message_id=message.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
+                user_id=requesting_user.id,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
@@ -1351,12 +1367,18 @@ async def generate_llm(
     Body: query. Returns the model reply only.
     """
     try:
+        await enforce_token_budget_or_raise(requesting_user)
         llm_manager = get_shared_llm_manager()
         llm = llm_manager.get_client_for_model("eve_v05")
         messages = [HumanMessage(content=request.query)]
         response = await llm.ainvoke(messages)
         content = getattr(response, "content", str(response))
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(request.query, content)
+        )
         return {"answer": content}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("generate_llm failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1396,6 +1418,8 @@ async def generate(
     """
     message = None
     try:
+        await enforce_token_budget_or_raise(requesting_user)
+        original_query = request.query
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
         try:
@@ -1453,6 +1477,9 @@ async def generate(
         answer, results, is_rag, latencies, prompts, retrieved_docs = (
             await generate_answer(request)
         )
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(original_query, answer)
+        )
 
         documents_data = []
         if results:
@@ -1466,6 +1493,8 @@ async def generate(
             "prompts": prompts,
             "retrieved_docs": retrieved_docs,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 

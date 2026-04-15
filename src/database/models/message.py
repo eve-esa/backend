@@ -1,6 +1,6 @@
 from typing import Any, ClassVar, Dict
 from pydantic import Field
-from src.services.generate_answer import GenerationRequest
+from src.schemas.generation_request import GenerationRequest
 from src.database.mongo_model import MongoModel
 from typing import Optional
 import logging

@@ -1,4 +1,6 @@
 import pytest
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from tests.utils.utils import create_test_user_and_token
 from tests.utils.cleaner import cleanup_models
@@ -251,3 +253,73 @@ async def test_generate_llm_requires_auth(async_client):
         json={"query": "hello"},
     )
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_generate_llm_rate_limited(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        user.rate_limit_tokens_used = 1000
+        user.rate_limit_period_start = datetime.now(timezone.utc) - timedelta(days=1)
+        user.rate_limit_period_end = datetime.now(timezone.utc) + timedelta(days=1)
+        await user.save()
+
+        resp = await async_client.post(
+            "/generate-llm",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 429
+        assert "Token budget exceeded" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_generate_llm_consumes_tokens(async_client, monkeypatch):
+    class _FakeLLM:
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="mocked answer")
+
+    class _FakeLLMManager:
+        def get_client_for_model(self, _model):
+            return _FakeLLM()
+
+    monkeypatch.setattr(
+        "src.routers.message.get_shared_llm_manager", lambda: _FakeLLMManager()
+    )
+
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await async_client.post(
+            "/generate-llm",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+
+        refreshed = await type(user).find_by_id(user.id)
+        assert refreshed is not None
+        assert refreshed.rate_limit_tokens_used > 0
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_generate_rate_limited(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        user.rate_limit_tokens_used = 1000
+        user.rate_limit_period_start = datetime.now(timezone.utc) - timedelta(days=1)
+        user.rate_limit_period_end = datetime.now(timezone.utc) + timedelta(days=1)
+        await user.save()
+
+        resp = await async_client.post(
+            "/generate",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 429
+        assert "Token budget exceeded" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
