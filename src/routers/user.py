@@ -1,8 +1,9 @@
 import logging
-from src.schemas.user import UpdateUserRequest
+from src.schemas.user import UpdateUserRequest, TokenUsageResponse
 from src.database.models.user import User
 from fastapi import APIRouter, Depends
 from src.middlewares.auth import get_current_user
+from src.services.token_rate_limiter import get_token_usage_summary
 
 router = APIRouter(prefix="/users")
 logger = logging.getLogger(__name__)
@@ -20,6 +21,12 @@ async def me(user: User = Depends(get_current_user)) -> User:
         Current user.
     """
     return user
+
+
+@router.get("/me/token-usage", response_model=TokenUsageResponse)
+async def get_my_token_usage(user: User = Depends(get_current_user)) -> TokenUsageResponse:
+    """Current user's token budget for the active rate-limit window (see ``TokenUsageResponse``)."""
+    return TokenUsageResponse.model_validate(await get_token_usage_summary(user))
 
 
 @router.patch("", response_model=User)

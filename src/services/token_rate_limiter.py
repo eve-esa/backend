@@ -100,6 +100,35 @@ async def _ensure_active_window(user: User, policy: Dict[str, Any]) -> None:
         await user.save()
 
 
+def _policy_cap_tokens(policy: Dict[str, Any]) -> int:
+    """Non-negative configured cap from a group policy dict (0 means no numeric cap)."""
+    return max(int(policy.get("max_tokens", 0) or 0), 0)
+
+
+def _token_usage_dict(
+    *,
+    unlimited: bool,
+    rate_limit_group: str,
+    used_tokens: int,
+    max_tokens: Optional[int],
+    remaining_tokens: Optional[int],
+    used_ratio: Optional[float],
+    remaining_ratio: Optional[float],
+    user: User,
+) -> Dict[str, Any]:
+    return {
+        "unlimited": unlimited,
+        "rate_limit_group": rate_limit_group,
+        "used_tokens": used_tokens,
+        "max_tokens": max_tokens,
+        "remaining_tokens": remaining_tokens,
+        "used_ratio": used_ratio,
+        "remaining_ratio": remaining_ratio,
+        "period_start": _to_utc_datetime(user.rate_limit_period_start),
+        "period_end": _to_utc_datetime(user.rate_limit_period_end),
+    }
+
+
 def count_tokens_for_texts(*texts: str) -> int:
     return sum(str_token_counter(text or "") for text in texts if text is not None)
 
@@ -110,7 +139,7 @@ async def enforce_token_budget_or_raise(user: User) -> None:
         return
 
     await _ensure_active_window(user, policy)
-    max_tokens = max(int(policy.get("max_tokens", 0) or 0), 0)
+    max_tokens = _policy_cap_tokens(policy)
     used = int(user.rate_limit_tokens_used or 0)
 
     if max_tokens <= 0:
@@ -143,3 +172,51 @@ async def consume_tokens_for_user(user: User, token_count: int) -> None:
     await _ensure_active_window(user, policy)
     user.rate_limit_tokens_used = int(user.rate_limit_tokens_used or 0) + int(token_count)
     await user.save()
+
+
+async def get_token_usage_summary(user: User) -> Dict[str, Any]:
+    """Token budget snapshot; same policy resolution as enforce/consume (see ``_resolve_policy_for_user``)."""
+    group, policy = _resolve_policy_for_user(user)
+
+    if not policy or group is None:
+        return _token_usage_dict(
+            unlimited=True,
+            rate_limit_group=str(user.rate_limit_group.value),
+            used_tokens=int(user.rate_limit_tokens_used or 0),
+            max_tokens=None,
+            remaining_tokens=None,
+            used_ratio=None,
+            remaining_ratio=None,
+            user=user,
+        )
+
+    await _ensure_active_window(user, policy)
+    cap = _policy_cap_tokens(policy)
+    used = int(user.rate_limit_tokens_used or 0)
+
+    if cap <= 0:
+        return _token_usage_dict(
+            unlimited=True,
+            rate_limit_group=str(group.value),
+            used_tokens=used,
+            max_tokens=None,
+            remaining_tokens=None,
+            used_ratio=None,
+            remaining_ratio=None,
+            user=user,
+        )
+
+    remaining = max(cap - used, 0)
+    used_ratio = min(max(used / cap, 0.0), 1.0)
+    remaining_ratio = min(max(remaining / cap, 0.0), 1.0)
+
+    return _token_usage_dict(
+        unlimited=False,
+        rate_limit_group=str(group.value),
+        used_tokens=used,
+        max_tokens=cap,
+        remaining_tokens=remaining,
+        used_ratio=float(used_ratio),
+        remaining_ratio=float(remaining_ratio),
+        user=user,
+    )
