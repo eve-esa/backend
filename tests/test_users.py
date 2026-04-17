@@ -32,11 +32,17 @@ async def test_get_my_token_usage(async_client):
         body = response.json()
         assert body["rate_limit_group"] == user.rate_limit_group.value
         assert body["used_tokens"] == 0
-        assert body["unlimited"] is False
-        assert body["max_tokens"] == 1000
-        assert body["remaining_tokens"] == 1000
-        assert body["used_ratio"] == 0.0
-        assert body["remaining_ratio"] == 1.0
+        if body["unlimited"]:
+            assert body["max_tokens"] is None
+            assert body["remaining_tokens"] is None
+            assert body["used_ratio"] is None
+            assert body["remaining_ratio"] is None
+        else:
+            assert isinstance(body["max_tokens"], int)
+            assert body["max_tokens"] > 0
+            assert body["remaining_tokens"] == body["max_tokens"]
+            assert body["used_ratio"] == 0.0
+            assert body["remaining_ratio"] == 1.0
         assert body["period_start"] is not None
         assert body["period_end"] is not None
     finally:

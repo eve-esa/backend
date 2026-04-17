@@ -13,20 +13,3 @@ token_rate_limit:
     pro: "eve_standard"
     pro+: "eve_advanced"
     ultra: "eve_enterprise"
-  groups:
-    eve_free:
-      label: "Free"
-      max_tokens: 1000
-      period_months: 1
-    eve_standard:
-      label: "Pro"
-      max_tokens: 10000
-      period_months: 1
-    eve_advanced:
-      label: "Pro+"
-      max_tokens: 50000
-      period_months: 1
-    eve_enterprise:
-      label: "Ultra"
-      max_tokens: 200000
-      period_months: 1
