@@ -1,6 +1,15 @@
-# EVE APIs
+# Backend
 
-A FastAPI-based backend service for document management and AI-powered operations.
+A FastAPI based backend service for EVE. It is part of the Earth Virtual Expert (EVE) initiative — an open-science program funded by the European Space Agency’s Φ-lab and developed by Pi School, in collaboration with Imperative Space and Mistral AI.
+
+## Earth Virtual Expert (EVE)
+
+**Earth Virtual Expert (EVE)** aims to advance the use of Large Language Models (LLMs) within the Earth Observation (EO) and Earth Science (ES) community.
+
+- Website: https://eve.philab.esa.int/  
+- HuggingFace: https://huggingface.co/eve-esa
+- Other repositories: https://github.com/eve-esa
+
 
 ## Docker Setup
 
@@ -81,3 +90,31 @@ The server will be available at [http://localhost:8000/docs](http://localhost:80
 - Branches: `staging` (pre-production), `main` (production).
 - Staging: open a PR to `staging` and merge. This deploys to the staging environment.
 - Production: after verifying on staging, open a PR from `staging` to `main` and merge. This deploys to production.
+
+## Funding
+
+This project is supported by the European Space Agency (ESA) Φ-lab through the Large Language Model for Earth Observation and Earth Science project, as part of the Foresight Element within FutureEO Block 4 programme.
+
+## Citation 
+
+If you use this project in academic or research settings, please cite:
+```
+@misc{atrio2026evedomainspecificllmframework,
+      title={{EVE}: A Domain-Specific {LLM} Framework for Earth Intelligence}, 
+      author={Àlex R. Atrio and Antonio Lopez and Jino Rohit and Yassine El Ouahidi and Marcello Politi and Vijayasri Iyer and Umar Jamil and Sébastien Bratières and Nicolas Longépé},
+      year={2026},
+      eprint={2604.13071},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2604.13071}, 
+}
+```
+
+## License
+
+This project is released under the Apache 2.0 License - see the [LICENSE](LICENSE) file for more details.
+
+## Contributing
+
+We welcome contributions!
+Please open an issue or submit a pull request on GitHub to help improve the pipeline.
