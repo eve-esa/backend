@@ -98,6 +98,17 @@ This project is supported by the European Space Agency (ESA) Φ-lab through the 
 ## Citation 
 
 If you use this project in academic or research settings, please cite:
+```
+@misc{atrio2026evedomainspecificllmframework,
+      title={{EVE}: A Domain-Specific {LLM} Framework for Earth Intelligence}, 
+      author={Àlex R. Atrio and Antonio Lopez and Jino Rohit and Yassine El Ouahidi and Marcello Politi and Vijayasri Iyer and Umar Jamil and Sébastien Bratières and Nicolas Longépé},
+      year={2026},
+      eprint={2604.13071},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2604.13071}, 
+}
+```
 
 ## License
 
