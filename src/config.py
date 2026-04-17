@@ -1,11 +1,11 @@
 # src/config.py
 import yaml
 import os
+import json
 from dotenv import load_dotenv
-import runpod
 import logging
 import sys
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 load_dotenv(override=True)
 
@@ -103,7 +103,105 @@ def configure_logging(level=logging.INFO):
 class Config:
     def __init__(self, config_path: str = "config.yaml"):
         with open(config_path, "r") as file:
-            self.config = yaml.safe_load(file)
+            loaded = yaml.safe_load(file) or {}
+            self.config = loaded if isinstance(loaded, dict) else {}
+        self._apply_token_rate_limit_env_overrides()
+
+    @staticmethod
+    def _parse_bool_env(env_name: str) -> Optional[bool]:
+        raw = os.getenv(env_name)
+        if raw is None:
+            return None
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        logging.warning("Ignoring invalid boolean value for %s.", env_name)
+        return None
+
+    @staticmethod
+    def _parse_int_env(env_name: str) -> Optional[int]:
+        raw = os.getenv(env_name)
+        if raw is None or not raw.strip():
+            return None
+        try:
+            return int(raw.strip())
+        except ValueError:
+            logging.warning("Ignoring invalid integer value for %s.", env_name)
+            return None
+
+    @staticmethod
+    def _parse_json_object_env(env_name: str) -> Optional[Dict[str, Any]]:
+        raw = os.getenv(env_name)
+        if raw is None or not raw.strip():
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logging.warning("Ignoring invalid JSON value for %s.", env_name)
+            return None
+        if not isinstance(parsed, dict):
+            logging.warning("Ignoring non-object JSON value for %s.", env_name)
+            return None
+        return parsed
+
+    @staticmethod
+    def _merge_flat_group_env(
+        groups: Dict[str, Any], env_prefix: str, group_key: str, default_label: str
+    ) -> None:
+        max_tokens = Config._parse_int_env(f"{env_prefix}_TOKENS")
+        period_months = Config._parse_int_env(f"{env_prefix}_PERIOD_MONTHS")
+        if max_tokens is None and period_months is None:
+            return
+
+        existing = groups.get(group_key)
+        group = dict(existing) if isinstance(existing, dict) else {}
+        group.setdefault("label", default_label)
+        if max_tokens is not None:
+            group["max_tokens"] = max_tokens
+        if period_months is not None:
+            group["period_months"] = period_months
+        groups[group_key] = group
+
+    def _apply_token_rate_limit_env_overrides(self) -> None:
+        token_cfg = self.config.get("token_rate_limit")
+        token_cfg = dict(token_cfg) if isinstance(token_cfg, dict) else {}
+
+        enabled = self._parse_bool_env("TOKEN_RATE_LIMIT_ENABLED")
+        if enabled is not None:
+            token_cfg["enabled"] = enabled
+
+        default_group = os.getenv("TOKEN_RATE_LIMIT_DEFAULT_GROUP")
+        if default_group is not None and default_group.strip():
+            token_cfg["default_group"] = default_group.strip()
+
+        aliases = token_cfg.get("aliases")
+        aliases = dict(aliases) if isinstance(aliases, dict) else {}
+        aliases_override = self._parse_json_object_env("TOKEN_RATE_LIMIT_ALIASES")
+        if aliases_override is not None:
+            aliases = {str(key): str(value) for key, value in aliases_override.items()}
+        if aliases:
+            token_cfg["aliases"] = aliases
+
+        groups = token_cfg.get("groups")
+        groups = dict(groups) if isinstance(groups, dict) else {}
+        groups_override = self._parse_json_object_env("TOKEN_RATE_LIMIT_GROUPS")
+        if groups_override is not None:
+            groups = groups_override
+
+        self._merge_flat_group_env(groups, "FREE", "eve_free", "Free")
+        self._merge_flat_group_env(groups, "PRO", "eve_standard", "Pro")
+        self._merge_flat_group_env(groups, "PRO_PLUS", "eve_advanced", "Pro+")
+        self._merge_flat_group_env(groups, "ULTRA", "eve_enterprise", "Ultra")
+
+        if groups:
+            token_cfg["groups"] = groups
+        else:
+            token_cfg.pop("groups", None)
+
+        if token_cfg:
+            self.config["token_rate_limit"] = token_cfg
 
     def get(self, *keys, default=None):
         """Generalized method to get a value from a nested dictionary."""

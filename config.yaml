@@ -4,3 +4,12 @@ mcp:
       url: "https://custom-agents-dev-mcp.scholargateway.ai/mcp"
       transport: "streamable_http"
       enabled: true
+
+token_rate_limit:
+  enabled: true
+  default_group: "eve_free"
+  aliases:
+    free: "eve_free"
+    pro: "eve_standard"
+    pro+: "eve_advanced"
+    ultra: "eve_enterprise"
