@@ -31,6 +31,10 @@ from src.config import (
     SATCOM_QDRANT_URL,
     SATCOM_QDRANT_API_KEY,
     MODEL_TIMEOUT,
+    MAIN_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
+    SATCOM_SMALL_MODEL_NAME,
+    SATCOM_LARGE_MODEL_NAME,
     config,
 )
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -155,12 +159,13 @@ async def persist_message_state(
     latencies: Optional[Dict[str, Any]] = None,
     prompts: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Any]] = None,
+    generated_model_name: Optional[str] = None,
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
-    - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
+    - Merges metadata fields (latencies, prompts, retrieved_docs, generated_model_name, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
@@ -184,6 +189,8 @@ async def persist_message_state(
             existing_metadata["prompts"] = prompts
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
+        if generated_model_name is not None:
+            existing_metadata["generated_model_name"] = generated_model_name
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:
@@ -194,6 +201,19 @@ async def persist_message_state(
     except Exception as e:
         logger.error(f"Failed to persist message state: {e}")
         return
+
+
+def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
+    """Resolve configured model name for a canonical llm_type."""
+    if llm_type == LLMType.Main.value:
+        return MAIN_MODEL_NAME
+    if llm_type == LLMType.Fallback.value:
+        return FALLBACK_MODEL_NAME
+    if llm_type == LLMType.Satcom_Small.value:
+        return SATCOM_SMALL_MODEL_NAME
+    if llm_type == LLMType.Satcom_Large.value:
+        return SATCOM_LARGE_MODEL_NAME
+    return None
 
 
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
@@ -1633,6 +1653,13 @@ async def generate_answer_stream_generator_helper(
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
+        selected_llm_type = llm_manager.get_selected_llm_type()
+        if fallback_gen_latency is not None:
+            generated_model_name = FALLBACK_MODEL_NAME
+        elif isinstance(selected_llm_type, str) and selected_llm_type:
+            generated_model_name = _resolve_model_name_for_llm_type(selected_llm_type)
+        else:
+            generated_model_name = FALLBACK_MODEL_NAME if IS_PROD else MAIN_MODEL_NAME
         await persist_message_state(
             message_id,
             output=answer,
@@ -1640,7 +1667,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=rag_decision_result.use_rag,
             latencies=latencies,
             prompts=prompts,
-            retrieved_docs=retrieved_docs
+            retrieved_docs=retrieved_docs,
+            generated_model_name=generated_model_name,
         )
 
         if background_tasks:
@@ -1654,6 +1682,7 @@ async def generate_answer_stream_generator_helper(
                 "type": "final",
                 "answer": answer,
                 "latencies": latencies,
+                "generated_model_name": generated_model_name,
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         else:
@@ -1669,6 +1698,7 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
             stopped=True,
         )
         return
@@ -1689,7 +1719,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=(locals().get("rag_decision_result").use_rag),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
-            retrieved_docs=locals().get("retrieved_docs") or []
+            retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"
