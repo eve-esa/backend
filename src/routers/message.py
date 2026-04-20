@@ -1131,6 +1131,7 @@ async def stream_hallucination(
         raise HTTPException(
             status_code=400, detail="Message does not belong to this conversation"
         )
+    await enforce_token_budget_or_raise(requesting_user)
 
     async def _generator():
         import json
@@ -1176,6 +1177,16 @@ async def stream_hallucination(
                     await message.save()
                 except Exception:
                     pass
+                try:
+                    await consume_tokens_for_user(
+                        requesting_user,
+                        count_tokens_for_texts(message.input, reason),
+                    )
+                except Exception as consume_error:
+                    logger.warning(
+                        "Failed to apply token usage for streamed hallucination: %s",
+                        consume_error,
+                    )
 
                 final_payload = {
                     "type": "final",
@@ -1305,6 +1316,16 @@ async def stream_hallucination(
             final_latency = time.perf_counter() - t2
 
             final_answer = "".join(final_answer_chunks)
+            try:
+                await consume_tokens_for_user(
+                    requesting_user,
+                    count_tokens_for_texts(message.input, final_answer),
+                )
+            except Exception as consume_error:
+                logger.warning(
+                    "Failed to apply token usage for streamed hallucination: %s",
+                    consume_error,
+                )
             total_latency = time.perf_counter() - total_start
             latencies = {
                 "detect": detect_latency,

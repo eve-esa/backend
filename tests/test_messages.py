@@ -13,6 +13,13 @@ async def mock_generate_answer(request, conversation_id=None):
     return "Test answer", [], False, {}, {}, []
 
 
+async def mark_user_as_rate_limited(user):
+    user.rate_limit_tokens_used = 1000
+    user.rate_limit_period_start = datetime.now(timezone.utc) - timedelta(days=1)
+    user.rate_limit_period_end = datetime.now(timezone.utc) + timedelta(days=1)
+    await user.save()
+
+
 @pytest.mark.asyncio
 async def test_message_flow(async_client, monkeypatch):
     """Full flow: create conversation → add message → update feedback."""
@@ -259,10 +266,7 @@ async def test_generate_llm_requires_auth(async_client):
 async def test_generate_llm_rate_limited(async_client):
     user, token = await create_test_user_and_token()
     try:
-        user.rate_limit_tokens_used = 1000
-        user.rate_limit_period_start = datetime.now(timezone.utc) - timedelta(days=1)
-        user.rate_limit_period_end = datetime.now(timezone.utc) + timedelta(days=1)
-        await user.save()
+        await mark_user_as_rate_limited(user)
 
         resp = await async_client.post(
             "/generate-llm",
@@ -309,14 +313,70 @@ async def test_generate_llm_consumes_tokens(async_client, monkeypatch):
 async def test_generate_rate_limited(async_client):
     user, token = await create_test_user_and_token()
     try:
-        user.rate_limit_tokens_used = 1000
-        user.rate_limit_period_start = datetime.now(timezone.utc) - timedelta(days=1)
-        user.rate_limit_period_end = datetime.now(timezone.utc) + timedelta(days=1)
-        await user.save()
+        await mark_user_as_rate_limited(user)
 
         resp = await async_client.post(
             "/generate",
             json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 429
+        assert "Token budget exceeded" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_rate_limited(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conv_resp = await async_client.post(
+            "/conversations",
+            json={"name": "Stream Rate Limit Conversation"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert conv_resp.status_code == 200
+        conv_id = conv_resp.json()["id"]
+
+        await mark_user_as_rate_limited(user)
+
+        resp = await async_client.post(
+            f"/conversations/{conv_id}/stream_messages",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 429
+        assert "Token budget exceeded" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_stream_hallucination_rate_limited(async_client, monkeypatch):
+    monkeypatch.setattr("src.routers.message.generate_answer", mock_generate_answer)
+
+    user, token = await create_test_user_and_token()
+    try:
+        conv_resp = await async_client.post(
+            "/conversations",
+            json={"name": "Hallucination Stream Rate Limit Conversation"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert conv_resp.status_code == 200
+        conv_id = conv_resp.json()["id"]
+
+        msg_resp = await async_client.post(
+            f"/conversations/{conv_id}/messages",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert msg_resp.status_code == 200
+        msg_id = msg_resp.json()["id"]
+
+        await mark_user_as_rate_limited(user)
+
+        resp = await async_client.post(
+            f"/conversations/{conv_id}/messages/{msg_id}/stream-hallucination",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 429
