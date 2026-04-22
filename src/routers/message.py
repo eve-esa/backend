@@ -1544,6 +1544,7 @@ async def retrieve(
             - requery: The rewritten query used for retrieval (or original if rewrite skipped/failed)
     """
     try:
+        await enforce_token_budget_or_raise(requesting_user)
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
         try:
             allowed_names = {
@@ -1621,11 +1622,20 @@ async def retrieve(
             latencies = dict(latencies) if latencies else {}
             latencies["rewrite"] = rewrite_latency
 
+        token_usage_inputs = [original_query]
+        if requery and requery != original_query:
+            token_usage_inputs.append(requery)
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(*token_usage_inputs)
+        )
+
         return {
             "retrieved_docs": formated_results,
             "latencies": latencies,
             "original_query": original_query,
             "requery": requery or original_query,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
