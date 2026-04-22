@@ -327,6 +327,55 @@ async def test_generate_rate_limited(async_client):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_rate_limited(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        await mark_user_as_rate_limited(user)
+
+        resp = await async_client.post(
+            "/retrieve",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 429
+        assert "Token budget exceeded" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_retrieve_consumes_tokens(async_client, monkeypatch):
+    class _RagDecision:
+        requery = "rewritten query"
+
+    async def _mock_should_use_rag(*_args, **_kwargs):
+        return _RagDecision(), None, None
+
+    async def _mock_setup_rag_and_context(_request):
+        return "", [], {"retrieve": 0.01}, [{"chunk": "example"}]
+
+    monkeypatch.setattr("src.routers.message.should_use_rag", _mock_should_use_rag)
+    monkeypatch.setattr(
+        "src.routers.message.setup_rag_and_context", _mock_setup_rag_and_context
+    )
+
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await async_client.post(
+            "/retrieve",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+
+        refreshed = await type(user).find_by_id(user.id)
+        assert refreshed is not None
+        assert refreshed.rate_limit_tokens_used > 0
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
 async def test_stream_messages_rate_limited(async_client):
     user, token = await create_test_user_and_token()
     try:
