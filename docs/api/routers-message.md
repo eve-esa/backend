@@ -86,6 +86,16 @@ Runs retrieval + generation and stores the response in the conversation.
 - Requires a valid `conversation_id`.
 - Collection names should come from collection endpoints.
 
+### Important params
+
+- `query`: User prompt sent to the model.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
+- `k`: Number of retrieved documents from `0` to `10`.
+- `filters`: Optional Qdrant-compatible filter object.
+- `public_collections`: Collection names from collection listing endpoints.
+- `temperature`: Generation temperature from `0.0` to `1.0`.
+- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `ship`, `eve_v05`).
+
 ## Create message (SSE streaming)
 
 `POST /conversations/{conversation_id}/stream_messages`
@@ -100,7 +110,27 @@ Runs retrieval + generation and stores the response in the conversation.
 ```python
 with requests.post(
     f"{BASE_URL}/conversations/{CONVERSATION_ID}/stream_messages",
-    json={"query": "Give me key EO missions from the last decade."},
+    json={
+        "query": "How is TROPOMI used to support policy making?",
+        "score_threshold": 0.6,
+        "temperature": 0.0645,
+        "k": 10,
+        "filters": {
+            "should": None,
+            "min_should": None,
+            "must": [],
+            "must_not": None
+        },
+        "llm_type": "main",
+        "public_collections": [
+            "Wiley AI Gateway",
+            "esa-data-qwen-1024",
+            "Wikipedia EO",
+            "wikipedia-512",
+            "satcom-chunks-collection",
+            "qwen-512-filtered"
+        ]
+    },
     headers={**headers, "Accept": "text/event-stream"},
     stream=True,
     timeout=120,
@@ -118,6 +148,7 @@ Streams generated output as server-sent events.
 ### Notes
 
 - Suitable for token-by-token UI updates.
+- Payload fields are the same as `POST /conversations/{conversation_id}/messages`.
 
 ## Retry generation for one message
 
@@ -331,7 +362,7 @@ print(resp.json())
 
 ### Explanation
 
-Runs direct LLM generation without retrieval or conversation persistence.
+Runs direct LLM generation (main model path) without retrieval or conversation persistence.
 
 ### Notes
 
@@ -352,9 +383,25 @@ Runs direct LLM generation without retrieval or conversation persistence.
 resp = requests.post(
     f"{BASE_URL}/generate",
     json={
-        "query": "Give me three EO datasets for flood monitoring.",
-        "public_collections": ["qwen-512-filtered"],
-        "k": 5,
+        "query": "How is TROPOMI used to support policy making?",
+        "score_threshold": 0.6,
+        "temperature": 0.0645,
+        "k": 10,
+        "filters": {
+            "should": None,
+            "min_should": None,
+            "must": [],
+            "must_not": None
+        },
+        "llm_type": "main",
+        "public_collections": [
+            "Wiley AI Gateway",
+            "esa-data-qwen-1024",
+            "Wikipedia EO",
+            "wikipedia-512",
+            "satcom-chunks-collection",
+            "qwen-512-filtered"
+        ]
     },
     headers=headers,
     timeout=120,
@@ -367,9 +414,15 @@ print(resp.json())
 
 Runs full retrieval + generation pipeline without storing a conversation message.
 
-### Notes
+### Important params
 
-- `public_collections` values come from collection listing endpoints.
+- `query`: User prompt sent to the model.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
+- `k`: Number of retrieved documents from `0` to `10`.
+- `filters`: Optional Qdrant-compatible filter object.
+- `public_collections`: Collection names from collection listing endpoints.
+- `temperature`: Generation temperature from `0.0` to `1.0` (lower is more deterministic).
+- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `ship`, `eve_v05`).
 
 ## Retrieval-only
 
@@ -386,9 +439,23 @@ Runs full retrieval + generation pipeline without storing a conversation message
 resp = requests.post(
     f"{BASE_URL}/retrieve",
     json={
-        "query": "Copernicus Sentinel-2 spatial resolution",
-        "public_collections": ["wikipedia-512"],
-        "k": 5,
+        "query": "How is TROPOMI used to support policy making?",
+        "score_threshold": 0.6,
+        "k": 10,
+        "filters": {
+            "should": None,
+            "min_should": None,
+            "must": [],
+            "must_not": None
+        },
+        "public_collections": [
+            "Wiley AI Gateway",
+            "esa-data-qwen-1024",
+            "Wikipedia EO",
+            "wikipedia-512",
+            "satcom-chunks-collection",
+            "qwen-512-filtered"
+        ]
     },
     headers=headers,
     timeout=120,
@@ -401,9 +468,13 @@ print(resp.json())
 
 Runs only retrieval and returns matched documents/metadata.
 
-### Notes
+### Important params
 
-- Useful to inspect retrieval quality independently from generation.
+- `query`: User query string.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
+- `k`: Number of retrieved documents from `0` to `10`.
+- `filters`: Optional Qdrant-compatible filter object.
+- `public_collections`: Collection names from collection listing endpoints.
 
 ## User message stats
 
