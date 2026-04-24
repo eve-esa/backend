@@ -8,7 +8,7 @@ User routes manage the authenticated user's profile and usage metadata.
 2. Use `access_token` in `Authorization` header.
 3. Call user routes (`/users/me`, `/users/me/token-usage`, `/users` patch).
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Get current user profile
 

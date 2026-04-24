@@ -10,38 +10,16 @@ This page covers chat generation, streaming, retry, feedback, and testing endpoi
 4. Call message or generate endpoints with `conversation_id` and collection names.
 5. Optionally run retry, feedback, hallucination, and stats endpoints.
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
-## List public collections before generation
+## Collection name prerequisite
 
-`GET /collections/public?page=1&limit=20`
+Before generation, fetch valid collection names from the Collection API:
 
-::: routers.collection.list_public_collections
-    options:
-      show_root_heading: false
-      show_source: false
+- Public collections: `GET /collections/public?page=1&limit=20`
+- Private collections you own: `GET /collections?page=1&limit=20`
 
-### Usage
-
-```python
-public_resp = requests.get(
-    f"{BASE_URL}/collections/public",
-    params={"page": 1, "limit": 20},
-    headers=headers,
-    timeout=30,
-)
-public_resp.raise_for_status()
-available_public_collections = [c["name"] for c in public_resp.json()["data"]]
-print(available_public_collections)
-```
-
-### Explanation
-
-Fetches valid `public_collections` values for generation payloads.
-
-### Notes
-
-- Use returned names exactly as provided.
+See [Collection API](./routers-collection.md) for endpoint details and examples.
 
 ## Create message (non-streaming)
 

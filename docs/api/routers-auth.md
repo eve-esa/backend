@@ -10,7 +10,7 @@ Authentication is the first step for all protected routes.
 4. Use `access_token` in protected routes
 5. `POST /refresh` when access token expires
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Signup
 

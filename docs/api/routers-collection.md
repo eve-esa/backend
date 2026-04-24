@@ -8,7 +8,7 @@ Collection routes are split into public collections (platform-managed) and priva
 2. Optionally call `POST /collections` to create a private collection.
 3. Use these names/IDs in message generation and document upload routes.
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## List public collections
 

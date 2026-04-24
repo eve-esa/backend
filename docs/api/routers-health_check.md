@@ -6,7 +6,7 @@ Health routes provide service liveness information.
 
 `GET /health` can be called any time (no auth/token prerequisite).
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Health check
 

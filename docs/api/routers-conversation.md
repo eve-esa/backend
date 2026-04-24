@@ -8,7 +8,7 @@ Conversation routes manage chat threads. Message generation routes require a con
 2. Use returned `conversation_id` with message endpoints.
 3. Optionally list, fetch, rename, or delete conversations.
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Create conversation
 

@@ -8,7 +8,7 @@ Document routes ingest and manage files inside user-owned collections.
 2. Use `collection_id` with document upload/list/get/delete routes.
 3. Use collection names in message/generate APIs for retrieval.
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Upload documents to a collection
 

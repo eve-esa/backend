@@ -9,7 +9,7 @@ Forgot-password routes reset credentials without requiring login.
 3. `POST /forgot-password/confirm` with code and new password fields.
 4. Login again through `POST /login` with the new password.
 
-Shared request setup is documented once in [API index](./index.md#shared-api-setup).
+Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
 ## Send reset code
 
