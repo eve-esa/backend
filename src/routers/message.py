@@ -56,6 +56,7 @@ from src.utils.error_logger import (
     set_message_context,
     get_error_logger,
 )
+from src.core.llm_manager import LLMType
 
 logger = logging.getLogger(__name__)
 
@@ -1383,14 +1384,14 @@ async def generate_llm(
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Call EVE-Instruct (v5) with a single query. No RAG, no conversation context.
+    Call EVE-Instruct (v5) (Main model) with a single query. No RAG, no conversation context.
 
     Body: query. Returns the model reply only.
     """
     try:
         await enforce_token_budget_or_raise(requesting_user)
         llm_manager = get_shared_llm_manager()
-        llm = llm_manager.get_client_for_model("eve_v05")
+        llm = llm_manager.get_client_for_model(LLMType.Main.value)
         messages = [HumanMessage(content=request.query)]
         response = await llm.ainvoke(messages)
         content = getattr(response, "content", str(response))
