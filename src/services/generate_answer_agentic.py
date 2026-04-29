@@ -4,18 +4,17 @@ Avoids langgraph.prebuilt (broken in the deployed environment) and implements
 the agent → tools → agent cycle directly with StateGraph + MessagesState.
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 import re
 import time
-import asyncio
-import contextlib
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import BackgroundTasks
 from pydantic import BaseModel, Field
 
-from src.core.vector_store_manager import VectorStoreManager
 from src.config import (
     AGENTIC_LLM_TYPE,
     IS_PROD,
@@ -23,6 +22,10 @@ from src.config import (
     SATCOM_QDRANT_API_KEY,
     SATCOM_QDRANT_URL,
 )
+from src.constants import DEFAULT_MAX_NEW_TOKENS
+from src.core.vector_store_manager import VectorStoreManager
+from src.database.models.message import Message
+from src.database.models.user import User
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
@@ -33,11 +36,19 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
 )
-from src.constants import DEFAULT_MAX_NEW_TOKENS
-from src.utils.helpers import build_context, extract_document_data, get_mongodb_uri, tiktoken_counter
-from src.utils.error_logger import Component, PipelineStage, get_error_logger
-from src.utils.langfuse_helper import get_callbacks, langfuse_context
 from src.services.stream_bus import get_stream_bus
+from src.services.token_rate_limiter import (
+    consume_tokens_for_user,
+    count_tokens_for_texts,
+)
+from src.utils.error_logger import Component, PipelineStage, get_error_logger
+from src.utils.helpers import (
+    build_context,
+    extract_document_data,
+    get_mongodb_uri,
+    tiktoken_counter,
+)
+from src.utils.langfuse_helper import get_callbacks, langfuse_context
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +56,16 @@ logger = logging.getLogger(__name__)
 
 _langgraph_available = False
 try:
-    from langgraph.graph import END, START, MessagesState, StateGraph
-    from langgraph.checkpoint.mongodb import MongoDBSaver
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, trim_messages
+    from langchain_core.messages import (
+        AIMessage,
+        HumanMessage,
+        SystemMessage,
+        ToolMessage,
+        trim_messages,
+    )
     from langchain_core.tools import StructuredTool
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
 
     _langgraph_available = True
 except Exception:
@@ -77,24 +94,29 @@ def _serialise_trace_entry(
 
     if AIMessage and isinstance(msg, AIMessage):
         entry["role"] = "assistant"
-        entry["content"] = msg.content if isinstance(msg.content, str) else str(msg.content)
+        entry["content"] = (
+            msg.content if isinstance(msg.content, str) else str(msg.content)
+        )
         tc = getattr(msg, "tool_calls", None)
         if tc:
             entry["tool_calls"] = [
-                {"name": c.get("name", ""), "args": c.get("args", {})}
-                for c in tc
+                {"name": c.get("name", ""), "args": c.get("args", {})} for c in tc
             ]
     elif ToolMessage and isinstance(msg, ToolMessage):
         entry["role"] = "tool"
         entry["name"] = getattr(msg, "name", "tool")
         content = str(msg.content)
-        entry["content"] =  content
+        entry["content"] = content
     elif HumanMessage and isinstance(msg, HumanMessage):
         entry["role"] = "user"
-        entry["content"] = msg.content if isinstance(msg.content, str) else str(msg.content)
+        entry["content"] = (
+            msg.content if isinstance(msg.content, str) else str(msg.content)
+        )
     elif SystemMessage and isinstance(msg, SystemMessage):
         entry["role"] = "system"
-        entry["content"] = msg.content if isinstance(msg.content, str) else str(msg.content)
+        entry["content"] = (
+            msg.content if isinstance(msg.content, str) else str(msg.content)
+        )
     else:
         entry["role"] = "unknown"
         entry["content"] = str(msg)
@@ -110,8 +132,12 @@ class SearchKBInput(BaseModel):
 
 class SearchWileyInput(BaseModel):
     query: str = Field(description="Search query for scientific articles")
-    start_year: Optional[int] = Field(default=None, description="Start year filter (inclusive)")
-    end_year: Optional[int] = Field(default=None, description="End year filter (inclusive)")
+    start_year: Optional[int] = Field(
+        default=None, description="Start year filter (inclusive)"
+    )
+    end_year: Optional[int] = Field(
+        default=None, description="End year filter (inclusive)"
+    )
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -136,7 +162,9 @@ def _build_tools(
             information, and domain-specific scientific content.
             """
             try:
-                vector_store = VectorStoreManager(embeddings_model=request.embeddings_model)
+                vector_store = VectorStoreManager(
+                    embeddings_model=request.embeddings_model
+                )
                 temp = GenerationRequest(
                     query=query,
                     embeddings_model=request.embeddings_model,
@@ -147,7 +175,10 @@ def _build_tools(
                 temp.collection_ids = list(request.collection_ids)
                 temp.private_collections_map = dict(request.private_collections_map)
 
-                if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
+                if (
+                    not IS_PROD
+                    and "satcom-chunks-collection" in request.public_collections
+                ):
                     satcom_vs = VectorStoreManager(
                         embeddings_model=request.embeddings_model,
                         qdrant_url=SATCOM_QDRANT_URL,
@@ -160,7 +191,9 @@ def _build_tools(
                         score_threshold=request.score_threshold,
                     )
                     sat_temp.collection_ids = ["satcom-chunks-collection"]
-                    sat_results, _ = await get_rag_context(satcom_vs, sat_temp, cancel_event=cancel_event)
+                    sat_results, _ = await get_rag_context(
+                        satcom_vs, sat_temp, cancel_event=cancel_event
+                    )
                     main_temp = GenerationRequest(
                         query=query,
                         embeddings_model=request.embeddings_model,
@@ -169,13 +202,21 @@ def _build_tools(
                         filters=request.filters,
                     )
                     main_temp.collection_ids = [
-                        c for c in request.collection_ids if c != "satcom-chunks-collection"
+                        c
+                        for c in request.collection_ids
+                        if c != "satcom-chunks-collection"
                     ]
-                    main_temp.private_collections_map = dict(request.private_collections_map)
-                    main_results, _ = await get_rag_context(vector_store, main_temp, cancel_event=cancel_event)
+                    main_temp.private_collections_map = dict(
+                        request.private_collections_map
+                    )
+                    main_results, _ = await get_rag_context(
+                        vector_store, main_temp, cancel_event=cancel_event
+                    )
                     results = list(main_results) + list(sat_results)
                 else:
-                    results, _ = await get_rag_context(vector_store, temp, cancel_event=cancel_event)
+                    results, _ = await get_rag_context(
+                        vector_store, temp, cancel_event=cancel_event
+                    )
 
                 if not results:
                     return "No relevant documents found in the knowledge base for this query."
@@ -222,8 +263,17 @@ def _build_tools(
                 parts: List[str] = []
                 for i, r in enumerate(results[: request.k]):
                     if isinstance(r, dict):
-                        title = r.get("title") or (r.get("metadata") or {}).get("title") or f"Article {i + 1}"
-                        text = r.get("text") or r.get("page_content") or r.get("content") or ""
+                        title = (
+                            r.get("title")
+                            or (r.get("metadata") or {}).get("title")
+                            or f"Article {i + 1}"
+                        )
+                        text = (
+                            r.get("text")
+                            or r.get("page_content")
+                            or r.get("content")
+                            or ""
+                        )
                         parts.append(f"[{i + 1}] {title}\n{str(text)[:800]}")
                 return "\n\n".join(parts) if parts else "No articles found."
             except Exception as exc:
@@ -260,11 +310,14 @@ async def _get_agentic_checkpointer() -> Optional[Any]:
             return _agentic_checkpointer
         try:
             from pymongo import MongoClient
+
             _agentic_checkpointer = MongoDBSaver(MongoClient(get_mongodb_uri()))
             logger.info("Agentic agent using MongoDB checkpointer")
             return _agentic_checkpointer
         except Exception as exc:
-            logger.warning("MongoDB checkpointer unavailable for agent, using in-memory: %s", exc)
+            logger.warning(
+                "MongoDB checkpointer unavailable for agent, using in-memory: %s", exc
+            )
             try:
                 _agentic_checkpointer = InMemorySaver()
                 return _agentic_checkpointer
@@ -299,7 +352,11 @@ def _reformat_messages_for_text_tool_model(messages: List[Any]) -> List[Any]:
 
     result: List[Any] = []
     for msg in messages:
-        if isinstance(msg, AIMessage) and not msg.content and getattr(msg, "tool_calls", None):
+        if (
+            isinstance(msg, AIMessage)
+            and not msg.content
+            and getattr(msg, "tool_calls", None)
+        ):
             calls = [
                 {"name": tc["name"], "arguments": tc.get("args", {})}
                 for tc in msg.tool_calls
@@ -320,7 +377,9 @@ def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
     if _TEXT_TOOL_CALL_MARKER not in content:
         return []
 
-    text = content[content.index(_TEXT_TOOL_CALL_MARKER) + len(_TEXT_TOOL_CALL_MARKER):].strip()
+    text = content[
+        content.index(_TEXT_TOOL_CALL_MARKER) + len(_TEXT_TOOL_CALL_MARKER) :
+    ].strip()
     calls: List[Dict[str, Any]] = []
     i = 0
     while i < len(text):
@@ -348,7 +407,12 @@ def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
                         except Exception:
                             args = {}
                         calls.append(
-                            {"id": f"call_{len(calls)}_{name}", "name": name, "args": args, "type": "tool_call"}
+                            {
+                                "id": f"call_{len(calls)}_{name}",
+                                "name": name,
+                                "args": args,
+                                "type": "tool_call",
+                            }
                         )
                         i = j + 1
                         break
@@ -356,11 +420,23 @@ def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
             else:
                 break
         else:
-            calls.append({"id": f"call_{len(calls)}_{name}", "name": name, "args": {}, "type": "tool_call"})
+            calls.append(
+                {
+                    "id": f"call_{len(calls)}_{name}",
+                    "name": name,
+                    "args": {},
+                    "type": "tool_call",
+                }
+            )
     return calls
 
 
-def _build_react_graph(llm_type: Optional[str], tools: List[Any], system_prompt: Optional[str], checkpointer: Any):
+def _build_react_graph(
+    llm_type: Optional[str],
+    tools: List[Any],
+    system_prompt: Optional[str],
+    checkpointer: Any,
+):
     """
     Compile a ReAct StateGraph manually (no langgraph.prebuilt dependency).
 
@@ -412,7 +488,11 @@ def _build_react_graph(llm_type: Optional[str], tools: List[Any], system_prompt:
         # back to plain text before sending.  These were injected by us to make
         # the LangGraph router fire; the model itself never speaks OpenAI-format.
         has_synthetic_tool_msgs = any(
-            (isinstance(m, AIMessage) and not m.content and getattr(m, "tool_calls", None))
+            (
+                isinstance(m, AIMessage)
+                and not m.content
+                and getattr(m, "tool_calls", None)
+            )
             or isinstance(m, ToolMessage)
             for m in messages
         )
@@ -423,11 +503,18 @@ def _build_react_graph(llm_type: Optional[str], tools: List[Any], system_prompt:
 
         # Parse text-format tool calls and promote to structured tool_calls
         # so the LangGraph router can fire the tools node.
-        if not getattr(response, "tool_calls", None) and isinstance(response.content, str):
+        if not getattr(response, "tool_calls", None) and isinstance(
+            response.content, str
+        ):
             parsed = _parse_text_tool_calls(response.content)
             if parsed:
-                logger.info("Parsed %d text-format tool call(s) from model response", len(parsed))
-                response = AIMessage(content="", tool_calls=parsed, id=getattr(response, "id", None))
+                logger.info(
+                    "Parsed %d text-format tool call(s) from model response",
+                    len(parsed),
+                )
+                response = AIMessage(
+                    content="", tool_calls=parsed, id=getattr(response, "id", None)
+                )
 
         return {"messages": [response]}
 
@@ -466,7 +553,9 @@ def _build_react_graph(llm_type: Optional[str], tools: List[Any], system_prompt:
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
     builder.add_edge(START, "agent")
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", END: END}
+    )
     builder.add_edge("tools", "agent")
     return builder.compile(checkpointer=checkpointer)
 
@@ -478,7 +567,14 @@ async def generate_answer_agentic(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
     user_id: Optional[str] = None,
-) -> tuple[str, List[Dict[str, Any]], bool, Dict[str, Optional[float]], Dict[str, Any], List[Dict[str, Any]]]:
+) -> tuple[
+    str,
+    List[Dict[str, Any]],
+    bool,
+    Dict[str, Optional[float]],
+    Dict[str, Any],
+    List[Dict[str, Any]],
+]:
     """Run the full agentic generation pipeline without streaming.
 
     Returns (answer, tool_results, use_rag, latencies, prompts, trace).
@@ -498,13 +594,19 @@ async def generate_answer_agentic(
         # The LangGraph checkpointer handles per-turn message continuity;
         # the rolling summary covers turns that have been trimmed from DB.
         if conversation_id:
-            _, conversation_summary = await _get_conversation_history_from_db(conversation_id)
+            _, conversation_summary = await _get_conversation_history_from_db(
+                conversation_id
+            )
             if conversation_summary:
                 summary_prefix = (
                     f"Previous conversation summary:\n{conversation_summary}\n\n"
                     "Please continue the conversation using this summary as context.\n\n"
                 )
-                system_prompt = (summary_prefix + system_prompt) if system_prompt else summary_prefix
+                system_prompt = (
+                    (summary_prefix + system_prompt)
+                    if system_prompt
+                    else summary_prefix
+                )
 
         graph = _build_react_graph(request.llm_type, tools, system_prompt, checkpointer)
 
@@ -537,7 +639,9 @@ async def generate_answer_agentic(
 
                     msgs = node_output.get("messages", [])
                     for msg in msgs:
-                        entry = _serialise_trace_entry(msg, node=node_name, latency_s=step_latency_s)
+                        entry = _serialise_trace_entry(
+                            msg, node=node_name, latency_s=step_latency_s
+                        )
                         trace_entries.append(entry)
                         all_messages.append(msg)
 
@@ -547,8 +651,14 @@ async def generate_answer_agentic(
 
         final_answer = ""
         for msg in reversed(all_messages):
-            if isinstance(msg, AIMessage) and msg.content and not getattr(msg, "tool_calls", None):
-                final_answer = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if (
+                isinstance(msg, AIMessage)
+                and msg.content
+                and not getattr(msg, "tool_calls", None)
+            ):
+                final_answer = (
+                    msg.content if isinstance(msg.content, str) else str(msg.content)
+                )
                 break
 
         tool_results: List[Dict[str, Any]] = []
@@ -556,7 +666,9 @@ async def generate_answer_agentic(
         for msg in all_messages:
             if isinstance(msg, ToolMessage):
                 use_rag = True
-                tool_results.append({"tool": getattr(msg, "name", "tool"), "content": msg.content})
+                tool_results.append(
+                    {"tool": getattr(msg, "name", "tool"), "content": msg.content}
+                )
 
         total_latency = time.perf_counter() - total_start
         latencies: Dict[str, Optional[float]] = {
@@ -564,7 +676,10 @@ async def generate_answer_agentic(
             "total_latency": total_latency,
             **{f"node_{k}_s": v for k, v in node_latencies.items()},
         }
-        prompts: Dict[str, Any] = {"query": request.query, "system_prompt": system_prompt}
+        prompts: Dict[str, Any] = {
+            "query": request.query,
+            "system_prompt": system_prompt,
+        }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
 
@@ -624,13 +739,17 @@ async def generate_answer_agentic_stream_helper(
 
         # Inject rolling conversation summary into the system prompt so the agent
         # has long-term context beyond what the LangGraph checkpointer holds.
-        _, conversation_summary = await _get_conversation_history_from_db(conversation_id)
+        _, conversation_summary = await _get_conversation_history_from_db(
+            conversation_id
+        )
         if conversation_summary:
             summary_prefix = (
                 f"Previous conversation summary:\n{conversation_summary}\n\n"
                 "Please continue the conversation using this summary as context.\n\n"
             )
-            system_prompt = (summary_prefix + system_prompt) if system_prompt else summary_prefix
+            system_prompt = (
+                (summary_prefix + system_prompt) if system_prompt else summary_prefix
+            )
 
         graph = _build_react_graph(request.llm_type, tools, system_prompt, checkpointer)
 
@@ -683,13 +802,17 @@ async def generate_answer_agentic_stream_helper(
                     else "Searching Wiley Gateway"
                 )
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                return [f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"]
+                return [
+                    f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                ]
 
             # Regular final-answer content — emit original chunks
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
                 if elapsed > MODEL_TIMEOUT:
-                    raise TimeoutError("No final-answer token received within MODEL_TIMEOUT")
+                    raise TimeoutError(
+                        "No final-answer token received within MODEL_TIMEOUT"
+                    )
                 first_token_latency = time.perf_counter() - total_start
 
             events: List[str] = []
@@ -699,7 +822,9 @@ async def generate_answer_agentic_stream_helper(
                 tokens_yielded += 1
                 accumulated.append(tok)
                 if output_format == "json":
-                    events.append(f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n")
+                    events.append(
+                        f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n"
+                    )
                 else:
                     events.append(f"data: {tok}\n\n")
             return events
@@ -747,7 +872,9 @@ async def generate_answer_agentic_stream_helper(
                     tool_name = getattr(chunk, "name", "tool")
                     preview = str(chunk.content)[:200]
                     step_s = time.perf_counter() - node_start_time
-                    trace_entries.append(_serialise_trace_entry(chunk, node=node, latency_s=step_s))
+                    trace_entries.append(
+                        _serialise_trace_entry(chunk, node=node, latency_s=step_s)
+                    )
                     yield f"data: {json.dumps({'type': 'tool_result', 'content': preview})}\n\n"
                     continue
 
@@ -756,8 +883,16 @@ async def generate_answer_agentic_stream_helper(
                     # Structured tool_calls (OpenAI-format models)
                     if getattr(chunk, "tool_calls", None):
                         tc = chunk.tool_calls[0]
-                        tname = tc.get("name", "tool") if isinstance(tc, dict) else getattr(tc, "name", "tool")
-                        args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                        tname = (
+                            tc.get("name", "tool")
+                            if isinstance(tc, dict)
+                            else getattr(tc, "name", "tool")
+                        )
+                        args = (
+                            tc.get("args", {})
+                            if isinstance(tc, dict)
+                            else getattr(tc, "args", {})
+                        )
                         query_used = args.get("query", "")
                         label = (
                             "Searching knowledge base"
@@ -766,14 +901,17 @@ async def generate_answer_agentic_stream_helper(
                         )
                         msg = f"{label}: {query_used}" if query_used else f"{label}…"
                         step_s = time.perf_counter() - node_start_time
-                        trace_entries.append(_serialise_trace_entry(chunk, node=node, latency_s=step_s))
+                        trace_entries.append(
+                            _serialise_trace_entry(chunk, node=node, latency_s=step_s)
+                        )
                         yield f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
                         continue
 
                     content = chunk.content
                     if isinstance(content, list):
                         content = "".join(
-                            c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+                            c.get("text", "") if isinstance(c, dict) else str(c)
+                            for c in content
                         )
                     if not content:
                         continue
@@ -804,12 +942,14 @@ async def generate_answer_agentic_stream_helper(
         # Add the final answer to the trace
         if answer:
             agent_s = node_latencies.get("agent", gen_latency)
-            trace_entries.append({
-                "role": "assistant",
-                "node": "agent",
-                "content": answer,
-                "latency_s": agent_s,
-            })
+            trace_entries.append(
+                {
+                    "role": "assistant",
+                    "node": "agent",
+                    "content": answer,
+                    "latency_s": agent_s,
+                }
+            )
 
         await persist_message_state(
             message_id,
@@ -832,7 +972,9 @@ async def generate_answer_agentic_stream_helper(
 
     except asyncio.CancelledError:
         logger.info("Agentic generation cancelled")
-        await persist_message_state(message_id, output="".join(accumulated), stopped=True)
+        await persist_message_state(
+            message_id, output="".join(accumulated), stopped=True
+        )
         return
 
     except TimeoutError as exc:
@@ -878,7 +1020,13 @@ async def generate_answer_agentic_stream(
 ):
     """Plain-text SSE wrapper around the agentic stream helper."""
     async for chunk in generate_answer_agentic_stream_helper(
-        request, conversation_id, message_id, "plain", background_tasks, cancel_event, user_id
+        request,
+        conversation_id,
+        message_id,
+        "plain",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -893,7 +1041,13 @@ async def generate_answer_agentic_json_stream(
 ):
     """JSON SSE wrapper around the agentic stream helper."""
     async for chunk in generate_answer_agentic_stream_helper(
-        request, conversation_id, message_id, "json", background_tasks, cancel_event, user_id
+        request,
+        conversation_id,
+        message_id,
+        "json",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -929,9 +1083,22 @@ async def run_agentic_generation_to_bus(
             f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n",
         )
     finally:
+        if user_id:
+            try:
+                user = await User.find_by_id(user_id)
+                message = await Message.find_by_id(message_id)
+                if user and message:
+                    token_count = count_tokens_for_texts(message.input, message.output)
+                    await consume_tokens_for_user(user, token_count)
+            except Exception as consume_error:
+                logger.warning(
+                    "Failed to apply token usage for agentic generation: %s",
+                    consume_error,
+                )
         await bus.close(message_id)
         with contextlib.suppress(Exception):
             from src.services.cancel_manager import get_cancel_manager
+
             cm = get_cancel_manager()
             cm.clear_mapping_for(conversation_id, message_id)
             cm.clear(message_id)

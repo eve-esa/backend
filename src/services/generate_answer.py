@@ -1,62 +1,67 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
+import asyncio
+import contextlib
 import json
 import logging
-import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from fastapi import BackgroundTasks, HTTPException
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field, PrivateAttr
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from typing import Any, Dict, List, Optional
 
-from src.core.vector_store_manager import VectorStoreManager
-from src.core.llm_manager import LLMManager, LLMType
+from fastapi import BackgroundTasks, HTTPException
+from pydantic import BaseModel, Field
+
+from src.config import (
+    DEEPINFRA_API_TOKEN,
+    FALLBACK_MODEL_NAME,
+    IS_PROD,
+    MAIN_MODEL_NAME,
+    MODEL_TIMEOUT,
+    SATCOM_LARGE_MODEL_NAME,
+    SATCOM_QDRANT_API_KEY,
+    SATCOM_QDRANT_URL,
+    SATCOM_SMALL_MODEL_NAME,
+    SCRAPING_DOG_API_KEY,
+    SILICONFLOW_API_TOKEN,
+)
 from src.constants import (
-    DEFAULT_QUERY,
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_K,
-    DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
-    DEFAULT_TEMPERATURE,
     MCP_MAX_TOP_N,
-    POLICY_NOT_ANSWER,
     POLICY_PROMPT,
+    SCRAPING_DOG_ALL_URLS,
+)
+from src.core.llm_manager import LLMManager, LLMType
+from src.core.vector_store_manager import VectorStoreManager
+from src.database.models.conversation import Conversation
+from src.database.models.message import Message
+from src.database.models.user import User
+from src.schemas.generation_request import GenerationRequest
+from src.services.cancel_manager import get_cancel_manager
+from src.services.mcp_client_service import MultiServerMCPClientService
+from src.services.stream_bus import get_stream_bus
+from src.services.token_rate_limiter import (
+    consume_tokens_for_user,
+    count_tokens_for_texts,
+)
+from src.utils.deepinfra_reranker import DeepInfraReranker
+from src.utils.error_logger import (
+    Component,
+    PipelineStage,
+    get_error_logger,
 )
 from src.utils.helpers import (
+    build_context,
     build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
-    build_context,
-)
-from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import (
-    DEEPINFRA_API_TOKEN,
-    IS_PROD,
-    SCRAPING_DOG_API_KEY,
-    SILICONFLOW_API_TOKEN,
-    SATCOM_QDRANT_URL,
-    SATCOM_QDRANT_API_KEY,
-    MODEL_TIMEOUT,
-    config,
-)
-from src.utils.deepinfra_reranker import DeepInfraReranker
-from src.utils.template_loader import get_template
-from src.utils.siliconflow_reranker import SiliconFlowReranker
-from src.utils.helpers import (
-    get_mongodb_uri,
     tiktoken_counter,
 )
-import contextlib
-
+from src.utils.langfuse_helper import flush as langfuse_flush
+from src.utils.langfuse_helper import get_callbacks, langfuse_context
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
-from src.constants import SCRAPING_DOG_ALL_URLS
-from src.services.stream_bus import get_stream_bus
-from src.utils.langfuse_helper import flush as langfuse_flush, get_callbacks, langfuse_context
-from src.utils.error_logger import (
-    get_error_logger,
-    Component,
-    PipelineStage,
-)
+from src.utils.siliconflow_reranker import SiliconFlowReranker
+from src.utils.template_loader import get_template
 
 
 logger = logging.getLogger(__name__)
@@ -93,48 +98,6 @@ class PolicyCheck(BaseModel):
         description="True if the input violates policies otherwise False"
     )
     reason: str = Field(description="Reason for the violation")
-
-
-class GenerationRequest(BaseModel):
-    query: str = DEFAULT_QUERY
-    year: Optional[List[int]] = None
-    filters: Optional[Dict[str, Any]] = None
-    llm_type: Optional[str] = Field(
-        default=None,
-        description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'ship', 'eve_v05'. "
-            "Legacy options 'runpod' and 'mistral' are also supported. "
-            "Defaults to None, which means environment-based behavior."
-        ),
-    )
-    embeddings_model: str = DEFAULT_EMBEDDING_MODEL
-    k: int = Field(DEFAULT_K, ge=0, le=10)
-    temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
-    score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
-    public_collections: List[str] = Field(
-        default_factory=list,
-        description="List of public collection names to include in the search",
-    )
-
-    _collection_ids: List[str] = PrivateAttr(default_factory=list)
-    _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
-
-    @property
-    def collection_ids(self) -> List[str]:
-        return self._collection_ids
-
-    @collection_ids.setter
-    def collection_ids(self, value: List[str]) -> None:
-        self._collection_ids = list(value) if value else []
-
-    @property
-    def private_collections_map(self) -> Dict[str, str]:
-        return self._private_collections_map
-
-    @private_collections_map.setter
-    def private_collections_map(self, value: Dict[str, str]) -> None:
-        self._private_collections_map = value
 
 
 def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
@@ -198,22 +161,21 @@ async def persist_message_state(
     latencies: Optional[Dict[str, Any]] = None,
     prompts: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Any]] = None,
+    generated_model_name: Optional[str] = None,
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
     trace: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
-    - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
+    - Merges metadata fields (latencies, prompts, retrieved_docs, generated_model_name, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
     - Sets Message.trace (agentic execution trace) if provided.
     """
     try:
-        from src.database.models.message import Message as MessageModel
-
-        message = await MessageModel.find_by_id(message_id)
+        message = await Message.find_by_id(message_id)
         if message is None:
             return
         if stopped is not None:
@@ -233,6 +195,8 @@ async def persist_message_state(
             existing_metadata["prompts"] = prompts
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
+        if generated_model_name is not None:
+            existing_metadata["generated_model_name"] = generated_model_name
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:
@@ -245,19 +209,32 @@ async def persist_message_state(
         return
 
 
+def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
+    """Resolve configured model name for a canonical llm_type."""
+    if llm_type == LLMType.Main.value:
+        return MAIN_MODEL_NAME
+    if llm_type == LLMType.Fallback.value:
+        return FALLBACK_MODEL_NAME
+    if llm_type == LLMType.Satcom_Small.value:
+        return SATCOM_SMALL_MODEL_NAME
+    if llm_type == LLMType.Satcom_Large.value:
+        return SATCOM_LARGE_MODEL_NAME
+    return None
+
+
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
 _langgraph_available = False
 try:
-    from langgraph.graph import StateGraph, MessagesState, START
-    from langgraph.checkpoint.mongodb import MongoDBSaver
-    from langgraph.graph.message import add_messages
     from langchain_core.messages import (
-        trim_messages,
-        HumanMessage,
         AIMessage,
+        HumanMessage,
         SystemMessage,
+        trim_messages,
     )
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+    from langgraph.graph import START, MessagesState, StateGraph
+    from langgraph.graph.message import add_messages
 
     _langgraph_available = True
 except Exception:
@@ -266,7 +243,7 @@ except Exception:
 
 # LangChain message classes for compatibility
 try:
-    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 except Exception:
     HumanMessage = None
     SystemMessage = None
@@ -419,7 +396,7 @@ Please continue the conversation using this summary as context for understanding
         # Try Mongo-backed checkpointer first, keep it open
         try:
             from pymongo import MongoClient
-            
+
             uri = get_mongodb_uri()
             client = MongoClient(uri)
             checkpointer = MongoDBSaver(client)
@@ -451,19 +428,16 @@ async def _get_conversation_history_from_db(
 ) -> tuple[List[Any], Optional[str]]:
     """Get conversation history and summary from database for fallback when LangGraph is not available."""
     try:
-        from src.database.models.message import Message as MessageModel
-        from src.database.models.conversation import Conversation as ConversationModel
-
         summary = None
         try:
-            conversation = await ConversationModel.find_by_id(conversation_id)
+            conversation = await Conversation.find_by_id(conversation_id)
             if conversation and getattr(conversation, "summary", None):
                 summary = conversation.summary
         except Exception:
             summary = None
 
         # Get recent messages from the conversation (limit to last 10 for context)
-        messages = await MessageModel.find_all(
+        messages = await Message.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", -1)],
             limit=1,
@@ -719,8 +693,12 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
-        error_msg = raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
-        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        error_msg = (
+            raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
+        )
+        error_obj = (
+            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -737,11 +715,7 @@ async def get_mcp_context(
             logger.info(
                 "Resetting shared instance to force reconnection with fresh token"
             )
-            from src.services.mcp_client_service import (
-                MultiServerMCPClientService as _Svc,
-            )
-
-            _Svc._shared_instance = None
+            MultiServerMCPClientService._shared_instance = None
         except Exception:
             pass
         mcp_client = MultiServerMCPClientService.get_shared()
@@ -760,8 +734,14 @@ async def get_mcp_context(
         is_error = bool(raw.get("is_error"))
         content_items = raw.get("content", []) or []
     if is_error:
-        error_msg = raw.get("error", "MCP retrieval failed") if isinstance(raw, dict) else str(raw)
-        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        error_msg = (
+            raw.get("error", "MCP retrieval failed")
+            if isinstance(raw, dict)
+            else str(raw)
+        )
+        error_obj = (
+            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -859,9 +839,9 @@ async def should_use_rag(
         )
         try:
             fallback_llm = llm_manager.get_fallback_llm()
-            structured_fallback_llm = fallback_llm.bind(temperature=0).with_structured_output(
-                ShouldUseRagDecision
-            )
+            structured_fallback_llm = fallback_llm.bind(
+                temperature=0
+            ).with_structured_output(ShouldUseRagDecision)
             result = await structured_fallback_llm.ainvoke(prompt)
             logger.info(f"should_use_rag result from fallback model: {result}")
             if isinstance(result, ShouldUseRagDecision):
@@ -936,7 +916,7 @@ async def setup_rag_and_context(
         mcp_lat: Dict[str, Optional[float]] = {}
         satcom_results: List[Any] = []
         satcom_lat: Dict[str, Optional[float]] = {}
-        
+
         # temporary for satcom collection
         if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
             satcom_vector_store = VectorStoreManager(
@@ -1080,10 +1060,12 @@ async def generate_answer(
 
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
-            await should_use_rag(
-                llm_manager, request.query, conversation_context, request.llm_type
-            )
+        (
+            rag_decision_result,
+            rag_decision_prompt,
+            is_main_LLM_fail,
+        ) = await should_use_rag(
+            llm_manager, request.query, conversation_context, request.llm_type
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
@@ -1095,11 +1077,14 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs = (
-                    await setup_rag_and_context(request)
-                )
+                (
+                    context,
+                    results,
+                    latencies,
+                    retrieved_docs,
+                ) = await setup_rag_and_context(request)
             except Exception as e:
-                logger.warning(f"Failed to setup RAG and context")
+                logger.warning("Failed to setup RAG and context")
                 await error_logger.log_error(
                     error=e,
                     component=Component.RETRIEVAL,
@@ -1207,7 +1192,10 @@ async def generate_answer(
             logger.info("starting to fallback using fallback model")
             gen_start = time.perf_counter()
 
-            final_answer, generation_prompt = await llm_manager.generate_answer_fallback(
+            (
+                final_answer,
+                generation_prompt,
+            ) = await llm_manager.generate_answer_fallback(
                 query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
@@ -1256,12 +1244,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
     Note: We derive the turn count from the number of Message documents in this conversation.
     """
     try:
-        from src.database.models.message import Message as MessageModel
-    except Exception:
-        return
-
-    try:
-        total_turns = await MessageModel.count_documents(
+        total_turns = await Message.count_documents(
             {"conversation_id": conversation_id}
         )
         if total_turns == 0 or total_turns % summary_every != 0:
@@ -1272,7 +1255,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         )
         # Build transcript from the last `summary_every` turns (each Message is one turn)
         skip = max(0, total_turns - summary_every)
-        messages = await MessageModel.find_all(
+        messages = await Message.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", 1)],
             skip=skip,
@@ -1286,19 +1269,10 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 transcript_parts.append(f"Assistant: {m.output}")
         transcript = "\n".join(transcript_parts)
 
-        # Include existing rolling summary if available
-        try:
-            from src.database.models.conversation import (
-                Conversation as ConversationModel,
-            )
-        except Exception:
-            ConversationModel = None  # type: ignore
-
+        convo = await Conversation.find_by_id(conversation_id)
         prior_summary: str = ""
-        if ConversationModel is not None:
-            convo = await ConversationModel.find_by_id(conversation_id)
-            if convo and getattr(convo, "summary", None):
-                prior_summary = convo.summary or ""
+        if convo and getattr(convo, "summary", None):
+            prior_summary = convo.summary or ""
 
         summarizer_input = (
             f"Current summary (may be empty):\n{prior_summary}\n\nRecent turns:\n{transcript}"
@@ -1312,16 +1286,14 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if not summary_text:
             return
 
-        # Persist the new rolling summary on the Conversation document
-        if ConversationModel is not None:
-            if convo is None:
-                convo = await ConversationModel.find_by_id(conversation_id)
-            if convo is not None:
-                convo.summary = summary_text
-                try:
-                    await convo.save()
-                except Exception:
-                    pass
+        if convo is None:
+            convo = await Conversation.find_by_id(conversation_id)
+        if convo is not None:
+            convo.summary = summary_text
+            try:
+                await convo.save()
+            except Exception:
+                pass
 
     except Exception:
         # Non-critical path; ignore errors
@@ -1373,7 +1345,7 @@ async def generate_answer_stream_generator_helper(
 
         if cancelled():
             await persist_message_state(message_id, stopped=True)
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
         is_main_LLM_fail = False
@@ -1385,7 +1357,7 @@ async def generate_answer_stream_generator_helper(
                 )
             except asyncio.CancelledError:
                 await persist_message_state(message_id, stopped=True)
-                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
         else:
             conversation_history, conversation_summary = (None, None)
@@ -1394,23 +1366,25 @@ async def generate_answer_stream_generator_helper(
         )
         rag_decision_start = time.perf_counter()
         try:
-            rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
-                await cancel_aware(
-                    should_use_rag(
-                        llm_manager,
-                        request.query,
-                        conversation_context,
-                        request.llm_type,
-                    )
+            (
+                rag_decision_result,
+                rag_decision_prompt,
+                is_main_LLM_fail,
+            ) = await cancel_aware(
+                should_use_rag(
+                    llm_manager,
+                    request.query,
+                    conversation_context,
+                    request.llm_type,
                 )
             )
         except asyncio.CancelledError:
             await persist_message_state(message_id, stopped=True)
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
         if rag_decision_result.requery:
             if rag_decision_result.use_rag:
-                yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
+                yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: ' + rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies, retrieved_docs = "", [], {}, []
@@ -1438,7 +1412,7 @@ async def generate_answer_stream_generator_helper(
                         "rag_decision_result": rag_decision_result,
                     },
                 )
-                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
             except Exception as er:
                 logger.warning(f"Failed to setup RAG and context: {str(er)}")
@@ -1485,7 +1459,7 @@ async def generate_answer_stream_generator_helper(
                     "rag_decision_result": rag_decision_result,
                 },
             )
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
         if rag_decision_result.use_rag:
@@ -1577,7 +1551,7 @@ async def generate_answer_stream_generator_helper(
                         first_text = getattr(first_chunk, "content", None)
                         if first_text:
                             if output_format == "json":
-                                yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
+                                yield f"data: {json.dumps({'type': 'token', 'content': first_text})}\n\n"
                             else:
                                 yield f"data: {first_text}\n\n"
                             accumulated.append(first_text)
@@ -1608,13 +1582,13 @@ async def generate_answer_stream_generator_helper(
                                     },
                                     retrieved_docs=retrieved_docs,
                                 )
-                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                                 return
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
                             if output_format == "json":
-                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
                             else:
                                 yield f"data: {text}\n\n"
                             accumulated.append(text)
@@ -1628,7 +1602,7 @@ async def generate_answer_stream_generator_helper(
                         used_stream = True
                     except TimeoutError as e:
                         logger.warning(
-                            f"LangGraph streaming timed out, falling back to fallback model streaming"
+                            "LangGraph streaming timed out, falling back to fallback model streaming"
                         )
                         await error_logger.log_error(
                             error=e,
@@ -1663,7 +1637,7 @@ async def generate_answer_stream_generator_helper(
         fallback_first_token_latency: Optional[float] = None
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
-            logger.info(f"Using fallback model streaming")
+            logger.info("Using fallback model streaming")
             gen = llm_manager.generate_answer_fallback_stream(
                 query=origin_query,
                 context=context,
@@ -1696,10 +1670,10 @@ async def generate_answer_stream_generator_helper(
                                 },
                                 retrieved_docs=retrieved_docs,
                             )
-                            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                             return
                     if output_format == "json":
-                        yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
                     else:
                         yield f"data: {token}\n\n"
                     accumulated.append(str(token))
@@ -1731,6 +1705,13 @@ async def generate_answer_stream_generator_helper(
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
+        selected_llm_type = llm_manager.get_selected_llm_type()
+        if fallback_gen_latency is not None:
+            generated_model_name = FALLBACK_MODEL_NAME
+        elif isinstance(selected_llm_type, str) and selected_llm_type:
+            generated_model_name = _resolve_model_name_for_llm_type(selected_llm_type)
+        else:
+            generated_model_name = FALLBACK_MODEL_NAME if IS_PROD else MAIN_MODEL_NAME
         await persist_message_state(
             message_id,
             output=answer,
@@ -1738,7 +1719,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=rag_decision_result.use_rag,
             latencies=latencies,
             prompts=prompts,
-            retrieved_docs=retrieved_docs
+            retrieved_docs=retrieved_docs,
+            generated_model_name=generated_model_name,
         )
 
         if background_tasks:
@@ -1752,10 +1734,11 @@ async def generate_answer_stream_generator_helper(
                 "type": "final",
                 "answer": answer,
                 "latencies": latencies,
+                "generated_model_name": generated_model_name,
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         else:
-            yield f"data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
 
     except asyncio.CancelledError:
         logger.info("Cancelled during generation")
@@ -1767,6 +1750,7 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
             stopped=True,
         )
         return
@@ -1787,7 +1771,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=(locals().get("rag_decision_result").use_rag),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
-            retrieved_docs=locals().get("retrieved_docs") or []
+            retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"
@@ -1803,7 +1788,13 @@ async def generate_answer_stream_generator(
 ):
     """Generate streaming answer using RAG and LLM."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "plain", background_tasks, cancel_event, user_id
+        request,
+        conversation_id,
+        message_id,
+        "plain",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -1818,7 +1809,13 @@ async def generate_answer_json_stream_generator(
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "json", background_tasks, cancel_event, user_id
+        request,
+        conversation_id,
+        message_id,
+        "json",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -1853,15 +1850,25 @@ async def run_generation_to_bus(
     except Exception as e:
         await bus.publish(
             message_id,
-            f"data: {json.dumps({'type':'error','message':str(e)})}\n\n",
+            f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n",
         )
     finally:
+        if user_id:
+            try:
+                user = await User.find_by_id(user_id)
+                message = await Message.find_by_id(message_id)
+                if user and message:
+                    token_count = count_tokens_for_texts(message.input, message.output)
+                    await consume_tokens_for_user(user, token_count)
+            except Exception as consume_error:
+                logger.warning(
+                    "Failed to apply token usage for streamed generation: %s",
+                    consume_error,
+                )
         # Signal end-of-data for subscribers
         await bus.close(message_id)
         # Cleanup cancel manager state for this message
         try:
-            from src.services.cancel_manager import get_cancel_manager
-
             cm = get_cancel_manager()
             cm.clear_mapping_for(conversation_id, message_id)
             cm.clear(message_id)

@@ -50,15 +50,56 @@ docs/                 # Site content (this page, api references)
     - Synchronous detection and streaming modes
     - Annotates message metadata with label, reason, timings
 
-### API surface (reference)
+### API guides (usage-first)
 
-- Auth: `[routers-auth]` — `routers.auth`
-- Collections: `[routers-collection]` — `routers.collection`
-- Documents: `[routers-document]` — `routers.document`
-- Conversations: `[routers-conversation]` — `routers.conversation`
-- Messages: `[routers-message]` — `routers.message`
-- Users: `[routers-user]` — `routers.user`
-- Health: `[routers-health_check]` — `routers.health_check`
+- Auth (working examples): `[routers-auth]`
+- Collections (public/private + examples): `[routers-collection]`
+- Documents (ingestion + examples): `[routers-document]`
+- Conversations (chat lifecycle + examples): `[routers-conversation]`
+- Messages (generation/streaming + examples): `[routers-message]`
+
+Use `[swagger-api]` only when you need exhaustive field-level reference.
+
+### Shared API setup
+
+Use this once and reuse it across all API examples:
+
+```python
+import requests
+
+BASE_URL = "http://localhost:8000"
+
+# Auth flow:
+# 1) signup -> verify -> login
+# 2) set ACCESS_TOKEN from login response
+ACCESS_TOKEN = "<your_access_token>"
+headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+```
+
+### Recommended API call order
+
+1. **Auth first**
+    - `POST /signup`
+    - `POST /verify`
+    - `POST /login` -> get `access_token` / `refresh_token`
+2. **Collection discovery**
+    - `GET /collections/public` to get valid `public_collections` names for generation
+3. **Conversation lifecycle**
+    - `POST /conversations` to get `conversation_id`
+4. **Message generation**
+    - `POST /conversations/{conversation_id}/messages` or `/stream_messages`
+5. **Optional ingestion for private retrieval**
+    - `POST /collections` -> get private `collection_id`
+    - `POST /collections/{collection_id}/documents`
+6. **Optional advanced/ops routes**
+    - `.../retry`, `.../hallucination`, `/generate`, `/retrieve`, stats endpoints
+
+### API dependency notes
+
+- Message endpoints require a valid `conversation_id`.
+- Generation endpoints require valid collection names (`public_collections`) from collection listing.
+- Document endpoints require a valid private `collection_id`.
+- Most non-auth endpoints require `Authorization: Bearer <access_token>`.
 
 ### Message generation flow (high-level)
 
