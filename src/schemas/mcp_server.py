@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field
 TransportLiteral = Literal["streamable_http", "stdio"]
 
 
-class ToolConfigRequest(BaseModel):
-    """Request payload for MCP tool configuration."""
+class MCPServerConfigRequest(BaseModel):
+    """Request payload for MCP server configuration."""
 
     url: Optional[str] = Field(
         default=None, description="Remote MCP server URL (when using HTTP)"
@@ -28,24 +28,31 @@ class ToolConfigRequest(BaseModel):
     )
 
 
-class ToolRequest(BaseModel):
-    name: str = Field(..., min_length=1, description="Tool name")
+class MCPServerRequest(BaseModel):
+    name: str = Field(..., min_length=1, description="MCP server name")
     provider: Optional[str] = Field(default=None, description="Provider name")
     description: Optional[str] = Field(default=None, description="Description")
-    type: str = Field(default="mcp", description="Tool type; default is mcp")
-    enabled: bool = Field(default=False, description="Whether the tool is enabled")
+    type: str = Field(default="mcp", description="Server type; default is mcp")
+    enabled: bool = Field(default=False, description="Whether the server is enabled")
     environment: Optional[List[str]] = Field(
         default=None, description="Environments where the tool is allowed"
     )
-    config: ToolConfigRequest = Field(..., description="MCP connection configuration")
+    config: MCPServerConfigRequest = Field(
+        ..., description="MCP connection configuration"
+    )
 
 
-class ToolUpdate(BaseModel):
+class MCPServerUpdate(BaseModel):
     name: Optional[str] = None
     provider: Optional[str] = None
     description: Optional[str] = None
     type: Optional[str] = None
     enabled: Optional[bool] = None
     environment: Optional[List[str]] = None
-    config: Optional[ToolConfigRequest] = None
+    config: Optional[MCPServerConfigRequest] = None
 
+
+# Backward compatibility aliases for existing imports.
+ToolConfigRequest = MCPServerConfigRequest
+ToolRequest = MCPServerRequest
+ToolUpdate = MCPServerUpdate
