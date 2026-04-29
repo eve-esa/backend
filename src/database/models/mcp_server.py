@@ -47,24 +47,20 @@ class ToolConfig(BaseModel):
     )
 
 
-class Tool(MongoModel):
-    """Model for storing tool configuration and MCP connection metadata."""
+class MCPServer(MongoModel):
+    """Model for storing MCP server configuration and connection metadata."""
 
     # Display / identification fields
     user_id: Optional[str] = Field(
         default=None, description="Owner user ID; None means globally managed tool"
     )
-    name: str = Field(..., description="Tool name")
+    name: str = Field(..., description="MCP server name")
     provider: Optional[str] = Field(None, description="Provider or organization name")
-    description: Optional[str] = Field(None, description="Tool description")
-    type: ToolType = Field(default=ToolType.MCP, description="Tool type")
+    description: Optional[str] = Field(None, description="MCP server description")
+    type: ToolType = Field(default=ToolType.MCP, description="Server type")
 
     # Operational flags
-    enabled: bool = Field(default=False, description="Whether the tool is enabled")
-    environment: Optional[List[str]] = Field(
-        default=None,
-        description="Environments where the tool is allowed (e.g. staging, prod)",
-    )
+    enabled: bool = Field(default=False, description="Whether the server is enabled")
 
     # Connection configuration
     config: ToolConfig = Field(..., description="MCP connection configuration")
@@ -82,4 +78,8 @@ class Tool(MongoModel):
         default=None, description="Soft delete timestamp (if deleted)"
     )
 
-    collection_name: ClassVar[str] = "tools"
+    collection_name: ClassVar[str] = "mcp_servers"
+
+
+# Backward compatibility alias for existing imports.
+Tool = MCPServer
