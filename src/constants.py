@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import yaml
 
 DEFAULT_QUERY = "What is ESA?"

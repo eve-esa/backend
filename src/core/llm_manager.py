@@ -4,40 +4,33 @@ LLM Manager module that handles different language model interactions.
 
 import logging
 from enum import Enum
-from typing import AsyncGenerator, List, Any
-import os
+from typing import AsyncGenerator, Optional
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from src.config import (
-    Config,
-    MAIN_MODEL_API_KEY,
     FALLBACK_MODEL_API_KEY,
-    IS_PROD,
-    SATCOM_RUNPOD_API_KEY,
-    MAIN_MODEL_URL,
-    FALLBACK_MODEL_URL,
-    MAIN_MODEL_NAME,
     FALLBACK_MODEL_NAME,
+    FALLBACK_MODEL_URL,
+    IS_PROD,
+    MAIN_MODEL_API_KEY,
+    MAIN_MODEL_NAME,
+    MAIN_MODEL_URL,
     MODEL_TIMEOUT,
-    SATCOM_SMALL_MODEL_NAME,
-    SATCOM_LARGE_MODEL_NAME,
-    SATCOM_SMALL_BASE_URL,
     SATCOM_LARGE_BASE_URL,
+    SATCOM_LARGE_MODEL_NAME,
+    SATCOM_RUNPOD_API_KEY,
+    SATCOM_SMALL_BASE_URL,
+    SATCOM_SMALL_MODEL_NAME,
+    Config,
 )
-from typing import Optional
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
-from src.utils.template_loader import format_template
-from src.utils.template_loader import get_template
 from src.utils.helpers import (
     str_token_counter,
     trim_text_to_token_limit,
 )
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-from langchain_classic.chains.summarize import load_summarize_chain
-from langchain_core.messages import SystemMessage, HumanMessage
-
+from src.utils.template_loader import format_template, get_template
 
 logger = logging.getLogger(__name__)
 
@@ -96,21 +89,29 @@ class LLMManager:
 
     def _init_langchain_clients(self) -> None:
         """Initialize LangChain ChatOpenAI client configured for Main and Fallback OpenAI-compatible endpoints."""
+        # Main model — independent try block so Satcom misconfiguration can't clobber it
         try:
-            # Main model configuration
             if not MAIN_MODEL_URL:
-                raise ValueError("MAIN_MODEL_URL environment variable not configured")            
+                raise ValueError("MAIN_MODEL_URL environment variable not configured")
             self._main_base_url = MAIN_MODEL_URL
-            # Model name can be provided via env MAIN_MODEL_NAME, else use config
             self._main_model_name = MAIN_MODEL_NAME
-            # Lazily initialized; create on first use to avoid unnecessary startup cost
             self._main_chat_openai: ChatOpenAI | None = None
+        except Exception as e:
+            logger.error(f"Failed to initialize LangChain Main client: {e}")
+            self._main_base_url = None
+            self._main_model_name = None
+            self._main_chat_openai = None
 
-            # Initialize Satcom client
+        # Satcom models — optional; missing URLs are non-fatal for other models
+        try:
             if not SATCOM_SMALL_BASE_URL:
-                raise ValueError("SATCOM_SMALL_BASE_URL environment variable not configured")
+                raise ValueError(
+                    "SATCOM_SMALL_BASE_URL environment variable not configured"
+                )
             if not SATCOM_LARGE_BASE_URL:
-                raise ValueError("SATCOM_LARGE_BASE_URL environment variable not configured")
+                raise ValueError(
+                    "SATCOM_LARGE_BASE_URL environment variable not configured"
+                )
             self._satcom_small_base_url = SATCOM_SMALL_BASE_URL
             self._satcom_small_model_name = SATCOM_SMALL_MODEL_NAME
             self._satcom_large_base_url = SATCOM_LARGE_BASE_URL
@@ -118,10 +119,7 @@ class LLMManager:
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
         except Exception as e:
-            logger.error(f"Failed to initialize LangChain Main client: {e}")
-            self._main_base_url = None
-            self._main_model_name = None
-            self._main_chat_openai = None
+            logger.warning(f"Satcom clients not available (optional): {e}")
             self._satcom_small_base_url = None
             self._satcom_large_base_url = None
             self._satcom_small_model_name = None
@@ -132,8 +130,10 @@ class LLMManager:
         # Configure Fallback client lazily
         try:
             if not FALLBACK_MODEL_URL:
-                raise ValueError("FALLBACK_MODEL_URL environment variable not configured")
-            
+                raise ValueError(
+                    "FALLBACK_MODEL_URL environment variable not configured"
+                )
+
             # Fallback model uses OpenAI-compatible API
             self._fallback_base_url = FALLBACK_MODEL_URL
             # Model name can be provided via env FALLBACK_MODEL_NAME, else use config
@@ -155,7 +155,9 @@ class LLMManager:
             if not self._main_base_url:
                 raise RuntimeError("Main model base URL is not configured")
             if not MAIN_MODEL_API_KEY:
-                raise RuntimeError("MAIN_MODEL_API_KEY (or RUNPOD_API_KEY) is not set (required for main model)")
+                raise RuntimeError(
+                    "MAIN_MODEL_API_KEY (or RUNPOD_API_KEY) is not set (required for main model)"
+                )
             self._main_chat_openai = ChatOpenAI(
                 api_key=MAIN_MODEL_API_KEY,
                 base_url=self._main_base_url,
@@ -172,7 +174,9 @@ class LLMManager:
             if not self._fallback_base_url:
                 raise RuntimeError("Fallback model base URL is not configured")
             if not FALLBACK_MODEL_API_KEY:
-                raise RuntimeError("FALLBACK_MODEL_API_KEY is not set (required for fallback model)")
+                raise RuntimeError(
+                    "FALLBACK_MODEL_API_KEY is not set (required for fallback model)"
+                )
             self._fallback_chat = ChatOpenAI(
                 api_key=FALLBACK_MODEL_API_KEY,
                 base_url=self._fallback_base_url,
@@ -230,7 +234,7 @@ class LLMManager:
                 llm_type = "main"
             elif llm_type == "mistral":
                 llm_type = "fallback"
-            
+
             if llm_type == LLMType.Fallback.value or llm_type == LLMType.Mistral.value:
                 self._selected_llm_type = LLMType.Fallback.value
                 return self._get_fallback_llm()
@@ -270,7 +274,7 @@ class LLMManager:
                 f"Falling back to Fallback model due to Main model error: {e}"
             )
             return self._get_fallback_llm()
-    
+
     def get_fallback_llm(self) -> ChatOpenAI:
         """Public accessor for the fallback ChatOpenAI client."""
         return self._get_fallback_llm()
@@ -477,39 +481,7 @@ class LLMManager:
             resp = await llm.ainvoke(messages)
             return getattr(resp, "content", str(resp))
 
-    async def summarize_context_with_map_reduce(
-        self, context: str, max_tokens: int
-    ) -> str:
-        """Summarize RAG/MCP context using LangChain where possible, respecting max_tokens.
-
-        Uses LangChain's RecursiveCharacterTextSplitter, Document, and load_summarize_chain
-        with the Runpod-backed ChatOpenAI from LLMManager. Falls back to a manual
-        map-reduce approach if LangChain summarization utilities are unavailable.
-        """
-        if str_token_counter(context) <= max_tokens:
-            return context
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=400_000, chunk_overlap=0
-        )
-        docs = [Document(page_content=t) for t in text_splitter.split_text(context)]
-
-        try:
-            llm = self.get_model()
-            chain = load_summarize_chain(llm, chain_type="map_reduce")
-
-            summary = chain.invoke(docs)
-            trimmed_context = trim_text_to_token_limit(
-                summary["output_text"], max_tokens
-            )
-            return trimmed_context
-        except Exception:
-            llm = self._get_fallback_llm()
-            chain = load_summarize_chain(llm, chain_type="map_reduce")
-            summary = chain.invoke(docs)
-            trimmed_context = trim_text_to_token_limit(
-                summary["output_text"], max_tokens
-            )
-            return trimmed_context
+    # summarize_context_with_map_reduce removed — load_summarize_chain blocks on import
 
     async def generate_answer(
         self,

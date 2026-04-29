@@ -51,6 +51,7 @@ import contextlib
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.constants import SCRAPING_DOG_ALL_URLS
 from src.services.stream_bus import get_stream_bus
+from src.utils.langfuse_helper import flush as langfuse_flush, get_callbacks, langfuse_context
 from src.utils.error_logger import (
     get_error_logger,
     Component,
@@ -199,6 +200,7 @@ async def persist_message_state(
     retrieved_docs: Optional[List[Any]] = None,
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -206,6 +208,7 @@ async def persist_message_state(
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
+    - Sets Message.trace (agentic execution trace) if provided.
     """
     try:
         from src.database.models.message import Message as MessageModel
@@ -221,6 +224,8 @@ async def persist_message_state(
             message.documents = [extract_document_data(d) for d in documents]
         if use_rag is not None:
             message.use_rag = bool(use_rag)
+        if trace is not None:
+            message.trace = trace
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         if latencies is not None:
             existing_metadata["latencies"] = latencies
@@ -1051,6 +1056,7 @@ async def check_policy(
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
     error_logger = get_error_logger()
@@ -1158,7 +1164,10 @@ async def generate_answer(
                 # Pass temperature to the graph via state config
                 graph, mode = await _get_or_create_compiled_graph()
                 if graph is not None:
-                    config = {"configurable": {"thread_id": conversation_id}}
+                    config = {
+                        "configurable": {"thread_id": conversation_id},
+                        "callbacks": get_callbacks(),
+                    }
                     state = {
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
@@ -1167,7 +1176,14 @@ async def generate_answer(
                         "is_streaming": False,
                         "llm_type": request.llm_type,
                     }
-                    result = await graph.ainvoke(state, config)
+                    with langfuse_context(
+                        user_id=user_id,
+                        session_id=conversation_id,
+                        tags=["classic", request.llm_type or "default"],
+                        trace_name="generation",
+                    ):
+                        result = await graph.ainvoke(state, config)
+                    langfuse_flush()
                 else:
                     result = None
                 base_gen_latency = time.perf_counter() - gen_start
@@ -1319,6 +1335,7 @@ async def generate_answer_stream_generator_helper(
     output_format: str = "plain",
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     error_logger = get_error_logger()
@@ -1517,7 +1534,10 @@ async def generate_answer_stream_generator_helper(
                     logger.info(
                         f"Using optimized LangGraph streaming with mode: {mode}"
                     )
-                    config = {"configurable": {"thread_id": conversation_id}}
+                    config = {
+                        "configurable": {"thread_id": conversation_id},
+                        "callbacks": get_callbacks(),
+                    }
 
                     state = {
                         "messages": add_messages(
@@ -1532,6 +1552,15 @@ async def generate_answer_stream_generator_helper(
 
                     logger.info("Using LangGraph astream for streaming")
                     llm_instruct_timeout = MODEL_TIMEOUT
+                    _lf_exit = contextlib.ExitStack()
+                    _lf_exit.enter_context(
+                        langfuse_context(
+                            user_id=user_id,
+                            session_id=conversation_id,
+                            tags=["classic", "stream", request.llm_type or "default"],
+                            trace_name="generation_stream",
+                        )
+                    )
                     try:
                         # Create the async generator once so we can pull the first token with a timeout
                         astream = graph.astream(
@@ -1592,6 +1621,7 @@ async def generate_answer_stream_generator_helper(
                             tokens_yielded += 1
 
                         base_gen_latency = time.perf_counter() - gen_start
+                        langfuse_flush()
                         logger.info(
                             f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
                         )
@@ -1610,6 +1640,7 @@ async def generate_answer_stream_generator_helper(
                         used_stream = False
                     finally:
                         # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
+                        _lf_exit.close()
                         with contextlib.suppress(Exception):
                             await graph.aclose()
                 else:
@@ -1768,10 +1799,11 @@ async def generate_answer_stream_generator(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "plain", background_tasks, cancel_event
+        request, conversation_id, message_id, "plain", background_tasks, cancel_event, user_id
     ):
         yield chunk
 
@@ -1782,10 +1814,11 @@ async def generate_answer_json_stream_generator(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "json", background_tasks, cancel_event
+        request, conversation_id, message_id, "json", background_tasks, cancel_event, user_id
     ):
         yield chunk
 
@@ -1796,6 +1829,7 @@ async def run_generation_to_bus(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """
     Run generation in the background and publish chunks to a per-message bus.
@@ -1809,6 +1843,7 @@ async def run_generation_to_bus(
             message_id=message_id,
             background_tasks=background_tasks,
             cancel_event=cancel_event,
+            user_id=user_id,
         ):
             # Forward SSE-formatted chunks as-is
             await bus.publish(message_id, chunk)

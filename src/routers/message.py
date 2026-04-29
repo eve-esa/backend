@@ -1,55 +1,59 @@
+import asyncio
+import json
+import logging
+import time
 from datetime import datetime
+from typing import Dict, Optional
 
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
+
 from src.config import IS_PROD, MODEL_TIMEOUT
 from src.constants import (
     PUBLIC_COLLECTIONS,
     STAGING_PUBLIC_COLLECTIONS,
     WILEY_PUBLIC_COLLECTIONS,
 )
-from src.schemas.message import MessageUpdate, CreateMessageResponse
+from src.database.models.co2eq_comparison import CO2EQComparison
+from src.database.models.collection import Collection as CollectionModel
+from src.database.models.conversation import Conversation
+from src.database.models.message import Message
+from src.database.models.user import User
+from src.middlewares.auth import get_current_user
+from src.schemas.co2 import CO2EquivalenceComparison, CO2EquivalenceResult
+from src.schemas.message import CreateMessageResponse, MessageUpdate
+from src.services.cancel_manager import get_cancel_manager
 from src.services.generate_answer import (
     GenerationRequest,
     generate_answer,
+    get_shared_llm_manager,
     maybe_rollup_and_trim_history,
+    run_generation_to_bus,
     setup_rag_and_context,
     should_use_rag,
-    get_shared_llm_manager,
 )
-from src.database.models.conversation import Conversation
-from src.database.models.message import Message
-from src.database.models.collection import Collection as CollectionModel
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
-from src.database.models.user import User
-from src.middlewares.auth import get_current_user
-import logging
-from src.utils.helpers import (
-    extract_document_data,
-    extract_year_range_from_filters,
-    build_context,
-    get_co2_usage_kg,
-    pluralize,
+from src.services.generate_answer_agentic import (
+    generate_answer_agentic,
+    run_agentic_generation_to_bus,
 )
-from src.database.models.co2eq_comparison import CO2EQComparison
-from src.schemas.co2 import CO2EquivalenceComparison, CO2EquivalenceResult
-import time
-from typing import Optional, Dict
-from pydantic import BaseModel
 from src.services.hallucination_detector import HallucinationDetector
-import asyncio
-import json
-from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
-from src.services.cancel_manager import get_cancel_manager
 from src.utils.error_logger import (
     Component,
     PipelineStage,
-    set_user_context,
+    get_error_logger,
     set_conversation_context,
     set_message_context,
-    get_error_logger,
+    set_user_context,
+)
+from src.utils.helpers import (
+    build_context,
+    extract_document_data,
+    extract_year_range_from_filters,
+    get_co2_usage_kg,
+    pluralize,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,14 +65,10 @@ async def get_lower_bound(usage_kg: float) -> Optional[CO2EquivalenceComparison]
     """Find the largest co2eq_kg <= usage_kg."""
     try:
         col = CO2EQComparison.get_collection()
-        
+
         query = {"enabled": True, "co2eq_kg": {"$lte": usage_kg}}
-        doc = await col.find_one(
-            query,
-            sort=[("co2eq_kg", -1)],
-            projection={"_id": 0}
-        )
-        
+        doc = await col.find_one(query, sort=[("co2eq_kg", -1)], projection={"_id": 0})
+
         if doc:
             return CO2EquivalenceComparison(**doc)
         return None
@@ -90,7 +90,7 @@ async def closest_with_direction(usage_kg: float) -> Optional[CO2EquivalenceComp
         upper_doc = await col.find_one(
             {"enabled": True, "co2eq_kg": {"$gt": usage_kg}},
             sort=[("co2eq_kg", 1)],
-            projection={"_id": 0}
+            projection={"_id": 0},
         )
         if upper_doc:
             return CO2EquivalenceComparison(**upper_doc)
@@ -109,12 +109,9 @@ async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
     title = doc.title
 
     if base == 0:
-        text = f""
+        text = ""
         return CO2EquivalenceResult(
-            title=title,
-            co2eq_kg=base,
-            equivalent_count=None,
-            text=text
+            title=title, co2eq_kg=base, equivalent_count=None, text=text
         )
 
     count = max(1, int(round(usage_kg / base)))
@@ -123,10 +120,7 @@ async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
     text = f"This is equivalent to: {count} {unit}"
 
     return CO2EquivalenceResult(
-        title=title,
-        co2eq_kg=base,
-        equivalent_count=count,
-        text=text
+        title=title, co2eq_kg=base, equivalent_count=count, text=text
     )
 
 
@@ -147,10 +141,12 @@ class HallucinationDetectResponse(BaseModel):
     final_answer: Optional[str] = None
     latencies: Optional[Dict[str, Optional[float]]] = None
 
+
 class GenerateLLMRequest(BaseModel):
     """Request body for LLM-only generation (EVE-Instruct v5, no RAG, no conversation)."""
 
     query: str = Field(..., description="User prompt to send to the LLM")
+
 
 @router.get("/conversations/messages/average-latencies")
 async def get_average_latencies(
@@ -222,7 +218,9 @@ async def get_average_latencies(
 
 
 @router.get("/conversations/messages/me/stats")
-async def get_my_message_stats(requesting_user: User = Depends(get_current_user)) -> dict:
+async def get_my_message_stats(
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
     """
     Return counts and character totals for the current user's messages.
 
@@ -303,7 +301,6 @@ async def get_my_message_stats(requesting_user: User = Depends(get_current_user)
                 "total_characters": 0,
             }
 
-        
         total_chars = stats.get("total_characters", 0)
         usage_kg = get_co2_usage_kg(total_chars=total_chars)
 
@@ -354,7 +351,7 @@ async def create_message(
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
-    
+
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -430,12 +427,17 @@ async def create_message(
             request_input=request,
             metadata={},
         )
-        
+
         set_message_context(message.id)
 
-        answer, results, is_rag, latencies, prompts, retrieved_docs = (
-            await generate_answer(request, conversation_id=conversation_id)
-        )
+        (
+            answer,
+            results,
+            is_rag,
+            latencies,
+            prompts,
+            retrieved_docs,
+        ) = await generate_answer(request, conversation_id=conversation_id, user_id=requesting_user.id)
 
         documents_data = []
         if results:
@@ -542,10 +544,15 @@ async def retry(
                 detail="This message cannot be retried",
             )
 
-        answer, results, is_rag, latencies, prompts, retrieved_docs = (
-            await generate_answer(
-                message.request_input, conversation_id=conversation_id
-            )
+        (
+            answer,
+            results,
+            is_rag,
+            latencies,
+            prompts,
+            retrieved_docs,
+        ) = await generate_answer(
+            message.request_input, conversation_id=conversation_id
         )
 
         documents_data = []
@@ -698,7 +705,7 @@ async def create_message_stream(
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
-    
+
     message = None
     try:
         conversation = await Conversation.find_by_id(conversation_id)
@@ -774,7 +781,7 @@ async def create_message_stream(
             request_input=request,
             metadata={},
         )
-        
+
         set_message_context(message.id)
 
         # Start decoupled background job that publishes to bus
@@ -788,6 +795,7 @@ async def create_message_stream(
                 message_id=message.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
+                user_id=requesting_user.id,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
@@ -798,7 +806,7 @@ async def create_message_stream(
             # Optional catch-up from currently saved output (usually empty right after create)
             try:
                 if message.output:
-                    yield f"data: {json.dumps({'type':'partial','content': message.output})}\n\n"
+                    yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
             async for data in bus.subscribe(message.id):
@@ -872,7 +880,9 @@ async def stop_conversation(
         cancel_mgr = get_cancel_manager()
         # Prefer async lookup to support Redis-backed mapping across workers
         try:
-            message_id = await cancel_mgr.get_message_for_conversation_async(conversation_id)  # type: ignore
+            message_id = await cancel_mgr.get_message_for_conversation_async(
+                conversation_id
+            )  # type: ignore
         except Exception:
             message_id = cancel_mgr.get_message_for_conversation(conversation_id)
         if not message_id:
@@ -887,7 +897,9 @@ async def stop_conversation(
         cancel_mgr.cancel(message_id)
         try:
             bus = get_stream_bus()
-            await bus.publish(message_id, f"data: {json.dumps({'type':'stopped'})}\n\n")
+            await bus.publish(
+                message_id, f"data: {json.dumps({'type': 'stopped'})}\n\n"
+            )
             await bus.close(message_id)
             logger.info(
                 "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
@@ -1119,6 +1131,7 @@ async def stream_hallucination(
     async def _generator():
         import json
         import time
+
         from src.utils.template_loader import get_template
 
         total_start = time.perf_counter()
@@ -1222,9 +1235,12 @@ async def stream_hallucination(
             retrieved_docs = []
             rag_latencies = {}
             try:
-                context, results, rag_latencies, retrieved_docs = (
-                    await setup_rag_and_context(rewritten_request)
-                )
+                (
+                    context,
+                    results,
+                    rag_latencies,
+                    retrieved_docs,
+                ) = await setup_rag_and_context(rewritten_request)
             except Exception as e:
                 # Soft-fail RAG retrieval; proceed without new docs
                 rag_latencies = {"rag_error": str(e)}
@@ -1257,14 +1273,14 @@ async def stream_hallucination(
                     first_text = getattr(first, "content", None)
                     if first_text:
                         final_answer_chunks.append(first_text)
-                        yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
+                        yield f"data: {json.dumps({'type': 'token', 'content': first_text})}\n\n"
                 # Continue without timeout
                 async for token in astream:
                     text = getattr(token, "content", None)
                     if not text:
                         continue
                     final_answer_chunks.append(text)
-                    yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                    yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
                 used_stream = True
             except Exception:
                 used_stream = False
@@ -1284,7 +1300,7 @@ async def stream_hallucination(
                     if not token:
                         continue
                     final_answer_chunks.append(str(token))
-                    yield f"data: {json.dumps({'type':'token','content':str(token)})}\n\n"
+                    yield f"data: {json.dumps({'type': 'token', 'content': str(token)})}\n\n"
 
             final_latency = time.perf_counter() - t2
 
@@ -1332,13 +1348,14 @@ async def stream_hallucination(
                 await message.save()
             except Exception:
                 pass
-            yield f"data: {json.dumps({'type':'error','message':str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     response = StreamingResponse(_generator(), media_type="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
     return response
+
 
 @router.post("/generate-llm")
 async def generate_llm(
@@ -1449,9 +1466,14 @@ async def generate(
         except Exception:
             request.year = None
 
-        answer, results, is_rag, latencies, prompts, retrieved_docs = (
-            await generate_answer(request)
-        )
+        (
+            answer,
+            results,
+            is_rag,
+            latencies,
+            prompts,
+            retrieved_docs,
+        ) = await generate_answer(request)
 
         documents_data = []
         if results:
@@ -1559,7 +1581,9 @@ async def retrieve(
                 requery = rag_decision_result.requery
                 request.query = requery
         except Exception as e:
-            logger.warning(f"Requery/rewrite failed in /retrieve, using original query: {e}")
+            logger.warning(
+                f"Requery/rewrite failed in /retrieve, using original query: {e}"
+            )
             requery = None
 
         _context, _results, latencies, formated_results = await setup_rag_and_context(
@@ -1577,4 +1601,294 @@ async def retrieve(
             "requery": requery or original_query,
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+# ─── Agentic endpoints ────────────────────────────────────────────────────────
+
+
+def _prepare_agentic_request(
+    request: GenerationRequest,
+    requesting_user: User,
+) -> GenerationRequest:
+    """Normalise collections on the request (shared by both agentic endpoints)."""
+    allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
+    try:
+        allowed_names = {
+            item.get("name")
+            for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
+            if isinstance(item, dict) and item.get("name")
+        }
+    except Exception:
+        allowed_names = set()
+
+    request.public_collections = [n for n in request.public_collections if n in allowed_names]
+    request.collection_ids = request.collection_ids + request.public_collections
+    request.collection_ids = [c for c in request.collection_ids if c != "Wiley AI Gateway"]
+
+    try:
+        request.year = extract_year_range_from_filters(request.filters)
+    except Exception:
+        request.year = None
+
+    return request
+
+
+@router.post(
+    "/conversations/{conversation_id}/agentic_messages",
+    response_model=CreateMessageResponse,
+)
+async def create_agentic_message(
+    request: GenerationRequest,
+    conversation_id: str,
+    background_tasks: BackgroundTasks,
+    requesting_user: User = Depends(get_current_user),
+) -> CreateMessageResponse:
+    """
+    Create a new message using the fully agentic LangGraph pipeline.
+
+    The agent autonomously decides when to search the knowledge base or the
+    Wiley AI Gateway (via tool calls) and loops until it produces a final answer.
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Message id, query, answer, documents, flags, and metadata.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
+    """
+    set_user_context(requesting_user.id)
+    set_conversation_context(conversation_id)
+
+    message = None
+    try:
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to add a message to this conversation",
+            )
+
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+        if other_users_collections:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if user_collections:
+            request.collection_ids = request.collection_ids + [c.id for c in user_collections]
+
+        request = _prepare_agentic_request(request, requesting_user)
+        logger.info("Agentic collection IDs: %s", request.collection_ids)
+
+        message = await Message.create(
+            conversation_id=conversation_id,
+            input=request.query,
+            output="",
+            documents=[],
+            use_rag=False,
+            request_input=request,
+            metadata={},
+        )
+        set_message_context(message.id)
+
+        answer, tool_results, use_rag, latencies, prompts, trace_entries = (
+            await generate_answer_agentic(
+                request, conversation_id=conversation_id, user_id=requesting_user.id
+            )
+        )
+
+        message.output = answer
+        message.documents = tool_results
+        message.use_rag = use_rag
+        message.trace = trace_entries if trace_entries else None
+        existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        existing_metadata.update({"latencies": latencies, "prompts": prompts})
+        message.metadata = existing_metadata
+        await message.save()
+
+        background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+
+        return {
+            "id": message.id,
+            "query": request.query,
+            "answer": answer,
+            "documents": tool_results,
+            "use_rag": use_rag,
+            "conversation_id": conversation_id,
+            "collection_ids": request.collection_ids,
+            "metadata": {"latencies": latencies},
+        }
+    except HTTPException as http_exc:
+        if message:
+            try:
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                message.metadata = existing_metadata
+                await message.save()
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        if message:
+            try:
+                existing_metadata = dict(getattr(message, "metadata", {}) or {})
+                existing_metadata["error"] = str(e)
+                message.metadata = existing_metadata
+                await message.save()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post(
+    "/conversations/{conversation_id}/stream_agentic_messages",
+    response_class=StreamingResponse,
+)
+async def create_agentic_message_stream(
+    request: GenerationRequest,
+    conversation_id: str,
+    background_tasks: BackgroundTasks,
+    requesting_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """
+    Create a new message using the agentic pipeline and stream the result via SSE.
+
+    Streams structured events:
+    - ``tool_call``   — agent is searching (with the query used)
+    - ``tool_result`` — tool returned a preview
+    - ``token``       — LLM final-answer token
+    - ``final``       — complete answer + latencies
+    - ``stopped``     — generation cancelled by client
+    - ``error``       — unhandled exception
+
+    Args:
+        request (GenerationRequest): Generation parameters including query, collections, and model settings.
+        conversation_id (str): Target conversation identifier.
+        background_tasks (BackgroundTasks): Background task runner used to schedule rollups.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        SSE stream for the agentic generation lifecycle.
+
+    Raises:
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
+    """
+    set_user_context(requesting_user.id)
+    set_conversation_context(conversation_id)
+
+    message = None
+    try:
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conversation.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to add a message to this conversation",
+            )
+
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
+        if other_users_collections:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
+
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if user_collections:
+            request.collection_ids = request.collection_ids + [c.id for c in user_collections]
+
+        request = _prepare_agentic_request(request, requesting_user)
+        logger.info("Agentic stream collection IDs: %s", request.collection_ids)
+
+        message = await Message.create(
+            conversation_id=conversation_id,
+            input=request.query,
+            output="",
+            documents=[],
+            use_rag=False,
+            request_input=request,
+            metadata={},
+        )
+        set_message_context(message.id)
+
+        cancel_mgr = get_cancel_manager()
+        cancel_event = cancel_mgr.create(message.id)
+        cancel_mgr.link_conversation(conversation_id, message.id)
+        gen_task = asyncio.create_task(
+            run_agentic_generation_to_bus(
+                request=request,
+                conversation_id=conversation_id,
+                message_id=message.id,
+                background_tasks=background_tasks,
+                cancel_event=cancel_event,
+                user_id=requesting_user.id,
+            )
+        )
+        cancel_mgr.set_task(message.id, gen_task)
+
+        bus = get_stream_bus()
+
+        async def _gen():
+            try:
+                if message.output:
+                    yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
+            except Exception:
+                pass
+            async for data in bus.subscribe(message.id):
+                yield data
+
+        response = StreamingResponse(_gen(), media_type="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Connection"] = "keep-alive"
+        response.headers["X-Accel-Buffering"] = "no"
+        return response
+
+    except HTTPException as http_exc:
+        if message:
+            error_logger = get_error_logger()
+            await error_logger.log_error_sync(
+                error=http_exc,
+                component=Component.ROUTER,
+                pipeline_stage=PipelineStage.ROUTER,
+                description="HTTPException in create_agentic_message_stream",
+                error_type=type(http_exc).__name__,
+            )
+        raise http_exc
+    except Exception as e:
+        if message:
+            error_logger = get_error_logger()
+            await error_logger.log_error_sync(
+                error=e,
+                component=Component.ROUTER,
+                pipeline_stage=PipelineStage.ROUTER,
+                description="Exception in create_agentic_message_stream",
+                error_type=type(e).__name__,
+            )
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

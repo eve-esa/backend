@@ -81,6 +81,17 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
+# Langfuse observability
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").strip()
+
+# Agentic pipeline model override.
+# The agentic graph requires function-calling support. Set this to "fallback"
+# to force Mistral (reliable tool use) regardless of the request's llm_type.
+# Leave empty to let each request determine its own model.
+AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers
