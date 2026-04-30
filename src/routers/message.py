@@ -1729,7 +1729,7 @@ async def _prepare_agentic_request(
 
 
 @router.post(
-    "/conversations/{conversation_id}/agentic_messages",
+    "/conversations/{conversation_id}/generate-agentic",
     response_model=CreateMessageResponse,
 )
 async def create_agentic_message(
@@ -1863,7 +1863,7 @@ async def create_agentic_message(
 
 
 @router.post(
-    "/conversations/{conversation_id}/stream_agentic_messages",
+    "/conversations/{conversation_id}/stream-generate-agentic",
     response_class=StreamingResponse,
 )
 async def create_agentic_message_stream(
