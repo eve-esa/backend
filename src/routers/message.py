@@ -20,6 +20,7 @@ from src.core.llm_manager import LLMType
 from src.database.models.co2eq_comparison import CO2EQComparison
 from src.database.models.collection import Collection as CollectionModel
 from src.database.models.conversation import Conversation
+from src.database.models.mcp_server import MCPServer
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
@@ -1677,11 +1678,11 @@ async def retrieve(
 # ─── Agentic endpoints ────────────────────────────────────────────────────────
 
 
-def _prepare_agentic_request(
+async def _prepare_agentic_request(
     request: GenerationRequest,
     requesting_user: User,
 ) -> GenerationRequest:
-    """Normalise collections on the request (shared by both agentic endpoints)."""
+    """Normalise collections and resolve MCP servers on the request."""
     allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
     try:
         allowed_names = {
@@ -1704,6 +1705,25 @@ def _prepare_agentic_request(
         request.year = extract_year_range_from_filters(request.filters)
     except Exception:
         request.year = None
+
+    # Resolve MCP servers by name from MongoDB.
+    if request.public_mcp_servers:
+        mcp_docs = await MCPServer.find_all(
+            filter_dict={
+                "name": {"$in": request.public_mcp_servers},
+                "enabled": True,
+            }
+        )
+        found_names = {s.name for s in mcp_docs}
+        missing = set[str](request.public_mcp_servers) - found_names
+        if missing:
+            logger.warning("Requested MCP servers not found or disabled: %s", missing)
+        request.mcp_server_configs = list(mcp_docs)
+        logger.info(
+            "Resolved %d MCP server(s): %s",
+            len(mcp_docs),
+            [s.name for s in mcp_docs],
+        )
 
     return request
 
@@ -1771,7 +1791,7 @@ async def create_agentic_message(
                 c.id for c in user_collections
             ]
 
-        request = _prepare_agentic_request(request, requesting_user)
+        request = await _prepare_agentic_request(request, requesting_user)
         logger.info("Agentic collection IDs: %s", request.collection_ids)
 
         message = await Message.create(
@@ -1910,7 +1930,7 @@ async def create_agentic_message_stream(
                 c.id for c in user_collections
             ]
 
-        request = _prepare_agentic_request(request, requesting_user)
+        request = await _prepare_agentic_request(request, requesting_user)
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
 
         message = await Message.create(

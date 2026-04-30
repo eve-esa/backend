@@ -92,6 +92,11 @@ LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").stri
 # Leave empty to let each request determine its own model.
 AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 
+# AWS Cognito credentials for AgentCore MCP server authentication.
+AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()
+AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
+AGENTCORE_CLIENT_SECRET = os.getenv("AGENTCORE_CLIENT_SECRET", "").strip()
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers

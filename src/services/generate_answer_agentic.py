@@ -36,6 +36,7 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
 )
+from src.services.mcp_auth import get_cognito_token_provider
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -80,6 +81,14 @@ try:
 except Exception:
     InMemorySaver = None  # type: ignore
 
+_mcp_adapters_available = False
+try:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    _mcp_adapters_available = True
+except Exception:
+    MultiServerMCPClient = None  # type: ignore
+
 
 # ─── Trace serialisation ─────────────────────────────────────────────────────
 
@@ -123,6 +132,19 @@ def _serialise_trace_entry(
     return entry
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _tool_call_label(tool_name: str) -> str:
+    """Return a human-readable label for a tool call event."""
+    if "knowledge_base" in tool_name:
+        return "Searching knowledge base"
+    if "wiley" in tool_name.lower():
+        return "Searching Wiley Gateway"
+    pretty = tool_name.replace("_", " ").replace("-", " ").strip()
+    return f"Calling {pretty}" if pretty else "Calling tool"
+
+
 # ─── Tool input schemas ───────────────────────────────────────────────────────
 
 
@@ -140,10 +162,72 @@ class SearchWileyInput(BaseModel):
     )
 
 
+# ─── MCP tool loader ──────────────────────────────────────────────────────────
+
+
+async def _load_mcp_tools_for_servers(
+    mcp_server_configs: List[Any],
+) -> List[Any]:
+    """Connect to each MCP server, authenticate, and load its tools.
+
+    Uses ``MultiServerMCPClient`` from ``langchain-mcp-adapters`` which creates a
+    fresh session per tool invocation (stateless), avoiding lifecycle issues.
+    """
+    if not _mcp_adapters_available or not mcp_server_configs:
+        return []
+
+    token_provider = get_cognito_token_provider()
+    auth_header: Optional[str] = None
+    if token_provider:
+        try:
+            token = await token_provider.get_token()
+            auth_header = f"Bearer {token}"
+        except Exception as exc:
+            logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
+
+    connections: Dict[str, Any] = {}
+    for srv in mcp_server_configs:
+        transport = (
+            srv.config.transport.value if srv.config.transport else "streamable_http"
+        )
+        if transport not in ("streamable_http", "sse"):
+            logger.warning(
+                "Skipping MCP server %r: unsupported transport %r", srv.name, transport
+            )
+            continue
+
+        headers: Dict[str, str] = dict(srv.config.headers or {})
+        if auth_header and "Authorization" not in headers:
+            headers["Authorization"] = auth_header
+
+        connections[srv.name] = {
+            "transport": "streamable_http" if transport == "streamable_http" else "sse",
+            "url": srv.config.url,
+            "headers": headers,
+        }
+
+    if not connections:
+        return []
+
+    try:
+        client = MultiServerMCPClient(connections, tool_name_prefix=True)
+        tools = await client.get_tools()
+        logger.info(
+            "Loaded %d MCP tool(s) from %d server(s): %s",
+            len(tools),
+            len(connections),
+            [t.name for t in tools],
+        )
+        return tools
+    except Exception as exc:
+        logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
+        return []
+
+
 # ─── Tool factory ─────────────────────────────────────────────────────────────
 
 
-def _build_tools(
+async def _build_tools(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
 ) -> List[Any]:
@@ -152,6 +236,11 @@ def _build_tools(
         return []
 
     tools: List[Any] = []
+
+    # Load dynamic MCP tools from requested servers.
+    if getattr(request, "mcp_server_configs", None):
+        mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
+        tools.extend(mcp_tools)
 
     if request.collection_ids:
 
@@ -483,6 +572,20 @@ def _build_react_graph(
                 end_on=("human", "tool"),
             )
 
+        # Some LLM APIs (Mistral) reject assistant messages that carry both
+        # text content AND tool_calls.  Strip the content from those messages
+        # so the history stays valid; the text was already streamed to the user.
+        messages = [
+            AIMessage(content="", tool_calls=m.tool_calls, id=m.id)
+            if (
+                isinstance(m, AIMessage)
+                and m.content
+                and getattr(m, "tool_calls", None)
+            )
+            else m
+            for m in messages
+        ]
+
         # For models that use the [TOOL_CALLS] text format (e.g. EVE-Instruct),
         # convert any structured tool_calls / ToolMessage objects in the history
         # back to plain text before sending.  These were injected by us to make
@@ -586,7 +689,7 @@ async def generate_answer_agentic(
     total_start = time.perf_counter()
 
     try:
-        tools = _build_tools(request)
+        tools = await _build_tools(request)
         checkpointer = await _get_agentic_checkpointer()
         system_prompt = _resolve_system_prompt(request.llm_type)
 
@@ -733,7 +836,7 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
-        tools = _build_tools(request, cancel_event=cancel_event)
+        tools = await _build_tools(request, cancel_event=cancel_event)
         checkpointer = await _get_agentic_checkpointer()
         system_prompt = _resolve_system_prompt(request.llm_type)
 
@@ -796,11 +899,7 @@ async def generate_answer_agentic_stream_helper(
                 tname = tc.get("name", "tool")
                 args = tc.get("args", {})
                 query_used = args.get("query", "")
-                label = (
-                    "Searching knowledge base"
-                    if "knowledge_base" in tname
-                    else "Searching Wiley Gateway"
-                )
+                label = _tool_call_label(tname)
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
                 return [
                     f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
@@ -894,11 +993,7 @@ async def generate_answer_agentic_stream_helper(
                             else getattr(tc, "args", {})
                         )
                         query_used = args.get("query", "")
-                        label = (
-                            "Searching knowledge base"
-                            if "knowledge_base" in tname
-                            else "Searching Wiley Gateway"
-                        )
+                        label = _tool_call_label(tname)
                         msg = f"{label}: {query_used}" if query_used else f"{label}…"
                         step_s = time.perf_counter() - node_start_time
                         trace_entries.append(
