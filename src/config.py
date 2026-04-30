@@ -86,16 +86,20 @@ LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
 LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").strip()
 
-# Agentic pipeline model override.
-# The agentic graph requires function-calling support. Set this to "fallback"
-# to force Mistral (reliable tool use) regardless of the request's llm_type.
-# Leave empty to let each request determine its own model.
+# ─── Agentic pipeline configuration ───────────────────────────────────────────
+# MODEL_TIMEOUT (defined above) is the per-step answer generation timeout used
+# by the streaming agentic graph. The vars below are specific to the agentic
+# pipeline and its MCP tool integrations.
+
+# Override the LLM type for the agentic graph.  Set to "fallback" to force
+# Mistral (reliable tool use) regardless of the request's llm_type.
 AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 
 # AWS Cognito credentials for AgentCore MCP server authentication.
 AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()
 AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
 AGENTCORE_CLIENT_SECRET = os.getenv("AGENTCORE_CLIENT_SECRET", "").strip()
+# ──────────────────────────────────────────────────────────────────────────────
 
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""

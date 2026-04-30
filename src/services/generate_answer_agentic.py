@@ -8,35 +8,37 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 import time
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import BackgroundTasks
-from pydantic import BaseModel, Field
 
 from src.config import (
     AGENTIC_LLM_TYPE,
-    IS_PROD,
     MODEL_TIMEOUT,
-    SATCOM_QDRANT_API_KEY,
-    SATCOM_QDRANT_URL,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS
-from src.core.vector_store_manager import VectorStoreManager
 from src.database.models.message import Message
 from src.database.models.user import User
+from src.services.agentic_utils import (
+    SearchWileyInput,
+    has_text_tool_call,
+    parse_text_tool_calls,
+    reformat_messages_for_text_tool_model,
+    strip_content_from_tool_call_messages,
+    tool_call_label,
+)
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
     _resolve_system_prompt,
     get_mcp_context,
-    get_rag_context,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
 )
 from src.services.mcp_auth import get_cognito_token_provider
+from src.services.mcp_tool_interceptor import ObservabilityInterceptor
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -44,8 +46,6 @@ from src.services.token_rate_limiter import (
 )
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
 from src.utils.helpers import (
-    build_context,
-    extract_document_data,
     get_mongodb_uri,
     tiktoken_counter,
 )
@@ -132,34 +132,7 @@ def _serialise_trace_entry(
     return entry
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-
-def _tool_call_label(tool_name: str) -> str:
-    """Return a human-readable label for a tool call event."""
-    if "knowledge_base" in tool_name:
-        return "Searching knowledge base"
-    if "wiley" in tool_name.lower():
-        return "Searching Wiley Gateway"
-    pretty = tool_name.replace("_", " ").replace("-", " ").strip()
-    return f"Calling {pretty}" if pretty else "Calling tool"
-
-
-# ─── Tool input schemas ───────────────────────────────────────────────────────
-
-
-class SearchKBInput(BaseModel):
-    query: str = Field(description="Search query to look up in the knowledge base")
-
-
-class SearchWileyInput(BaseModel):
-    query: str = Field(description="Search query for scientific articles")
-    start_year: Optional[int] = Field(
-        default=None, description="Start year filter (inclusive)"
-    )
-    end_year: Optional[int] = Field(
-        default=None, description="End year filter (inclusive)"
-    )
+# ─── Helpers (extracted to src/services/agentic_utils.py) ─────────────────────
 
 
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
@@ -210,7 +183,11 @@ async def _load_mcp_tools_for_servers(
         return []
 
     try:
-        client = MultiServerMCPClient(connections, tool_name_prefix=True)
+        client = MultiServerMCPClient(
+            connections,
+            tool_name_prefix=True,
+            tool_interceptors=[ObservabilityInterceptor()],
+        )
         tools = await client.get_tools()
         logger.info(
             "Loaded %d MCP tool(s) from %d server(s): %s",
@@ -241,92 +218,6 @@ async def _build_tools(
     if getattr(request, "mcp_server_configs", None):
         mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
         tools.extend(mcp_tools)
-
-    if request.collection_ids:
-
-        async def _search_knowledge_base(query: str) -> str:
-            """Search the scientific knowledge base for relevant documents.
-
-            Use for Earth Observation papers, ESA/NASA mission data, satellite
-            information, and domain-specific scientific content.
-            """
-            try:
-                vector_store = VectorStoreManager(
-                    embeddings_model=request.embeddings_model
-                )
-                temp = GenerationRequest(
-                    query=query,
-                    embeddings_model=request.embeddings_model,
-                    k=request.k,
-                    score_threshold=request.score_threshold,
-                    filters=request.filters,
-                )
-                temp.collection_ids = list(request.collection_ids)
-                temp.private_collections_map = dict(request.private_collections_map)
-
-                if (
-                    not IS_PROD
-                    and "satcom-chunks-collection" in request.public_collections
-                ):
-                    satcom_vs = VectorStoreManager(
-                        embeddings_model=request.embeddings_model,
-                        qdrant_url=SATCOM_QDRANT_URL,
-                        qdrant_api_key=SATCOM_QDRANT_API_KEY,
-                    )
-                    sat_temp = GenerationRequest(
-                        query=query,
-                        embeddings_model=request.embeddings_model,
-                        k=request.k,
-                        score_threshold=request.score_threshold,
-                    )
-                    sat_temp.collection_ids = ["satcom-chunks-collection"]
-                    sat_results, _ = await get_rag_context(
-                        satcom_vs, sat_temp, cancel_event=cancel_event
-                    )
-                    main_temp = GenerationRequest(
-                        query=query,
-                        embeddings_model=request.embeddings_model,
-                        k=request.k,
-                        score_threshold=request.score_threshold,
-                        filters=request.filters,
-                    )
-                    main_temp.collection_ids = [
-                        c
-                        for c in request.collection_ids
-                        if c != "satcom-chunks-collection"
-                    ]
-                    main_temp.private_collections_map = dict(
-                        request.private_collections_map
-                    )
-                    main_results, _ = await get_rag_context(
-                        vector_store, main_temp, cancel_event=cancel_event
-                    )
-                    results = list(main_results) + list(sat_results)
-                else:
-                    results, _ = await get_rag_context(
-                        vector_store, temp, cancel_event=cancel_event
-                    )
-
-                if not results:
-                    return "No relevant documents found in the knowledge base for this query."
-                formatted = [extract_document_data(r) for r in results]
-                return build_context(formatted)
-            except Exception as exc:
-                logger.warning("RAG tool error: %s", exc)
-                return f"Knowledge-base search failed: {exc}"
-
-        tools.append(
-            StructuredTool.from_function(
-                coroutine=_search_knowledge_base,
-                name="search_knowledge_base",
-                description=(
-                    "Search the scientific knowledge base for relevant documents. "
-                    "Use for queries about Earth observation, satellite data, "
-                    "ESA/NASA missions, and related scientific topics."
-                ),
-                args_schema=SearchKBInput,
-            )
-        )
 
     if "Wiley AI Gateway" in (request.public_collections or []):
 
@@ -417,109 +308,6 @@ async def _get_agentic_checkpointer() -> Optional[Any]:
 # ─── Manual ReAct graph builder ───────────────────────────────────────────────
 
 
-_TEXT_TOOL_CALL_MARKER = "[TOOL_CALLS]"
-
-
-def _reformat_messages_for_text_tool_model(messages: List[Any]) -> List[Any]:
-    """Convert structured tool_calls / ToolMessage objects back to the plain-text
-    format used by Mistral-family models (e.g. EVE-Instruct).
-
-    OpenAI-format:
-      AIMessage(content="", tool_calls=[{name, args}])
-      ToolMessage(content=result, tool_call_id=..., name=...)
-
-    Mistral text-format (what the model actually understands):
-      AIMessage(content="[TOOL_CALLS] [{name, arguments}]")
-      HumanMessage(content="[TOOL_RESULTS]\\n<result>")
-
-    Only applied when the history contains synthetic AIMessages with empty
-    content and structured tool_calls (i.e. messages we fabricated to make
-    the LangGraph router fire).
-    """
-    if not (AIMessage and ToolMessage and HumanMessage):
-        return messages
-
-    result: List[Any] = []
-    for msg in messages:
-        if (
-            isinstance(msg, AIMessage)
-            and not msg.content
-            and getattr(msg, "tool_calls", None)
-        ):
-            calls = [
-                {"name": tc["name"], "arguments": tc.get("args", {})}
-                for tc in msg.tool_calls
-            ]
-            result.append(AIMessage(content=f"[TOOL_CALLS] {json.dumps(calls)}"))
-        elif isinstance(msg, ToolMessage):
-            result.append(HumanMessage(content=f"[TOOL_RESULTS]\n{msg.content}"))
-        else:
-            result.append(msg)
-    return result
-
-
-def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
-    """Parse EVE-Instruct-style text tool calls: [TOOL_CALLS]tool_name{"key": "val"} ...
-
-    Returns a list of tool-call dicts compatible with LangChain's AIMessage.tool_calls.
-    """
-    if _TEXT_TOOL_CALL_MARKER not in content:
-        return []
-
-    text = content[
-        content.index(_TEXT_TOOL_CALL_MARKER) + len(_TEXT_TOOL_CALL_MARKER) :
-    ].strip()
-    calls: List[Dict[str, Any]] = []
-    i = 0
-    while i < len(text):
-        while i < len(text) and text[i] in " \t\n,":
-            i += 1
-        if i >= len(text):
-            break
-        m = re.match(r"([A-Za-z_]\w*)", text[i:])
-        if not m:
-            break
-        name = m.group(1)
-        i += m.end()
-        while i < len(text) and text[i] in " \t":
-            i += 1
-        if i < len(text) and text[i] == "{":
-            depth, j = 0, i
-            while j < len(text):
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            args = json.loads(text[i : j + 1])
-                        except Exception:
-                            args = {}
-                        calls.append(
-                            {
-                                "id": f"call_{len(calls)}_{name}",
-                                "name": name,
-                                "args": args,
-                                "type": "tool_call",
-                            }
-                        )
-                        i = j + 1
-                        break
-                j += 1
-            else:
-                break
-        else:
-            calls.append(
-                {
-                    "id": f"call_{len(calls)}_{name}",
-                    "name": name,
-                    "args": {},
-                    "type": "tool_call",
-                }
-            )
-    return calls
-
-
 def _build_react_graph(
     llm_type: Optional[str],
     tools: List[Any],
@@ -572,24 +360,10 @@ def _build_react_graph(
                 end_on=("human", "tool"),
             )
 
-        # Some LLM APIs (Mistral) reject assistant messages that carry both
-        # text content AND tool_calls.  Strip the content from those messages
-        # so the history stays valid; the text was already streamed to the user.
-        messages = [
-            AIMessage(content="", tool_calls=m.tool_calls, id=m.id)
-            if (
-                isinstance(m, AIMessage)
-                and m.content
-                and getattr(m, "tool_calls", None)
-            )
-            else m
-            for m in messages
-        ]
+        messages = strip_content_from_tool_call_messages(
+            messages, AIMessage=AIMessage
+        )
 
-        # For models that use the [TOOL_CALLS] text format (e.g. EVE-Instruct),
-        # convert any structured tool_calls / ToolMessage objects in the history
-        # back to plain text before sending.  These were injected by us to make
-        # the LangGraph router fire; the model itself never speaks OpenAI-format.
         has_synthetic_tool_msgs = any(
             (
                 isinstance(m, AIMessage)
@@ -600,7 +374,12 @@ def _build_react_graph(
             for m in messages
         )
         if has_synthetic_tool_msgs:
-            messages = _reformat_messages_for_text_tool_model(messages)
+            messages = reformat_messages_for_text_tool_model(
+                messages,
+                AIMessage=AIMessage,
+                ToolMessage=ToolMessage,
+                HumanMessage=HumanMessage,
+            )
 
         response = await llm_with_tools.ainvoke(messages)
 
@@ -609,7 +388,7 @@ def _build_react_graph(
         if not getattr(response, "tool_calls", None) and isinstance(
             response.content, str
         ):
-            parsed = _parse_text_tool_calls(response.content)
+            parsed = parse_text_tool_calls(response.content)
             if parsed:
                 logger.info(
                     "Parsed %d text-format tool call(s) from model response",
@@ -890,16 +669,15 @@ async def generate_answer_agentic_stream_helper(
             joined = "".join(items)
             turn_buffer.clear()
 
-            if _TEXT_TOOL_CALL_MARKER in joined:
-                # Text-format tool call — emit a tool_call event, not tokens
-                parsed = _parse_text_tool_calls(joined)
+            if has_text_tool_call(joined):
+                parsed = parse_text_tool_calls(joined)
                 if not parsed:
                     return []
                 tc = parsed[0]
                 tname = tc.get("name", "tool")
                 args = tc.get("args", {})
                 query_used = args.get("query", "")
-                label = _tool_call_label(tname)
+                label = tool_call_label(tname)
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
                 return [
                     f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
@@ -993,7 +771,7 @@ async def generate_answer_agentic_stream_helper(
                             else getattr(tc, "args", {})
                         )
                         query_used = args.get("query", "")
-                        label = _tool_call_label(tname)
+                        label = tool_call_label(tname)
                         msg = f"{label}: {query_used}" if query_used else f"{label}…"
                         step_s = time.perf_counter() - node_start_time
                         trace_entries.append(
