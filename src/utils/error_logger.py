@@ -33,6 +33,7 @@ class Component(str, Enum):
     RE_RANKER = "RE-RANKER"
     RE_RANKER_FALLBACK = "RE-RANKER_FALLBACK"
     ROUTER = "ROUTER"
+    MCP_TOOL = "MCP_TOOL"
 
 
 class PipelineStage(str, Enum):
@@ -43,6 +44,7 @@ class PipelineStage(str, Enum):
     RETRIEVAL = "retrieval"
     HALLUCINATION = "hallucination"
     ROUTER = "router"
+    TOOL_EXECUTION = "tool_execution"
 
 
 class ErrorException(Exception):

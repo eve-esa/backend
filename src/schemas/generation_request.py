@@ -33,9 +33,14 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of public collection names to include in the search",
     )
+    public_mcp_servers: List[str] = Field(
+        default_factory=list,
+        description="List of MCP server names to attach as tools for the agentic pipeline",
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _mcp_server_configs: List[Any] = PrivateAttr(default_factory=list)
 
     @property
     def collection_ids(self) -> List[str]:
@@ -52,3 +57,11 @@ class GenerationRequest(BaseModel):
     @private_collections_map.setter
     def private_collections_map(self, value: Dict[str, str]) -> None:
         self._private_collections_map = value
+
+    @property
+    def mcp_server_configs(self) -> List[Any]:
+        return self._mcp_server_configs
+
+    @mcp_server_configs.setter
+    def mcp_server_configs(self, value: List[Any]) -> None:
+        self._mcp_server_configs = list(value) if value else []

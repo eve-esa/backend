@@ -1,65 +1,67 @@
 """Endpoint to generate an answer using a language model and vector store."""
 
+import asyncio
+import contextlib
 import json
 import logging
-import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from typing import Any, Dict, List, Optional
+
 from fastapi import BackgroundTasks, HTTPException
-from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
-from src.core.vector_store_manager import VectorStoreManager
-from src.core.llm_manager import LLMManager, LLMType
+from src.config import (
+    DEEPINFRA_API_TOKEN,
+    FALLBACK_MODEL_NAME,
+    IS_PROD,
+    MAIN_MODEL_NAME,
+    MODEL_TIMEOUT,
+    SATCOM_LARGE_MODEL_NAME,
+    SATCOM_QDRANT_API_KEY,
+    SATCOM_QDRANT_URL,
+    SATCOM_SMALL_MODEL_NAME,
+    SCRAPING_DOG_API_KEY,
+    SILICONFLOW_API_TOKEN,
+)
 from src.constants import (
     DEFAULT_MAX_NEW_TOKENS,
     MCP_MAX_TOP_N,
     POLICY_PROMPT,
+    SCRAPING_DOG_ALL_URLS,
+)
+from src.core.llm_manager import LLMManager, LLMType
+from src.core.vector_store_manager import VectorStoreManager
+from src.database.models.conversation import Conversation
+from src.database.models.message import Message
+from src.database.models.user import User
+from src.schemas.generation_request import GenerationRequest
+from src.services.cancel_manager import get_cancel_manager
+from src.services.mcp_client_service import MultiServerMCPClientService
+from src.services.stream_bus import get_stream_bus
+from src.services.token_rate_limiter import (
+    consume_tokens_for_user,
+    count_tokens_for_texts,
+)
+from src.utils.deepinfra_reranker import DeepInfraReranker
+from src.utils.error_logger import (
+    Component,
+    PipelineStage,
+    get_error_logger,
 )
 from src.utils.helpers import (
+    build_context,
     build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
-    build_context,
-)
-from src.services.mcp_client_service import MultiServerMCPClientService
-from src.config import (
-    DEEPINFRA_API_TOKEN,
-    IS_PROD,
-    SCRAPING_DOG_API_KEY,
-    SILICONFLOW_API_TOKEN,
-    SATCOM_QDRANT_URL,
-    SATCOM_QDRANT_API_KEY,
-    MODEL_TIMEOUT,
-    MAIN_MODEL_NAME,
-    FALLBACK_MODEL_NAME,
-    SATCOM_SMALL_MODEL_NAME,
-    SATCOM_LARGE_MODEL_NAME,
-    config,
-)
-from src.utils.deepinfra_reranker import DeepInfraReranker
-from src.utils.template_loader import get_template
-from src.utils.siliconflow_reranker import SiliconFlowReranker
-from src.utils.helpers import (
-    get_mongodb_uri,
     tiktoken_counter,
 )
-import contextlib
-
+from src.utils.langfuse_helper import flush as langfuse_flush
+from src.utils.langfuse_helper import get_callbacks, langfuse_context
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
-from src.constants import SCRAPING_DOG_ALL_URLS
-from src.services.stream_bus import get_stream_bus
-from src.services.cancel_manager import get_cancel_manager
-from src.services.token_rate_limiter import consume_tokens_for_user, count_tokens_for_texts
-from src.database.models.user import User
-from src.database.models.message import Message
-from src.database.models.conversation import Conversation
-from src.schemas.generation_request import GenerationRequest
-from src.utils.error_logger import (
-    get_error_logger,
-    Component,
-    PipelineStage,
-)
+from src.utils.siliconflow_reranker import SiliconFlowReranker
+from src.utils.template_loader import get_template
 
 
 logger = logging.getLogger(__name__)
@@ -162,6 +164,7 @@ async def persist_message_state(
     generated_model_name: Optional[str] = None,
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -169,6 +172,7 @@ async def persist_message_state(
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
+    - Sets Message.trace (agentic execution trace) if provided.
     """
     try:
         message = await Message.find_by_id(message_id)
@@ -182,6 +186,8 @@ async def persist_message_state(
             message.documents = [extract_document_data(d) for d in documents]
         if use_rag is not None:
             message.use_rag = bool(use_rag)
+        if trace is not None:
+            message.trace = trace
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         if latencies is not None:
             existing_metadata["latencies"] = latencies
@@ -220,15 +226,15 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
 _langgraph_available = False
 try:
-    from langgraph.graph import StateGraph, MessagesState, START
-    from langgraph.checkpoint.mongodb import MongoDBSaver
-    from langgraph.graph.message import add_messages
     from langchain_core.messages import (
-        trim_messages,
-        HumanMessage,
         AIMessage,
+        HumanMessage,
         SystemMessage,
+        trim_messages,
     )
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+    from langgraph.graph import START, MessagesState, StateGraph
+    from langgraph.graph.message import add_messages
 
     _langgraph_available = True
 except Exception:
@@ -237,7 +243,7 @@ except Exception:
 
 # LangChain message classes for compatibility
 try:
-    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 except Exception:
     HumanMessage = None
     SystemMessage = None
@@ -390,7 +396,7 @@ Please continue the conversation using this summary as context for understanding
         # Try Mongo-backed checkpointer first, keep it open
         try:
             from pymongo import MongoClient
-            
+
             uri = get_mongodb_uri()
             client = MongoClient(uri)
             checkpointer = MongoDBSaver(client)
@@ -687,8 +693,12 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
-        error_msg = raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
-        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        error_msg = (
+            raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
+        )
+        error_obj = (
+            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -724,8 +734,14 @@ async def get_mcp_context(
         is_error = bool(raw.get("is_error"))
         content_items = raw.get("content", []) or []
     if is_error:
-        error_msg = raw.get("error", "MCP retrieval failed") if isinstance(raw, dict) else str(raw)
-        error_obj = Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        error_msg = (
+            raw.get("error", "MCP retrieval failed")
+            if isinstance(raw, dict)
+            else str(raw)
+        )
+        error_obj = (
+            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -823,9 +839,9 @@ async def should_use_rag(
         )
         try:
             fallback_llm = llm_manager.get_fallback_llm()
-            structured_fallback_llm = fallback_llm.bind(temperature=0).with_structured_output(
-                ShouldUseRagDecision
-            )
+            structured_fallback_llm = fallback_llm.bind(
+                temperature=0
+            ).with_structured_output(ShouldUseRagDecision)
             result = await structured_fallback_llm.ainvoke(prompt)
             logger.info(f"should_use_rag result from fallback model: {result}")
             if isinstance(result, ShouldUseRagDecision):
@@ -900,7 +916,7 @@ async def setup_rag_and_context(
         mcp_lat: Dict[str, Optional[float]] = {}
         satcom_results: List[Any] = []
         satcom_lat: Dict[str, Optional[float]] = {}
-        
+
         # temporary for satcom collection
         if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
             satcom_vector_store = VectorStoreManager(
@@ -1020,6 +1036,7 @@ async def check_policy(
 async def generate_answer(
     request: GenerationRequest,
     conversation_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[str, list, bool, dict, Dict[str, Optional[float]], Dict[str, str]]:
     """Generate an answer using RAG and LLM."""
     error_logger = get_error_logger()
@@ -1043,10 +1060,12 @@ async def generate_answer(
 
         # Check if we need to use RAG using LLMManager
         rag_decision_start = time.perf_counter()
-        rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
-            await should_use_rag(
-                llm_manager, request.query, conversation_context, request.llm_type
-            )
+        (
+            rag_decision_result,
+            rag_decision_prompt,
+            is_main_LLM_fail,
+        ) = await should_use_rag(
+            llm_manager, request.query, conversation_context, request.llm_type
         )
         request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
@@ -1058,11 +1077,14 @@ async def generate_answer(
             and rag_decision_result.use_rag
         ):
             try:
-                context, results, latencies, retrieved_docs = (
-                    await setup_rag_and_context(request)
-                )
+                (
+                    context,
+                    results,
+                    latencies,
+                    retrieved_docs,
+                ) = await setup_rag_and_context(request)
             except Exception as e:
-                logger.warning(f"Failed to setup RAG and context")
+                logger.warning("Failed to setup RAG and context")
                 await error_logger.log_error(
                     error=e,
                     component=Component.RETRIEVAL,
@@ -1127,7 +1149,10 @@ async def generate_answer(
                 # Pass temperature to the graph via state config
                 graph, mode = await _get_or_create_compiled_graph()
                 if graph is not None:
-                    config = {"configurable": {"thread_id": conversation_id}}
+                    config = {
+                        "configurable": {"thread_id": conversation_id},
+                        "callbacks": get_callbacks(),
+                    }
                     state = {
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
@@ -1136,7 +1161,14 @@ async def generate_answer(
                         "is_streaming": False,
                         "llm_type": request.llm_type,
                     }
-                    result = await graph.ainvoke(state, config)
+                    with langfuse_context(
+                        user_id=user_id,
+                        session_id=conversation_id,
+                        tags=["classic", request.llm_type or "default"],
+                        trace_name="generation",
+                    ):
+                        result = await graph.ainvoke(state, config)
+                    langfuse_flush()
                 else:
                     result = None
                 base_gen_latency = time.perf_counter() - gen_start
@@ -1160,7 +1192,10 @@ async def generate_answer(
             logger.info("starting to fallback using fallback model")
             gen_start = time.perf_counter()
 
-            final_answer, generation_prompt = await llm_manager.generate_answer_fallback(
+            (
+                final_answer,
+                generation_prompt,
+            ) = await llm_manager.generate_answer_fallback(
                 query=origin_query,
                 context=context,
                 max_new_tokens=request.max_new_tokens,
@@ -1272,6 +1307,7 @@ async def generate_answer_stream_generator_helper(
     output_format: str = "plain",
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
     error_logger = get_error_logger()
@@ -1309,7 +1345,7 @@ async def generate_answer_stream_generator_helper(
 
         if cancelled():
             await persist_message_state(message_id, stopped=True)
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
         is_main_LLM_fail = False
@@ -1321,7 +1357,7 @@ async def generate_answer_stream_generator_helper(
                 )
             except asyncio.CancelledError:
                 await persist_message_state(message_id, stopped=True)
-                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
         else:
             conversation_history, conversation_summary = (None, None)
@@ -1330,23 +1366,25 @@ async def generate_answer_stream_generator_helper(
         )
         rag_decision_start = time.perf_counter()
         try:
-            rag_decision_result, rag_decision_prompt, is_main_LLM_fail = (
-                await cancel_aware(
-                    should_use_rag(
-                        llm_manager,
-                        request.query,
-                        conversation_context,
-                        request.llm_type,
-                    )
+            (
+                rag_decision_result,
+                rag_decision_prompt,
+                is_main_LLM_fail,
+            ) = await cancel_aware(
+                should_use_rag(
+                    llm_manager,
+                    request.query,
+                    conversation_context,
+                    request.llm_type,
                 )
             )
         except asyncio.CancelledError:
             await persist_message_state(message_id, stopped=True)
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
         if rag_decision_result.requery:
             if rag_decision_result.use_rag:
-                yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: '+rag_decision_result.requery})}\n\n"
+                yield f"data: {json.dumps({'type': 'requery', 'content': 'Searched for: ' + rag_decision_result.requery})}\n\n"
             request.query = rag_decision_result.requery
         rag_decision_latency = time.perf_counter() - rag_decision_start
         context, results, latencies, retrieved_docs = "", [], {}, []
@@ -1374,7 +1412,7 @@ async def generate_answer_stream_generator_helper(
                         "rag_decision_result": rag_decision_result,
                     },
                 )
-                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
             except Exception as er:
                 logger.warning(f"Failed to setup RAG and context: {str(er)}")
@@ -1421,7 +1459,7 @@ async def generate_answer_stream_generator_helper(
                     "rag_decision_result": rag_decision_result,
                 },
             )
-            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
         if rag_decision_result.use_rag:
@@ -1470,7 +1508,10 @@ async def generate_answer_stream_generator_helper(
                     logger.info(
                         f"Using optimized LangGraph streaming with mode: {mode}"
                     )
-                    config = {"configurable": {"thread_id": conversation_id}}
+                    config = {
+                        "configurable": {"thread_id": conversation_id},
+                        "callbacks": get_callbacks(),
+                    }
 
                     state = {
                         "messages": add_messages(
@@ -1485,6 +1526,15 @@ async def generate_answer_stream_generator_helper(
 
                     logger.info("Using LangGraph astream for streaming")
                     llm_instruct_timeout = MODEL_TIMEOUT
+                    _lf_exit = contextlib.ExitStack()
+                    _lf_exit.enter_context(
+                        langfuse_context(
+                            user_id=user_id,
+                            session_id=conversation_id,
+                            tags=["classic", "stream", request.llm_type or "default"],
+                            trace_name="generation_stream",
+                        )
+                    )
                     try:
                         # Create the async generator once so we can pull the first token with a timeout
                         astream = graph.astream(
@@ -1501,7 +1551,7 @@ async def generate_answer_stream_generator_helper(
                         first_text = getattr(first_chunk, "content", None)
                         if first_text:
                             if output_format == "json":
-                                yield f"data: {json.dumps({'type':'token','content':first_text})}\n\n"
+                                yield f"data: {json.dumps({'type': 'token', 'content': first_text})}\n\n"
                             else:
                                 yield f"data: {first_text}\n\n"
                             accumulated.append(first_text)
@@ -1532,26 +1582,27 @@ async def generate_answer_stream_generator_helper(
                                     },
                                     retrieved_docs=retrieved_docs,
                                 )
-                                yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                                 return
                             text = getattr(chunk, "content", None)
                             if not text:
                                 continue
                             if output_format == "json":
-                                yield f"data: {json.dumps({'type':'token','content':text})}\n\n"
+                                yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
                             else:
                                 yield f"data: {text}\n\n"
                             accumulated.append(text)
                             tokens_yielded += 1
 
                         base_gen_latency = time.perf_counter() - gen_start
+                        langfuse_flush()
                         logger.info(
                             f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
                         )
                         used_stream = True
                     except TimeoutError as e:
                         logger.warning(
-                            f"LangGraph streaming timed out, falling back to fallback model streaming"
+                            "LangGraph streaming timed out, falling back to fallback model streaming"
                         )
                         await error_logger.log_error(
                             error=e,
@@ -1563,6 +1614,7 @@ async def generate_answer_stream_generator_helper(
                         used_stream = False
                     finally:
                         # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
+                        _lf_exit.close()
                         with contextlib.suppress(Exception):
                             await graph.aclose()
                 else:
@@ -1585,7 +1637,7 @@ async def generate_answer_stream_generator_helper(
         fallback_first_token_latency: Optional[float] = None
         if not used_stream or tokens_yielded == 0:
             gen_start = time.perf_counter()
-            logger.info(f"Using fallback model streaming")
+            logger.info("Using fallback model streaming")
             gen = llm_manager.generate_answer_fallback_stream(
                 query=origin_query,
                 context=context,
@@ -1618,10 +1670,10 @@ async def generate_answer_stream_generator_helper(
                                 },
                                 retrieved_docs=retrieved_docs,
                             )
-                            yield f"data: {json.dumps({'type':'stopped'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                             return
                     if output_format == "json":
-                        yield f"data: {json.dumps({'type':'token','content':token})}\n\n"
+                        yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
                     else:
                         yield f"data: {token}\n\n"
                     accumulated.append(str(token))
@@ -1686,7 +1738,7 @@ async def generate_answer_stream_generator_helper(
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         else:
-            yield f"data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
 
     except asyncio.CancelledError:
         logger.info("Cancelled during generation")
@@ -1732,10 +1784,17 @@ async def generate_answer_stream_generator(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "plain", background_tasks, cancel_event
+        request,
+        conversation_id,
+        message_id,
+        "plain",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -1746,10 +1805,17 @@ async def generate_answer_json_stream_generator(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
     async for chunk in generate_answer_stream_generator_helper(
-        request, conversation_id, message_id, "json", background_tasks, cancel_event
+        request,
+        conversation_id,
+        message_id,
+        "json",
+        background_tasks,
+        cancel_event,
+        user_id,
     ):
         yield chunk
 
@@ -1774,6 +1840,7 @@ async def run_generation_to_bus(
             message_id=message_id,
             background_tasks=background_tasks,
             cancel_event=cancel_event,
+            user_id=user_id,
         ):
             # Forward SSE-formatted chunks as-is
             await bus.publish(message_id, chunk)
@@ -1783,7 +1850,7 @@ async def run_generation_to_bus(
     except Exception as e:
         await bus.publish(
             message_id,
-            f"data: {json.dumps({'type':'error','message':str(e)})}\n\n",
+            f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n",
         )
     finally:
         if user_id:
