@@ -95,6 +95,11 @@ LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").stri
 # Mistral (reliable tool use) regardless of the request's llm_type.
 AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 
+# Which agent graph to use.  Short names (e.g. "react") resolve to built-in
+# graphs in src/services/agents/graphs/.  Dotted paths (e.g.
+# "my_package.MyAgent") are imported dynamically for external graphs.
+AGENT_GRAPH_TYPE = os.getenv("AGENT_GRAPH_TYPE", "react").strip()
+
 # AWS Cognito credentials for AgentCore MCP server authentication.
 AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()
 AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
