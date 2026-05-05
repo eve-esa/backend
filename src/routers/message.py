@@ -1744,6 +1744,11 @@ async def create_agentic_message(
     The agent autonomously decides when to search the knowledge base or the
     Wiley AI Gateway (via tool calls) and loops until it produces a final answer.
 
+    ``public_mcp_servers`` controls which MCP servers are available for this
+    request. Pass server names in ``request.public_mcp_servers``; only enabled
+    servers found in the MCP server store are resolved and attached to the
+    request as tool configs before generation starts.
+
     Args:
         request (GenerationRequest): Generation parameters including query, collections, and model settings.
         conversation_id (str): Target conversation identifier.
@@ -1752,6 +1757,7 @@ async def create_agentic_message(
 
     Returns:
         Message id, query, answer, documents, flags, and metadata.
+        ``trace`` contains the agentic execution steps captured during generation.
 
     Raises:
         HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
@@ -1876,6 +1882,11 @@ async def create_agentic_message_stream(
     """
     Create a new message using the agentic pipeline and stream the result via SSE.
 
+    ``public_mcp_servers`` controls which MCP servers are available for this
+    request. Pass server names in ``request.public_mcp_servers``; only enabled
+    servers found in the MCP server store are resolved and attached to the
+    request as tool configs before streaming generation starts.
+
     Streams structured events:
     - ``tool_call``   — agent is searching (with the query used)
     - ``tool_result`` — tool returned a preview
@@ -1892,6 +1903,7 @@ async def create_agentic_message_stream(
 
     Returns:
         SSE stream for the agentic generation lifecycle.
+        The ``final`` event includes ``trace`` with the agentic execution steps captured during generation.
 
     Raises:
         HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
