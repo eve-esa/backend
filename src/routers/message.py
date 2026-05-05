@@ -1838,6 +1838,7 @@ async def create_agentic_message(
             "use_rag": use_rag,
             "conversation_id": conversation_id,
             "collection_ids": request.collection_ids,
+            "trace": trace_entries if trace_entries else None,
             "metadata": {"latencies": latencies},
         }
     except HTTPException as http_exc:
