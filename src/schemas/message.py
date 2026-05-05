@@ -135,4 +135,8 @@ class CreateMessageResponse(BaseModel):
     loop_result: Optional[LoopResult] = Field(
         default=None, description="Hallucination loop output when enabled"
     )
+    trace: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Agentic execution trace including reasoning/tool steps",
+    )
     metadata: ResponseMetadata
