@@ -42,6 +42,7 @@ from src.services.generate_answer_agentic import (
 )
 from src.services.hallucination_detector import HallucinationDetector
 from src.services.stream_bus import get_stream_bus
+from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
     count_tokens_for_texts,
@@ -1408,14 +1409,11 @@ async def generate_llm(
     Body: query. Returns the model reply only.
     """
     try:
-        await enforce_token_budget_or_raise(requesting_user)
-        llm_manager = get_shared_llm_manager()
-        llm = llm_manager.get_client_for_model(LLMType.Main.value)
-        messages = [HumanMessage(content=request.query)]
-        response = await llm.ainvoke(messages)
-        content = getattr(response, "content", str(response))
-        await consume_tokens_for_user(
-            requesting_user, count_tokens_for_texts(request.query, content)
+        content = await invoke_llm_and_consume_tokens(
+            user=requesting_user,
+            model=LLMType.Main.value,
+            messages=[HumanMessage(content=request.query)],
+            prompt_for_token_count=request.query,
         )
         return {"answer": content}
     except HTTPException:

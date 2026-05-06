@@ -290,7 +290,7 @@ async def test_generate_llm_consumes_tokens(async_client, monkeypatch):
             return _FakeLLM()
 
     monkeypatch.setattr(
-        "src.routers.message.get_shared_llm_manager", lambda: _FakeLLMManager()
+        "src.services.llm_inference.get_shared_llm_manager", lambda: _FakeLLMManager()
     )
 
     user, token = await create_test_user_and_token()
@@ -305,6 +305,77 @@ async def test_generate_llm_consumes_tokens(async_client, monkeypatch):
         refreshed = await type(user).find_by_id(user.id)
         assert refreshed is not None
         assert refreshed.rate_limit_tokens_used > 0
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_requires_auth(async_client):
+    resp = await async_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": LLMType.Main.value,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_consumes_tokens(async_client, monkeypatch):
+    class _FakeLLM:
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="mocked openai answer")
+
+    class _FakeLLMManager:
+        def get_client_for_model(self, _model):
+            return _FakeLLM()
+
+    monkeypatch.setattr(
+        "src.services.llm_inference.get_shared_llm_manager", lambda: _FakeLLMManager()
+    )
+
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await async_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": LLMType.Main.value,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["object"] == "chat.completion"
+        assert body["model"] == LLMType.Main.value
+        assert len(body["choices"]) == 1
+        assert body["choices"][0]["message"]["role"] == "assistant"
+        assert body["choices"][0]["message"]["content"] == "mocked openai answer"
+        assert body["usage"]["total_tokens"] > 0
+
+        refreshed = await type(user).find_by_id(user.id)
+        assert refreshed is not None
+        assert refreshed.rate_limit_tokens_used > 0
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_completions_rejects_stream(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await async_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": LLMType.Main.value,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 400
+        assert "stream=false" in resp.json()["detail"]
     finally:
         await cleanup_models([user])
 
