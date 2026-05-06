@@ -19,6 +19,17 @@ from contextlib import AsyncExitStack
 logger = logging.getLogger(__name__)
 
 
+def _extract_exception_details(exc: BaseException) -> List[str]:
+    """Flatten nested ExceptionGroup errors into readable detail lines."""
+    details: List[str] = []
+    if isinstance(exc, BaseExceptionGroup):
+        for sub_exc in exc.exceptions:
+            details.extend(_extract_exception_details(sub_exc))
+    else:
+        details.append(f"{type(exc).__name__}: {exc}")
+    return details
+
+
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
@@ -203,7 +214,14 @@ class MultiServerMCPClientService:
 
             return formatted_tools
         except Exception as e:
-            logger.error(f"Failed to list tools from server '{server_name}': {e}")
+            logger.exception("Failed to list tools from server '%s'", server_name)
+            details = _extract_exception_details(e)
+            if details:
+                logger.error(
+                    "Tool discovery error details for '%s': %s",
+                    server_name,
+                    " | ".join(details),
+                )
             return []
 
     async def list_tools_from_all_servers(self) -> List[Dict[str, Any]]:
@@ -236,7 +254,13 @@ class MultiServerMCPClientService:
                 all_tools.append(tool_data)
 
         except Exception as e:
-            logger.error(f"Failed to list tools from all servers: {e}")
+            logger.exception("Failed to list tools from all servers")
+            details = _extract_exception_details(e)
+            if details:
+                logger.error(
+                    "Tool discovery error details for all servers: %s",
+                    " | ".join(details),
+                )
             return []
 
         return all_tools

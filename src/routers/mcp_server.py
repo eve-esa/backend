@@ -10,7 +10,7 @@ from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
 from src.schemas.mcp_server import MCPServerDetail, MCPServerRequest, MCPServerUpdate
 from src.database.models.user import User
-from src.services.mcp_client_service import MultiServerMCPClientService
+from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
 
 
 router = APIRouter()
@@ -121,10 +121,16 @@ async def get_mcp_server(
     """
     mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="access")
     tools = []
-    service: Optional[MultiServerMCPClientService] = None
     try:
-        service = MultiServerMCPClientService.from_mcp_server_model(mcp_server)
-        tools = await service.list_tools_from_server(mcp_server.name)
+        loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
+        tools = [
+            {
+                "name": getattr(tool, "name", "unknown"),
+                "description": getattr(tool, "description", None),
+                "server": mcp_server.name,
+            }
+            for tool in loaded_tools
+        ]
     except Exception as exc:
         logger.warning(
             "Failed loading tools for MCP server '%s' (%s): %s",
@@ -132,9 +138,6 @@ async def get_mcp_server(
             mcp_server.id,
             exc,
         )
-    finally:
-        if service:
-            await service.close()
 
     return MCPServerDetail(**mcp_server.model_dump(), tools=tools)
 
