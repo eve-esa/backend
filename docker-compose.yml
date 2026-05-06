@@ -24,6 +24,7 @@ services:
       - MONGO_HOST=mongo
       - REDIS_URL=redis://redis:6379/0
       # Langfuse: use a separate var so load_dotenv(override=True) can't clobber it
+      # (HTTPS is only on langfuse-caddy; ingestion stays in-network HTTP)
       - LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
     volumes:
       - .:/code
@@ -79,8 +80,9 @@ services:
   langfuse-web:
     image: langfuse/langfuse:3
     restart: unless-stopped
+    # HTTP on loopback for SDKs / default LANGFUSE_BASE_URL; use HTTPS UI on langfuse-caddy.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       langfuse-db:
         condition: service_healthy
@@ -90,7 +92,9 @@ services:
         condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
-      NEXTAUTH_URL: http://localhost:3000
+      # Public URL users/SDK hit (HTTPS via langfuse-caddy by default)
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-https://localhost:3443}
+      AUTH_TRUST_HOST: "true"
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
       SALT: ${LANGFUSE_SALT}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
@@ -122,6 +126,21 @@ services:
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
       LANGFUSE_INIT_USER_NAME: admin
       LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+    networks:
+      - app-network
+
+  # HTTPS entrypoint (Langfuse app remains HTTP on the internal network).
+  langfuse-caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${LANGFUSE_HTTPS_PORT:-3443}:443"
+    environment:
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-localhost}
+    volumes:
+      - ./caddy/langfuse.Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - langfuse-web
     networks:
       - app-network
 
