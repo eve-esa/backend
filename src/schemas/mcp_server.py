@@ -1,5 +1,6 @@
-from typing import Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
+from src.database.models.mcp_server import MCPServer
 
 
 TransportLiteral = Literal["streamable_http", "stdio"]
@@ -50,6 +51,12 @@ class MCPServerUpdate(BaseModel):
     enabled: Optional[bool] = None
     environment: Optional[List[str]] = None
     config: Optional[MCPServerConfigRequest] = None
+
+
+class MCPServerDetail(MCPServer):
+    tools: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Tools available on this MCP server"
+    )
 
 
 # Backward compatibility aliases for existing imports.
