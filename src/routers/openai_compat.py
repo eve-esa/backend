@@ -1,16 +1,21 @@
 import logging
+import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from src.core.llm_manager import LLMType
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
-from src.services.llm_inference import invoke_llm_and_consume_tokens
+from src.services.llm_inference import (
+    invoke_llm_and_consume_tokens,
+    invoke_llm_stream_and_consume_tokens,
+)
 from src.services.token_rate_limiter import count_tokens_for_texts
 
 logger = logging.getLogger(__name__)
@@ -67,23 +72,84 @@ async def chat_completions(
     requesting_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    OpenAI-compatible chat completions endpoint (non-streaming).
+    OpenAI-compatible chat completions endpoint.
     """
-    if request.stream:
-        raise HTTPException(
-            status_code=400,
-            detail="Streaming is not supported on this endpoint yet. Use stream=false.",
-        )
-
     if not request.messages:
         raise HTTPException(status_code=400, detail="messages must not be empty")
 
     started_at = int(time.time())
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
 
     try:
         prompt_text = "\n".join(
             _extract_text_content(message.content) for message in request.messages
         )
+        if request.stream:
+            async def _event_stream():
+                # Match OpenAI semantics: initial role delta, token deltas, done marker.
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": started_at,
+                            "model": request.model,
+                            "choices": [
+                                {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                            ],
+                        }
+                    )
+                    + "\n\n"
+                )
+
+                async for token in invoke_llm_stream_and_consume_tokens(
+                    user=requesting_user,
+                    model=request.model,
+                    messages=_to_langchain_messages(request.messages),
+                    prompt_for_token_count=prompt_text,
+                ):
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": started_at,
+                                "model": request.model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {"content": token},
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            }
+                        )
+                        + "\n\n"
+                    )
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": started_at,
+                            "model": request.model,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        }
+                    )
+                    + "\n\n"
+                )
+                yield "data: [DONE]\n\n"
+
+            response = StreamingResponse(_event_stream(), media_type="text/event-stream")
+            response.headers["Cache-Control"] = "no-cache"
+            response.headers["Connection"] = "keep-alive"
+            response.headers["X-Accel-Buffering"] = "no"
+            return response
+
         answer = await invoke_llm_and_consume_tokens(
             user=requesting_user,
             model=request.model,
@@ -93,7 +159,7 @@ async def chat_completions(
         usage = count_tokens_for_texts(prompt_text, answer)
 
         return {
-            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "id": completion_id,
             "object": "chat.completion",
             "created": started_at,
             "model": request.model,

@@ -362,10 +362,24 @@ async def test_openai_chat_completions_consumes_tokens(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_rejects_stream(async_client):
+async def test_openai_chat_completions_stream_consumes_tokens(async_client, monkeypatch):
+    class _FakeLLM:
+        async def astream(self, _messages):
+            yield SimpleNamespace(content="mocked ")
+            yield SimpleNamespace(content="stream")
+
+    class _FakeLLMManager:
+        def get_client_for_model(self, _model):
+            return _FakeLLM()
+
+    monkeypatch.setattr(
+        "src.services.llm_inference.get_shared_llm_manager", lambda: _FakeLLMManager()
+    )
+
     user, token = await create_test_user_and_token()
     try:
-        resp = await async_client.post(
+        async with async_client.stream(
+            "POST",
             "/v1/chat/completions",
             json={
                 "model": LLMType.Main.value,
@@ -373,9 +387,22 @@ async def test_openai_chat_completions_rejects_stream(async_client):
                 "messages": [{"role": "user", "content": "hello"}],
             },
             headers={"Authorization": f"Bearer {token}"},
-        )
-        assert resp.status_code == 400
-        assert "stream=false" in resp.json()["detail"]
+        ) as resp:
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            body = await resp.aread()
+
+        text = body.decode()
+        assert '"object": "chat.completion.chunk"' in text
+        assert '"role": "assistant"' in text
+        assert '"content": "mocked "' in text
+        assert '"content": "stream"' in text
+        assert '"finish_reason": "stop"' in text
+        assert "data: [DONE]" in text
+
+        refreshed = await type(user).find_by_id(user.id)
+        assert refreshed is not None
+        assert refreshed.rate_limit_tokens_used > 0
     finally:
         await cleanup_models([user])
 
