@@ -42,6 +42,15 @@ class ChatCompletionsRequest(BaseModel):
     user: Optional[str] = None
 
 
+class CompletionsRequest(BaseModel):
+    model: str = Field(default=LLMType.Main.value)
+    prompt: Union[str, List[str]]
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_tokens: Optional[int] = Field(default=None, ge=1)
+    stream: bool = False
+    user: Optional[str] = None
+
+
 def _extract_text_content(content: Union[str, List[OpenAITextPart]]) -> str:
     if isinstance(content, str):
         return content
@@ -64,6 +73,25 @@ def _to_langchain_messages(messages: List[OpenAIMessage]) -> List[Any]:
         else:
             converted.append(HumanMessage(content=text_content))
     return converted
+
+
+def _to_prompt_text(prompt: Union[str, List[str]]) -> str:
+    if isinstance(prompt, str):
+        return prompt
+    return "\n".join(item for item in prompt if item)
+
+
+def _new_sse_response(stream: Any) -> StreamingResponse:
+    response = StreamingResponse(stream, media_type="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+def _raise_internal_error(endpoint_name: str, error: Exception) -> None:
+    logger.exception("%s failed: %s", endpoint_name, error)
+    raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.post("/chat/completions")
@@ -144,11 +172,7 @@ async def chat_completions(
                 )
                 yield "data: [DONE]\n\n"
 
-            response = StreamingResponse(_event_stream(), media_type="text/event-stream")
-            response.headers["Cache-Control"] = "no-cache"
-            response.headers["Connection"] = "keep-alive"
-            response.headers["X-Accel-Buffering"] = "no"
-            return response
+            return _new_sse_response(_event_stream())
 
         answer = await invoke_llm_and_consume_tokens(
             user=requesting_user,
@@ -179,5 +203,107 @@ async def chat_completions(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("chat_completions failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        _raise_internal_error("chat_completions", e)
+
+
+@router.post("/completions")
+async def completions(
+    request: CompletionsRequest,
+    requesting_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    OpenAI-compatible legacy completions endpoint.
+    """
+    prompt_text = _to_prompt_text(request.prompt)
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+
+    started_at = int(time.time())
+    completion_id = f"cmpl-{uuid.uuid4().hex}"
+
+    try:
+        if request.stream:
+
+            async def _event_stream():
+                async for token in invoke_llm_stream_and_consume_tokens(
+                    user=requesting_user,
+                    model=request.model,
+                    messages=[HumanMessage(content=prompt_text)],
+                    prompt_for_token_count=prompt_text,
+                ):
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "id": completion_id,
+                                "object": "text_completion",
+                                "created": started_at,
+                                "model": request.model,
+                                "choices": [
+                                    {"index": 0, "text": token, "finish_reason": None}
+                                ],
+                            }
+                        )
+                        + "\n\n"
+                    )
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "id": completion_id,
+                            "object": "text_completion",
+                            "created": started_at,
+                            "model": request.model,
+                            "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+                        }
+                    )
+                    + "\n\n"
+                )
+                yield "data: [DONE]\n\n"
+
+            return _new_sse_response(_event_stream())
+
+        answer = await invoke_llm_and_consume_tokens(
+            user=requesting_user,
+            model=request.model,
+            messages=[HumanMessage(content=prompt_text)],
+            prompt_for_token_count=prompt_text,
+        )
+        usage = count_tokens_for_texts(prompt_text, answer)
+
+        return {
+            "id": completion_id,
+            "object": "text_completion",
+            "created": started_at,
+            "model": request.model,
+            "choices": [
+                {"index": 0, "text": answer, "finish_reason": "stop"}
+            ],
+            "usage": {
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "total_tokens": usage,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        _raise_internal_error("completions", e)
+
+
+@router.get("/models")
+async def list_models(
+    _requesting_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    OpenAI-compatible models listing endpoint.
+    """
+    unique_models = list(dict.fromkeys(item.value for item in LLMType))
+    return {
+        "object": "list",
+        "data": [
+            {"id": model_id, "object": "model", "created": 0, "owned_by": "eve"}
+            for model_id in unique_models
+        ],
+    }
