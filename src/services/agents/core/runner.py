@@ -20,7 +20,6 @@ from src.database.models.user import User
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
-    _resolve_system_prompt,
     get_mcp_context,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
@@ -28,7 +27,7 @@ from src.services.generate_answer import (
 )
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.core.registry import get_agent_graph
-from src.services.agents.graphs.base import LatencyInterceptor
+from src.services.agents.graphs_bundle import graphs_base_module, graphs_utils_module
 from src.services.mcp_auth import get_cognito_token_provider
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
@@ -38,6 +37,8 @@ from src.services.token_rate_limiter import (
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
 from src.utils.helpers import get_mongodb_uri
 from src.utils.langfuse_helper import get_callbacks, langfuse_context
+
+LatencyInterceptor = graphs_base_module().LatencyInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +75,11 @@ except Exception:
     MultiServerMCPClient = None  # type: ignore
 
 try:
-    from src.services.agents.graphs.utils import (
-        SearchWileyInput,
-        has_text_tool_call,
-        parse_text_tool_calls,
-        tool_call_label,
-    )
+    _graphs_utils = graphs_utils_module()
+    SearchWileyInput = _graphs_utils.SearchWileyInput
+    has_text_tool_call = _graphs_utils.has_text_tool_call
+    parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
+    tool_call_label = _graphs_utils.tool_call_label
 except Exception:
     SearchWileyInput = None  # type: ignore
     tool_call_label = None  # type: ignore
@@ -306,29 +306,38 @@ def _get_llm(llm_type: Optional[str]):
     return get_shared_llm_manager().get_client_for_model(effective_llm_type)
 
 
-# ─── Resolve system prompt + conversation summary ─────────────────────────────
+def _resolve_agent_graph_type(request: GenerationRequest) -> str:
+    """Return request-selected graph type, else AGENT_GRAPH_TYPE from env."""
+    from src.config import AGENT_GRAPH_TYPE
+
+    raw = getattr(request, "agent", None)
+    if raw is None:
+        return AGENT_GRAPH_TYPE
+
+    s = str(raw).strip().lstrip("\ufeff").strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    return s or AGENT_GRAPH_TYPE
 
 
-async def _resolve_full_system_prompt(
-    llm_type: Optional[str], conversation_id: Optional[str]
-) -> Optional[str]:
-    """Build the system prompt with injected conversation summary."""
-    system_prompt = _resolve_system_prompt(llm_type)
+# ─── Conversation context ─────────────────────────────────────────────────────
 
-    if conversation_id:
-        _, conversation_summary = await _get_conversation_history_from_db(
-            conversation_id
-        )
-        if conversation_summary:
-            summary_prefix = (
-                f"Previous conversation summary:\n{conversation_summary}\n\n"
-                "Please continue the conversation using this summary as context.\n\n"
-            )
-            system_prompt = (
-                (summary_prefix + system_prompt) if system_prompt else summary_prefix
-            )
 
-    return system_prompt
+async def _fetch_conversation_context(
+    conversation_id: Optional[str],
+) -> tuple[List[Any], Optional[str]]:
+    """Return ``(history, summary)`` for the given conversation.
+
+    *history* is a list of LangChain messages (HumanMessage / AIMessage) from the
+    most-recent turn stored in the DB; *summary* is the rolling summary string if
+    one exists.  Both are ``[]`` / ``None`` when there is no conversation yet.
+    The agent is responsible for deciding how to integrate them via
+    :meth:`~AgentGraph.format_history` and :meth:`~AgentGraph.instruction_text`.
+    """
+    if not conversation_id:
+        return [], None
+    history, summary = await _get_conversation_history_from_db(conversation_id)
+    return history, summary
 
 
 # ─── Non-streaming generation ─────────────────────────────────────────────────
@@ -359,19 +368,18 @@ async def generate_answer_agentic(
     try:
         tools = await _build_tools(request)
         checkpointer = await _get_agentic_checkpointer()
-        system_prompt = await _resolve_full_system_prompt(
-            request.llm_type, conversation_id
-        )
+        history, summary = await _fetch_conversation_context(conversation_id)
         llm = _get_llm(request.llm_type)
 
-        from src.config import AGENT_GRAPH_TYPE
-
-        agent = get_agent_graph(AGENT_GRAPH_TYPE)
+        agent_graph_type = _resolve_agent_graph_type(request)
+        agent = get_agent_graph(agent_graph_type)
+        resolved_instruction = agent.instruction_text(history=history, summary=summary)
         graph = agent.compile(
             llm=llm,
             tools=tools,
-            system_prompt=system_prompt,
             checkpointer=checkpointer,
+            history=history,
+            summary=summary,
         )
 
         config = {
@@ -441,7 +449,9 @@ async def generate_answer_agentic(
         }
         prompts: Dict[str, Any] = {
             "query": request.query,
-            "system_prompt": system_prompt,
+            "instruction": resolved_instruction,
+            "agent_prompts": dict(agent.prompts),
+            "agent_graph_type": agent_graph_type,
         }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
@@ -498,19 +508,18 @@ async def generate_answer_agentic_stream_helper(
 
         tools = await _build_tools(request, cancel_event=cancel_event)
         checkpointer = await _get_agentic_checkpointer()
-        system_prompt = await _resolve_full_system_prompt(
-            request.llm_type, conversation_id
-        )
+        history, summary = await _fetch_conversation_context(conversation_id)
         llm = _get_llm(request.llm_type)
 
-        from src.config import AGENT_GRAPH_TYPE
-
-        agent = get_agent_graph(AGENT_GRAPH_TYPE)
+        agent_graph_type = _resolve_agent_graph_type(request)
+        agent = get_agent_graph(agent_graph_type)
+        resolved_instruction = agent.instruction_text(history=history, summary=summary)
         graph = agent.compile(
             llm=llm,
             tools=tools,
-            system_prompt=system_prompt,
             checkpointer=checkpointer,
+            history=history,
+            summary=summary,
         )
 
         config = {
@@ -686,7 +695,12 @@ async def generate_answer_agentic_stream_helper(
             output=answer,
             use_rag=use_rag,
             latencies=latencies,
-            prompts={"query": request.query, "system_prompt": system_prompt},
+            prompts={
+                "query": request.query,
+                "instruction": resolved_instruction,
+                "agent_prompts": dict(agent.prompts),
+                "agent_graph_type": agent_graph_type,
+            },
             trace=trace_entries if trace_entries else None,
         )
 

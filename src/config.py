@@ -98,7 +98,16 @@ AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 # Which agent graph to use.  Short names (e.g. "react") resolve to built-in
 # graphs in src/services/agents/graphs/.  Dotted paths (e.g.
 # "my_package.MyAgent") are imported dynamically for external graphs.
-AGENT_GRAPH_TYPE = os.getenv("AGENT_GRAPH_TYPE", "react").strip()
+def _normalize_agent_graph_type(raw: str) -> str:
+    s = raw.strip().lstrip("\ufeff").strip()
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    return s
+
+
+AGENT_GRAPH_TYPE = _normalize_agent_graph_type(
+    os.getenv("AGENT_GRAPH_TYPE", "react") or "react"
+)
 
 # AWS Cognito credentials for AgentCore MCP server authentication.
 AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()

@@ -37,6 +37,14 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of MCP server names to attach as tools for the agentic pipeline",
     )
+    agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional agent graph selector for the agentic pipeline "
+            "(e.g. 'react', 'simple', or dotted module path). "
+            "When omitted, backend uses AGENT_GRAPH_TYPE from environment."
+        ),
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)

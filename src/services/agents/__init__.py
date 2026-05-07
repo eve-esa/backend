@@ -12,6 +12,10 @@ Top-level re-exports keep the public API stable.
 """
 
 from src.services.agents.core.registry import get_agent_graph
-from src.services.agents.graphs.base import AgentGraph, LatencyInterceptor
+from src.services.agents.graphs_bundle import graphs_base_module
+
+_bg = graphs_base_module()
+AgentGraph = _bg.AgentGraph
+LatencyInterceptor = _bg.LatencyInterceptor
 
 __all__ = ["AgentGraph", "LatencyInterceptor", "get_agent_graph"]
