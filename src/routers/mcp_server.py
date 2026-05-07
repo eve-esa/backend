@@ -1,29 +1,26 @@
 from datetime import datetime, timezone
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.database.models.mcp_server import (
-    MCPServer,
-    ToolConfig,
-    ToolTransport,
-    ToolType,
-)
+from src.database.models.mcp_server import MCPServer, ToolConfig, ToolTransport, ToolType
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
-from src.schemas.mcp_server import MCPServerRequest, MCPServerUpdate
+from src.schemas.mcp_server import MCPServerDetail, MCPServerRequest, MCPServerUpdate
 from src.database.models.user import User
+from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _build_tool_config_from_request(request: MCPServerRequest) -> ToolConfig:
     transport: Optional[ToolTransport] = (
         ToolTransport(request.config.transport) if request.config.transport else None
     )
-
     return ToolConfig(
         url=request.config.url,
         transport=transport,
@@ -32,6 +29,17 @@ def _build_tool_config_from_request(request: MCPServerRequest) -> ToolConfig:
         args=request.config.args,
         env=request.config.env,
     )
+
+
+async def _get_owned_mcp_server(
+    server_id: str, requesting_user: User, action: str = "access"
+) -> MCPServer:
+    mcp_server = await MCPServer.find_by_id(server_id)
+    if not mcp_server:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    if mcp_server.user_id != requesting_user.id:
+        raise HTTPException(status_code=403, detail=f"Not allowed to {action} this MCP server")
+    return mcp_server
 
 
 @router.get("/mcp-servers", response_model=PaginatedResponse[MCPServer])
@@ -94,7 +102,7 @@ async def create_mcp_server(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
-@router.get("/mcp-servers/{server_id}", response_model=MCPServer)
+@router.get("/mcp-servers/{server_id}", response_model=MCPServerDetail)
 async def get_mcp_server(
     server_id: str, requesting_user: User = Depends(get_current_user)
 ):
@@ -106,19 +114,32 @@ async def get_mcp_server(
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
     :return: MCP server.\n
-    :rtype: MCPServer\n
+    :rtype: MCPServerDetail\n
     :raises HTTPException:\n
         - 404: MCP server not found.
         - 403: Not allowed to access this MCP server.
     """
-    mcp_server = await MCPServer.find_by_id(server_id)
-    if not mcp_server:
-        raise HTTPException(status_code=404, detail="MCP server not found")
-    if mcp_server.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="Not allowed to access this MCP server"
+    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="access")
+    tools = []
+    try:
+        loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
+        tools = [
+            {
+                "name": getattr(tool, "name", "unknown"),
+                "description": getattr(tool, "description", None),
+                "server": mcp_server.name,
+            }
+            for tool in loaded_tools
+        ]
+    except Exception as exc:
+        logger.warning(
+            "Failed loading tools for MCP server '%s' (%s): %s",
+            mcp_server.name,
+            mcp_server.id,
+            exc,
         )
-    return mcp_server
+
+    return MCPServerDetail(**mcp_server.model_dump(), tools=tools)
 
 
 @router.patch("/mcp-servers/{server_id}", response_model=MCPServer)
@@ -144,13 +165,7 @@ async def update_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to update this MCP server.
     """
-    mcp_server = await MCPServer.find_by_id(server_id)
-    if not mcp_server:
-        raise HTTPException(status_code=404, detail="MCP server not found")
-    if mcp_server.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="Not allowed to update this MCP server"
-        )
+    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="update")
 
     if request.name is not None:
         mcp_server.name = request.name
@@ -201,13 +216,7 @@ async def delete_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to delete this MCP server.
     """
-    mcp_server = await MCPServer.find_by_id(server_id)
-    if not mcp_server:
-        raise HTTPException(status_code=404, detail="MCP server not found")
-    if mcp_server.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="Not allowed to delete this MCP server"
-        )
+    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="delete")
 
     await mcp_server.delete()
     return {"message": "MCP server deleted successfully"}
