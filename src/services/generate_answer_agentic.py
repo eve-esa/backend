@@ -37,8 +37,9 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
 )
-from src.services.mcp_auth import get_cognito_token_provider
-from src.services.mcp_tool_interceptor import ObservabilityInterceptor
+from src.services.mcp.auth import get_cognito_token_provider
+from src.services.mcp.proxy_url import backend_mcp_proxy_url
+from src.services.mcp.tool_interceptor import ObservabilityInterceptor
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -140,6 +141,8 @@ def _serialise_trace_entry(
 
 async def _load_mcp_tools_for_servers(
     mcp_server_configs: List[Any],
+    *,
+    mcp_proxy_bearer_token: Optional[str] = None,
 ) -> List[Any]:
     """Connect to each MCP server, authenticate, and load its tools.
 
@@ -170,12 +173,24 @@ async def _load_mcp_tools_for_servers(
             continue
 
         headers: Dict[str, str] = dict(srv.config.headers or {})
-        if auth_header and "Authorization" not in headers:
-            headers["Authorization"] = auth_header
+        proxy_http_url = (
+            backend_mcp_proxy_url(srv.name) if mcp_proxy_bearer_token else None
+        )
+        if proxy_http_url:
+            headers["Authorization"] = f"Bearer {mcp_proxy_bearer_token}"
+            url = proxy_http_url
+        else:
+            if auth_header and "Authorization" not in headers:
+                headers["Authorization"] = auth_header
+            url = srv.config.url
+
+        if not url:
+            logger.warning("Skipping MCP server %r: missing URL", srv.name)
+            continue
 
         connections[srv.name] = {
             "transport": "streamable_http" if transport == "streamable_http" else "sse",
-            "url": srv.config.url,
+            "url": url,
             "headers": headers,
         }
 
@@ -216,7 +231,10 @@ async def _build_tools(
 
     # Load dynamic MCP tools from requested servers.
     if getattr(request, "mcp_server_configs", None):
-        mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
+        mcp_tools = await _load_mcp_tools_for_servers(
+            request.mcp_server_configs,
+            mcp_proxy_bearer_token=request.mcp_proxy_bearer_token,
+        )
         tools.extend(mcp_tools)
 
     if "Wiley AI Gateway" in (request.public_collections or []):

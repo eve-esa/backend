@@ -38,7 +38,7 @@ from src.database.models.message import Message
 from src.database.models.user import User
 from src.schemas.generation_request import GenerationRequest
 from src.services.cancel_manager import get_cancel_manager
-from src.services.mcp_client_service import MultiServerMCPClientService
+from src.services.mcp.client_service import MultiServerMCPClientService
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
