@@ -1,0 +1,13 @@
+# TLS terminates here; Langfuse (langfuse-web) stays HTTP on the Docker network.
+# Set on langfuse-web: NEXTAUTH_URL to match how you open the UI (e.g. https://localhost:3443)
+# and AUTH_TRUST_HOST=true so NextAuth honors X-Forwarded-Proto from this proxy.
+#
+# Default uses Caddy's internal CA (browser will warn once; trust is optional for local dev).
+# For a public hostname with real certificates, replace `tls internal` with Caddy's
+# automatic HTTPS (site address = your domain, ports 80+443 published, DNS pointed here).
+
+{$LANGFUSE_HOST:localhost}:443 {
+	tls internal
+	encode zstd gzip
+	reverse_proxy langfuse-web:3000
+}
