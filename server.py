@@ -16,6 +16,7 @@ from src.routers import (
     document_router,
     mcp_server_router,
     error_log_router,
+    openai_compat_router,
 )
 
 configure_logging(level=logging.DEBUG)
@@ -49,6 +50,9 @@ def register_routers(app: FastAPI):
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
+
+    # OpenAI-compatible API
+    app.include_router(openai_compat_router, tags=["OpenAI Compatible"])
 
 
 def create_app(debug=False, **kwargs):
