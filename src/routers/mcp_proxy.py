@@ -5,7 +5,6 @@ https://gofastmcp.com/servers/providers/proxy
 """
 
 import asyncio
-import base64
 import json
 import logging
 from contextlib import AsyncExitStack
@@ -15,8 +14,10 @@ from fastmcp import settings as fastmcp_settings
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.providers.proxy import ProxyClient
+from jose import JWTError
 
 from src.database.mongo import get_collection
+from src.middlewares.auth import verify_access_token
 from src.services.mcp.auth import get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 
@@ -58,22 +59,6 @@ async def shutdown_mcp_proxy_lifespans() -> None:
             await stack.aclose()
         _proxy_lifespan_stacks.clear()
         _proxy_apps.clear()
-
-
-def _decode_jwt_claims_unverified(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) < 2:
-        raise PermissionError("Invalid token format")
-    payload = parts[1]
-    padding = "=" * (-len(payload) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(payload + padding)
-        claims = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise PermissionError("Invalid token payload") from exc
-    if not isinstance(claims, dict):
-        raise PermissionError("Invalid token payload")
-    return claims
 
 
 class MCPProxyDispatcher:
@@ -127,7 +112,10 @@ class MCPProxyDispatcher:
         if not auth.startswith("Bearer "):
             raise PermissionError("Missing or malformed Authorization header")
 
-        claims = _decode_jwt_claims_unverified(auth[7:])
+        try:
+            claims = verify_access_token(auth[7:])
+        except JWTError as exc:
+            raise PermissionError("Invalid token") from exc
         user_id = claims.get("sub")
         if not user_id:
             raise PermissionError("Invalid token payload")

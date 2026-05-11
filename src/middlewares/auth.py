@@ -7,16 +7,24 @@ from src.database.models.user import User
 security = HTTPBearer()
 
 
+def verify_access_token(token: str) -> dict:
+    """Decode and verify a user access JWT, returning its claims.
+
+    Raises ``jose.JWTError`` on signature/audience/format failures.
+    """
+    return jwt.decode(
+        token,
+        JWT_SECRET_KEY,
+        algorithms=[JWT_ALGORITHM],
+        audience=JWT_AUDIENCE_ACCESS,
+    )
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            JWT_SECRET_KEY,
-            algorithms=[JWT_ALGORITHM],
-            audience=JWT_AUDIENCE_ACCESS,
-        )
+        payload = verify_access_token(credentials.credentials)
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token payload")
