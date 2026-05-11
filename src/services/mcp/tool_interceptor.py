@@ -73,6 +73,6 @@ class ObservabilityInterceptor:
                 pipeline_stage=PipelineStage.TOOL_EXECUTION,
                 description=f"MCP tool '{tool_name}' on server '{server_name}' failed after {elapsed:.2f}s",
                 error_type=type(exc).__name__,
-                logger_name="src.services.mcp_tool_interceptor",
+                logger_name="src.services.mcp.tool_interceptor",
             )
             raise

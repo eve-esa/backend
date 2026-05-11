@@ -1,9 +1,11 @@
 from src.database.mongo import async_mongo_manager
+from src.database.indexes import ensure_indexes
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 import logging
 from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from contextlib import asynccontextmanager
+from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 
 from src.routers import (
     health_check_router,
@@ -63,10 +65,15 @@ def create_app(debug=False, **kwargs):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await async_mongo_manager.connect()
+        await ensure_indexes()
         logging.info("Database connection established")
         try:
             yield
         finally:
+            try:
+                await shutdown_mcp_proxy_lifespans()
+            except Exception:
+                logging.exception("MCP proxy sub-app shutdown failed")
             await async_mongo_manager.close()
             logging.info("Database connection closed")
 
@@ -85,6 +92,7 @@ def create_app(debug=False, **kwargs):
         return "Welcome to Eve"
 
     register_routers(app)
+    app = MCPProxyDispatcher(app)
     return app
 
 

@@ -23,6 +23,8 @@ services:
       # Override .env values for Docker networking
       - MONGO_HOST=mongo
       - REDIS_URL=redis://redis:6379/0
+      # generate-agentic MCP client calls this app’s /mcp/*; host :8001 is not open inside the container
+      - MCP_PROXY_INTERNAL_BASE_URL=http://127.0.0.1:8000
       # Langfuse: use a separate var so load_dotenv(override=True) can't clobber it
       - LANGFUSE_INTERNAL_URL=http://langfuse-web:3000
     volumes:

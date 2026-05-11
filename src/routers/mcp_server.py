@@ -2,19 +2,49 @@ from datetime import datetime, timezone
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.database.models.mcp_server import MCPServer, ToolConfig, ToolTransport, ToolType
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
-from src.schemas.mcp_server import MCPServerDetail, MCPServerRequest, MCPServerUpdate
+from src.schemas.mcp_server import (
+    MCPServerPublic,
+    MCPServerPublicDetail,
+    MCPServerRequest,
+    MCPServerUpdate,
+)
 from src.database.models.user import User
 from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
+from src.services.mcp.proxy_url import resolve_public_mcp_url
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _to_public_mcp_server(mcp_server: MCPServer) -> MCPServerPublic:
+    transport = None
+    public_url = None
+    if mcp_server.config and mcp_server.config.transport:
+        transport = mcp_server.config.transport.value
+        if mcp_server.config.transport == ToolTransport.STREAMABLE_HTTP:
+            public_url = resolve_public_mcp_url(mcp_server.name)
+
+    return MCPServerPublic(
+        id=mcp_server.id,
+        timestamp=mcp_server.timestamp,
+        name=mcp_server.name,
+        provider=mcp_server.provider,
+        description=mcp_server.description,
+        type=mcp_server.type,
+        enabled=mcp_server.enabled,
+        environment=getattr(mcp_server, "environment", None),
+        config={"transport": transport, "url": public_url},
+        created_at=mcp_server.created_at,
+        updated_at=mcp_server.updated_at,
+        deleted_at=mcp_server.deleted_at,
+    )
 
 
 def _build_tool_config_from_request(request: MCPServerRequest) -> ToolConfig:
@@ -42,7 +72,7 @@ async def _get_owned_mcp_server(
     return mcp_server
 
 
-@router.get("/mcp-servers", response_model=PaginatedResponse[MCPServer])
+@router.get("/mcp-servers", response_model=PaginatedResponse[MCPServerPublic])
 async def list_mcp_servers(
     pagination: Pagination = Depends(),
     requesting_user: User = Depends(get_current_user),
@@ -54,18 +84,22 @@ async def list_mcp_servers(
     :type pagination: Pagination\n
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
-    :return: Paginated MCP servers for the user.\n
-    :rtype: PaginatedResponse[MCPServer]\n
+    :return: Paginated sanitized MCP servers for the user.\n
+    :rtype: PaginatedResponse[MCPServerPublic]\n
     """
-    return await MCPServer.find_all_with_pagination(
+    result = await MCPServer.find_all_with_pagination(
         limit=pagination.limit,
         page=pagination.page,
         sort=[("timestamp", -1)],
         filter_dict={"user_id": requesting_user.id},
     )
+    return PaginatedResponse[MCPServerPublic](
+        data=[_to_public_mcp_server(server) for server in result.data],
+        meta=result.meta,
+    )
 
 
-@router.post("/mcp-servers", response_model=MCPServer)
+@router.post("/mcp-servers", response_model=MCPServerPublic)
 async def create_mcp_server(
     request: MCPServerRequest, requesting_user: User = Depends(get_current_user)
 ):
@@ -76,8 +110,8 @@ async def create_mcp_server(
     :type request: MCPServerRequest\n
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
-    :return: Created MCP server.\n
-    :rtype: MCPServer\n
+    :return: Created MCP server (sanitized).\n
+    :rtype: MCPServerPublic\n
     :raises HTTPException:\n
         - 400: Invalid request data.
         - 500: Server error.
@@ -95,16 +129,18 @@ async def create_mcp_server(
         )
 
         await mcp_server.save()
-        return mcp_server
+        return _to_public_mcp_server(mcp_server)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
-@router.get("/mcp-servers/{server_id}", response_model=MCPServerDetail)
+@router.get("/mcp-servers/{server_id}", response_model=MCPServerPublicDetail)
 async def get_mcp_server(
-    server_id: str, requesting_user: User = Depends(get_current_user)
+    server_id: str,
+    http_request: Request,
+    requesting_user: User = Depends(get_current_user),
 ):
     """
     Get an MCP server by id owned by the current user.
@@ -113,8 +149,8 @@ async def get_mcp_server(
     :type server_id: str\n
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
-    :return: MCP server.\n
-    :rtype: MCPServerDetail\n
+    :return: MCP server (sanitized).\n
+    :rtype: MCPServerPublicDetail\n
     :raises HTTPException:\n
         - 404: MCP server not found.
         - 403: Not allowed to access this MCP server.
@@ -122,7 +158,11 @@ async def get_mcp_server(
     mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="access")
     tools = []
     try:
-        loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
+        auth = http_request.headers.get("Authorization") or ""
+        bearer = auth[7:] if auth.startswith("Bearer ") else None
+        loaded_tools = await _load_mcp_tools_for_servers(
+            [mcp_server], mcp_proxy_bearer_token=bearer
+        )
         tools = [
             {
                 "name": getattr(tool, "name", "unknown"),
@@ -139,10 +179,10 @@ async def get_mcp_server(
             exc,
         )
 
-    return MCPServerDetail(**mcp_server.model_dump(), tools=tools)
+    return MCPServerPublicDetail(**_to_public_mcp_server(mcp_server).model_dump(), tools=tools)
 
 
-@router.patch("/mcp-servers/{server_id}", response_model=MCPServer)
+@router.patch("/mcp-servers/{server_id}", response_model=MCPServerPublic)
 async def update_mcp_server(
     server_id: str,
     request: MCPServerUpdate,
@@ -159,8 +199,8 @@ async def update_mcp_server(
     :type request: MCPServerUpdate\n
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
-    :return: Updated MCP server.\n
-    :rtype: MCPServer\n
+    :return: Updated MCP server (sanitized).\n
+    :rtype: MCPServerPublic\n
     :raises HTTPException:\n
         - 404: MCP server not found.
         - 403: Not allowed to update this MCP server.
@@ -196,7 +236,7 @@ async def update_mcp_server(
 
     mcp_server.updated_at = datetime.now(timezone.utc)
     await mcp_server.save()
-    return mcp_server
+    return _to_public_mcp_server(mcp_server)
 
 
 @router.delete("/mcp-servers/{server_id}")

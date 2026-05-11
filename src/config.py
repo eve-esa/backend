@@ -1,11 +1,12 @@
 # src/config.py
-import yaml
-import os
 import json
-from dotenv import load_dotenv
 import logging
+import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import yaml
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
@@ -30,14 +31,22 @@ FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-medium-latest").
 
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
 
-EMBEDDING_URL = os.getenv("EMBEDDING_URL", "https://api.deepinfra.com/v1/openai").strip()
+EMBEDDING_URL = os.getenv(
+    "EMBEDDING_URL", "https://api.deepinfra.com/v1/openai"
+).strip()
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "").strip()
 
-EMBEDDING_FALLBACK_URL = os.getenv("EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1").strip()
+EMBEDDING_FALLBACK_URL = os.getenv(
+    "EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1"
+).strip()
 EMBEDDING_FALLBACK_API_KEY = os.getenv("EMBEDDING_FALLBACK_API_KEY", "").strip()
 
-SATCOM_SMALL_MODEL_NAME = os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b").strip()
-SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b").strip()
+SATCOM_SMALL_MODEL_NAME = os.getenv(
+    "SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"
+).strip()
+SATCOM_LARGE_MODEL_NAME = os.getenv(
+    "SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b"
+).strip()
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
 SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
@@ -99,7 +108,10 @@ AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()
 AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
 AGENTCORE_CLIENT_SECRET = os.getenv("AGENTCORE_CLIENT_SECRET", "").strip()
+MCP_PROXY_BASE_URL = os.getenv("MCP_PROXY_BASE_URL", "").strip()
+MCP_PROXY_INTERNAL_BASE_URL = os.getenv("MCP_PROXY_INTERNAL_BASE_URL", "").strip()
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""

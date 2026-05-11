@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -1733,6 +1733,7 @@ async def _prepare_agentic_request(
 async def create_agentic_message(
     request: GenerationRequest,
     conversation_id: str,
+    http_request: Request,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ) -> CreateMessageResponse:
@@ -1796,6 +1797,9 @@ async def create_agentic_message(
             ]
 
         request = await _prepare_agentic_request(request, requesting_user)
+        auth_header = http_request.headers.get("Authorization") or ""
+        if auth_header.startswith("Bearer "):
+            request.mcp_proxy_bearer_token = auth_header[7:]
         logger.info("Agentic collection IDs: %s", request.collection_ids)
 
         message = await Message.create(
@@ -1874,6 +1878,7 @@ async def create_agentic_message(
 async def create_agentic_message_stream(
     request: GenerationRequest,
     conversation_id: str,
+    http_request: Request,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -1942,6 +1947,9 @@ async def create_agentic_message_stream(
             ]
 
         request = await _prepare_agentic_request(request, requesting_user)
+        auth_header = http_request.headers.get("Authorization") or ""
+        if auth_header.startswith("Bearer "):
+            request.mcp_proxy_bearer_token = auth_header[7:]
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
 
         message = await Message.create(

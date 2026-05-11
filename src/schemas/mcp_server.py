@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
-from src.database.models.mcp_server import MCPServer
+from src.database.models.mcp_server import MCPServer, ToolType
 
 
 TransportLiteral = Literal["streamable_http", "stdio"]
@@ -54,6 +55,44 @@ class MCPServerUpdate(BaseModel):
 
 
 class MCPServerDetail(MCPServer):
+    tools: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Tools available on this MCP server"
+    )
+
+
+class MCPServerPublicConfig(BaseModel):
+    """Sanitized MCP server config returned to clients."""
+
+    transport: Optional[TransportLiteral] = Field(
+        default=None, description="Transport type for MCP connection"
+    )
+    url: Optional[str] = Field(
+        default=None, description="Public MCP proxy URL for this server"
+    )
+
+
+class MCPServerPublic(BaseModel):
+    """Sanitized MCP server payload that never exposes internal URLs or headers."""
+
+    id: Optional[str] = Field(default=None, description="MCP server identifier")
+    timestamp: datetime = Field(description="Creation timestamp")
+    name: str = Field(..., description="MCP server name")
+    provider: Optional[str] = Field(default=None, description="Provider name")
+    description: Optional[str] = Field(default=None, description="Description")
+    type: ToolType = Field(default=ToolType.MCP, description="Server type")
+    enabled: bool = Field(default=False, description="Whether the server is enabled")
+    environment: Optional[List[str]] = Field(
+        default=None, description="Environments where the tool is allowed"
+    )
+    config: MCPServerPublicConfig = Field(
+        ..., description="Sanitized MCP connection configuration"
+    )
+    created_at: datetime = Field(description="Creation timestamp")
+    updated_at: datetime = Field(description="Last update timestamp")
+    deleted_at: Optional[datetime] = Field(default=None, description="Soft delete timestamp")
+
+
+class MCPServerPublicDetail(MCPServerPublic):
     tools: List[Dict[str, Any]] = Field(
         default_factory=list, description="Tools available on this MCP server"
     )
