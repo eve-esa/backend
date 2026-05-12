@@ -18,7 +18,8 @@ from src.services.openai_usage import track_usage
 logger = logging.getLogger(__name__)
 
 _STRIP_REQUEST_HEADERS = frozenset(
-    {b"host", b"connection", b"keep-alive", b"transfer-encoding", b"te", b"trailer", b"upgrade"}
+    {b"host", b"connection", b"keep-alive", b"transfer-encoding", b"te", b"trailer", b"upgrade",
+     b"content-length"}  # recalculated by httpx after body is potentially rewritten
 )
 _STRIP_RESPONSE_HEADERS = frozenset(
     {"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding", "trailer", "upgrade"}
@@ -26,6 +27,7 @@ _STRIP_RESPONSE_HEADERS = frozenset(
 
 
 def _parse_usage(payload: dict) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Extract (input_tokens, output_tokens, total_tokens) from an OpenAI usage block."""
     usage = payload.get("usage") or {}
     return usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens")
 
@@ -141,7 +143,8 @@ class OpenAIProxyDispatcher:
             if not event.get("more_body", False):
                 break
 
-        # Extract model and stream flag from request body for usage tracking.
+        # Extract model and stream flag; inject stream_options so the upstream
+        # includes a usage chunk in the SSE stream.
         model: Optional[str] = None
         is_streaming = False
         req_body: Optional[dict] = None
@@ -150,6 +153,9 @@ class OpenAIProxyDispatcher:
                 req_body = json.loads(body)
                 model = req_body.get("model")
                 is_streaming = bool(req_body.get("stream", False))
+                if is_streaming:
+                    req_body.setdefault("stream_options", {})["include_usage"] = True
+                    body = json.dumps(req_body).encode()
             except (json.JSONDecodeError, AttributeError):
                 pass
 
@@ -179,7 +185,7 @@ class OpenAIProxyDispatcher:
                     await send({"type": "http.response.body", "body": chunk, "more_body": True})
                 await send({"type": "http.response.body", "body": b""})
 
-                (pt, ct, tt), raw_response = _parse_sse_chunks(chunks)
+                (input_tokens, output_tokens, total_tokens), response_body = _parse_sse_chunks(chunks)
             else:
                 chunks = []
                 async for chunk in resp.aiter_bytes():
@@ -187,14 +193,14 @@ class OpenAIProxyDispatcher:
                 full_body = b"".join(chunks)
                 await send({"type": "http.response.body", "body": full_body})
 
-                pt, ct, tt = None, None, None
-                raw_response = None
+                input_tokens = output_tokens = total_tokens = None
+                response_body = None
                 try:
                     parsed = json.loads(full_body)
-                    pt, ct, tt = _parse_usage(parsed)
-                    raw_response = parsed
+                    input_tokens, output_tokens, total_tokens = _parse_usage(parsed)
+                    response_body = parsed
                 except (json.JSONDecodeError, AttributeError):
-                    raw_response = full_body.decode(errors="replace")
+                    response_body = full_body.decode(errors="replace")
 
         await track_usage(
             user_id=user_id,
@@ -202,10 +208,10 @@ class OpenAIProxyDispatcher:
             method=method,
             model=model,
             request_body=req_body,
-            response_body=raw_response,
-            prompt_tokens=pt,
-            completion_tokens=ct,
-            total_tokens=tt,
+            response_body=response_body,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
             status_code=resp.status_code,
         )
 

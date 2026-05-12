@@ -120,8 +120,8 @@ async def test_chat_completions_proxied(async_client, monkeypatch):
 
         mock_track.assert_awaited_once()
         kw = mock_track.call_args.kwargs
-        assert kw["prompt_tokens"] == 10
-        assert kw["completion_tokens"] == 5
+        assert kw["input_tokens"] == 10
+        assert kw["output_tokens"] == 5
         assert kw["total_tokens"] == 15
         assert kw["model"] == "gpt-4"
         assert kw["status_code"] == 200
@@ -189,8 +189,8 @@ async def test_chat_completions_streaming_proxied(async_client, monkeypatch):
 
         mock_track.assert_awaited_once()
         kw = mock_track.call_args.kwargs
-        assert kw["prompt_tokens"] == 8
-        assert kw["completion_tokens"] == 3
+        assert kw["input_tokens"] == 8
+        assert kw["output_tokens"] == 3
         assert kw["total_tokens"] == 11
     finally:
         await cleanup_models([user])
@@ -225,7 +225,7 @@ async def test_chat_completions_streaming_no_usage_chunk(async_client, monkeypat
 
         assert resp.status_code == 200
         kw = mock_track.call_args.kwargs
-        assert kw["prompt_tokens"] is None
+        assert kw["input_tokens"] is None
         assert kw["total_tokens"] is None
     finally:
         await cleanup_models([user])
