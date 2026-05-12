@@ -7,19 +7,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from fastapi import BackgroundTasks, HTTPException
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field
 
 from src.core.vector_store_manager import VectorStoreManager
 from src.core.llm_manager import LLMManager, LLMType
 from src.constants import (
-    DEFAULT_QUERY,
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_K,
-    DEFAULT_SCORE_THRESHOLD,
     DEFAULT_MAX_NEW_TOKENS,
-    DEFAULT_TEMPERATURE,
     MCP_MAX_TOP_N,
-    POLICY_NOT_ANSWER,
     POLICY_PROMPT,
 )
 from src.utils.helpers import (
@@ -37,6 +31,10 @@ from src.config import (
     SATCOM_QDRANT_URL,
     SATCOM_QDRANT_API_KEY,
     MODEL_TIMEOUT,
+    MAIN_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
+    SATCOM_SMALL_MODEL_NAME,
+    SATCOM_LARGE_MODEL_NAME,
     config,
 )
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -51,6 +49,12 @@ import contextlib
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.constants import SCRAPING_DOG_ALL_URLS
 from src.services.stream_bus import get_stream_bus
+from src.services.cancel_manager import get_cancel_manager
+from src.services.token_rate_limiter import consume_tokens_for_user, count_tokens_for_texts
+from src.database.models.user import User
+from src.database.models.message import Message
+from src.database.models.conversation import Conversation
+from src.schemas.generation_request import GenerationRequest
 from src.utils.error_logger import (
     get_error_logger,
     Component,
@@ -92,48 +96,6 @@ class PolicyCheck(BaseModel):
         description="True if the input violates policies otherwise False"
     )
     reason: str = Field(description="Reason for the violation")
-
-
-class GenerationRequest(BaseModel):
-    query: str = DEFAULT_QUERY
-    year: Optional[List[int]] = None
-    filters: Optional[Dict[str, Any]] = None
-    llm_type: Optional[str] = Field(
-        default=None,
-        description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'ship', 'eve_v05'. "
-            "Legacy options 'runpod' and 'mistral' are also supported. "
-            "Defaults to None, which means environment-based behavior."
-        ),
-    )
-    embeddings_model: str = DEFAULT_EMBEDDING_MODEL
-    k: int = Field(DEFAULT_K, ge=0, le=10)
-    temperature: float = Field(DEFAULT_TEMPERATURE, ge=0.0, le=1.0)
-    score_threshold: float = Field(DEFAULT_SCORE_THRESHOLD, ge=0.0, le=1.0)
-    max_new_tokens: int = Field(DEFAULT_MAX_NEW_TOKENS, ge=100, le=100_000)
-    public_collections: List[str] = Field(
-        default_factory=list,
-        description="List of public collection names to include in the search",
-    )
-
-    _collection_ids: List[str] = PrivateAttr(default_factory=list)
-    _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
-
-    @property
-    def collection_ids(self) -> List[str]:
-        return self._collection_ids
-
-    @collection_ids.setter
-    def collection_ids(self, value: List[str]) -> None:
-        self._collection_ids = list(value) if value else []
-
-    @property
-    def private_collections_map(self) -> Dict[str, str]:
-        return self._private_collections_map
-
-    @private_collections_map.setter
-    def private_collections_map(self, value: Dict[str, str]) -> None:
-        self._private_collections_map = value
 
 
 def _extract_final_assistant_content(messages_out: Any) -> Optional[str]:
@@ -197,20 +159,19 @@ async def persist_message_state(
     latencies: Optional[Dict[str, Any]] = None,
     prompts: Optional[Dict[str, Any]] = None,
     retrieved_docs: Optional[List[Any]] = None,
+    generated_model_name: Optional[str] = None,
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
-    - Merges metadata fields (latencies, prompts, retrieved_docs, error) without clobbering others.
+    - Merges metadata fields (latencies, prompts, retrieved_docs, generated_model_name, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
     """
     try:
-        from src.database.models.message import Message as MessageModel
-
-        message = await MessageModel.find_by_id(message_id)
+        message = await Message.find_by_id(message_id)
         if message is None:
             return
         if stopped is not None:
@@ -228,6 +189,8 @@ async def persist_message_state(
             existing_metadata["prompts"] = prompts
         if retrieved_docs is not None:
             existing_metadata["retrieved_docs"] = retrieved_docs
+        if generated_model_name is not None:
+            existing_metadata["generated_model_name"] = generated_model_name
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:
@@ -238,6 +201,19 @@ async def persist_message_state(
     except Exception as e:
         logger.error(f"Failed to persist message state: {e}")
         return
+
+
+def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
+    """Resolve configured model name for a canonical llm_type."""
+    if llm_type == LLMType.Main.value:
+        return MAIN_MODEL_NAME
+    if llm_type == LLMType.Fallback.value:
+        return FALLBACK_MODEL_NAME
+    if llm_type == LLMType.Satcom_Small.value:
+        return SATCOM_SMALL_MODEL_NAME
+    if llm_type == LLMType.Satcom_Large.value:
+        return SATCOM_LARGE_MODEL_NAME
+    return None
 
 
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
@@ -446,19 +422,16 @@ async def _get_conversation_history_from_db(
 ) -> tuple[List[Any], Optional[str]]:
     """Get conversation history and summary from database for fallback when LangGraph is not available."""
     try:
-        from src.database.models.message import Message as MessageModel
-        from src.database.models.conversation import Conversation as ConversationModel
-
         summary = None
         try:
-            conversation = await ConversationModel.find_by_id(conversation_id)
+            conversation = await Conversation.find_by_id(conversation_id)
             if conversation and getattr(conversation, "summary", None):
                 summary = conversation.summary
         except Exception:
             summary = None
 
         # Get recent messages from the conversation (limit to last 10 for context)
-        messages = await MessageModel.find_all(
+        messages = await Message.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", -1)],
             limit=1,
@@ -732,11 +705,7 @@ async def get_mcp_context(
             logger.info(
                 "Resetting shared instance to force reconnection with fresh token"
             )
-            from src.services.mcp_client_service import (
-                MultiServerMCPClientService as _Svc,
-            )
-
-            _Svc._shared_instance = None
+            MultiServerMCPClientService._shared_instance = None
         except Exception:
             pass
         mcp_client = MultiServerMCPClientService.get_shared()
@@ -1240,12 +1209,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
     Note: We derive the turn count from the number of Message documents in this conversation.
     """
     try:
-        from src.database.models.message import Message as MessageModel
-    except Exception:
-        return
-
-    try:
-        total_turns = await MessageModel.count_documents(
+        total_turns = await Message.count_documents(
             {"conversation_id": conversation_id}
         )
         if total_turns == 0 or total_turns % summary_every != 0:
@@ -1256,7 +1220,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         )
         # Build transcript from the last `summary_every` turns (each Message is one turn)
         skip = max(0, total_turns - summary_every)
-        messages = await MessageModel.find_all(
+        messages = await Message.find_all(
             filter_dict={"conversation_id": conversation_id},
             sort=[("timestamp", 1)],
             skip=skip,
@@ -1270,19 +1234,10 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 transcript_parts.append(f"Assistant: {m.output}")
         transcript = "\n".join(transcript_parts)
 
-        # Include existing rolling summary if available
-        try:
-            from src.database.models.conversation import (
-                Conversation as ConversationModel,
-            )
-        except Exception:
-            ConversationModel = None  # type: ignore
-
+        convo = await Conversation.find_by_id(conversation_id)
         prior_summary: str = ""
-        if ConversationModel is not None:
-            convo = await ConversationModel.find_by_id(conversation_id)
-            if convo and getattr(convo, "summary", None):
-                prior_summary = convo.summary or ""
+        if convo and getattr(convo, "summary", None):
+            prior_summary = convo.summary or ""
 
         summarizer_input = (
             f"Current summary (may be empty):\n{prior_summary}\n\nRecent turns:\n{transcript}"
@@ -1296,16 +1251,14 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
         if not summary_text:
             return
 
-        # Persist the new rolling summary on the Conversation document
-        if ConversationModel is not None:
-            if convo is None:
-                convo = await ConversationModel.find_by_id(conversation_id)
-            if convo is not None:
-                convo.summary = summary_text
-                try:
-                    await convo.save()
-                except Exception:
-                    pass
+        if convo is None:
+            convo = await Conversation.find_by_id(conversation_id)
+        if convo is not None:
+            convo.summary = summary_text
+            try:
+                await convo.save()
+            except Exception:
+                pass
 
     except Exception:
         # Non-critical path; ignore errors
@@ -1700,6 +1653,13 @@ async def generate_answer_stream_generator_helper(
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
+        selected_llm_type = llm_manager.get_selected_llm_type()
+        if fallback_gen_latency is not None:
+            generated_model_name = FALLBACK_MODEL_NAME
+        elif isinstance(selected_llm_type, str) and selected_llm_type:
+            generated_model_name = _resolve_model_name_for_llm_type(selected_llm_type)
+        else:
+            generated_model_name = FALLBACK_MODEL_NAME if IS_PROD else MAIN_MODEL_NAME
         await persist_message_state(
             message_id,
             output=answer,
@@ -1707,7 +1667,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=rag_decision_result.use_rag,
             latencies=latencies,
             prompts=prompts,
-            retrieved_docs=retrieved_docs
+            retrieved_docs=retrieved_docs,
+            generated_model_name=generated_model_name,
         )
 
         if background_tasks:
@@ -1721,6 +1682,7 @@ async def generate_answer_stream_generator_helper(
                 "type": "final",
                 "answer": answer,
                 "latencies": latencies,
+                "generated_model_name": generated_model_name,
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         else:
@@ -1736,6 +1698,7 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
             stopped=True,
         )
         return
@@ -1756,7 +1719,8 @@ async def generate_answer_stream_generator_helper(
             use_rag=(locals().get("rag_decision_result").use_rag),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
-            retrieved_docs=locals().get("retrieved_docs") or []
+            retrieved_docs=locals().get("retrieved_docs") or [],
+            generated_model_name=locals().get("generated_model_name"),
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"
@@ -1796,6 +1760,7 @@ async def run_generation_to_bus(
     message_id: str,
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
 ):
     """
     Run generation in the background and publish chunks to a per-message bus.
@@ -1821,12 +1786,22 @@ async def run_generation_to_bus(
             f"data: {json.dumps({'type':'error','message':str(e)})}\n\n",
         )
     finally:
+        if user_id:
+            try:
+                user = await User.find_by_id(user_id)
+                message = await Message.find_by_id(message_id)
+                if user and message:
+                    token_count = count_tokens_for_texts(message.input, message.output)
+                    await consume_tokens_for_user(user, token_count)
+            except Exception as consume_error:
+                logger.warning(
+                    "Failed to apply token usage for streamed generation: %s",
+                    consume_error,
+                )
         # Signal end-of-data for subscribers
         await bus.close(message_id)
         # Cleanup cancel manager state for this message
         try:
-            from src.services.cancel_manager import get_cancel_manager
-
             cm = get_cancel_manager()
             cm.clear_mapping_for(conversation_id, message_id)
             cm.clear(message_id)

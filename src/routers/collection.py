@@ -116,22 +116,36 @@ async def list_collections(
 
 
 @router.get("/collections/{collection_id}")
-async def get_collection(collection_id: str) -> dict:
+async def get_collection(
+    collection_id: str,
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
     """
     Get a collection by id with document and vector counts.
 
     Args:
         collection_id (str): Target collection identifier.
+        requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
         Collection data including documents_count and points_count.
 
     Raises:
         HTTPException: 404 if collection is not found.
+        HTTPException: 403 if the collection is owned by another user.
     """
     collection = await Collection.find_by_id(collection_id)
     if not collection:
         raise HTTPException(status_code=404, detail="Collection not found")
+
+    if (
+        collection.user_id is not None
+        and collection.user_id != requesting_user.id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not allowed to access this collection",
+        )
 
     documents_count, points_count = await _get_counts_for_id(collection_id)
 

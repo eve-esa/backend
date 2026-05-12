@@ -8,13 +8,14 @@ from src.constants import (
     WILEY_PUBLIC_COLLECTIONS,
 )
 from src.schemas.message import MessageUpdate, CreateMessageResponse
+from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
-    GenerationRequest,
     generate_answer,
+    get_shared_llm_manager,
     maybe_rollup_and_trim_history,
+    run_generation_to_bus,
     setup_rag_and_context,
     should_use_rag,
-    get_shared_llm_manager,
 )
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
@@ -40,9 +41,13 @@ from pydantic import BaseModel
 from src.services.hallucination_detector import HallucinationDetector
 import asyncio
 import json
-from src.services.generate_answer import run_generation_to_bus
 from src.services.stream_bus import get_stream_bus
 from src.services.cancel_manager import get_cancel_manager
+from src.services.token_rate_limiter import (
+    consume_tokens_for_user,
+    count_tokens_for_texts,
+    enforce_token_budget_or_raise,
+)
 from src.utils.error_logger import (
     Component,
     PipelineStage,
@@ -51,6 +56,7 @@ from src.utils.error_logger import (
     set_message_context,
     get_error_logger,
 )
+from src.core.llm_manager import LLMType
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +372,8 @@ async def create_message(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
+        original_query = request.query
 
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
@@ -454,6 +462,9 @@ async def create_message(
         )
         message.metadata = existing_metadata
         await message.save()
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(original_query, answer)
+        )
 
         # Schedule rollup as background task to avoid blocking response
         background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -541,6 +552,7 @@ async def retry(
                 status_code=400,
                 detail="This message cannot be retried",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         answer, results, is_rag, latencies, prompts, retrieved_docs = (
             await generate_answer(
@@ -565,6 +577,9 @@ async def retry(
         )
         message.metadata = existing_metadata
         await message.save()
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(message.input, answer)
+        )
 
         # Schedule rollup as background task to avoid blocking response
         background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -710,6 +725,7 @@ async def create_message_stream(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
@@ -788,6 +804,7 @@ async def create_message_stream(
                 message_id=message.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
+                user_id=requesting_user.id,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
@@ -1115,6 +1132,7 @@ async def stream_hallucination(
         raise HTTPException(
             status_code=400, detail="Message does not belong to this conversation"
         )
+    await enforce_token_budget_or_raise(requesting_user)
 
     async def _generator():
         import json
@@ -1160,6 +1178,16 @@ async def stream_hallucination(
                     await message.save()
                 except Exception:
                     pass
+                try:
+                    await consume_tokens_for_user(
+                        requesting_user,
+                        count_tokens_for_texts(message.input, reason),
+                    )
+                except Exception as consume_error:
+                    logger.warning(
+                        "Failed to apply token usage for streamed hallucination: %s",
+                        consume_error,
+                    )
 
                 final_payload = {
                     "type": "final",
@@ -1289,6 +1317,16 @@ async def stream_hallucination(
             final_latency = time.perf_counter() - t2
 
             final_answer = "".join(final_answer_chunks)
+            try:
+                await consume_tokens_for_user(
+                    requesting_user,
+                    count_tokens_for_texts(message.input, final_answer),
+                )
+            except Exception as consume_error:
+                logger.warning(
+                    "Failed to apply token usage for streamed hallucination: %s",
+                    consume_error,
+                )
             total_latency = time.perf_counter() - total_start
             latencies = {
                 "detect": detect_latency,
@@ -1343,19 +1381,26 @@ async def stream_hallucination(
 @router.post("/generate-llm")
 async def generate_llm(
     request: GenerateLLMRequest,
+    requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Call EVE-Instruct (v5) with a single query. No RAG, no conversation context.
+    Call EVE-Instruct (v5) (Main model) with a single query. No RAG, no conversation context.
 
     Body: query. Returns the model reply only.
     """
     try:
+        await enforce_token_budget_or_raise(requesting_user)
         llm_manager = get_shared_llm_manager()
-        llm = llm_manager.get_client_for_model("eve_v05")
+        llm = llm_manager.get_client_for_model(LLMType.Main.value)
         messages = [HumanMessage(content=request.query)]
         response = await llm.ainvoke(messages)
         content = getattr(response, "content", str(response))
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(request.query, content)
+        )
         return {"answer": content}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("generate_llm failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -1395,6 +1440,8 @@ async def generate(
     """
     message = None
     try:
+        await enforce_token_budget_or_raise(requesting_user)
+        original_query = request.query
         # Normalize and validate requested public collections against allowed lists
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
         try:
@@ -1452,6 +1499,9 @@ async def generate(
         answer, results, is_rag, latencies, prompts, retrieved_docs = (
             await generate_answer(request)
         )
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(original_query, answer)
+        )
 
         documents_data = []
         if results:
@@ -1465,6 +1515,8 @@ async def generate(
             "prompts": prompts,
             "retrieved_docs": retrieved_docs,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
@@ -1472,7 +1524,7 @@ async def generate(
 @router.post("/retrieve")
 async def retrieve(
     request: GenerationRequest,
-    # requesting_user: User = Depends(get_current_user),
+    requesting_user: User = Depends(get_current_user)
 ) -> dict:
     """
     Run the entire retrieval pipeline and return all documents.
@@ -1493,6 +1545,7 @@ async def retrieve(
             - requery: The rewritten query used for retrieval (or original if rewrite skipped/failed)
     """
     try:
+        await enforce_token_budget_or_raise(requesting_user)
         allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
         try:
             allowed_names = {
@@ -1508,30 +1561,30 @@ async def retrieve(
         ]
         request.public_collections = public_collections
 
-        # other_users_collections = await CollectionModel.find_all(
-        #     filter_dict={
-        #         "id": {"$in": request.public_collections},
-        #         "user_id": {"$ne": requesting_user.id},
-        #     }
-        # )
+        other_users_collections = await CollectionModel.find_all(
+            filter_dict={
+                "id": {"$in": request.public_collections},
+                "user_id": {"$ne": requesting_user.id},
+            }
+        )
 
-        # if len(other_users_collections) > 0:
-        #     raise HTTPException(
-        #         status_code=403,
-        #         detail="You are not allowed to use collections from other users",
-        #     )
+        if len(other_users_collections) > 0:
+            raise HTTPException(
+                status_code=403,
+                detail="You are not allowed to use collections from other users",
+            )
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # user_collections = await CollectionModel.find_all(
-        #     filter_dict={"user_id": requesting_user.id}
-        # )
+        user_collections = await CollectionModel.find_all(
+            filter_dict={"user_id": requesting_user.id}
+        )
 
-        # request.private_collections_map = {c.id: c.name for c in user_collections}
-        # if len(user_collections) > 0:
-        #     request.collection_ids = request.collection_ids + [
-        #         c.id for c in user_collections
-        #     ]
+        request.private_collections_map = {c.id: c.name for c in user_collections}
+        if len(user_collections) > 0:
+            request.collection_ids = request.collection_ids + [
+                c.id for c in user_collections
+            ]
         request.collection_ids = [
             c for c in request.collection_ids if c != "Wiley AI Gateway"
         ]
@@ -1570,11 +1623,20 @@ async def retrieve(
             latencies = dict(latencies) if latencies else {}
             latencies["rewrite"] = rewrite_latency
 
+        token_usage_inputs = [original_query]
+        if requery and requery != original_query:
+            token_usage_inputs.append(requery)
+        await consume_tokens_for_user(
+            requesting_user, count_tokens_for_texts(*token_usage_inputs)
+        )
+
         return {
             "retrieved_docs": formated_results,
             "latencies": latencies,
             "original_query": original_query,
             "requery": requery or original_query,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

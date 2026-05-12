@@ -93,6 +93,57 @@ async def test_update_collection_not_owner(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_collection_requires_auth(async_client, monkeypatch):
+    """GET /collections/{id} must not be callable without a Bearer token."""
+
+    _stub_vector_methods(monkeypatch)
+
+    user, token = await create_test_user_and_token()
+    try:
+        coll_id = (
+            await async_client.post(
+                "/collections",
+                json={"name": "Auth Gate Coll"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        resp = await async_client.get(f"/collections/{coll_id}")
+        assert resp.status_code == 403
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_get_collection_not_owner(async_client, monkeypatch):
+    _stub_vector_methods(monkeypatch)
+
+    owner, owner_token = await create_test_user_and_token()
+    intruder, intr_token = await create_test_user_and_token()
+    try:
+        coll_id = (
+            await async_client.post(
+                "/collections",
+                json={"name": "Owner Read Coll"},
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+        ).json()["id"]
+
+        resp = await async_client.get(
+            f"/collections/{coll_id}",
+            headers={"Authorization": f"Bearer {intr_token}"},
+        )
+        assert resp.status_code == 403
+
+        await async_client.delete(
+            f"/collections/{coll_id}",
+            headers={"Authorization": f"Bearer {owner_token}"},
+        )
+    finally:
+        await cleanup_models([owner, intruder])
+
+
+@pytest.mark.asyncio
 async def test_delete_collection_not_owner(async_client, monkeypatch):
     _stub_vector_methods(monkeypatch)
 
