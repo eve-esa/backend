@@ -110,6 +110,9 @@ AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
 AGENTCORE_CLIENT_SECRET = os.getenv("AGENTCORE_CLIENT_SECRET", "").strip()
 MCP_PROXY_BASE_URL = os.getenv("MCP_PROXY_BASE_URL", "").strip()
 MCP_PROXY_INTERNAL_BASE_URL = os.getenv("MCP_PROXY_INTERNAL_BASE_URL", "").strip()
+# OpenAI-compatible proxy — upstream base URL (e.g. "https://example.com") and optional API key
+OPENAI_PROXY_UPSTREAM_URL = os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
+OPENAI_PROXY_API_KEY = os.getenv("OPENAI_PROXY_API_KEY", "").strip()
 # ──────────────────────────────────────────────────────────────────────────────
 
 
