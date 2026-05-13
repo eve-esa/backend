@@ -7,9 +7,11 @@ https://gofastmcp.com/servers/providers/proxy
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from typing import Any
 
+import httpx
 from fastmcp import settings as fastmcp_settings
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.server import create_proxy
@@ -18,7 +20,7 @@ from jose import JWTError
 
 from src.database.mongo import get_collection
 from src.middlewares.auth import verify_access_token
-from src.services.mcp.auth import get_cognito_token_provider
+from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 
 logger = logging.getLogger(__name__)
@@ -28,9 +30,71 @@ _proxy_lifespan_stacks: dict[str, AsyncExitStack] = {}
 _proxy_build_lock = asyncio.Lock()
 
 
-async def build_proxy_app(agentcore_url: str, cognito_token: str):
-    """Return a cached ASGI app that proxies MCP to ``agentcore_url`` with Cognito auth."""
-    cache_key = f"{agentcore_url}:{cognito_token[:16]}"
+class _DynamicBearerAuth(httpx.Auth):
+    """httpx Auth that fetches a fresh Cognito token on every request.
+
+    This prevents the proxy from getting stuck with a stale cached token after
+    the Cognito JWT expires.  ``CognitoTokenProvider.get_token()`` is already
+    internally cached and only hits the network when the token approaches
+    expiry, so there is no performance penalty on the hot path.
+
+    On a 401 response from AgentCore the auth flow invalidates the token cache
+    and retries the request exactly once with a freshly-issued token.  httpx
+    supports this two-yield pattern natively via ``async_auth_flow``.
+    """
+
+    def __init__(self, provider: CognitoTokenProvider) -> None:
+        self._provider = provider
+
+    def auth_flow(self, request: httpx.Request):
+        # Sync fallback — should not be reached by httpx.AsyncClient.
+        yield request  # pragma: no cover
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        token = await self._provider.get_token()
+        request.headers["Authorization"] = f"Bearer {token}"
+
+        # Yield the request; httpx sends it and feeds the response back via send().
+        response = yield request
+
+        if response.status_code != 401:
+            # Happy path — nothing more to do.
+            return
+
+        # ------------------------------------------------------------------ #
+        # AgentCore returned 401.  This is intermittent and happens when the  #
+        # cached Cognito token expires between our local expiry check and the  #
+        # actual HTTP round-trip (clock skew / narrow expiry window).          #
+        # Strategy: invalidate the in-memory cache, fetch a fresh token from  #
+        # Cognito, and retry the request exactly once.                         #
+        # ------------------------------------------------------------------ #
+        url_hint = str(request.url)[:80]
+        logger.warning(
+            "[MCP proxy] AgentCore returned 401 Unauthorized for %s – "
+            "Cognito token may be stale. Invalidating cache and retrying with "
+            "a fresh token (single retry).",
+            url_hint,
+        )
+        self._provider.invalidate()
+        token = await self._provider.get_token()
+        request.headers["Authorization"] = f"Bearer {token}"
+        logger.info(
+            "[MCP proxy] Retrying request to %s with freshly-issued Cognito token.",
+            url_hint,
+        )
+        yield request
+
+
+async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
+    """Return a cached ASGI app that proxies MCP to ``agentcore_url`` with Cognito auth.
+
+    The proxy is cached by URL only.  Authentication is handled dynamically
+    via ``_DynamicBearerAuth`` so tokens are always fresh regardless of how
+    long the proxy has been alive.
+    """
+    cache_key = agentcore_url
     if cache_key in _proxy_apps:
         return _proxy_apps[cache_key]
 
@@ -39,7 +103,7 @@ async def build_proxy_app(agentcore_url: str, cognito_token: str):
             return _proxy_apps[cache_key]
         transport = StreamableHttpTransport(
             agentcore_url,
-            auth=cognito_token,
+            auth=_DynamicBearerAuth(provider),
         )
         backend = ProxyClient(transport)
         proxy = create_proxy(backend, name=f"proxy-{agentcore_url[-8:]}")
@@ -48,7 +112,7 @@ async def build_proxy_app(agentcore_url: str, cognito_token: str):
         await stack.enter_async_context(http_app.lifespan(http_app))
         _proxy_lifespan_stacks[cache_key] = stack
         _proxy_apps[cache_key] = http_app
-        logger.info("MCP proxy sub-app started (lifespan): %s", cache_key[:48])
+        logger.info("MCP proxy sub-app started (lifespan): %s", cache_key[:64])
         return http_app
 
 
@@ -141,9 +205,8 @@ class MCPProxyDispatcher:
         provider = get_cognito_token_provider()
         if provider is None:
             raise RuntimeError("AgentCore authentication is not configured")
-        cognito_token = await provider.get_token()
 
-        return await build_proxy_app(server["config"]["url"], cognito_token)
+        return await build_proxy_app(server["config"]["url"], provider)
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
