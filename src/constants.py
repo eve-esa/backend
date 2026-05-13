@@ -68,7 +68,7 @@ STAGING_PUBLIC_COLLECTIONS = [
         "name": "wikipedia-512",
         "description": "ESA data with Wikipedia articles for testing",
     },
-    {"name": "qwen-512-filtered", "description": "ESA data with Qwen-512 for testing"},
+    {"name": "qwen-512-filtered", "alias": "EVE open access", "description": "ESA data with Qwen-512 for testing"},
     {
         "name": "satcom-chunks-collection",
         "alias": "SATCOM Technical Knowledge Base",

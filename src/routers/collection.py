@@ -1,6 +1,8 @@
-import logging
-import anyio
 import asyncio
+import logging
+
+import anyio
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.config import IS_PROD
 from src.constants import (
@@ -8,16 +10,14 @@ from src.constants import (
     STAGING_PUBLIC_COLLECTIONS,
     WILEY_PUBLIC_COLLECTIONS,
 )
-from src.schemas.common import Pagination
-from src.schemas.collection import CollectionRequest, CollectionUpdate
-from src.database.models.document import Document
-from fastapi import APIRouter, HTTPException, Depends
-
+from src.core.vector_store_manager import VectorStoreManager
 from src.database.models.collection import Collection
+from src.database.models.document import Document
 from src.database.models.user import User
 from src.database.mongo_model import PaginatedResponse, get_pagination_metadata
 from src.middlewares.auth import get_current_user
-from src.core.vector_store_manager import VectorStoreManager
+from src.schemas.collection import CollectionRequest, CollectionUpdate
+from src.schemas.common import Pagination
 
 logger = logging.getLogger(__name__)
 vector_store = VectorStoreManager()
@@ -56,7 +56,9 @@ async def _get_counts_for_id(collection_id: str):
 
 
 @router.get("/collections/public", response_model=PaginatedResponse[Collection])
-async def list_public_collections(pagination: Pagination = Depends()) -> PaginatedResponse[Collection]:
+async def list_public_collections(
+    pagination: Pagination = Depends(),
+) -> PaginatedResponse[Collection]:
     """
     List public collections with pagination.
 
@@ -138,10 +140,7 @@ async def get_collection(
     if not collection:
         raise HTTPException(status_code=404, detail="Collection not found")
 
-    if (
-        collection.user_id is not None
-        and collection.user_id != requesting_user.id
-    ):
+    if collection.user_id is not None and collection.user_id != requesting_user.id:
         raise HTTPException(
             status_code=403,
             detail="You are not allowed to access this collection",
