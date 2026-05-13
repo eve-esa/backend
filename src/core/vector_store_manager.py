@@ -6,17 +6,14 @@ vector collections using Qdrant as the backend. It handles embedding generation,
 document storage, and similarity search operations.
 """
 
-import logging
-from typing import Any, Dict, List, Optional, Tuple
-from types import SimpleNamespace
-from uuid import uuid4
 import asyncio
+import logging
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
-from openai import OpenAI
-
-from src.database.models.collection import Collection
 from langchain_core.documents import Document
-
+from openai import OpenAI
 from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.models import (
@@ -27,27 +24,29 @@ from qdrant_client.http.models import (
     VectorParams,
 )
 
+from src.config import (
+    EMBEDDING_API_KEY,
+    EMBEDDING_FALLBACK_API_KEY,
+    EMBEDDING_FALLBACK_URL,
+    EMBEDDING_URL,
+    QDRANT_API_KEY,
+    QDRANT_URL,
+    Config,
+)
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
     EVE_PUBLIC_COLLECTION_NAME,
     PUBLIC_COLLECTIONS,
 )
-from src.config import (
-    Config,
-    QDRANT_URL,
-    QDRANT_API_KEY,
-    EMBEDDING_API_KEY,
-    EMBEDDING_URL,
-    EMBEDDING_FALLBACK_API_KEY,
-    EMBEDDING_FALLBACK_URL,
-)
-from src.utils.error_logger import get_error_logger, Component, PipelineStage
+from src.database.models.collection import Collection
+from src.utils.error_logger import Component, PipelineStage, get_error_logger
 
 # Setup logging
 logger = logging.getLogger(__name__)
 
 # Initialize configuration
 config = Config()
+
 
 class VectorStoreManager:
     """
@@ -354,7 +353,9 @@ class VectorStoreManager:
         metadatas = [doc.metadata for doc in documents]
 
         # Generate embeddings for this batch
-        embeddings, _ = await self.generate_batch_embeddings(texts, self.embeddings_model)
+        embeddings, _ = await self.generate_batch_embeddings(
+            texts, self.embeddings_model
+        )
         # Create points for Qdrant
         points = []
         for i, (text, metadata, embedding, uuid) in enumerate(
@@ -631,12 +632,8 @@ class VectorStoreManager:
             RuntimeError: If embedding generation fails
         """
         try:
-            openai = OpenAI(
-                api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL
-            )
-            response = openai.embeddings.create(
-                input=query, model=embeddings_model
-            )
+            openai = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL)
+            response = openai.embeddings.create(input=query, model=embeddings_model)
             return response.data[0].embedding, None
 
         except Exception as e:
@@ -653,12 +650,12 @@ class VectorStoreManager:
                 openai = OpenAI(
                     api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
                 )
-                response = openai.embeddings.create(
-                    input=query, model=embeddings_model
-                )
+                response = openai.embeddings.create(input=query, model=embeddings_model)
                 return response.data[0].embedding, str(e)
             except Exception as e:
-                logger.error(f"Failed to generate query vector from fallback model: {e}")
+                logger.error(
+                    f"Failed to generate query vector from fallback model: {e}"
+                )
                 await error_logger.log_error_sync(
                     error=e,
                     component=Component.RETRIEVAL_FALLBACK,
@@ -687,12 +684,8 @@ class VectorStoreManager:
             return [], None
 
         try:
-            openai = OpenAI(
-                api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL
-            )
-            response = openai.embeddings.create(
-                input=texts, model=embeddings_model
-            )
+            openai = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_URL)
+            response = openai.embeddings.create(input=texts, model=embeddings_model)
             embeddings = [item.embedding for item in response.data]
             return embeddings, None
 
@@ -701,9 +694,7 @@ class VectorStoreManager:
             openai = OpenAI(
                 api_key=EMBEDDING_FALLBACK_API_KEY, base_url=EMBEDDING_FALLBACK_URL
             )
-            response = openai.embeddings.create(
-                input=texts, model=embeddings_model
-            )
+            response = openai.embeddings.create(input=texts, model=embeddings_model)
             embeddings = [item.embedding for item in response.data]
             return embeddings, str(e)
 
