@@ -1,25 +1,26 @@
-from src.database.mongo import async_mongo_manager
-from src.database.indexes import ensure_indexes
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
 import logging
-from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from contextlib import asynccontextmanager
-from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.config import CORS_ALLOWED_ORIGINS, configure_logging
+from src.database.indexes import ensure_indexes
+from src.database.mongo import async_mongo_manager
 from src.routers import (
-    health_check_router,
+    OpenAIProxyDispatcher,
     auth_router,
+    collection_router,
     conversation_router,
+    document_router,
+    error_log_router,
+    forgot_password_router,
+    health_check_router,
+    mcp_server_router,
     message_router,
     user_router,
-    forgot_password_router,
-    collection_router,
-    document_router,
-    mcp_server_router,
-    error_log_router,
-    openai_compat_router,
 )
+from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 
 configure_logging(level=logging.DEBUG)
 
@@ -52,9 +53,6 @@ def register_routers(app: FastAPI):
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
-
-    # OpenAI-compatible API
-    app.include_router(openai_compat_router, tags=["OpenAI Compatible"])
 
 
 def create_app(debug=False, **kwargs):
@@ -92,6 +90,7 @@ def create_app(debug=False, **kwargs):
         return "Welcome to Eve"
 
     register_routers(app)
+    app = OpenAIProxyDispatcher(app)
     app = MCPProxyDispatcher(app)
     return app
 

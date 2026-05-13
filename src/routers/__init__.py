@@ -9,7 +9,7 @@ from .auth import router as auth_router
 from .forgot_password import router as forgot_password_router
 from .mcp_server import router as mcp_server_router
 from .error_log import router as error_log_router
-from .openai_compat import router as openai_compat_router
+from .openai_proxy import OpenAIProxyDispatcher
 
 __all__ = [
     "collection_router",
@@ -22,5 +22,5 @@ __all__ = [
     "forgot_password_router",
     "mcp_server_router",
     "error_log_router",
-    "openai_compat_router",
+    "OpenAIProxyDispatcher",
 ]
