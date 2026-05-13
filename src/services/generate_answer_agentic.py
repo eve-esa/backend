@@ -18,6 +18,7 @@ from src.config import (
     MODEL_TIMEOUT,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS
+from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.agentic_utils import (
@@ -331,6 +332,7 @@ def _build_react_graph(
     tools: List[Any],
     system_prompt: Optional[str],
     checkpointer: Any,
+    llm_type_override: Optional[str] = None,
 ):
     """
     Compile a ReAct StateGraph manually (no langgraph.prebuilt dependency).
@@ -348,8 +350,13 @@ def _build_react_graph(
     pipeline can be pinned to a model that supports function calling (e.g.
     "fallback" for Mistral) independently of the main generation model.
     """
-    effective_llm_type = AGENTIC_LLM_TYPE or llm_type
-    if AGENTIC_LLM_TYPE and AGENTIC_LLM_TYPE != llm_type:
+    effective_llm_type = llm_type_override or AGENTIC_LLM_TYPE or llm_type
+    if llm_type_override and llm_type_override != (AGENTIC_LLM_TYPE or llm_type):
+        logger.info(
+            "Agentic graph: using llm_type %r after primary graph init failed",
+            llm_type_override,
+        )
+    elif AGENTIC_LLM_TYPE and AGENTIC_LLM_TYPE != llm_type:
         logger.info(
             "Agentic graph: overriding llm_type %r → %r (AGENTIC_LLM_TYPE)",
             llm_type,
@@ -460,6 +467,32 @@ def _build_react_graph(
     return builder.compile(checkpointer=checkpointer)
 
 
+def _build_react_graph_with_fallback(
+    llm_type: Optional[str],
+    tools: List[Any],
+    system_prompt: Optional[str],
+    checkpointer: Any,
+):
+    primary_llm_type = AGENTIC_LLM_TYPE or llm_type
+    try:
+        return _build_react_graph(llm_type, tools, system_prompt, checkpointer)
+    except Exception as exc:
+        if primary_llm_type in (LLMType.Fallback.value, "mistral"):
+            raise
+        logger.warning(
+            "Agentic graph init failed with llm_type %r, retrying with fallback: %s",
+            primary_llm_type,
+            exc,
+        )
+        return _build_react_graph(
+            llm_type,
+            tools,
+            system_prompt,
+            checkpointer,
+            llm_type_override=LLMType.Fallback.value,
+        )
+
+
 # ─── Non-streaming agentic generation ─────────────────────────────────────────
 
 
@@ -508,7 +541,9 @@ async def generate_answer_agentic(
                     else summary_prefix
                 )
 
-        graph = _build_react_graph(request.llm_type, tools, system_prompt, checkpointer)
+        graph = _build_react_graph_with_fallback(
+            request.llm_type, tools, system_prompt, checkpointer
+        )
 
         config = {
             "configurable": {"thread_id": conversation_id or "default"},
@@ -651,7 +686,9 @@ async def generate_answer_agentic_stream_helper(
                 (summary_prefix + system_prompt) if system_prompt else summary_prefix
             )
 
-        graph = _build_react_graph(request.llm_type, tools, system_prompt, checkpointer)
+        graph = _build_react_graph_with_fallback(
+            request.llm_type, tools, system_prompt, checkpointer
+        )
 
         config = {
             "configurable": {"thread_id": conversation_id},
