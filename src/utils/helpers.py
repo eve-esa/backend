@@ -30,15 +30,71 @@ from src.config import (
     MONGO_DATABASE,
     MONGO_PARAMS,
 )
-from src.constants import TOKEN_OVERFLOW_LIMIT
+from src.constants import (
+    PUBLIC_COLLECTIONS,
+    STAGING_PUBLIC_COLLECTIONS,
+    TOKEN_OVERFLOW_LIMIT,
+    WILEY_PUBLIC_COLLECTIONS,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
 class EmbeddingModelType(Enum):
     """Supported embedding model types."""
 
     QWEN_3_4B = "Qwen/Qwen3-Embedding-4B"
     QWEN_3_4B_INFERENCE = "qwen/qwen3-embedding-4b"
+
+
+def normalize_public_collections_selection(
+    requested: Optional[List[str]],
+    *,
+    is_prod: bool,
+) -> list[str]:
+    """Return allowed public collection Qdrant ``name`` values: alias → name, drop unknowns, dedupe.
+
+    On any unexpected error (bad catalog shape, etc.) returns ``[]`` and logs a warning.
+    """
+    try:
+        labels = list(requested or [])
+        allowed_source = PUBLIC_COLLECTIONS if is_prod else STAGING_PUBLIC_COLLECTIONS
+        combined = allowed_source + WILEY_PUBLIC_COLLECTIONS
+        allowed_labels: set[str] = set()
+        label_to_canonical: dict[str, str] = {}
+        for item in combined:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            alias = item.get("alias")
+            if name:
+                allowed_labels.add(name)
+                label_to_canonical[name] = name
+            if alias:
+                allowed_labels.add(alias)
+                if name:
+                    label_to_canonical[alias] = name
+                else:
+                    label_to_canonical[alias] = alias
+        out: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            if label not in allowed_labels:
+                continue
+            canonical = label_to_canonical.get(label, label)
+            if canonical not in seen:
+                seen.add(canonical)
+                out.append(canonical)
+        return out
+    except Exception as e:
+        logger.warning(
+            "normalize_public_collections_selection failed: %s",
+            e,
+            exc_info=True,
+        )
+        return []
+
 
 async def save_upload_file_to_temp(upload_file: UploadFile) -> str:
     """

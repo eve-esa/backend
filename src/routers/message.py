@@ -11,11 +11,6 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from src.config import IS_PROD, MODEL_TIMEOUT
-from src.constants import (
-    PUBLIC_COLLECTIONS,
-    STAGING_PUBLIC_COLLECTIONS,
-    WILEY_PUBLIC_COLLECTIONS,
-)
 from src.core.llm_manager import LLMType
 from src.database.models.co2eq_comparison import CO2EQComparison
 from src.database.models.collection import Collection as CollectionModel
@@ -61,6 +56,7 @@ from src.utils.helpers import (
     extract_document_data,
     extract_year_range_from_filters,
     get_co2_usage_kg,
+    normalize_public_collections_selection,
     pluralize,
 )
 
@@ -375,20 +371,10 @@ async def create_message(
         original_query = request.query
 
         # Normalize and validate requested public collections against allowed lists
-        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
-        try:
-            allowed_names = {
-                item.get("name")
-                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-                if isinstance(item, dict) and item.get("name")
-            }
-        except Exception:
-            allowed_names = set()
-
-        public_collections = [
-            n for n in request.public_collections if n in allowed_names
-        ]
-        request.public_collections = public_collections
+        request.public_collections = normalize_public_collections_selection(
+            request.public_collections,
+            is_prod=IS_PROD,
+        )
 
         # lookup query to check if some of the collection ids from other users are in the request.collection_ids
         other_users_collections = await CollectionModel.find_all(
@@ -739,20 +725,10 @@ async def create_message_stream(
         await enforce_token_budget_or_raise(requesting_user)
 
         # Normalize and validate requested public collections against allowed lists
-        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
-        try:
-            allowed_names = {
-                item.get("name")
-                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-                if isinstance(item, dict) and item.get("name")
-            }
-        except Exception:
-            allowed_names = set()
-
-        public_collections = [
-            n for n in request.public_collections if n in allowed_names
-        ]
-        request.public_collections = public_collections
+        request.public_collections = normalize_public_collections_selection(
+            request.public_collections,
+            is_prod=IS_PROD,
+        )
 
         # lookup query to check if some of the collection ids from other users are in the request.collection_ids
         other_users_collections = await CollectionModel.find_all(
@@ -1460,20 +1436,10 @@ async def generate(
         await enforce_token_budget_or_raise(requesting_user)
         original_query = request.query
         # Normalize and validate requested public collections against allowed lists
-        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
-        try:
-            allowed_names = {
-                item.get("name")
-                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-                if isinstance(item, dict) and item.get("name")
-            }
-        except Exception:
-            allowed_names = set()
-
-        public_collections = [
-            n for n in request.public_collections if n in allowed_names
-        ]
-        request.public_collections = public_collections
+        request.public_collections = normalize_public_collections_selection(
+            request.public_collections,
+            is_prod=IS_PROD,
+        )
 
         # lookup query to check if some of the collection ids from other users are in the request.collection_ids
         other_users_collections = await CollectionModel.find_all(
@@ -1575,20 +1541,10 @@ async def retrieve(
     """
     try:
         await enforce_token_budget_or_raise(requesting_user)
-        allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
-        try:
-            allowed_names = {
-                item.get("name")
-                for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-                if isinstance(item, dict) and item.get("name")
-            }
-        except Exception:
-            allowed_names = set()
-
-        public_collections = [
-            n for n in request.public_collections if n in allowed_names
-        ]
-        request.public_collections = public_collections
+        request.public_collections = normalize_public_collections_selection(
+            request.public_collections,
+            is_prod=IS_PROD,
+        )
 
         other_users_collections = await CollectionModel.find_all(
             filter_dict={
@@ -1681,19 +1637,10 @@ async def _prepare_agentic_request(
     requesting_user: User,
 ) -> GenerationRequest:
     """Normalise collections and resolve MCP servers on the request."""
-    allowed_source = PUBLIC_COLLECTIONS if IS_PROD else STAGING_PUBLIC_COLLECTIONS
-    try:
-        allowed_names = {
-            item.get("name")
-            for item in (allowed_source + WILEY_PUBLIC_COLLECTIONS)
-            if isinstance(item, dict) and item.get("name")
-        }
-    except Exception:
-        allowed_names = set()
-
-    request.public_collections = [
-        n for n in request.public_collections if n in allowed_names
-    ]
+    request.public_collections = normalize_public_collections_selection(
+        request.public_collections,
+        is_prod=IS_PROD,
+    )
     request.collection_ids = request.collection_ids + request.public_collections
     request.collection_ids = [
         c for c in request.collection_ids if c != "Wiley AI Gateway"
