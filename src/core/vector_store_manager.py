@@ -35,8 +35,10 @@ from src.config import (
 )
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
-    EVE_PUBLIC_COLLECTION_NAME,
+    EVE_PUBLIC_COLLECTION_NAME_PROD,
+    EVE_PUBLIC_COLLECTION_NAME_STAGING,
     PUBLIC_COLLECTIONS,
+    IS_PROD,
 )
 from src.database.models.collection import Collection
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
@@ -463,7 +465,8 @@ class VectorStoreManager:
 
         aggregated_results: List[Any] = []
         for collection_name in collection_names:
-            if collection_name != EVE_PUBLIC_COLLECTION_NAME:
+            eve_public_collection_name = EVE_PUBLIC_COLLECTION_NAME_PROD if IS_PROD else EVE_PUBLIC_COLLECTION_NAME_STAGING
+            if collection_name != eve_public_collection_name:
                 collection_query_filter = None
             else:
                 collection_query_filter = query_filter
