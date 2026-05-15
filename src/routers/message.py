@@ -1602,7 +1602,7 @@ async def retrieve(
             )
             requery = None
 
-        _context, _results, latencies, formated_results = await setup_rag_and_context(
+        _context, results, latencies, _formated_results = await setup_rag_and_context(
             request
         )
 
@@ -1618,7 +1618,7 @@ async def retrieve(
         )
 
         return {
-            "retrieved_docs": formated_results,
+            "retrieved_docs": results,
             "latencies": latencies,
             "original_query": original_query,
             "requery": requery or original_query,
