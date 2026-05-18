@@ -20,7 +20,7 @@ TOKEN_OVERFLOW_LIMIT = 7_000
 
 MCP_MAX_TOP_N = 20
 
-EVE_PUBLIC_COLLECTION_NAME = "EVE open-access"
+EVE_PUBLIC_COLLECTION_NAME = "qwen-512-filtered"
 
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
