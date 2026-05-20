@@ -1,11 +1,12 @@
 # src/config.py
-import yaml
-import os
 import json
-from dotenv import load_dotenv
 import logging
+import os
 import sys
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
+import yaml
+from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
@@ -30,14 +31,22 @@ FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-medium-latest").
 
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
 
-EMBEDDING_URL = os.getenv("EMBEDDING_URL", "https://api.deepinfra.com/v1/openai").strip()
+EMBEDDING_URL = os.getenv(
+    "EMBEDDING_URL", "https://api.deepinfra.com/v1/openai"
+).strip()
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "").strip()
 
-EMBEDDING_FALLBACK_URL = os.getenv("EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1").strip()
+EMBEDDING_FALLBACK_URL = os.getenv(
+    "EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1"
+).strip()
 EMBEDDING_FALLBACK_API_KEY = os.getenv("EMBEDDING_FALLBACK_API_KEY", "").strip()
 
-SATCOM_SMALL_MODEL_NAME = os.getenv("SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b").strip()
-SATCOM_LARGE_MODEL_NAME = os.getenv("SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b").strip()
+SATCOM_SMALL_MODEL_NAME = os.getenv(
+    "SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"
+).strip()
+SATCOM_LARGE_MODEL_NAME = os.getenv(
+    "SATCOM_LARGE_MODEL_NAME", "esa-sceva/satcom-chat-70b"
+).strip()
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
 SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
@@ -80,6 +89,32 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+# Langfuse observability
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").strip()
+
+# ─── Agentic pipeline configuration ───────────────────────────────────────────
+# MODEL_TIMEOUT (defined above) is the per-step answer generation timeout used
+# by the streaming agentic graph. The vars below are specific to the agentic
+# pipeline and its MCP tool integrations.
+
+# Override the LLM type for the agentic graph.  Set to "fallback" to force
+# Mistral (reliable tool use) regardless of the request's llm_type.
+AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
+
+# AWS Cognito credentials for AgentCore MCP server authentication.
+AGENTCORE_TOKEN_URL = os.getenv("AGENTCORE_TOKEN_URL", "").strip()
+AGENTCORE_CLIENT_ID = os.getenv("AGENTCORE_CLIENT_ID", "").strip()
+AGENTCORE_CLIENT_SECRET = os.getenv("AGENTCORE_CLIENT_SECRET", "").strip()
+MCP_PROXY_BASE_URL = os.getenv("MCP_PROXY_BASE_URL", "").strip()
+MCP_PROXY_INTERNAL_BASE_URL = os.getenv("MCP_PROXY_INTERNAL_BASE_URL", "").strip()
+# OpenAI-compatible proxy — upstream base URL (e.g. "https://example.com") and optional API key
+OPENAI_PROXY_UPSTREAM_URL = os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
+OPENAI_PROXY_API_KEY = os.getenv("OPENAI_PROXY_API_KEY", "").strip()
+# ──────────────────────────────────────────────────────────────────────────────
+
 
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
