@@ -29,13 +29,15 @@ from src.config import (
     EMBEDDING_FALLBACK_API_KEY,
     EMBEDDING_FALLBACK_URL,
     EMBEDDING_URL,
+    IS_PROD,
     QDRANT_API_KEY,
     QDRANT_URL,
     Config,
 )
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
-    EVE_PUBLIC_COLLECTION_NAME,
+    EVE_PUBLIC_COLLECTION_NAME_PROD,
+    EVE_PUBLIC_COLLECTION_NAME_STAGING,
     PUBLIC_COLLECTIONS,
 )
 from src.database.models.collection import Collection
@@ -463,10 +465,11 @@ class VectorStoreManager:
 
         aggregated_results: List[Any] = []
         for collection_name in collection_names:
-            if collection_name != EVE_PUBLIC_COLLECTION_NAME:
-                collection_query_filter = None
-            else:
+            eve_public_collection_name = EVE_PUBLIC_COLLECTION_NAME_PROD if IS_PROD else EVE_PUBLIC_COLLECTION_NAME_STAGING
+            if collection_name == eve_public_collection_name:
                 collection_query_filter = query_filter
+            else:
+                collection_query_filter = None
             try:
                 # Use query_points API exclusively
                 qp_response = self.client.query_points(
