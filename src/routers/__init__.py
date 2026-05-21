@@ -7,8 +7,9 @@ from .conversation import router as conversation_router
 from .user import router as user_router
 from .auth import router as auth_router
 from .forgot_password import router as forgot_password_router
-from .tool import router as tool_router
+from .mcp_server import router as mcp_server_router
 from .error_log import router as error_log_router
+from .openai_proxy import OpenAIProxyDispatcher
 
 __all__ = [
     "collection_router",
@@ -19,6 +20,7 @@ __all__ = [
     "user_router",
     "auth_router",
     "forgot_password_router",
-    "tool_router",
+    "mcp_server_router",
     "error_log_router",
+    "OpenAIProxyDispatcher",
 ]

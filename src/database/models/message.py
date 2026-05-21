@@ -1,8 +1,7 @@
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar, Dict, List, Optional
 from pydantic import Field
 from src.schemas.generation_request import GenerationRequest
 from src.database.mongo_model import MongoModel
-from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,6 +41,10 @@ class Message(MongoModel):
     )
     hallucination: Optional[Dict[str, Any]] = Field(
         default=None, description="Hallucination analysis data"
+    )
+    trace: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Full agentic execution trace: every LangGraph message, tool call, and result",
     )
 
     collection_name: ClassVar[str] = "messages"
