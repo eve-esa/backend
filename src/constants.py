@@ -1,4 +1,5 @@
 from pathlib import Path
+
 import yaml
 
 DEFAULT_QUERY = "What is ESA?"
@@ -20,7 +21,8 @@ TOKEN_OVERFLOW_LIMIT = 7_000
 
 MCP_MAX_TOP_N = 20
 
-EVE_PUBLIC_COLLECTION_NAME = "EVE open-access"
+EVE_PUBLIC_COLLECTION_NAME_PROD = "qwen-512-filtered"
+EVE_PUBLIC_COLLECTION_NAME_STAGING = "qwen-512-filtered"
 
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
@@ -67,7 +69,7 @@ STAGING_PUBLIC_COLLECTIONS = [
         "name": "wikipedia-512",
         "description": "ESA data with Wikipedia articles for testing",
     },
-    {"name": "qwen-512-filtered", "description": "ESA data with Qwen-512 for testing"},
+    {"name": "qwen-512-filtered", "alias": "EVE open-access", "description": "ESA data with Qwen-512 for testing"},
     {
         "name": "satcom-chunks-collection",
         "alias": "SATCOM Technical Knowledge Base",

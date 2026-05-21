@@ -1,22 +1,26 @@
-from src.database.mongo import async_mongo_manager
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI
 import logging
-from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from contextlib import asynccontextmanager
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.config import CORS_ALLOWED_ORIGINS, configure_logging
+from src.database.indexes import ensure_indexes
+from src.database.mongo import async_mongo_manager
 from src.routers import (
-    health_check_router,
+    OpenAIProxyDispatcher,
     auth_router,
+    collection_router,
     conversation_router,
+    document_router,
+    error_log_router,
+    forgot_password_router,
+    health_check_router,
+    mcp_server_router,
     message_router,
     user_router,
-    forgot_password_router,
-    collection_router,
-    document_router,
-    tool_router,
-    error_log_router,
 )
+from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 
 configure_logging(level=logging.DEBUG)
 
@@ -44,8 +48,8 @@ def register_routers(app: FastAPI):
     # Documents
     app.include_router(document_router, tags=["Documents"])
 
-    # Tools
-    app.include_router(tool_router, tags=["Tools"])
+    # MCP Servers
+    app.include_router(mcp_server_router, tags=["MCP Servers"])
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
@@ -59,10 +63,15 @@ def create_app(debug=False, **kwargs):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await async_mongo_manager.connect()
+        await ensure_indexes()
         logging.info("Database connection established")
         try:
             yield
         finally:
+            try:
+                await shutdown_mcp_proxy_lifespans()
+            except Exception:
+                logging.exception("MCP proxy sub-app shutdown failed")
             await async_mongo_manager.close()
             logging.info("Database connection closed")
 
@@ -81,6 +90,8 @@ def create_app(debug=False, **kwargs):
         return "Welcome to Eve"
 
     register_routers(app)
+    app = OpenAIProxyDispatcher(app)
+    app = MCPProxyDispatcher(app)
     return app
 
 
