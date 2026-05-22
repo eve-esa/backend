@@ -55,8 +55,8 @@ jobs:
 
             cd ${{ secrets.STAGING_AGENTIC_PATH }}
             # pull new backend image
-            docker compose -f docker-compose.STAGING-agentic.yml pull backend
-            docker compose -f docker-compose.STAGING-agentic.yml up -d --force-recreate backend
+            docker compose -f docker-compose.staging-agentic.yml pull backend
+            docker compose -f docker-compose.staging-agentic.yml up -d --force-recreate backend
 
             # clean up old images
             docker image prune -f
