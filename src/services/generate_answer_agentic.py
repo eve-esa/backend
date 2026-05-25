@@ -475,7 +475,7 @@ def _build_react_graph_with_fallback(
 ):
     primary_llm_type = llm_type or AGENTIC_LLM_TYPE
     try:
-        return _build_react_graph(llm_type, tools, system_prompt, checkpointer)
+        return _build_react_graph(primary_llm_type, tools, system_prompt, checkpointer)
     except Exception as exc:
         logger.warning(
             "Agentic graph init failed with llm_type %r, retrying with fallback: %s",
