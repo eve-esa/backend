@@ -151,7 +151,7 @@ async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
                 call_tool_settings={"enabled": False},
             )
         )
-        http_app = proxy.http_app()
+        http_app = proxy.http_app(stateless_http=True)
         stack = AsyncExitStack()
         await stack.enter_async_context(http_app.lifespan(http_app))
         _proxy_lifespan_stacks[cache_key] = stack
@@ -252,8 +252,14 @@ class MCPProxyDispatcher:
                         },
                         {"config.url": 1},
                     )
-                    if not server or not server.get("config") or not server["config"].get("url"):
-                        raise LookupError(f"MCP server '{server_name}' not found or not accessible")
+                    if (
+                        not server
+                        or not server.get("config")
+                        or not server["config"].get("url")
+                    ):
+                        raise LookupError(
+                            f"MCP server '{server_name}' not found or not accessible"
+                        )
                     agentcore_url = server["config"]["url"]
                     _server_url_cache[cache_key] = (
                         agentcore_url,
@@ -261,7 +267,9 @@ class MCPProxyDispatcher:
                     )
                     logger.debug(
                         "[MCP proxy] cached URL for server=%r user=%s (TTL=%.0fs)",
-                        server_name, user_id, MCP_TOOLS_CACHE_TTL,
+                        server_name,
+                        user_id,
+                        MCP_TOOLS_CACHE_TTL,
                     )
 
         await track_usage(
