@@ -107,7 +107,7 @@ async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
         )
         backend = ProxyClient(transport)
         proxy = create_proxy(backend, name=f"proxy-{agentcore_url[-8:]}")
-        http_app = proxy.http_app()
+        http_app = proxy.http_app(stateless_http=True)
         stack = AsyncExitStack()
         await stack.enter_async_context(http_app.lifespan(http_app))
         _proxy_lifespan_stacks[cache_key] = stack
