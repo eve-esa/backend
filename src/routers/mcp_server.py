@@ -1,10 +1,16 @@
-from datetime import datetime, timezone
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.database.models.mcp_server import MCPServer, ToolConfig, ToolTransport, ToolType
+from src.database.models.mcp_server import (
+    MCPServer,
+    ToolConfig,
+    ToolTransport,
+    ToolType,
+)
+from src.database.models.user import User
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
@@ -14,10 +20,8 @@ from src.schemas.mcp_server import (
     MCPServerRequest,
     MCPServerUpdate,
 )
-from src.database.models.user import User
 from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
 from src.services.mcp.proxy_url import resolve_public_mcp_url
-
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -68,7 +72,9 @@ async def _get_owned_mcp_server(
     if not mcp_server:
         raise HTTPException(status_code=404, detail="MCP server not found")
     if mcp_server.user_id != requesting_user.id:
-        raise HTTPException(status_code=403, detail=f"Not allowed to {action} this MCP server")
+        raise HTTPException(
+            status_code=403, detail=f"Not allowed to {action} this MCP server"
+        )
     return mcp_server
 
 
@@ -155,7 +161,9 @@ async def get_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to access this MCP server.
     """
-    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="access")
+    mcp_server = await _get_owned_mcp_server(
+        server_id, requesting_user, action="access"
+    )
     tools = []
     try:
         auth = http_request.headers.get("Authorization") or ""
@@ -179,7 +187,9 @@ async def get_mcp_server(
             exc,
         )
 
-    return MCPServerPublicDetail(**_to_public_mcp_server(mcp_server).model_dump(), tools=tools)
+    return MCPServerPublicDetail(
+        **_to_public_mcp_server(mcp_server).model_dump(), tools=tools
+    )
 
 
 @router.patch("/mcp-servers/{server_id}", response_model=MCPServerPublic)
@@ -205,7 +215,9 @@ async def update_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to update this MCP server.
     """
-    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="update")
+    mcp_server = await _get_owned_mcp_server(
+        server_id, requesting_user, action="update"
+    )
 
     if request.name is not None:
         mcp_server.name = request.name
@@ -256,7 +268,9 @@ async def delete_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to delete this MCP server.
     """
-    mcp_server = await _get_owned_mcp_server(server_id, requesting_user, action="delete")
+    mcp_server = await _get_owned_mcp_server(
+        server_id, requesting_user, action="delete"
+    )
 
     await mcp_server.delete()
     return {"message": "MCP server deleted successfully"}

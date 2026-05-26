@@ -38,7 +38,7 @@ from src.database.models.message import Message
 from src.database.models.user import User
 from src.schemas.generation_request import GenerationRequest
 from src.services.cancel_manager import get_cancel_manager
-from src.services.mcp.client_service import MultiServerMCPClientService
+from src.services.mcp_client_service import MultiServerMCPClientService
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -62,7 +62,6 @@ from src.utils.langfuse_helper import get_callbacks, langfuse_context
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.utils.siliconflow_reranker import SiliconFlowReranker
 from src.utils.template_loader import get_template
-
 
 logger = logging.getLogger(__name__)
 

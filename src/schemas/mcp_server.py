@@ -1,8 +1,9 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Literal
-from pydantic import BaseModel, Field
-from src.database.models.mcp_server import MCPServer, ToolType
+from typing import Any, Dict, List, Literal, Optional
 
+from pydantic import BaseModel, Field
+
+from src.database.models.mcp_server import MCPServer, ToolType
 
 TransportLiteral = Literal["streamable_http", "stdio"]
 
@@ -89,7 +90,9 @@ class MCPServerPublic(BaseModel):
     )
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: datetime = Field(description="Last update timestamp")
-    deleted_at: Optional[datetime] = Field(default=None, description="Soft delete timestamp")
+    deleted_at: Optional[datetime] = Field(
+        default=None, description="Soft delete timestamp"
+    )
 
 
 class MCPServerPublicDetail(MCPServerPublic):

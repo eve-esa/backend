@@ -36,8 +36,8 @@ from src.services.generate_answer_agentic import (
     run_agentic_generation_to_bus,
 )
 from src.services.hallucination_detector import HallucinationDetector
-from src.services.stream_bus import get_stream_bus
 from src.services.llm_inference import invoke_llm_and_consume_tokens
+from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
     count_tokens_for_texts,
