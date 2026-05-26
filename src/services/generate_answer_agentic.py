@@ -91,6 +91,7 @@ except Exception:
     MultiServerMCPClient = None  # type: ignore
 
 
+
 # ─── Trace serialisation ─────────────────────────────────────────────────────
 
 
@@ -146,22 +147,16 @@ async def _load_mcp_tools_for_servers(
 ) -> List[Any]:
     """Connect to each MCP server, authenticate, and load its tools.
 
-    Uses ``MultiServerMCPClient`` from ``langchain-mcp-adapters`` which creates a
-    fresh session per tool invocation (stateless), avoiding lifecycle issues.
+    Tool *schemas* are fetched via a per-URL ``ProxyProvider`` whose built-in
+    TTL cache (fastmcp ≥ 3.2.0, default 300 s) prevents redundant list_tools()
+    calls under concurrent load.  Tool *execution* still uses the per-request
+    connection config so auth tokens are always fresh.
     """
     if not _mcp_adapters_available or not mcp_server_configs:
         return []
 
-    token_provider = get_cognito_token_provider()
-    auth_header: Optional[str] = None
-    if token_provider:
-        try:
-            token = await token_provider.get_token()
-            auth_header = f"Bearer {token}"
-        except Exception as exc:
-            logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
+    all_tools: List[Any] = []
 
-    connections: Dict[str, Any] = {}
     for srv in mcp_server_configs:
         transport = (
             srv.config.transport.value if srv.config.transport else "streamable_http"
@@ -172,48 +167,68 @@ async def _load_mcp_tools_for_servers(
             )
             continue
 
-        headers: Dict[str, str] = dict(srv.config.headers or {})
+        backend_url = srv.config.url
+        if not backend_url:
+            logger.warning("Skipping MCP server %r: missing URL", srv.name)
+            continue
+
+        # ── execution + listing connection ─────────────────────────────────
+        # When the proxy is reachable (normal deployment), route both listing
+        # and execution through our FastMCP proxy endpoint so they share the
+        # same ResponseCachingMiddleware cache and the Cognito credential is
+        # handled internally by the proxy's _DynamicBearerAuth.
+        # Fallback: direct AgentCore connection with a Cognito M2M token
+        # (used when MCP_PROXY_INTERNAL_BASE_URL / MCP_PROXY_BASE_URL are
+        # not configured).
+        exec_headers: Dict[str, str] = dict(srv.config.headers or {})
         proxy_http_url = (
             backend_mcp_proxy_url(srv.name) if mcp_proxy_bearer_token else None
         )
         if proxy_http_url:
-            headers["Authorization"] = f"Bearer {mcp_proxy_bearer_token}"
-            url = proxy_http_url
+            exec_headers["Authorization"] = f"Bearer {mcp_proxy_bearer_token}"
+            exec_url = proxy_http_url
         else:
-            if auth_header and "Authorization" not in headers:
-                headers["Authorization"] = auth_header
-            url = srv.config.url
+            # Direct AgentCore fallback — fetch Cognito token only when needed.
+            token_provider = get_cognito_token_provider()
+            if token_provider and "Authorization" not in exec_headers:
+                try:
+                    token = await token_provider.get_token()
+                    exec_headers["Authorization"] = f"Bearer {token}"
+                except Exception as exc:
+                    logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
+            exec_url = backend_url
 
-        if not url:
-            logger.warning("Skipping MCP server %r: missing URL", srv.name)
-            continue
-
-        connections[srv.name] = {
+        exec_connection: Dict[str, Any] = {
             "transport": "streamable_http" if transport == "streamable_http" else "sse",
-            "url": url,
-            "headers": headers,
+            "url": exec_url,
+            "headers": exec_headers,
         }
 
-    if not connections:
-        return []
+        # Both listing and execution use exec_connection.  When routed through
+        # the proxy, tools/list is served from the proxy's
+        # ResponseCachingMiddleware; when using the direct fallback there is no
+        # server-side cache, but that path is only active in misconfigured
+        # deployments.
+        try:
+            client = MultiServerMCPClient(
+                {srv.name: exec_connection},
+                tool_name_prefix=True,
+                tool_interceptors=[ObservabilityInterceptor()],
+            )
+            srv_tools = await client.get_tools()
+            all_tools.extend(srv_tools)
+        except Exception as exc:
+            logger.error(
+                "Failed to load MCP tools for %r: %s", srv.name, exc, exc_info=True
+            )
 
-    try:
-        client = MultiServerMCPClient(
-            connections,
-            tool_name_prefix=True,
-            tool_interceptors=[ObservabilityInterceptor()],
-        )
-        tools = await client.get_tools()
-        logger.info(
-            "Loaded %d MCP tool(s) from %d server(s): %s",
-            len(tools),
-            len(connections),
-            [t.name for t in tools],
-        )
-        return tools
-    except Exception as exc:
-        logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
-        return []
+    logger.info(
+        "Loaded %d MCP tool(s) from %d server(s): %s",
+        len(all_tools),
+        len(mcp_server_configs),
+        [t.name for t in all_tools],
+    )
+    return all_tools
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -378,9 +393,7 @@ def _build_react_graph(
                 end_on=("human", "tool"),
             )
 
-        messages = strip_content_from_tool_call_messages(
-            messages, AIMessage=AIMessage
-        )
+        messages = strip_content_from_tool_call_messages(messages, AIMessage=AIMessage)
 
         has_synthetic_tool_msgs = any(
             (

@@ -7,6 +7,7 @@ https://gofastmcp.com/servers/providers/proxy
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
 from typing import Any
@@ -15,9 +16,11 @@ import httpx
 from fastmcp import settings as fastmcp_settings
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.server import create_proxy
+from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
 from jose import JWTError
 
+from src.config import MCP_TOOLS_CACHE_TTL
 from src.database.mongo import get_collection
 from src.middlewares.auth import verify_access_token
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
@@ -28,6 +31,22 @@ logger = logging.getLogger(__name__)
 _proxy_apps: dict[str, Any] = {}
 _proxy_lifespan_stacks: dict[str, AsyncExitStack] = {}
 _proxy_build_lock = asyncio.Lock()
+
+# Cache of (server_name, user_id) → (agentcore_url, expiry_monotonic).
+# Avoids a MongoDB round-trip on every proxy request when the result is stable.
+# TTL matches MCP_TOOLS_CACHE_TTL so both caches expire together.
+# Per-server_name locks ensure at most one concurrent cold-miss fetch.
+_server_url_cache: dict[tuple[str, str], tuple[str, float]] = {}
+_server_url_locks: dict[str, asyncio.Lock] = {}
+_server_url_registry_lock = asyncio.Lock()
+
+
+async def _get_server_url_lock(server_name: str) -> asyncio.Lock:
+    if server_name not in _server_url_locks:
+        async with _server_url_registry_lock:
+            if server_name not in _server_url_locks:
+                _server_url_locks[server_name] = asyncio.Lock()
+    return _server_url_locks[server_name]
 
 
 class _DynamicBearerAuth(httpx.Auth):
@@ -107,7 +126,32 @@ async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
         )
         backend = ProxyClient(transport)
         proxy = create_proxy(backend, name=f"proxy-{agentcore_url[-8:]}")
-        http_app = proxy.http_app()
+
+        # Cache the `tools/list` JSON-RPC response at the proxy server layer so
+        # that the MCP SDK's per-call output-schema validation
+        # (`ClientSession._validate_tool_result` → `list_tools()` in
+        # mcp/client/session.py) does not fan out to AgentCore on every
+        # `tools/call`.  FastMCP's built-in `ProxyProvider._tools_cache` only
+        # accelerates internal `_get_tool(name)` lookups; it does not
+        # short-circuit incoming `tools/list` requests
+        # (https://gofastmcp.com/servers/providers/proxy#component-list-caching).
+        # Explicitly disable `call_tool` caching — tool execution must always
+        # reach upstream (default TTL is 1 h, which would silently serve stale
+        # results).
+        proxy.add_middleware(
+            ResponseCachingMiddleware(
+                list_tools_settings={
+                    "enabled": True,
+                    "ttl": int(MCP_TOOLS_CACHE_TTL),
+                },
+                list_resources_settings={"enabled": False},
+                list_prompts_settings={"enabled": False},
+                read_resource_settings={"enabled": False},
+                get_prompt_settings={"enabled": False},
+                call_tool_settings={"enabled": False},
+            )
+        )
+        http_app = proxy.http_app(stateless_http=True)
         stack = AsyncExitStack()
         await stack.enter_async_context(http_app.lifespan(http_app))
         _proxy_lifespan_stacks[cache_key] = stack
@@ -184,17 +228,49 @@ class MCPProxyDispatcher:
         if not user_id:
             raise PermissionError("Invalid token payload")
 
-        mcp_servers = get_collection("mcp_servers")
-        server = await mcp_servers.find_one(
-            {
-                "name": server_name,
-                "enabled": True,
-                "$or": [{"user_id": user_id}, {"user_id": None}],
-            },
-            {"config.url": 1},
-        )
-        if not server or not server.get("config") or not server["config"].get("url"):
-            raise LookupError(f"MCP server '{server_name}' not found or not accessible")
+        cache_key = (server_name, user_id)
+        now = time.monotonic()
+        cached = _server_url_cache.get(cache_key)
+
+        if cached and now < cached[1]:
+            agentcore_url = cached[0]
+        else:
+            lock = await _get_server_url_lock(server_name)
+            async with lock:
+                # Re-check after acquiring lock — another coroutine may have
+                # already refreshed the entry while we were waiting.
+                cached = _server_url_cache.get(cache_key)
+                if cached and time.monotonic() < cached[1]:
+                    agentcore_url = cached[0]
+                else:
+                    mcp_servers = get_collection("mcp_servers")
+                    server = await mcp_servers.find_one(
+                        {
+                            "name": server_name,
+                            "enabled": True,
+                            "$or": [{"user_id": user_id}, {"user_id": None}],
+                        },
+                        {"config.url": 1},
+                    )
+                    if (
+                        not server
+                        or not server.get("config")
+                        or not server["config"].get("url")
+                    ):
+                        raise LookupError(
+                            f"MCP server '{server_name}' not found or not accessible"
+                        )
+                    agentcore_url = server["config"]["url"]
+                    _server_url_cache[cache_key] = (
+                        agentcore_url,
+                        time.monotonic() + MCP_TOOLS_CACHE_TTL,
+                    )
+                    logger.debug(
+                        "[MCP proxy] cached URL for server=%r user=%s (TTL=%.0fs)",
+                        server_name,
+                        user_id,
+                        MCP_TOOLS_CACHE_TTL,
+                    )
 
         await track_usage(
             user_id=user_id,
@@ -206,7 +282,7 @@ class MCPProxyDispatcher:
         if provider is None:
             raise RuntimeError("AgentCore authentication is not configured")
 
-        return await build_proxy_app(server["config"]["url"], provider)
+        return await build_proxy_app(agentcore_url, provider)
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
