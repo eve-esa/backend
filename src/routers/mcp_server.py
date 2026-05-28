@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 
 from src.database.models.mcp_server import (
     MCPServer,
@@ -145,7 +145,6 @@ async def create_mcp_server(
 @router.get("/mcp-servers/{server_id}", response_model=MCPServerPublicDetail)
 async def get_mcp_server(
     server_id: str,
-    http_request: Request,
     requesting_user: User = Depends(get_current_user),
 ):
     """
@@ -166,11 +165,7 @@ async def get_mcp_server(
     )
     tools = []
     try:
-        auth = http_request.headers.get("Authorization") or ""
-        bearer = auth[7:] if auth.startswith("Bearer ") else None
-        loaded_tools = await _load_mcp_tools_for_servers(
-            [mcp_server], mcp_proxy_bearer_token=bearer
-        )
+        loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
         tools = [
             {
                 "name": getattr(tool, "name", "unknown"),

@@ -151,8 +151,14 @@ async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any
             srv.config.transport.value if srv.config.transport else "streamable_http"
         )
         if transport not in ("streamable_http", "sse"):
+            raise ValueError(
+                f"MCP server {srv.name!r} uses unsupported transport {transport!r}. "
+                "Only 'streamable_http' and 'sse' are supported."
+            )
+
+        if not srv.config.url:
             logger.warning(
-                "Skipping MCP server %r: unsupported transport %r", srv.name, transport
+                "Skipping MCP server %r: missing URL in config", srv.name
             )
             continue
 
@@ -185,7 +191,7 @@ async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any
         return tools
     except Exception as exc:
         logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
-        return []
+        raise
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -202,8 +208,11 @@ async def _build_tools(
     tools: List[Any] = []
 
     if getattr(request, "mcp_server_configs", None):
-        mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
-        tools.extend(mcp_tools)
+        try:
+            mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
+            tools.extend(mcp_tools)
+        except Exception:
+            logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
 
     if "Wiley AI Gateway" in (request.public_collections or []):
 
