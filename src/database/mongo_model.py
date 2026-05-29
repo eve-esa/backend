@@ -221,14 +221,14 @@ class MongoModel(BaseModel):
             raise ValueError(f"Document with ID {self.id} not found")
 
         # Update current instance with fresh data
-        for field, value in fresh_doc.dict().items():
+        for field, value in fresh_doc.model_dump().items():
             setattr(self, field, value)
 
         return self
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert model to dictionary for MongoDB storage."""
-        doc_dict = self.dict(exclude={"id"})
+        doc_dict = self.model_dump(exclude={"id"})
 
         for key, value in doc_dict.items():
             if isinstance(value, Enum):

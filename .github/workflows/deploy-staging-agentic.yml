@@ -15,7 +15,7 @@ env:
 
 jobs:
   deploy:
-    name: Build & Deploy to AWS EC2 STAGING-agentic instance
+    name: Build & Deploy to AWS EC2 staging-agentic instance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2

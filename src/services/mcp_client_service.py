@@ -6,6 +6,7 @@ import time
 from urllib.parse import urlparse
 
 from src.config import Config, WILEY_AUTH_TOKEN
+from src.database.models.mcp_server import MCPServer, ToolTransport
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from mcp.client.streamable_http import streamablehttp_client
@@ -18,6 +19,17 @@ from contextlib import AsyncExitStack
 logger = logging.getLogger(__name__)
 
 
+def _extract_exception_details(exc: BaseException) -> List[str]:
+    """Flatten nested ExceptionGroup errors into readable detail lines."""
+    details: List[str] = []
+    if isinstance(exc, BaseExceptionGroup):
+        for sub_exc in exc.exceptions:
+            details.extend(_extract_exception_details(sub_exc))
+    else:
+        details.append(f"{type(exc).__name__}: {exc}")
+    return details
+
+
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
@@ -26,21 +38,69 @@ class MultiServerMCPClientService:
     _wiley_access_token_shared: Optional[str] = None
     _wiley_access_token_expiry_epoch_shared: float = 0.0
 
-    def __init__(self, config: Optional[Config] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        server_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self._config = config or Config()
         self._client: Optional[MultiServerMCPClient] = None
 
         # Load server configurations
-        self._load_server_configs()
+        self._load_server_configs(server_configs=server_configs)
 
         if not self._client:
             raise ValueError(
                 "No MCP servers configured or failed to initialize MultiServerMCPClient"
             )
 
-    def _load_server_configs(self) -> None:
+    @staticmethod
+    def build_server_config_from_model(
+        mcp_server: MCPServer,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Build MultiServerMCPClient config from a persisted MCPServer model."""
+        if not mcp_server.config or not mcp_server.config.transport:
+            return None
+
+        server_config: Optional[Dict[str, Any]] = None
+        if mcp_server.config.transport == ToolTransport.STDIO:
+            if not mcp_server.config.command:
+                return None
+            server_config = {
+                "transport": "stdio",
+                "command": mcp_server.config.command,
+                "args": mcp_server.config.args or [],
+                "env": mcp_server.config.env or {},
+                "enabled": mcp_server.enabled,
+            }
+        elif mcp_server.config.transport == ToolTransport.STREAMABLE_HTTP:
+            if not mcp_server.config.url:
+                return None
+            server_config = {
+                "transport": "streamable_http",
+                "url": mcp_server.config.url,
+                "headers": mcp_server.config.headers or {},
+                "enabled": mcp_server.enabled,
+            }
+
+        if not server_config:
+            return None
+
+        return {mcp_server.name: server_config}
+
+    @classmethod
+    def from_mcp_server_model(cls, mcp_server: MCPServer) -> "MultiServerMCPClientService":
+        server_configs = cls.build_server_config_from_model(mcp_server)
+        if not server_configs:
+            raise ValueError(f"MCP server '{mcp_server.name}' has invalid configuration")
+        return cls(server_configs=server_configs)
+
+    def _load_server_configs(
+        self, server_configs: Optional[Dict[str, Dict[str, Any]]] = None
+    ) -> None:
         """Load MCP server configurations and initialize MultiServerMCPClient."""
-        server_configs = self._config.get_mcp_servers()
+        if server_configs is None:
+            server_configs = self._config.get_mcp_servers()
 
         if not server_configs:
             logger.warning("No MCP servers configured")
@@ -154,7 +214,14 @@ class MultiServerMCPClientService:
 
             return formatted_tools
         except Exception as e:
-            logger.error(f"Failed to list tools from server '{server_name}': {e}")
+            logger.exception("Failed to list tools from server '%s'", server_name)
+            details = _extract_exception_details(e)
+            if details:
+                logger.error(
+                    "Tool discovery error details for '%s': %s",
+                    server_name,
+                    " | ".join(details),
+                )
             return []
 
     async def list_tools_from_all_servers(self) -> List[Dict[str, Any]]:
@@ -187,7 +254,13 @@ class MultiServerMCPClientService:
                 all_tools.append(tool_data)
 
         except Exception as e:
-            logger.error(f"Failed to list tools from all servers: {e}")
+            logger.exception("Failed to list tools from all servers")
+            details = _extract_exception_details(e)
+            if details:
+                logger.error(
+                    "Tool discovery error details for all servers: %s",
+                    " | ".join(details),
+                )
             return []
 
         return all_tools

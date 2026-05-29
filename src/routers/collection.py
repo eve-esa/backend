@@ -149,7 +149,7 @@ async def get_collection(
     documents_count, points_count = await _get_counts_for_id(collection_id)
 
     return {
-        **collection.dict(),
+        **collection.model_dump(),
         "documents_count": documents_count,
         "points_count": points_count,
     }
