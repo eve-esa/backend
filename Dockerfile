@@ -4,7 +4,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc && rm -rf /var/lib/apt/lists/*
+    build-essential gcc git && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv $VIRTUAL_ENV
 COPY requirements.txt .
