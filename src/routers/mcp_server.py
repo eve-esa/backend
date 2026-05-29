@@ -77,6 +77,14 @@ async def _get_owned_mcp_server(
         )
     return mcp_server
 
+async def _get_public_mcp_server(
+    server_id: str
+) -> MCPServer:
+    mcp_server = await MCPServer.find_by_id(server_id)
+    if not mcp_server:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    
+    return mcp_server
 
 @router.get("/mcp-servers", response_model=PaginatedResponse[MCPServerPublic])
 async def list_mcp_servers(
@@ -145,7 +153,6 @@ async def create_mcp_server(
 @router.get("/mcp-servers/{server_id}", response_model=MCPServerPublicDetail)
 async def get_mcp_server(
     server_id: str,
-    requesting_user: User = Depends(get_current_user),
 ):
     """
     Get an MCP server by id owned by the current user.
@@ -160,9 +167,7 @@ async def get_mcp_server(
         - 404: MCP server not found.
         - 403: Not allowed to access this MCP server.
     """
-    mcp_server = await _get_owned_mcp_server(
-        server_id, requesting_user, action="access"
-    )
+    mcp_server = await _get_public_mcp_server(server_id)
     tools = []
     try:
         loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
