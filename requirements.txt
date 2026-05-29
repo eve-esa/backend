@@ -13,7 +13,7 @@ langchain-text-splitters==1.0.0
 langchain-classic==1.0.0
 langgraph==1.0.5
 # Standalone agent graphs (import package ``agents``). Prefer pinning a tag/commit.
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@main
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@6dbdb77b
 langfuse>=2.60.0
 openai>=1.0.0,<2.0.0
 langgraph-checkpoint==3.0.1
