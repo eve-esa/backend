@@ -79,6 +79,7 @@ def _extract_tool_calls(trace) -> list[str]:
     return out
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_generate_agentic_huntsville_real_end_to_end():
     """Black-box end-to-end test that authenticates as a real user and hits
