@@ -1,7 +1,7 @@
 import asyncio
 import contextlib
-from typing import Dict, Set, AsyncIterator
-from src.config import REDIS_URL
+from typing import Dict, Optional, Set, AsyncIterator
+from src.config import REDIS_URL, redis_client_kwargs
 
 try:
     # Requires redis>=4.2 for asyncio support
@@ -37,10 +37,14 @@ class StreamBus:
                 except asyncio.QueueFull:
                     pass
 
-    async def subscribe(self, key: str) -> AsyncIterator[str]:
+    async def subscribe(
+        self, key: str, ready: Optional[asyncio.Event] = None
+    ) -> AsyncIterator[str]:
         q: asyncio.Queue[str] = asyncio.Queue(maxsize=1000)
         async with self._get_lock(key):
             self._subscribers.setdefault(key, set()).add(q)
+        if ready is not None:
+            ready.set()
 
         try:
             while True:
@@ -62,7 +66,7 @@ class RedisStreamBus:
     def __init__(self, url: str):
         if aioredis is None:
             raise RuntimeError("redis asyncio client not available")
-        self._redis = aioredis.Redis.from_url(url)
+        self._redis = aioredis.Redis.from_url(url, **redis_client_kwargs())
 
     async def publish(self, key: str, data: str):
         await self._redis.publish(f"sse:{key}", data)
@@ -70,12 +74,19 @@ class RedisStreamBus:
     async def close(self, key: str):
         await self._redis.publish(f"sse:{key}", "[[__EOD__]]")
 
-    async def subscribe(self, key: str) -> AsyncIterator[str]:
+    async def subscribe(
+        self, key: str, ready: Optional[asyncio.Event] = None
+    ) -> AsyncIterator[str]:
         pubsub = self._redis.pubsub()
         channel = f"sse:{key}"
         await pubsub.subscribe(channel)
+        if ready is not None:
+            ready.set()
         try:
-            async for msg in pubsub.listen():
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=None
+                )
                 if not msg or msg.get("type") != "message":
                     continue
                 data = msg.get("data")

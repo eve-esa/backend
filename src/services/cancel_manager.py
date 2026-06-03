@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import Dict, Optional
-from src.config import REDIS_URL
+from src.config import REDIS_URL, redis_client_kwargs
 
 try:
     # Prefer redis>=4.2 which provides asyncio interface
@@ -18,7 +18,6 @@ class CancelManager:
         self._logger = logging.getLogger(__name__)
         # Redis-related fields (lazy init)
         self._redis = None
-        self._pubsub = None
         self._channel_tasks: Dict[str, asyncio.Task] = {}
 
     def _is_redis_enabled(self) -> bool:
@@ -29,28 +28,27 @@ class CancelManager:
             return
         if self._redis is None:
             try:
-                self._redis = aioredis.Redis.from_url(REDIS_URL)
+                self._redis = aioredis.Redis.from_url(
+                    REDIS_URL, **redis_client_kwargs()
+                )
             except Exception as e:
                 self._logger.warning("Redis init failed: %s", str(e))
                 self._redis = None
                 return
-        if self._pubsub is None and self._redis is not None:
-            try:
-                self._pubsub = self._redis.pubsub()
-            except Exception as e:
-                self._logger.warning("Redis pubsub init failed: %s", str(e))
-                self._pubsub = None
 
     async def _subscribe_cancel_channel(self, message_id: str, ev: asyncio.Event):
+        channel = f"cancel:{message_id}"
+        redis = None
+        pubsub = None
         try:
-            await self._ensure_redis()
-            if self._pubsub is None:
-                return
-            channel = f"cancel:{message_id}"
-            await self._pubsub.subscribe(channel)
+            redis = aioredis.Redis.from_url(REDIS_URL, **redis_client_kwargs())
+            pubsub = redis.pubsub()
+            await pubsub.subscribe(channel)
             self._logger.info("cancel_manager.redis_subscribed channel=%s", channel)
-            # Listen loop
-            async for msg in self._pubsub.listen():
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=None
+                )
                 if msg is None:
                     continue
                 try:
@@ -73,11 +71,20 @@ class CancelManager:
         except Exception as e:
             self._logger.warning("cancel_manager.redis_subscribe_error: %s", str(e))
         finally:
-            try:
-                if self._pubsub is not None:
-                    await self._pubsub.unsubscribe(f"cancel:{message_id}")
-            except Exception:
-                pass
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(channel)
+                except Exception:
+                    pass
+                try:
+                    await pubsub.close()
+                except Exception:
+                    pass
+            if redis is not None:
+                try:
+                    await redis.aclose()
+                except Exception:
+                    pass
 
     def create(
         self, message_id: str, task: Optional[asyncio.Task] = None
