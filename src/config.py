@@ -81,6 +81,20 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
+
+def redis_client_kwargs() -> Dict[str, Any]:
+    """
+    Connection kwargs for Redis clients that use blocking pub/sub reads.
+
+    socket_timeout must be None so listen/get_message can wait for the next
+    chunk during long RAG/setup phases (default timeouts break SSE streaming).
+    """
+    return {
+        "socket_timeout": None,
+        "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT", "10")),
+    }
+
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers
