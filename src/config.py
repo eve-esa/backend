@@ -133,6 +133,18 @@ OPENAI_PROXY_UPSTREAM_URL = os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
 OPENAI_PROXY_API_KEY = os.getenv("OPENAI_PROXY_API_KEY", "").strip()
 # ──────────────────────────────────────────────────────────────────────────────
 
+def redis_client_kwargs() -> Dict[str, Any]:
+    """
+    Connection kwargs for Redis clients that use blocking pub/sub reads.
+
+    socket_timeout must be None so listen/get_message can wait for the next
+    chunk during long RAG/setup phases (default timeouts break SSE streaming).
+    """
+    return {
+        "socket_timeout": None,
+        "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT", "10")),
+    }
+
 
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""

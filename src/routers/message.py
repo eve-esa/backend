@@ -780,7 +780,11 @@ async def create_message_stream(
 
         set_message_context(message.id)
 
-        # Start decoupled background job that publishes to bus
+        # Ensure SSE subscriber is active before generation publishes (Redis pub/sub
+        # drops messages published before subscribe; gunicorn multi-worker needs Redis).
+        stream_ready = asyncio.Event()
+        bus = get_stream_bus()
+
         cancel_mgr = get_cancel_manager()
         cancel_event = cancel_mgr.create(message.id)
         cancel_mgr.link_conversation(conversation_id, message.id)
@@ -792,11 +796,10 @@ async def create_message_stream(
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
                 user_id=requesting_user.id,
+                stream_ready=stream_ready,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
-
-        bus = get_stream_bus()
 
         async def _gen():
             # Optional catch-up from currently saved output (usually empty right after create)
@@ -805,7 +808,7 @@ async def create_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id):
+            async for data in bus.subscribe(message.id, ready=stream_ready):
                 yield data
 
         response = StreamingResponse(_gen(), media_type="text/event-stream")

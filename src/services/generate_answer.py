@@ -1826,11 +1826,20 @@ async def run_generation_to_bus(
     background_tasks: BackgroundTasks = None,
     cancel_event: Optional[asyncio.Event] = None,
     user_id: Optional[str] = None,
+    stream_ready: Optional[asyncio.Event] = None,
 ):
     """
     Run generation in the background and publish chunks to a per-message bus.
     This decouples generation from HTTP connection lifetime.
     """
+    if stream_ready is not None:
+        try:
+            await asyncio.wait_for(stream_ready.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "stream subscriber not ready within timeout message_id=%s",
+                message_id,
+            )
     bus = get_stream_bus()
     try:
         async for chunk in generate_answer_json_stream_generator(
