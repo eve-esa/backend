@@ -1,5 +1,7 @@
 import logging
 from src.schemas.auth import (
+    CreateAccessTokenRequest,
+    CreateAccessTokenResponse,
     LoginRequest,
     LoginResponse,
     RefreshRequest,
@@ -11,14 +13,15 @@ from src.schemas.auth import (
 )
 from src.config import JWT_ALGORITHM, JWT_SECRET_KEY, JWT_AUDIENCE_REFRESH
 from src.database.models.user import User
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from src.middlewares.auth import get_current_user
 from src.services.auth import (
-    verify_user,
     create_access_token,
     create_refresh_token,
     create_user,
+    generate_activation_code,
+    verify_user,
 )
-from src.services.auth import generate_activation_code
 from jose import jwt, JWTError
 from src.services.email import email_service
 from src.config import FRONTEND_URL
@@ -97,6 +100,31 @@ async def refresh(request: RefreshRequest) -> RefreshResponse:
 
     return RefreshResponse(
         access_token=create_access_token(sub=user.id),
+    )
+
+
+@router.post("/access-token", response_model=CreateAccessTokenResponse)
+async def create_user_access_token(
+    request: CreateAccessTokenRequest,
+    user: User = Depends(get_current_user),
+) -> CreateAccessTokenResponse:
+    """
+    Issue an access token with a custom expiration date for programmatic API access.
+
+    Args:
+        request (CreateAccessTokenRequest): Desired token expiration.
+        user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Access token and its expiration time.
+
+    Raises:
+        HTTPException: 401 if the caller is not authenticated.
+    """
+    expires_at = request.expires_at
+    return CreateAccessTokenResponse(
+        access_token=create_access_token(sub=user.id, expires_at=expires_at),
+        expires_at=expires_at,
     )
 
 

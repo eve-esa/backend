@@ -52,10 +52,12 @@ async def create_user(
     return user
 
 
-def create_access_token(*, sub: str):
-    expire = datetime.now(timezone.utc) + timedelta(
+def create_access_token(*, sub: str, expires_at: datetime | None = None) -> str:
+    expire = expires_at or datetime.now(timezone.utc) + timedelta(
         minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES
     )
+    if expire.tzinfo is None:
+        expire = expire.replace(tzinfo=timezone.utc)
     to_encode = {"exp": expire, "sub": sub, "aud": JWT_AUDIENCE_ACCESS}
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
