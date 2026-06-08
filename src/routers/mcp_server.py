@@ -105,7 +105,6 @@ async def list_mcp_servers(
         limit=pagination.limit,
         page=pagination.page,
         sort=[("timestamp", -1)],
-        filter_dict={"user_id": requesting_user.id},
     )
     return PaginatedResponse[MCPServerPublic](
         data=[_to_public_mcp_server(server) for server in result.data],
