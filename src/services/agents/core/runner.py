@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import BackgroundTasks
 
 from src.config import AGENTIC_LLM_TYPE, MODEL_TIMEOUT
+from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.generate_answer import (
@@ -329,6 +330,133 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     return s or AGENT_GRAPH_TYPE
 
 
+# ─── Graph compile helpers ────────────────────────────────────────────────────
+
+
+def _build_react_graph(
+    llm_type: Optional[str],
+    tools: List[Any],
+    checkpointer: Any,
+    *,
+    agent: Any,
+    history: Optional[List[Any]] = None,
+    summary: Optional[str] = None,
+    llm_type_override: Optional[str] = None,
+    fallback_llm: Any = None,
+) -> Any:
+    """Compile the agent graph using the resolved LLM type.
+
+    ``llm_type_override`` forces a specific model (e.g. ``LLMType.Fallback.value``)
+    regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
+    ``agent.compile()`` for in-graph node-level fallback.
+    """
+    effective_type = llm_type_override or llm_type
+    llm = get_shared_llm_manager().get_client_for_model(effective_type)
+    return agent.compile(
+        llm=llm,
+        tools=tools,
+        checkpointer=checkpointer,
+        history=history,
+        summary=summary,
+        fallback_llm=fallback_llm,
+    )
+
+
+def _build_react_graph_with_fallback(
+    llm_type: Optional[str],
+    tools: List[Any],
+    checkpointer: Any,
+    *,
+    agent: Any,
+    history: Optional[List[Any]] = None,
+    summary: Optional[str] = None,
+) -> tuple[Any, bool]:
+    """Compile the agent graph, falling back to the Fallback LLM on init failure.
+
+    Returns ``(graph, used_fallback_llm)`` so callers can record which model
+    was ultimately used.  The in-graph ``fallback_llm`` is always wired in so
+    permanent primary-provider failures inside the graph are also handled.
+    """
+    primary_llm_type = llm_type or AGENTIC_LLM_TYPE
+    fallback_type = LLMType.Fallback.value
+    # Don't configure a fallback when already on a fallback/satcom model.
+    skip_fallback = primary_llm_type in (
+        LLMType.Fallback.value,
+        LLMType.Satcom_Small.value,
+        LLMType.Satcom_Large.value,
+    )
+    in_graph_fallback_llm = (
+        None
+        if skip_fallback
+        else get_shared_llm_manager().get_client_for_model(fallback_type)
+    )
+    try:
+        graph = _build_react_graph(
+            primary_llm_type,
+            tools,
+            checkpointer,
+            agent=agent,
+            history=history,
+            summary=summary,
+            fallback_llm=in_graph_fallback_llm,
+        )
+        return graph, False
+    except Exception as exc:
+        logger.warning(
+            "Agentic graph init failed with llm_type %r, retrying with fallback: %s",
+            primary_llm_type,
+            exc,
+        )
+        graph = _build_react_graph(
+            llm_type,
+            tools,
+            checkpointer,
+            agent=agent,
+            history=history,
+            summary=summary,
+            llm_type_override=fallback_type,
+        )
+        return graph, True
+
+
+def _is_retryable_agentic_error(exc: BaseException) -> bool:
+    """Return True for transient or provider errors that warrant a fallback-LLM retry.
+
+    Logic bugs and contract violations are NOT retried — they should surface
+    loudly.  Only errors where switching to a different provider could succeed
+    are retryable at the runner level.
+    """
+    # Logic / contract errors: a different model won't fix these.
+    if isinstance(
+        exc,
+        (TypeError, ValueError, KeyError, AttributeError, ImportError, NameError),
+    ):
+        return False
+    # Explicit transient categories.
+    if isinstance(exc, (TimeoutError, ConnectionError, asyncio.TimeoutError)):
+        return True
+    # httpx errors (used by openai SDK and httpx directly).
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in (429, 502, 503, 504)
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+    except ImportError:
+        pass
+    # OpenAI SDK error names (checked by name to avoid hard dependency on version).
+    if type(exc).__name__ in (
+        "RateLimitError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "ServiceUnavailableError",
+        "InternalServerError",
+    ):
+        return True
+    return False
+
+
 # ─── Conversation context ─────────────────────────────────────────────────────
 
 
@@ -378,15 +506,15 @@ async def generate_answer_agentic(
         tools = await _build_tools(request)
         checkpointer = await _get_agentic_checkpointer()
         history, summary = await _fetch_conversation_context(conversation_id)
-        llm = _get_llm(request.llm_type)
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
-        graph = agent.compile(
-            llm=llm,
-            tools=tools,
-            checkpointer=checkpointer,
+        graph, used_fallback_llm = _build_react_graph_with_fallback(
+            request.llm_type,
+            tools,
+            checkpointer,
+            agent=agent,
             history=history,
             summary=summary,
         )
@@ -396,38 +524,76 @@ async def generate_answer_agentic(
             "callbacks": get_callbacks(),
         }
 
-        gen_start = time.perf_counter()
-        trace_entries: List[Dict[str, Any]] = []
-        all_messages: List[Any] = []
-        node_latencies: Dict[str, float] = {}
-
-        with langfuse_context(
-            user_id=user_id,
-            session_id=conversation_id,
-            tags=["agentic", request.llm_type or "default"],
-            trace_name="agentic_generation",
-        ):
-            async for update in graph.astream(
-                {"messages": [HumanMessage(content=request.query)]},
-                config=config,
-                stream_mode="updates",
+        async def _run_graph(
+            g: Any,
+        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float]:
+            """Stream the graph and collect (raw_messages, trace_entries, node_latencies, duration)."""
+            raw_msgs: List[Any] = []
+            trace: List[Dict[str, Any]] = []
+            latency_map: Dict[str, float] = {}
+            start = time.perf_counter()
+            with langfuse_context(
+                user_id=user_id,
+                session_id=conversation_id,
+                tags=["agentic", request.llm_type or "default"],
+                trace_name="agentic_generation",
             ):
-                step_time = time.perf_counter()
-                for node_name, node_output in update.items():
-                    step_latency_s = step_time - gen_start
-                    node_latencies.setdefault(node_name, 0.0)
+                async for update in g.astream(
+                    {"messages": [HumanMessage(content=request.query)]},
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    step_time = time.perf_counter()
+                    for node_name, node_output in update.items():
+                        step_latency_s = step_time - start
+                        latency_map.setdefault(node_name, 0.0)
+                        msgs = node_output.get("messages", [])
+                        for msg in msgs:
+                            trace.append(
+                                _serialise_trace_entry(
+                                    msg, node=node_name, latency_s=step_latency_s
+                                )
+                            )
+                            raw_msgs.append(msg)
+                        latency_map[node_name] = step_latency_s
+            return raw_msgs, trace, latency_map, time.perf_counter() - start
 
-                    msgs = node_output.get("messages", [])
-                    for msg in msgs:
-                        entry = _serialise_trace_entry(
-                            msg, node=node_name, latency_s=step_latency_s
-                        )
-                        trace_entries.append(entry)
-                        all_messages.append(msg)
-
-                    node_latencies[node_name] = step_latency_s
-
-        gen_latency = time.perf_counter() - gen_start
+        gen_start = time.perf_counter()
+        try:
+            all_messages, trace_entries, node_latencies, gen_latency = await _run_graph(
+                graph
+            )
+        except Exception as run_exc:
+            if _is_retryable_agentic_error(run_exc) and not used_fallback_llm:
+                logger.warning(
+                    "Agentic generation failed with primary LLM (%s), retrying with fallback",
+                    type(run_exc).__name__,
+                )
+                await error_logger.log_error(
+                    error=run_exc,
+                    component=Component.LLM,
+                    pipeline_stage=PipelineStage.GENERATION,
+                    description="Agentic generation failed with primary LLM; retrying with fallback",
+                    error_type=type(run_exc).__name__,
+                )
+                fallback_graph = _build_react_graph(
+                    request.llm_type,
+                    tools,
+                    checkpointer,
+                    agent=agent,
+                    history=history,
+                    summary=summary,
+                    llm_type_override=LLMType.Fallback.value,
+                )
+                (
+                    all_messages,
+                    trace_entries,
+                    node_latencies,
+                    gen_latency,
+                ) = await _run_graph(fallback_graph)
+                used_fallback_llm = True
+            else:
+                raise
 
         final_answer = ""
         for msg in reversed(all_messages):
@@ -461,6 +627,8 @@ async def generate_answer_agentic(
             "instruction": resolved_instruction,
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
+            "agentic_llm_resolved": AGENTIC_LLM_TYPE or request.llm_type,
+            "used_fallback_llm": used_fallback_llm,
         }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
@@ -487,6 +655,8 @@ async def generate_answer_agentic_stream_helper(
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
     user_id: Optional[str] = None,
+    _graph_override: Any = None,
+    _used_fallback_llm: bool = False,
 ):
     """Stream agentic generation as SSE events.
 
@@ -497,6 +667,10 @@ async def generate_answer_agentic_stream_helper(
       final       — complete answer + latencies
       stopped     — cancelled by client
       error       — unhandled exception
+
+    ``_graph_override`` and ``_used_fallback_llm`` are internal-only parameters
+    used by the runner-level execution fallback so the function can be re-entered
+    with a pre-compiled fallback graph without repeating the setup work.
     """
     if not _langgraph_available:
         yield f"data: {json.dumps({'type': 'error', 'message': 'LangGraph not available'})}\n\n"
@@ -518,18 +692,23 @@ async def generate_answer_agentic_stream_helper(
         tools = await _build_tools(request, cancel_event=cancel_event)
         checkpointer = await _get_agentic_checkpointer()
         history, summary = await _fetch_conversation_context(conversation_id)
-        llm = _get_llm(request.llm_type)
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
-        graph = agent.compile(
-            llm=llm,
-            tools=tools,
-            checkpointer=checkpointer,
-            history=history,
-            summary=summary,
-        )
+
+        if _graph_override is not None:
+            graph = _graph_override
+            used_fallback_llm = _used_fallback_llm
+        else:
+            graph, used_fallback_llm = _build_react_graph_with_fallback(
+                request.llm_type,
+                tools,
+                checkpointer,
+                agent=agent,
+                history=history,
+                summary=summary,
+            )
 
         config = {
             "configurable": {"thread_id": conversation_id},
@@ -709,6 +888,8 @@ async def generate_answer_agentic_stream_helper(
                 "instruction": resolved_instruction,
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
+                "agentic_llm_resolved": AGENTIC_LLM_TYPE or request.llm_type,
+                "used_fallback_llm": used_fallback_llm,
             },
             trace=trace_entries if trace_entries else None,
         )
@@ -750,6 +931,49 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'message': 'Generation timed out'})}\n\n"
 
     except Exception as exc:
+        # For retryable provider errors with no tokens sent yet, try the fallback
+        # LLM once before surfacing the error to the client.
+        if _is_retryable_agentic_error(exc) and not used_fallback_llm and not accumulated:
+            logger.warning(
+                "Agentic streaming failed with primary LLM (%s), retrying with fallback",
+                type(exc).__name__,
+            )
+            await error_logger.log_error(
+                error=exc,
+                component=Component.LLM,
+                pipeline_stage=PipelineStage.GENERATION,
+                description="Agentic streaming failed with primary LLM; retrying with fallback",
+                error_type=type(exc).__name__,
+            )
+            try:
+                fallback_graph = _build_react_graph(
+                    request.llm_type,
+                    tools,
+                    checkpointer,
+                    agent=agent,
+                    history=history,
+                    summary=summary,
+                    llm_type_override=LLMType.Fallback.value,
+                )
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id,
+                    message_id,
+                    output_format,
+                    background_tasks,
+                    cancel_event,
+                    user_id,
+                    _graph_override=fallback_graph,
+                    _used_fallback_llm=True,
+                ):
+                    yield event
+                return
+            except Exception as fallback_exc:
+                logger.error(
+                    "Agentic streaming fallback also failed: %s", fallback_exc
+                )
+                exc = fallback_exc
+
         logger.error("Agentic streaming error: %s", exc)
         await error_logger.log_error(
             error=exc,
