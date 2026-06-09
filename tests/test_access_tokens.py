@@ -13,7 +13,7 @@ async def test_create_api_key(async_client):
     user, token = await create_test_user_and_token()
     try:
         response = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={"name": "EVA integration"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -35,7 +35,7 @@ async def test_create_api_key_with_expiry(async_client):
     expires_at = datetime.now(timezone.utc) + timedelta(days=30)
     try:
         response = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={"name": "Short-lived key", "expires_at": expires_at.isoformat()},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -52,7 +52,7 @@ async def test_api_key_authenticates_requests(async_client):
     user, token = await create_test_user_and_token()
     try:
         create_resp = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={"name": "test key"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -73,7 +73,7 @@ async def test_api_key_authenticates_requests(async_client):
 @pytest.mark.asyncio
 async def test_create_api_key_requires_auth(async_client):
     response = await async_client.post(
-        "/users/access-token",
+        "/users/api-keys",
         json={"name": "test"},
     )
     assert response.status_code == 403
@@ -84,7 +84,7 @@ async def test_create_api_key_rejects_past_expiry(async_client):
     user, token = await create_test_user_and_token()
     try:
         response = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={
                 "name": "bad key",
                 "expires_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
@@ -102,13 +102,13 @@ async def test_list_api_keys(async_client):
     try:
         for name in ("key-a", "key-b"):
             await async_client.post(
-                "/users/access-token",
+                "/users/api-keys",
                 json={"name": name},
                 headers={"Authorization": f"Bearer {token}"},
             )
 
         list_resp = await async_client.get(
-            "/users/access-token",
+            "/users/api-keys",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert list_resp.status_code == 200
@@ -124,7 +124,7 @@ async def test_revoke_api_key(async_client):
     user, token = await create_test_user_and_token()
     try:
         create_resp = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={"name": "to-revoke"},
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -134,7 +134,7 @@ async def test_revoke_api_key(async_client):
         raw_token = body["token"]
 
         revoke_resp = await async_client.delete(
-            f"/users/access-token/{key_id}",
+            f"/users/api-keys/{key_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert revoke_resp.status_code == 204
@@ -183,14 +183,14 @@ async def test_revoke_api_key_ownership(async_client):
     user_b, token_b = await create_test_user_and_token()
     try:
         create_resp = await async_client.post(
-            "/users/access-token",
+            "/users/api-keys",
             json={"name": "user-a key"},
             headers={"Authorization": f"Bearer {token_a}"},
         )
         key_id = create_resp.json()["id"]
 
         revoke_resp = await async_client.delete(
-            f"/users/access-token/{key_id}",
+            f"/users/api-keys/{key_id}",
             headers={"Authorization": f"Bearer {token_b}"},
         )
         assert revoke_resp.status_code == 403

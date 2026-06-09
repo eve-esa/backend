@@ -18,11 +18,9 @@ from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
-from jose import JWTError
-
 from src.config import MCP_TOOLS_CACHE_TTL
 from src.database.mongo import get_collection
-from src.middlewares.auth import verify_access_token
+from src.middlewares.auth import get_user_id_from_bearer_token
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 
@@ -220,13 +218,7 @@ class MCPProxyDispatcher:
         if not auth.startswith("Bearer "):
             raise PermissionError("Missing or malformed Authorization header")
 
-        try:
-            claims = verify_access_token(auth[7:])
-        except JWTError as exc:
-            raise PermissionError("Invalid token") from exc
-        user_id = claims.get("sub")
-        if not user_id:
-            raise PermissionError("Invalid token payload")
+        user_id = await get_user_id_from_bearer_token(auth[7:])
 
         cache_key = (server_name, user_id)
         now = time.monotonic()

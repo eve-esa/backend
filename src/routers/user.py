@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.database.models.api_key import ApiKey
@@ -55,7 +56,7 @@ async def update_user(
     return user
 
 
-@router.post("/access-token", response_model=CreateApiKeyResponse, status_code=201)
+@router.post("/api-keys", response_model=CreateApiKeyResponse, status_code=201)
 async def create_api_key(
     request: CreateApiKeyRequest,
     user: User = Depends(get_current_user),
@@ -88,7 +89,7 @@ async def create_api_key(
     )
 
 
-@router.get("/access-token", response_model=list[ApiKeyItem])
+@router.get("/api-keys", response_model=list[ApiKeyItem])
 async def list_api_keys(
     user: User = Depends(get_current_user),
 ) -> list[ApiKeyItem]:
@@ -115,7 +116,7 @@ async def list_api_keys(
     ]
 
 
-@router.delete("/access-token/{key_id}", status_code=204)
+@router.delete("/api-keys/{key_id}", status_code=204)
 async def revoke_api_key(
     key_id: str,
     user: User = Depends(get_current_user),
@@ -130,10 +131,16 @@ async def revoke_api_key(
     Raises:
         HTTPException: 404 if key not found; 403 if key belongs to another user.
     """
-    api_key = await ApiKey.find_by_id(key_id)
-    if not api_key:
+    try:
+        oid = ObjectId(key_id)
+    except Exception:
         raise HTTPException(status_code=404, detail="API key not found")
-    if api_key.user_id != user.id:
+    result = await ApiKey.get_collection().find_one_and_update(
+        {"_id": oid, "user_id": user.id},
+        {"$set": {"revoked_at": datetime.now(timezone.utc)}},
+    )
+    if result is None:
+        existing = await ApiKey.find_by_id(key_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="API key not found")
         raise HTTPException(status_code=403, detail="Not authorized to revoke this key")
-    api_key.revoked_at = datetime.now(timezone.utc)
-    await api_key.save()
