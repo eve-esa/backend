@@ -1,7 +1,11 @@
 import logging
+
+from fastapi import APIRouter, HTTPException
+from jose import JWTError, jwt
+
+from src.config import FRONTEND_URL, JWT_ALGORITHM, JWT_AUDIENCE_REFRESH, JWT_SECRET_KEY
+from src.database.models.user import User
 from src.schemas.auth import (
-    CreateAccessTokenRequest,
-    CreateAccessTokenResponse,
     LoginRequest,
     LoginResponse,
     RefreshRequest,
@@ -11,10 +15,6 @@ from src.schemas.auth import (
     SignupResponse,
     VerifyRequest,
 )
-from src.config import JWT_ALGORITHM, JWT_SECRET_KEY, JWT_AUDIENCE_REFRESH
-from src.database.models.user import User
-from fastapi import APIRouter, Depends, HTTPException
-from src.middlewares.auth import get_current_user
 from src.services.auth import (
     create_access_token,
     create_refresh_token,
@@ -22,10 +22,7 @@ from src.services.auth import (
     generate_activation_code,
     verify_user,
 )
-from jose import jwt, JWTError
 from src.services.email import email_service
-from src.config import FRONTEND_URL
-
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -91,7 +88,6 @@ async def refresh(request: RefreshRequest) -> RefreshResponse:
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-        # Use find_by_id instead of find_one with _id
         user = await User.find_by_id(user_id)
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
@@ -100,31 +96,6 @@ async def refresh(request: RefreshRequest) -> RefreshResponse:
 
     return RefreshResponse(
         access_token=create_access_token(sub=user.id),
-    )
-
-
-@router.post("/access-token", response_model=CreateAccessTokenResponse)
-async def create_user_access_token(
-    request: CreateAccessTokenRequest,
-    user: User = Depends(get_current_user),
-) -> CreateAccessTokenResponse:
-    """
-    Issue an access token with a custom expiration date for programmatic API access.
-
-    Args:
-        request (CreateAccessTokenRequest): Desired token expiration.
-        user (User): Authenticated user injected by dependency.
-
-    Returns:
-        Access token and its expiration time.
-
-    Raises:
-        HTTPException: 401 if the caller is not authenticated.
-    """
-    expires_at = request.expires_at
-    return CreateAccessTokenResponse(
-        access_token=create_access_token(sub=user.id, expires_at=expires_at),
-        expires_at=expires_at,
     )
 
 
