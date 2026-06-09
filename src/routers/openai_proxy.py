@@ -9,10 +9,9 @@ import logging
 from typing import Optional
 
 import httpx
-from jose import JWTError
 
 from src.config import OPENAI_PROXY_API_KEY, OPENAI_PROXY_UPSTREAM_URL
-from src.middlewares.auth import verify_access_token
+from src.middlewares.auth import get_user_id_from_bearer_token
 from src.services.openai_usage import track_usage
 
 logger = logging.getLogger(__name__)
@@ -121,13 +120,7 @@ class OpenAIProxyDispatcher:
         if not auth.startswith("Bearer "):
             raise PermissionError("Missing or malformed Authorization header")
 
-        try:
-            claims = verify_access_token(auth[7:])
-        except JWTError as exc:
-            raise PermissionError("Invalid token") from exc
-        user_id: str = claims.get("sub", "")
-        if not user_id:
-            raise PermissionError("Invalid token payload")
+        user_id: str = await get_user_id_from_bearer_token(auth[7:])
 
         path: str = scope["path"]
         # Strip /v1 prefix so it isn't doubled when the upstream URL already ends with /v1

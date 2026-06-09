@@ -1,4 +1,10 @@
 import logging
+
+from fastapi import APIRouter, HTTPException
+from jose import JWTError, jwt
+
+from src.config import FRONTEND_URL, JWT_ALGORITHM, JWT_AUDIENCE_REFRESH, JWT_SECRET_KEY
+from src.database.models.user import User
 from src.schemas.auth import (
     LoginRequest,
     LoginResponse,
@@ -9,20 +15,14 @@ from src.schemas.auth import (
     SignupResponse,
     VerifyRequest,
 )
-from src.config import JWT_ALGORITHM, JWT_SECRET_KEY, JWT_AUDIENCE_REFRESH
-from src.database.models.user import User
-from fastapi import APIRouter, HTTPException
 from src.services.auth import (
-    verify_user,
     create_access_token,
     create_refresh_token,
     create_user,
+    generate_activation_code,
+    verify_user,
 )
-from src.services.auth import generate_activation_code
-from jose import jwt, JWTError
 from src.services.email import email_service
-from src.config import FRONTEND_URL
-
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -88,7 +88,6 @@ async def refresh(request: RefreshRequest) -> RefreshResponse:
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-        # Use find_by_id instead of find_one with _id
         user = await User.find_by_id(user_id)
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
