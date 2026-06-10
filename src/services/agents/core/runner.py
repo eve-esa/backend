@@ -304,16 +304,25 @@ async def _get_agentic_checkpointer() -> Optional[Any]:
 # ─── Resolve LLM ──────────────────────────────────────────────────────────────
 
 
-def _get_llm(llm_type: Optional[str]):
-    """Get the LLM instance, respecting AGENTIC_LLM_TYPE override."""
-    effective_llm_type = AGENTIC_LLM_TYPE or llm_type
+def _resolve_agentic_llm_type(
+    llm_type: Optional[str], *, override: Optional[str] = None
+) -> Optional[str]:
+    """Resolve the effective LLM type for agentic generation.
+
+    Precedence: explicit ``override`` (e.g. forcing the Fallback model) wins,
+    then the ``AGENTIC_LLM_TYPE`` env override, then the request's ``llm_type``.
+    Centralising this here keeps the env override from being bypassed by any
+    direct caller of :func:`_build_react_graph`.
+    """
+    if override is not None:
+        return override
     if AGENTIC_LLM_TYPE and AGENTIC_LLM_TYPE != llm_type:
         logger.info(
             "Agentic graph: overriding llm_type %r -> %r (AGENTIC_LLM_TYPE)",
             llm_type,
             AGENTIC_LLM_TYPE,
         )
-    return get_shared_llm_manager().get_client_for_model(effective_llm_type)
+    return AGENTIC_LLM_TYPE or llm_type
 
 
 def _resolve_agent_graph_type(request: GenerationRequest) -> str:
@@ -350,7 +359,7 @@ def _build_react_graph(
     regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
     ``agent.compile()`` for in-graph node-level fallback.
     """
-    effective_type = llm_type_override or llm_type
+    effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
     llm = get_shared_llm_manager().get_client_for_model(effective_type)
     return agent.compile(
         llm=llm,
@@ -377,7 +386,7 @@ def _build_react_graph_with_fallback(
     was ultimately used.  The in-graph ``fallback_llm`` is always wired in so
     permanent primary-provider failures inside the graph are also handled.
     """
-    primary_llm_type = llm_type or AGENTIC_LLM_TYPE
+    primary_llm_type = _resolve_agentic_llm_type(llm_type)
     fallback_type = LLMType.Fallback.value
     # Don't configure a fallback when already on a fallback/satcom model.
     skip_fallback = primary_llm_type in (
@@ -526,11 +535,18 @@ async def generate_answer_agentic(
 
         async def _run_graph(
             g: Any,
-        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float]:
-            """Stream the graph and collect (raw_messages, trace_entries, node_latencies, duration)."""
+        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, bool]:
+            """Stream the graph and collect results.
+
+            Returns ``(raw_messages, trace_entries, node_latencies, duration,
+            in_graph_fallback)`` where *in_graph_fallback* is ``True`` when the
+            graph's node-level ``error_handler`` switched to the fallback model
+            mid-run (signalled via the ``use_fallback_llm`` state flag).
+            """
             raw_msgs: List[Any] = []
             trace: List[Dict[str, Any]] = []
             latency_map: Dict[str, float] = {}
+            in_graph_fallback = False
             start = time.perf_counter()
             with langfuse_context(
                 user_id=user_id,
@@ -545,9 +561,18 @@ async def generate_answer_agentic(
                 ):
                     step_time = time.perf_counter()
                     for node_name, node_output in update.items():
+                        if (
+                            isinstance(node_output, dict)
+                            and node_output.get("use_fallback_llm")
+                        ):
+                            in_graph_fallback = True
                         step_latency_s = step_time - start
                         latency_map.setdefault(node_name, 0.0)
-                        msgs = node_output.get("messages", [])
+                        msgs = (
+                            node_output.get("messages", [])
+                            if isinstance(node_output, dict)
+                            else []
+                        )
                         for msg in msgs:
                             trace.append(
                                 _serialise_trace_entry(
@@ -556,13 +581,18 @@ async def generate_answer_agentic(
                             )
                             raw_msgs.append(msg)
                         latency_map[node_name] = step_latency_s
-            return raw_msgs, trace, latency_map, time.perf_counter() - start
+            return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
 
         gen_start = time.perf_counter()
         try:
-            all_messages, trace_entries, node_latencies, gen_latency = await _run_graph(
-                graph
-            )
+            (
+                all_messages,
+                trace_entries,
+                node_latencies,
+                gen_latency,
+                in_graph_fallback,
+            ) = await _run_graph(graph)
+            used_fallback_llm = used_fallback_llm or in_graph_fallback
         except Exception as run_exc:
             if _is_retryable_agentic_error(run_exc) and not used_fallback_llm:
                 logger.warning(
@@ -590,6 +620,7 @@ async def generate_answer_agentic(
                     trace_entries,
                     node_latencies,
                     gen_latency,
+                    _,
                 ) = await _run_graph(fallback_graph)
                 used_fallback_llm = True
             else:
@@ -679,6 +710,9 @@ async def generate_answer_agentic_stream_helper(
     error_logger = get_error_logger()
     total_start = time.perf_counter()
     accumulated: List[str] = []
+    # Initialised before the try so the broad ``except`` below can reference it
+    # even when setup (tool/history/graph build) fails before assignment.
+    used_fallback_llm = _used_fallback_llm
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -719,6 +753,7 @@ async def generate_answer_agentic_stream_helper(
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         use_rag = False
+        in_graph_fallback_used = False
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
@@ -776,10 +811,10 @@ async def generate_answer_agentic_stream_helper(
             tags=["agentic", "stream", request.llm_type or "default"],
             trace_name="agentic_generation_stream",
         ):
-            async for chunk, metadata in graph.astream(
+            async for mode, payload in graph.astream(
                 {"messages": [HumanMessage(content=request.query)]},
                 config=config,
-                stream_mode="messages",
+                stream_mode=["messages", "updates"],
             ):
                 if cancelled():
                     await persist_message_state(
@@ -788,6 +823,16 @@ async def generate_answer_agentic_stream_helper(
                     yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                     return
 
+                if mode == "updates":
+                    for node_output in payload.values():
+                        if (
+                            isinstance(node_output, dict)
+                            and node_output.get("use_fallback_llm")
+                        ):
+                            in_graph_fallback_used = True
+                    continue
+
+                chunk, metadata = payload
                 node = metadata.get("langgraph_node", "")
                 if node != current_node:
                     if current_node:
@@ -889,7 +934,7 @@ async def generate_answer_agentic_stream_helper(
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
                 "agentic_llm_resolved": AGENTIC_LLM_TYPE or request.llm_type,
-                "used_fallback_llm": used_fallback_llm,
+                "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
             },
             trace=trace_entries if trace_entries else None,
         )
