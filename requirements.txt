@@ -13,7 +13,7 @@ langchain-text-splitters==1.1.2
 langchain-classic==1.0.7
 langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Prefer pinning a tag/commit.
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@fix/add-fallback-error-handling-langgraph
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@main
 langfuse>=2.60.0
 openai>=2.26.0,<3.0.0
 langgraph-checkpoint==4.1.0
