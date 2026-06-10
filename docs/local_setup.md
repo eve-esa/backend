@@ -142,7 +142,10 @@ EMAIL_FROM_ADDRESS=noreply@eve-esa.com
 EMAIL_FROM_NAME=EVE
 
 # CORS (comma separated list)
-CORS_ALLOWED_ORIGINS=http://localhost:5173
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:5174
+
+# Admin backoffice (required for POST /admin/users)
+ADMIN_API_KEY=
 
 DEEPINFRA_API_TOKEN=
 SILICONFLOW_API_TOKEN=
@@ -201,7 +204,8 @@ IS_PROD=false
 | `SMTP_PASSWORD` | No | SMTP password. |
 | `EMAIL_FROM_ADDRESS` | No | Sender email address (default `noreply@eve-ai.com`). |
 | `EMAIL_FROM_NAME` | No | Sender display name (default `EVE AI`). |
-| `CORS_ALLOWED_ORIGINS` | No | Comma-separated list of allowed origins (default `http://localhost:5173`). |
+| `CORS_ALLOWED_ORIGINS` | No | Comma-separated list of allowed origins (default `http://localhost:5173`). Include `http://localhost:5174` for the backoffice dev server. |
+| `ADMIN_API_KEY` | No | Secret for `POST /admin/users` (backoffice). If unset, the admin endpoint returns 503. |
 | `SCRAPING_DOG_API_KEY` | No | API key for ScrapingDog service, used as fallback of retrieval. |
 | `SATCOM_SMALL_MODEL_NAME` | No | Model name for Satcom small LLM. |
 | `SATCOM_LARGE_MODEL_NAME` | No | Model name for Satcom large LLM. |

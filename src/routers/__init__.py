@@ -5,6 +5,7 @@ from .document import router as document_router
 from .message import router as message_router
 from .conversation import router as conversation_router
 from .user import router as user_router
+from .admin import router as admin_router
 from .auth import router as auth_router
 from .forgot_password import router as forgot_password_router
 from .mcp_server import router as mcp_server_router
@@ -18,6 +19,7 @@ __all__ = [
     "message_router",
     "conversation_router",
     "user_router",
+    "admin_router",
     "auth_router",
     "forgot_password_router",
     "mcp_server_router",

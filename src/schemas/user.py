@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
+
+from src.schemas.rate_limit import RateLimitGroup
 
 
 class UpdateUserRequest(BaseModel):
@@ -20,6 +22,22 @@ class UserResponse(BaseModel):
     email: str
     first_name: str | None = None
     last_name: str | None = None
+
+
+class AdminCreateUserRequest(BaseModel):
+    email: EmailStr
+    password: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    rate_limit_group: RateLimitGroup = RateLimitGroup.EVE_FREE
+
+
+class AdminCreateUserResponse(BaseModel):
+    id: str
+    email: str
+    password: str
+    is_active: bool
+    rate_limit_group: str
 
 
 class TokenUsageResponse(BaseModel):

@@ -16,6 +16,7 @@ from src.config import (
     JWT_SECRET_KEY,
 )
 from src.database.models.user import User
+from src.schemas.rate_limit import RateLimitGroup
 from src.services.utils import hash_password
 
 
@@ -30,6 +31,12 @@ async def verify_user(email: str, password: str) -> bool:
 def generate_activation_code(length: int = 6) -> str:
     chars = string.ascii_uppercase + string.digits
     return "".join(random.choices(chars, k=length))
+
+
+def generate_random_password(length: int = 20) -> str:
+    """Generate a cryptographically secure random password of given length."""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 async def create_user(
@@ -51,6 +58,34 @@ async def create_user(
         activation_code=activation_code,
     )
     return user
+
+
+async def create_user_admin(
+    email: str,
+    password: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    rate_limit_group: RateLimitGroup = RateLimitGroup.EVE_FREE,
+    *,
+    is_active: bool = True,
+) -> tuple[User, str]:
+    existing = await User.find_one({"email": email})
+    if existing:
+        raise ValueError("User with this email already exists")
+
+    if not password:
+        password = generate_random_password()
+
+    user = await User.create(
+        email=email,
+        password_hash=hash_password(password),
+        first_name=first_name,
+        last_name=last_name,
+        is_active=is_active,
+        activation_code=None,
+        rate_limit_group=rate_limit_group,
+    )
+    return user, password
 
 
 def create_access_token(*, sub: str) -> str:

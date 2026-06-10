@@ -9,6 +9,7 @@ from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
 from src.routers import (
     OpenAIProxyDispatcher,
+    admin_router,
     auth_router,
     collection_router,
     conversation_router,
@@ -31,6 +32,9 @@ def register_routers(app: FastAPI):
 
     # Auth
     app.include_router(auth_router, tags=["Auth"])
+
+    # Admin
+    app.include_router(admin_router, tags=["Admin"])
 
     # User
     app.include_router(user_router, tags=["User"])
