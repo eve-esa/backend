@@ -1490,14 +1490,6 @@ async def generate(
             prompts,
             retrieved_docs,
         ) = await generate_answer(request)
-        (
-            answer,
-            results,
-            is_rag,
-            latencies,
-            prompts,
-            retrieved_docs,
-        ) = await generate_answer(request)
         await consume_tokens_for_user(
             requesting_user, count_tokens_for_texts(original_query, answer)
         )
