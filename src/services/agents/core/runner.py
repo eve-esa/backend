@@ -561,10 +561,7 @@ async def generate_answer_agentic(
                 ):
                     step_time = time.perf_counter()
                     for node_name, node_output in update.items():
-                        if (
-                            isinstance(node_output, dict)
-                            and node_output.get("use_fallback_llm")
-                        ):
+                        if node_name == "agent_fallback":
                             in_graph_fallback = True
                         step_latency_s = step_time - start
                         latency_map.setdefault(node_name, 0.0)
@@ -824,12 +821,8 @@ async def generate_answer_agentic_stream_helper(
                     return
 
                 if mode == "updates":
-                    for node_output in payload.values():
-                        if (
-                            isinstance(node_output, dict)
-                            and node_output.get("use_fallback_llm")
-                        ):
-                            in_graph_fallback_used = True
+                    if "agent_fallback" in payload:
+                        in_graph_fallback_used = True
                     continue
 
                 chunk, metadata = payload
@@ -913,11 +906,12 @@ async def generate_answer_agentic_stream_helper(
         }
 
         if answer:
-            agent_s = node_latencies.get("agent", gen_latency)
+            answer_node = current_node or "agent"
+            agent_s = node_latencies.get(answer_node, gen_latency)
             trace_entries.append(
                 {
                     "role": "assistant",
-                    "node": "agent",
+                    "node": answer_node,
                     "content": answer,
                     "latency_s": agent_s,
                 }
