@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
-from src.config import AGENTIC_LLM_TYPE, MODEL_TIMEOUT
+from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
@@ -310,19 +310,19 @@ def _resolve_agentic_llm_type(
     """Resolve the effective LLM type for agentic generation.
 
     Precedence: explicit ``override`` (e.g. forcing the Fallback model) wins,
-    then the ``AGENTIC_LLM_TYPE`` env override, then the request's ``llm_type``.
-    Centralising this here keeps the env override from being bypassed by any
-    direct caller of :func:`_build_react_graph`.
+    then the request's ``llm_type``, then the ``AGENTIC_LLM_TYPE`` env default.
+    Centralising this here keeps resolution consistent for every caller of
+    :func:`_build_react_graph`.
     """
     if override is not None:
         return override
-    if AGENTIC_LLM_TYPE and AGENTIC_LLM_TYPE != llm_type:
+    if llm_type and llm_type != AGENTIC_LLM_TYPE:
         logger.info(
-            "Agentic graph: overriding llm_type %r -> %r (AGENTIC_LLM_TYPE)",
-            llm_type,
+            "Agentic graph: overriding AGENTIC_LLM_TYPE %r -> %r llm_type",
             AGENTIC_LLM_TYPE,
+            llm_type,
         )
-    return AGENTIC_LLM_TYPE or llm_type
+    return llm_type or AGENTIC_LLM_TYPE
 
 
 def _resolve_agent_graph_type(request: GenerationRequest) -> str:
@@ -368,6 +368,7 @@ def _build_react_graph(
         history=history,
         summary=summary,
         fallback_llm=fallback_llm,
+        llm_run_timeout=MODEL_TIMEOUT
     )
 
 
@@ -388,17 +389,7 @@ def _build_react_graph_with_fallback(
     """
     primary_llm_type = _resolve_agentic_llm_type(llm_type)
     fallback_type = LLMType.Fallback.value
-    # Don't configure a fallback when already on a fallback/satcom model.
-    skip_fallback = primary_llm_type in (
-        LLMType.Fallback.value,
-        LLMType.Satcom_Small.value,
-        LLMType.Satcom_Large.value,
-    )
-    in_graph_fallback_llm = (
-        None
-        if skip_fallback
-        else get_shared_llm_manager().get_client_for_model(fallback_type)
-    )
+    in_graph_fallback_llm = get_shared_llm_manager().get_client_for_model(fallback_type)
     try:
         graph = _build_react_graph(
             primary_llm_type,
@@ -655,7 +646,7 @@ async def generate_answer_agentic(
             "instruction": resolved_instruction,
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
-            "agentic_llm_resolved": AGENTIC_LLM_TYPE or request.llm_type,
+            "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
             "used_fallback_llm": used_fallback_llm,
         }
 
@@ -710,6 +701,7 @@ async def generate_answer_agentic_stream_helper(
     # Initialised before the try so the broad ``except`` below can reference it
     # even when setup (tool/history/graph build) fails before assignment.
     used_fallback_llm = _used_fallback_llm
+    setup_complete = False
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -740,6 +732,8 @@ async def generate_answer_agentic_stream_helper(
                 history=history,
                 summary=summary,
             )
+
+        setup_complete = True
 
         config = {
             "configurable": {"thread_id": conversation_id},
@@ -782,9 +776,9 @@ async def generate_answer_agentic_stream_helper(
 
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
-                if elapsed > MODEL_TIMEOUT:
+                if elapsed > AGENTIC_TIMEOUT:
                     raise TimeoutError(
-                        "No final-answer token received within MODEL_TIMEOUT"
+                        "No final-answer token received within AGENTIC_TIMEOUT"
                     )
                 first_token_latency = time.perf_counter() - total_start
 
@@ -927,7 +921,7 @@ async def generate_answer_agentic_stream_helper(
                 "instruction": resolved_instruction,
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
-                "agentic_llm_resolved": AGENTIC_LLM_TYPE or request.llm_type,
+                "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
                 "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
             },
             trace=trace_entries if trace_entries else None,
@@ -972,7 +966,12 @@ async def generate_answer_agentic_stream_helper(
     except Exception as exc:
         # For retryable provider errors with no tokens sent yet, try the fallback
         # LLM once before surfacing the error to the client.
-        if _is_retryable_agentic_error(exc) and not used_fallback_llm and not accumulated:
+        if (
+            _is_retryable_agentic_error(exc)
+            and not used_fallback_llm
+            and not accumulated
+            and setup_complete
+        ):
             logger.warning(
                 "Agentic streaming failed with primary LLM (%s), retrying with fallback",
                 type(exc).__name__,

@@ -2,7 +2,7 @@
 
 Covers:
 - _is_retryable_agentic_error: error-classification contract
-- _resolve_agentic_llm_type: AGENTIC_LLM_TYPE precedence over request llm_type
+- _resolve_agentic_llm_type: request llm_type precedence over AGENTIC_LLM_TYPE
 - _build_react_graph: delegates llm_type resolution + compile call
 - _build_react_graph_with_fallback: retries compile with Fallback LLM on init failure
 - generate_answer_agentic: records in-graph fallback + runner last-resort retry
@@ -306,7 +306,8 @@ class TestBuildReactGraphWithFallback:
         second_call_kwargs = agent.compile.call_args_list[1].kwargs
         assert second_call_kwargs.get("fallback_llm") is None  # no in-graph fallback on retry
 
-    def test_skip_fallback_when_already_on_fallback_model(self):
+    def test_in_graph_fallback_llm_wired_when_already_on_fallback_model(self):
+        """In-graph fallback_llm is always wired, even when primary is fallback."""
         agent = self._make_agent()
         fake_mgr = self._fake_llm_manager()
 
@@ -319,9 +320,8 @@ class TestBuildReactGraphWithFallback:
             )
 
         assert not used_fallback
-        # in-graph fallback_llm should be None when already on fallback
         compile_kwargs = agent.compile.call_args.kwargs
-        assert compile_kwargs.get("fallback_llm") is None
+        assert compile_kwargs.get("fallback_llm") is not None
 
     def test_in_graph_fallback_llm_wired_for_primary_model(self):
         """When using primary LLM, fallback_llm is passed into compile()."""
@@ -350,10 +350,14 @@ class TestResolveAgenticLlmType:
                 == "satcom_large"
             )
 
-    def test_env_overrides_request(self):
-        # AGENTIC_LLM_TYPE must take precedence over the request's llm_type.
+    def test_request_overrides_env(self):
+        # Request llm_type must take precedence over AGENTIC_LLM_TYPE.
         with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", "fallback"):
-            assert _resolve_agentic_llm_type("main") == "fallback"
+            assert _resolve_agentic_llm_type("main") == "main"
+
+    def test_env_used_when_request_unset(self):
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", "fallback"):
+            assert _resolve_agentic_llm_type(None) == "fallback"
 
     def test_request_used_when_env_unset(self):
         with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None):
@@ -364,9 +368,9 @@ class TestResolveAgenticLlmType:
             assert _resolve_agentic_llm_type(None) is None
 
 
-class TestBuildReactGraphHonoursEnvOverride:
-    def test_env_override_passed_to_llm_manager(self):
-        """``_build_react_graph`` must resolve the env override, not the request."""
+class TestBuildReactGraphHonoursRequestLlmType:
+    def test_request_llm_type_passed_to_llm_manager(self):
+        """``_build_react_graph`` must resolve the request llm_type over env default."""
         agent = MagicMock()
         agent.compile.return_value = MagicMock(name="graph")
         fake_mgr = MagicMock()
@@ -377,7 +381,7 @@ class TestBuildReactGraphHonoursEnvOverride:
         ):
             _build_react_graph("main", [], None, agent=agent)
 
-        fake_mgr.get_client_for_model.assert_called_once_with("fallback")
+        fake_mgr.get_client_for_model.assert_called_once_with("main")
 
 
 # ─── generate_answer_agentic (non-streaming) ──────────────────────────────────
@@ -385,16 +389,10 @@ class TestBuildReactGraphHonoursEnvOverride:
 
 class TestGenerateAnswerAgenticInGraphFallback:
     async def test_in_graph_fallback_recorded_in_metadata(self):
-        """A mid-run ``use_fallback_llm`` flag must surface in persisted prompts."""
+        """A mid-run ``agent_fallback`` update must surface in persisted prompts."""
         updates = [
-            # error_handler escalation emits the flag, then the agent re-runs.
-            {"agent": {"messages": [AIMessage(content="")], "use_fallback_llm": True}},
-            {
-                "agent": {
-                    "messages": [AIMessage(content="final answer")],
-                    "use_fallback_llm": False,
-                }
-            },
+            {"agent_fallback": {"messages": [AIMessage(content="")]}},
+            {"agent": {"messages": [AIMessage(content="final answer")]}},
         ]
         graph = _FakeUpdatesGraph(updates)
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
@@ -458,7 +456,7 @@ class TestStreamingEarlyFailure:
 
         with _patched_runner(
             _build_tools=AsyncMock(side_effect=ConnectionError("net")),
-        ):
+        ), patch(f"{_RUNNER}.logger"):
             events = []
             async for event in generate_answer_agentic_stream_helper(
                 request, conversation_id="c1", message_id="m1"
@@ -467,3 +465,4 @@ class TestStreamingEarlyFailure:
 
         assert events, "expected at least one SSE event"
         assert any('"type": "error"' in e for e in events)
+        assert not any("tools" in e and "not associated with a value" in e for e in events)
