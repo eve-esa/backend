@@ -21,7 +21,6 @@ from src.database.models.user import User
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
-    get_mcp_context,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -53,13 +52,11 @@ try:
         SystemMessage,
         ToolMessage,
     )
-    from langchain_core.tools import StructuredTool
     from langgraph.checkpoint.mongodb import MongoDBSaver
 
     _langgraph_available = True
 except Exception:
     AIMessage = HumanMessage = SystemMessage = ToolMessage = None  # type: ignore
-    StructuredTool = None  # type: ignore
     MongoDBSaver = None  # type: ignore
 
 try:
@@ -77,7 +74,6 @@ except Exception:
 
 try:
     _graphs_utils = graphs_utils_module()
-    SearchWileyInput = _graphs_utils.SearchWileyInput
     has_text_tool_call = _graphs_utils.has_text_tool_call
     might_be_incomplete_text_tool_call = (
         _graphs_utils.might_be_incomplete_text_tool_call
@@ -85,7 +81,6 @@ try:
     parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
     tool_call_label = _graphs_utils.tool_call_label
 except Exception:
-    SearchWileyInput = None  # type: ignore
     tool_call_label = None  # type: ignore
     has_text_tool_call = None  # type: ignore
     might_be_incomplete_text_tool_call = None  # type: ignore
@@ -180,23 +175,46 @@ async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any
     if not connections:
         return []
 
-    try:
-        client = MultiServerMCPClient(
-            connections,
-            tool_name_prefix=True,
-            tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
-        )
-        tools = await client.get_tools()
+    client = MultiServerMCPClient(
+        connections,
+        tool_name_prefix=True,
+        tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
+    )
+    tools: List[Any] = []
+    failed_servers: List[str] = []
+    for server_name in connections:
+        try:
+            server_tools = await client.get_tools(server_name=server_name)
+            tools.extend(server_tools)
+            logger.info(
+                "Loaded %d MCP tool(s) from server %r: %s",
+                len(server_tools),
+                server_name,
+                [t.name for t in server_tools],
+            )
+        except Exception as exc:
+            failed_servers.append(server_name)
+            logger.error(
+                "Failed to load MCP tools from server %r: %s",
+                server_name,
+                exc,
+                exc_info=True,
+            )
+
+    if tools:
         logger.info(
-            "Loaded %d MCP tool(s) from %d server(s): %s",
+            "Loaded %d MCP tool(s) total from %d/%d MCP server(s)",
             len(tools),
+            len(connections) - len(failed_servers),
             len(connections),
-            [t.name for t in tools],
         )
-        return tools
-    except Exception as exc:
-        logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
-        raise
+    elif failed_servers:
+        logger.warning(
+            "No MCP tools loaded; all %d configured server(s) failed: %s",
+            len(failed_servers),
+            failed_servers,
+        )
+    return tools
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -218,59 +236,6 @@ async def _build_tools(
             tools.extend(mcp_tools)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
-
-    if "Wiley AI Gateway" in (request.public_collections or []):
-
-        async def _search_wiley_gateway(
-            query: str,
-            start_year: Optional[int] = None,
-            end_year: Optional[int] = None,
-        ) -> str:
-            """Search the Wiley AI Gateway for peer-reviewed scientific articles."""
-            try:
-                temp = GenerationRequest(
-                    query=query,
-                    k=request.k,
-                    score_threshold=request.score_threshold,
-                    public_collections=["Wiley AI Gateway"],
-                )
-                temp.year = (
-                    [start_year, end_year] if start_year and end_year else request.year
-                )
-                results, _ = await get_mcp_context(temp, cancel_event=cancel_event)
-                if not results:
-                    return "No articles found in the Wiley AI Gateway for this query."
-                parts: List[str] = []
-                for i, r in enumerate(results[: request.k]):
-                    if isinstance(r, dict):
-                        title = (
-                            r.get("title")
-                            or (r.get("metadata") or {}).get("title")
-                            or f"Article {i + 1}"
-                        )
-                        text = (
-                            r.get("text")
-                            or r.get("page_content")
-                            or r.get("content")
-                            or ""
-                        )
-                        parts.append(f"[{i + 1}] {title}\n{str(text)[:800]}")
-                return "\n\n".join(parts) if parts else "No articles found."
-            except Exception as exc:
-                logger.warning("Wiley MCP tool error: %s", exc)
-                return f"Wiley Gateway search failed: {exc}"
-
-        tools.append(
-            StructuredTool.from_function(
-                coroutine=_search_wiley_gateway,
-                name="search_wiley_gateway",
-                description=(
-                    "Search the Wiley AI Gateway for peer-reviewed scientific articles. "
-                    "Use when the query requires academic publications or research papers."
-                ),
-                args_schema=SearchWileyInput,
-            )
-        )
 
     return tools
 
