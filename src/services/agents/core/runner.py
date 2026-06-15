@@ -79,12 +79,16 @@ try:
     _graphs_utils = graphs_utils_module()
     SearchWileyInput = _graphs_utils.SearchWileyInput
     has_text_tool_call = _graphs_utils.has_text_tool_call
+    might_be_incomplete_text_tool_call = (
+        _graphs_utils.might_be_incomplete_text_tool_call
+    )
     parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
     tool_call_label = _graphs_utils.tool_call_label
 except Exception:
     SearchWileyInput = None  # type: ignore
     tool_call_label = None  # type: ignore
     has_text_tool_call = None  # type: ignore
+    might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
 
 
@@ -887,6 +891,13 @@ async def generate_answer_agentic_stream_helper(
                         continue
 
                     turn_buffer.append(content)
+                    joined = "".join(turn_buffer)
+                    if might_be_incomplete_text_tool_call and (
+                        might_be_incomplete_text_tool_call(joined)
+                    ):
+                        continue
+                    for event in _flush_turn_buffer_to_events():
+                        yield event
 
             if current_node:
                 elapsed_s = time.perf_counter() - node_start_time
