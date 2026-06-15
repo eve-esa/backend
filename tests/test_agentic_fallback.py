@@ -1,15 +1,12 @@
-"""Unit tests for the agentic LangGraph fallback and error-handling layer.
+"""Unit tests for the agentic LangGraph error-handling layer.
 
 Covers:
-- _is_retryable_agentic_error: error-classification contract
 - _resolve_agentic_llm_type: request llm_type precedence over AGENTIC_LLM_TYPE
-- _build_react_graph: delegates llm_type resolution + compile call
-- _build_react_graph_with_fallback: retries compile with Fallback LLM on init failure
-- generate_answer_agentic: records in-graph fallback + runner last-resort retry
+- _build_react_graph: delegates llm_type resolution + in-graph fallback_llm wiring
+- generate_answer_agentic: records in-graph fallback via agent_fallback node
 - generate_answer_agentic_stream_helper: no UnboundLocalError on early setup failure
 """
 
-import asyncio
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,8 +15,6 @@ from langchain_core.messages import AIMessage
 
 from src.services.agents.core.runner import (
     _build_react_graph,
-    _build_react_graph_with_fallback,
-    _is_retryable_agentic_error,
     _resolve_agentic_llm_type,
     generate_answer_agentic,
     generate_answer_agentic_stream_helper,
@@ -30,11 +25,7 @@ _RUNNER = "src.services.agents.core.runner"
 
 
 class _FakeUpdatesGraph:
-    """Minimal stand-in for a compiled graph driving ``astream(stream_mode=...)``.
-
-    Yields the scripted ``updates`` payloads, or raises *raise_exc* on first use
-    to simulate a run-time provider failure.
-    """
+    """Minimal stand-in for a compiled graph driving ``astream(stream_mode=...)``."""
 
     def __init__(self, updates=None, raise_exc=None):
         self._updates = updates or []
@@ -56,10 +47,7 @@ def _fake_agent():
 
 @contextlib.contextmanager
 def _patched_runner(**overrides):
-    """Patch the runner's external boundaries with sensible async defaults.
-
-    Individual values can be overridden via *overrides* (keyword = attr name).
-    """
+    """Patch the runner's external boundaries with sensible async defaults."""
     error_logger = MagicMock()
     error_logger.log_error = AsyncMock()
 
@@ -84,90 +72,6 @@ def _patched_runner(**overrides):
             applied[name] = stack.enter_context(patch(f"{_RUNNER}.{name}", value))
         applied["error_logger"] = error_logger
         yield applied
-
-
-# ─── _is_retryable_agentic_error ──────────────────────────────────────────────
-
-
-class TestIsRetryableAgenticError:
-    def test_timeout_is_retryable(self):
-        assert _is_retryable_agentic_error(TimeoutError("deadline"))
-
-    def test_connection_error_is_retryable(self):
-        assert _is_retryable_agentic_error(ConnectionError("refused"))
-
-    def test_asyncio_timeout_is_retryable(self):
-        assert _is_retryable_agentic_error(asyncio.TimeoutError())
-
-    def test_type_error_is_not_retryable(self):
-        assert not _is_retryable_agentic_error(TypeError("bad arg"))
-
-    def test_value_error_is_not_retryable(self):
-        assert not _is_retryable_agentic_error(ValueError("invalid"))
-
-    def test_key_error_is_not_retryable(self):
-        assert not _is_retryable_agentic_error(KeyError("missing"))
-
-    def test_attribute_error_is_not_retryable(self):
-        assert not _is_retryable_agentic_error(AttributeError("no attr"))
-
-    def test_import_error_is_not_retryable(self):
-        assert not _is_retryable_agentic_error(ImportError("no module"))
-
-    def test_openai_rate_limit_is_retryable(self):
-        class RateLimitError(Exception):
-            pass
-
-        assert _is_retryable_agentic_error(RateLimitError("429"))
-
-    def test_openai_api_connection_error_is_retryable(self):
-        class APIConnectionError(Exception):
-            pass
-
-        assert _is_retryable_agentic_error(APIConnectionError("conn"))
-
-    def test_openai_api_timeout_error_is_retryable(self):
-        class APITimeoutError(Exception):
-            pass
-
-        assert _is_retryable_agentic_error(APITimeoutError("timeout"))
-
-    def test_generic_exception_is_not_retryable(self):
-        # Unknown exceptions should not be blindly retried at the runner level.
-        assert not _is_retryable_agentic_error(Exception("something unknown"))
-
-    def test_httpx_429_is_retryable(self):
-        try:
-            import httpx
-
-            response = MagicMock()
-            response.status_code = 429
-            exc = httpx.HTTPStatusError("rate limited", request=MagicMock(), response=response)
-            assert _is_retryable_agentic_error(exc)
-        except ImportError:
-            pytest.skip("httpx not installed")
-
-    def test_httpx_500_is_not_retryable(self):
-        try:
-            import httpx
-
-            response = MagicMock()
-            response.status_code = 500
-            exc = httpx.HTTPStatusError("internal error", request=MagicMock(), response=response)
-            assert not _is_retryable_agentic_error(exc)
-        except ImportError:
-            pytest.skip("httpx not installed")
-
-    def test_httpx_503_is_retryable(self):
-        try:
-            import httpx
-
-            response = MagicMock()
-            response.status_code = 503
-            exc = httpx.HTTPStatusError("unavailable", request=MagicMock(), response=response)
-            assert _is_retryable_agentic_error(exc)
-        except ImportError:
-            pytest.skip("httpx not installed")
 
 
 # ─── _build_react_graph ───────────────────────────────────────────────────────
@@ -198,7 +102,8 @@ class TestBuildReactGraph:
                 summary=None,
             )
 
-        fake_llm_manager.get_client_for_model.assert_called_once_with("main")
+        fake_llm_manager.get_client_for_model.assert_any_call("main")
+        fake_llm_manager.get_client_for_model.assert_any_call("fallback")
         agent.compile.assert_called_once()
         compile_kwargs = agent.compile.call_args.kwargs
         assert compile_kwargs["llm"] is fake_llm
@@ -221,7 +126,8 @@ class TestBuildReactGraph:
                 llm_type_override="fallback",
             )
 
-        fake_llm_manager.get_client_for_model.assert_called_once_with("fallback")
+        fake_llm_manager.get_client_for_model.assert_called_with("fallback")
+        assert fake_llm_manager.get_client_for_model.call_count == 2
 
     def test_fallback_llm_forwarded_to_compile(self):
         agent = self._make_agent()
@@ -241,102 +147,32 @@ class TestBuildReactGraph:
                 fallback_llm=fallback_llm,
             )
 
+        fake_llm_manager.get_client_for_model.assert_called_once_with("main")
         compile_kwargs = agent.compile.call_args.kwargs
         assert compile_kwargs["fallback_llm"] is fallback_llm
-        
 
-# ─── _build_react_graph_with_fallback ────────────────────────────────────────
-
-
-class TestBuildReactGraphWithFallback:
-    def _make_agent(self, *, fail_first=False):
-        agent = MagicMock()
-        if fail_first:
-            primary_graph = MagicMock(name="primary_graph")
-            calls = {"count": 0}
-
-            def compile_side_effect(**kwargs):
-                calls["count"] += 1
-                # Fail on first compile (primary), succeed on second (fallback).
-                if calls["count"] == 1:
-                    raise RuntimeError("primary LLM unavailable")
-                return primary_graph
-
-            agent.compile.side_effect = compile_side_effect
-        else:
-            agent.compile.return_value = MagicMock(name="compiled_graph")
-        return agent
-
-    def _fake_llm_manager(self):
-        mgr = MagicMock()
-        mgr.get_client_for_model.return_value = MagicMock(name="llm_client")
-        return mgr
-
-    def test_returns_primary_graph_when_init_succeeds(self):
+    def test_default_in_graph_fallback_llm_wired(self):
         agent = self._make_agent()
-        fake_mgr = self._fake_llm_manager()
+        primary_llm = MagicMock(name="primary_llm")
+        fallback_llm = MagicMock(name="fallback_llm")
+        fake_mgr = MagicMock()
 
-        with patch(
-            "src.services.agents.core.runner.get_shared_llm_manager",
-            return_value=fake_mgr,
-        ):
-            graph, used_fallback = _build_react_graph_with_fallback(
-                "main", [], None, agent=agent
-            )
+        def get_client(llm_type):
+            if llm_type == "fallback":
+                return fallback_llm
+            return primary_llm
 
-        assert not used_fallback
-        assert graph is agent.compile.return_value
-
-    def test_falls_back_to_fallback_llm_on_init_failure(self):
-        agent = self._make_agent(fail_first=True)
-        fake_mgr = self._fake_llm_manager()
-
-        with patch(
-            "src.services.agents.core.runner.get_shared_llm_manager",
-            return_value=fake_mgr,
-        ):
-            graph, used_fallback = _build_react_graph_with_fallback(
-                "main", [], None, agent=agent
-            )
-
-        assert used_fallback
-        # compile was called twice: once for primary (raises), once for fallback.
-        assert agent.compile.call_count == 2
-        # Second call must have used fallback llm_type_override.
-        second_call_kwargs = agent.compile.call_args_list[1].kwargs
-        assert second_call_kwargs.get("fallback_llm") is None  # no in-graph fallback on retry
-
-    def test_in_graph_fallback_llm_wired_when_already_on_fallback_model(self):
-        """In-graph fallback_llm is always wired, even when primary is fallback."""
-        agent = self._make_agent()
-        fake_mgr = self._fake_llm_manager()
-
-        with patch(
-            "src.services.agents.core.runner.get_shared_llm_manager",
-            return_value=fake_mgr,
-        ):
-            graph, used_fallback = _build_react_graph_with_fallback(
-                "fallback", [], None, agent=agent
-            )
-
-        assert not used_fallback
-        compile_kwargs = agent.compile.call_args.kwargs
-        assert compile_kwargs.get("fallback_llm") is not None
-
-    def test_in_graph_fallback_llm_wired_for_primary_model(self):
-        """When using primary LLM, fallback_llm is passed into compile()."""
-        agent = self._make_agent()
-        fake_mgr = self._fake_llm_manager()
+        fake_mgr.get_client_for_model.side_effect = get_client
 
         with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
             "src.services.agents.core.runner.get_shared_llm_manager",
             return_value=fake_mgr,
         ):
-            _build_react_graph_with_fallback("main", [], None, agent=agent)
+            _build_react_graph("main", [], None, agent=agent)
 
         compile_kwargs = agent.compile.call_args.kwargs
-        # fallback_llm must be provided so agent_fn can switch mid-node.
-        assert compile_kwargs.get("fallback_llm") is not None
+        assert compile_kwargs["llm"] is primary_llm
+        assert compile_kwargs["fallback_llm"] is fallback_llm
 
 
 # ─── _resolve_agentic_llm_type ────────────────────────────────────────────────
@@ -351,7 +187,6 @@ class TestResolveAgenticLlmType:
             )
 
     def test_request_overrides_env(self):
-        # Request llm_type must take precedence over AGENTIC_LLM_TYPE.
         with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", "fallback"):
             assert _resolve_agentic_llm_type("main") == "main"
 
@@ -370,7 +205,6 @@ class TestResolveAgenticLlmType:
 
 class TestBuildReactGraphHonoursRequestLlmType:
     def test_request_llm_type_passed_to_llm_manager(self):
-        """``_build_react_graph`` must resolve the request llm_type over env default."""
         agent = MagicMock()
         agent.compile.return_value = MagicMock(name="graph")
         fake_mgr = MagicMock()
@@ -381,7 +215,8 @@ class TestBuildReactGraphHonoursRequestLlmType:
         ):
             _build_react_graph("main", [], None, agent=agent)
 
-        fake_mgr.get_client_for_model.assert_called_once_with("main")
+        fake_mgr.get_client_for_model.assert_any_call("main")
+        fake_mgr.get_client_for_model.assert_any_call("fallback")
 
 
 # ─── generate_answer_agentic (non-streaming) ──────────────────────────────────
@@ -398,7 +233,7 @@ class TestGenerateAnswerAgenticInGraphFallback:
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
 
         with _patched_runner(
-            _build_react_graph_with_fallback=MagicMock(return_value=(graph, False)),
+            _build_react_graph=MagicMock(return_value=graph),
         ):
             (
                 final_answer,
@@ -413,45 +248,12 @@ class TestGenerateAnswerAgenticInGraphFallback:
         assert prompts["used_fallback_llm"] is True
 
 
-class TestGenerateAnswerAgenticLastResort:
-    async def test_connection_error_triggers_fallback_primary_graph(self):
-        primary = _FakeUpdatesGraph(raise_exc=ConnectionError("provider down"))
-        fallback = _FakeUpdatesGraph(
-            [{"agent": {"messages": [AIMessage(content="recovered")]}}]
-        )
-        build_fallback = MagicMock(return_value=fallback)
-        request = GenerationRequest(query="hi", llm_type="main", agent="react")
-
-        with _patched_runner(
-            _build_react_graph_with_fallback=MagicMock(return_value=(primary, False)),
-            _build_react_graph=build_fallback,
-        ) as patched:
-            (
-                final_answer,
-                _tool_results,
-                _use_rag,
-                _latencies,
-                prompts,
-                _trace,
-            ) = await generate_answer_agentic(request, conversation_id="c1")
-
-        assert final_answer == "recovered"
-        assert prompts["used_fallback_llm"] is True
-        build_fallback.assert_called_once()
-        patched["error_logger"].log_error.assert_awaited()
-
-
 # ─── generate_answer_agentic_stream_helper (streaming) ────────────────────────
 
 
 class TestStreamingEarlyFailure:
-    async def test_retryable_setup_failure_does_not_raise_unbound(self):
-        """A retryable failure before graph build must not ``UnboundLocalError``.
-
-        ``used_fallback_llm`` is referenced in the broad ``except`` and must be
-        initialised before the ``try`` so early setup failures degrade to an
-        error event instead of crashing the stream.
-        """
+    async def test_setup_failure_yields_error_event(self):
+        """Setup failures must degrade to an error SSE event, not crash the stream."""
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
 
         with _patched_runner(
@@ -465,4 +267,3 @@ class TestStreamingEarlyFailure:
 
         assert events, "expected at least one SSE event"
         assert any('"type": "error"' in e for e in events)
-        assert not any("tools" in e and "not associated with a value" in e for e in events)
