@@ -356,7 +356,6 @@ def _build_react_graph(
     summary: Optional[str] = None,
     llm_type_override: Optional[str] = None,
     fallback_llm: Any = None,
-    streaming: bool = True,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -374,7 +373,6 @@ def _build_react_graph(
         summary=summary,
         fallback_llm=fallback_llm,
         llm_run_timeout=MODEL_TIMEOUT,
-        streaming=streaming,
     )
 
 
@@ -386,7 +384,6 @@ def _build_react_graph_with_fallback(
     agent: Any,
     history: Optional[List[Any]] = None,
     summary: Optional[str] = None,
-    streaming: bool = True,
 ) -> tuple[Any, bool]:
     """Compile the agent graph, falling back to the Fallback LLM on init failure.
 
@@ -406,7 +403,6 @@ def _build_react_graph_with_fallback(
             history=history,
             summary=summary,
             fallback_llm=in_graph_fallback_llm,
-            streaming=streaming,
         )
         return graph, False
     except Exception as exc:
@@ -423,7 +419,6 @@ def _build_react_graph_with_fallback(
             history=history,
             summary=summary,
             llm_type_override=fallback_type,
-            streaming=streaming,
         )
         return graph, True
 
@@ -526,7 +521,6 @@ async def generate_answer_agentic(
             agent=agent,
             history=history,
             summary=summary,
-            streaming=False,
         )
 
         config = {
@@ -612,7 +606,6 @@ async def generate_answer_agentic(
                     history=history,
                     summary=summary,
                     llm_type_override=LLMType.Fallback.value,
-                    streaming=False,
                 )
                 (
                     all_messages,
@@ -742,7 +735,6 @@ async def generate_answer_agentic_stream_helper(
                 agent=agent,
                 history=history,
                 summary=summary,
-                streaming=True,
             )
 
         setup_complete = True
@@ -1011,7 +1003,6 @@ async def generate_answer_agentic_stream_helper(
                     history=history,
                     summary=summary,
                     llm_type_override=LLMType.Fallback.value,
-                    streaming=True,
                 )
                 async for event in generate_answer_agentic_stream_helper(
                     request,

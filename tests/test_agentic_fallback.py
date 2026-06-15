@@ -243,26 +243,7 @@ class TestBuildReactGraph:
 
         compile_kwargs = agent.compile.call_args.kwargs
         assert compile_kwargs["fallback_llm"] is fallback_llm
-
-    def test_streaming_flag_forwarded_to_compile(self):
-        agent = self._make_agent()
-        fake_llm_manager = MagicMock()
-        fake_llm_manager.get_client_for_model.return_value = MagicMock()
-
-        with patch(
-            "src.services.agents.core.runner.get_shared_llm_manager",
-            return_value=fake_llm_manager,
-        ):
-            _build_react_graph(
-                "main",
-                tools=[],
-                checkpointer=None,
-                agent=agent,
-                streaming=False,
-            )
-
-        compile_kwargs = agent.compile.call_args.kwargs
-        assert compile_kwargs["streaming"] is False
+        
 
 # ─── _build_react_graph_with_fallback ────────────────────────────────────────
 
@@ -356,21 +337,6 @@ class TestBuildReactGraphWithFallback:
         compile_kwargs = agent.compile.call_args.kwargs
         # fallback_llm must be provided so agent_fn can switch mid-node.
         assert compile_kwargs.get("fallback_llm") is not None
-
-    def test_streaming_flag_forwarded_to_compile(self):
-        agent = self._make_agent()
-        fake_mgr = self._fake_llm_manager()
-
-        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
-            "src.services.agents.core.runner.get_shared_llm_manager",
-            return_value=fake_mgr,
-        ):
-            _build_react_graph_with_fallback(
-                "main", [], None, agent=agent, streaming=False
-            )
-
-        compile_kwargs = agent.compile.call_args.kwargs
-        assert compile_kwargs["streaming"] is False
 
 
 # ─── _resolve_agentic_llm_type ────────────────────────────────────────────────
