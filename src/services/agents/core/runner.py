@@ -14,13 +14,13 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
-from src.config import AGENTIC_LLM_TYPE, MODEL_TIMEOUT
+from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
+from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
-    get_mcp_context,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -52,13 +52,11 @@ try:
         SystemMessage,
         ToolMessage,
     )
-    from langchain_core.tools import StructuredTool
     from langgraph.checkpoint.mongodb import MongoDBSaver
 
     _langgraph_available = True
 except Exception:
     AIMessage = HumanMessage = SystemMessage = ToolMessage = None  # type: ignore
-    StructuredTool = None  # type: ignore
     MongoDBSaver = None  # type: ignore
 
 try:
@@ -76,14 +74,16 @@ except Exception:
 
 try:
     _graphs_utils = graphs_utils_module()
-    SearchWileyInput = _graphs_utils.SearchWileyInput
     has_text_tool_call = _graphs_utils.has_text_tool_call
+    might_be_incomplete_text_tool_call = (
+        _graphs_utils.might_be_incomplete_text_tool_call
+    )
     parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
     tool_call_label = _graphs_utils.tool_call_label
 except Exception:
-    SearchWileyInput = None  # type: ignore
     tool_call_label = None  # type: ignore
     has_text_tool_call = None  # type: ignore
+    might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
 
 
@@ -175,23 +175,46 @@ async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any
     if not connections:
         return []
 
-    try:
-        client = MultiServerMCPClient(
-            connections,
-            tool_name_prefix=True,
-            tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
-        )
-        tools = await client.get_tools()
+    client = MultiServerMCPClient(
+        connections,
+        tool_name_prefix=True,
+        tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
+    )
+    tools: List[Any] = []
+    failed_servers: List[str] = []
+    for server_name in connections:
+        try:
+            server_tools = await client.get_tools(server_name=server_name)
+            tools.extend(server_tools)
+            logger.info(
+                "Loaded %d MCP tool(s) from server %r: %s",
+                len(server_tools),
+                server_name,
+                [t.name for t in server_tools],
+            )
+        except Exception as exc:
+            failed_servers.append(server_name)
+            logger.error(
+                "Failed to load MCP tools from server %r: %s",
+                server_name,
+                exc,
+                exc_info=True,
+            )
+
+    if tools:
         logger.info(
-            "Loaded %d MCP tool(s) from %d server(s): %s",
+            "Loaded %d MCP tool(s) total from %d/%d MCP server(s)",
             len(tools),
+            len(connections) - len(failed_servers),
             len(connections),
-            [t.name for t in tools],
         )
-        return tools
-    except Exception as exc:
-        logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
-        raise
+    elif failed_servers:
+        logger.warning(
+            "No MCP tools loaded; all %d configured server(s) failed: %s",
+            len(failed_servers),
+            failed_servers,
+        )
+    return tools
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -213,59 +236,6 @@ async def _build_tools(
             tools.extend(mcp_tools)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
-
-    if "Wiley AI Gateway" in (request.public_collections or []):
-
-        async def _search_wiley_gateway(
-            query: str,
-            start_year: Optional[int] = None,
-            end_year: Optional[int] = None,
-        ) -> str:
-            """Search the Wiley AI Gateway for peer-reviewed scientific articles."""
-            try:
-                temp = GenerationRequest(
-                    query=query,
-                    k=request.k,
-                    score_threshold=request.score_threshold,
-                    public_collections=["Wiley AI Gateway"],
-                )
-                temp.year = (
-                    [start_year, end_year] if start_year and end_year else request.year
-                )
-                results, _ = await get_mcp_context(temp, cancel_event=cancel_event)
-                if not results:
-                    return "No articles found in the Wiley AI Gateway for this query."
-                parts: List[str] = []
-                for i, r in enumerate(results[: request.k]):
-                    if isinstance(r, dict):
-                        title = (
-                            r.get("title")
-                            or (r.get("metadata") or {}).get("title")
-                            or f"Article {i + 1}"
-                        )
-                        text = (
-                            r.get("text")
-                            or r.get("page_content")
-                            or r.get("content")
-                            or ""
-                        )
-                        parts.append(f"[{i + 1}] {title}\n{str(text)[:800]}")
-                return "\n\n".join(parts) if parts else "No articles found."
-            except Exception as exc:
-                logger.warning("Wiley MCP tool error: %s", exc)
-                return f"Wiley Gateway search failed: {exc}"
-
-        tools.append(
-            StructuredTool.from_function(
-                coroutine=_search_wiley_gateway,
-                name="search_wiley_gateway",
-                description=(
-                    "Search the Wiley AI Gateway for peer-reviewed scientific articles. "
-                    "Use when the query requires academic publications or research papers."
-                ),
-                args_schema=SearchWileyInput,
-            )
-        )
 
     return tools
 
@@ -303,16 +273,25 @@ async def _get_agentic_checkpointer() -> Optional[Any]:
 # ─── Resolve LLM ──────────────────────────────────────────────────────────────
 
 
-def _get_llm(llm_type: Optional[str]):
-    """Get the LLM instance, respecting AGENTIC_LLM_TYPE override."""
-    effective_llm_type = AGENTIC_LLM_TYPE or llm_type
-    if AGENTIC_LLM_TYPE and AGENTIC_LLM_TYPE != llm_type:
+def _resolve_agentic_llm_type(
+    llm_type: Optional[str], *, override: Optional[str] = None
+) -> Optional[str]:
+    """Resolve the effective LLM type for agentic generation.
+
+    Precedence: explicit ``override`` (e.g. forcing the Fallback model) wins,
+    then the request's ``llm_type``, then the ``AGENTIC_LLM_TYPE`` env default.
+    Centralising this here keeps resolution consistent for every caller of
+    :func:`_build_react_graph`.
+    """
+    if override is not None:
+        return override
+    if llm_type and llm_type != AGENTIC_LLM_TYPE:
         logger.info(
-            "Agentic graph: overriding llm_type %r -> %r (AGENTIC_LLM_TYPE)",
-            llm_type,
+            "Agentic graph: overriding AGENTIC_LLM_TYPE %r -> %r llm_type",
             AGENTIC_LLM_TYPE,
+            llm_type,
         )
-    return get_shared_llm_manager().get_client_for_model(effective_llm_type)
+    return llm_type or AGENTIC_LLM_TYPE
 
 
 def _resolve_agent_graph_type(request: GenerationRequest) -> str:
@@ -327,6 +306,43 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
         s = s[1:-1].strip()
     return s or AGENT_GRAPH_TYPE
+
+
+# ─── Graph compile helpers ────────────────────────────────────────────────────
+
+
+def _build_react_graph(
+    llm_type: Optional[str],
+    tools: List[Any],
+    checkpointer: Any,
+    *,
+    agent: Any,
+    history: Optional[List[Any]] = None,
+    summary: Optional[str] = None,
+    llm_type_override: Optional[str] = None,
+    fallback_llm: Any = None,
+) -> Any:
+    """Compile the agent graph using the resolved LLM type.
+
+    ``llm_type_override`` forces a specific model (e.g. ``LLMType.Fallback.value``)
+    regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
+    ``agent.compile()`` for in-graph node-level fallback.
+    """
+    effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
+    llm = get_shared_llm_manager().get_client_for_model(effective_type)
+    if fallback_llm is None:
+        fallback_llm = get_shared_llm_manager().get_client_for_model(
+            LLMType.Fallback.value
+        )
+    return agent.compile(
+        llm=llm,
+        tools=tools,
+        checkpointer=checkpointer,
+        history=history,
+        summary=summary,
+        fallback_llm=fallback_llm,
+        llm_run_timeout=MODEL_TIMEOUT,
+    )
 
 
 # ─── Conversation context ─────────────────────────────────────────────────────
@@ -378,15 +394,15 @@ async def generate_answer_agentic(
         tools = await _build_tools(request)
         checkpointer = await _get_agentic_checkpointer()
         history, summary = await _fetch_conversation_context(conversation_id)
-        llm = _get_llm(request.llm_type)
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
-        graph = agent.compile(
-            llm=llm,
-            tools=tools,
-            checkpointer=checkpointer,
+        graph = _build_react_graph(
+            request.llm_type,
+            tools,
+            checkpointer,
+            agent=agent,
             history=history,
             summary=summary,
         )
@@ -396,38 +412,61 @@ async def generate_answer_agentic(
             "callbacks": get_callbacks(),
         }
 
-        gen_start = time.perf_counter()
-        trace_entries: List[Dict[str, Any]] = []
-        all_messages: List[Any] = []
-        node_latencies: Dict[str, float] = {}
+        async def _run_graph(
+            g: Any,
+        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, bool]:
+            """Stream the graph and collect results.
 
-        with langfuse_context(
-            user_id=user_id,
-            session_id=conversation_id,
-            tags=["agentic", request.llm_type or "default"],
-            trace_name="agentic_generation",
-        ):
-            async for update in graph.astream(
-                {"messages": [HumanMessage(content=request.query)]},
-                config=config,
-                stream_mode="updates",
+            Returns ``(raw_messages, trace_entries, node_latencies, duration,
+            in_graph_fallback)`` where *in_graph_fallback* is ``True`` when the
+            graph's node-level ``error_handler`` switched to the fallback model
+            mid-run (signalled via the ``use_fallback_llm`` state flag).
+            """
+            raw_msgs: List[Any] = []
+            trace: List[Dict[str, Any]] = []
+            latency_map: Dict[str, float] = {}
+            in_graph_fallback = False
+            start = time.perf_counter()
+            with langfuse_context(
+                user_id=user_id,
+                session_id=conversation_id,
+                tags=["agentic", request.llm_type or "default"],
+                trace_name="agentic_generation",
             ):
-                step_time = time.perf_counter()
-                for node_name, node_output in update.items():
-                    step_latency_s = step_time - gen_start
-                    node_latencies.setdefault(node_name, 0.0)
-
-                    msgs = node_output.get("messages", [])
-                    for msg in msgs:
-                        entry = _serialise_trace_entry(
-                            msg, node=node_name, latency_s=step_latency_s
+                async for update in g.astream(
+                    {"messages": [HumanMessage(content=request.query)]},
+                    config=config,
+                    stream_mode="updates",
+                ):
+                    step_time = time.perf_counter()
+                    for node_name, node_output in update.items():
+                        if node_name == "agent_fallback":
+                            in_graph_fallback = True
+                        step_latency_s = step_time - start
+                        latency_map.setdefault(node_name, 0.0)
+                        msgs = (
+                            node_output.get("messages", [])
+                            if isinstance(node_output, dict)
+                            else []
                         )
-                        trace_entries.append(entry)
-                        all_messages.append(msg)
+                        for msg in msgs:
+                            trace.append(
+                                _serialise_trace_entry(
+                                    msg, node=node_name, latency_s=step_latency_s
+                                )
+                            )
+                            raw_msgs.append(msg)
+                        latency_map[node_name] = step_latency_s
+            return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
 
-                    node_latencies[node_name] = step_latency_s
-
-        gen_latency = time.perf_counter() - gen_start
+        gen_start = time.perf_counter()
+        (
+            all_messages,
+            trace_entries,
+            node_latencies,
+            gen_latency,
+            used_fallback_llm,
+        ) = await _run_graph(graph)
 
         final_answer = ""
         for msg in reversed(all_messages):
@@ -461,6 +500,8 @@ async def generate_answer_agentic(
             "instruction": resolved_instruction,
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
+            "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
+            "used_fallback_llm": used_fallback_llm,
         }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
@@ -497,6 +538,7 @@ async def generate_answer_agentic_stream_helper(
       final       — complete answer + latencies
       stopped     — cancelled by client
       error       — unhandled exception
+
     """
     if not _langgraph_available:
         yield f"data: {json.dumps({'type': 'error', 'message': 'LangGraph not available'})}\n\n"
@@ -505,6 +547,7 @@ async def generate_answer_agentic_stream_helper(
     error_logger = get_error_logger()
     total_start = time.perf_counter()
     accumulated: List[str] = []
+    used_fallback_llm = False
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -518,15 +561,16 @@ async def generate_answer_agentic_stream_helper(
         tools = await _build_tools(request, cancel_event=cancel_event)
         checkpointer = await _get_agentic_checkpointer()
         history, summary = await _fetch_conversation_context(conversation_id)
-        llm = _get_llm(request.llm_type)
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
-        graph = agent.compile(
-            llm=llm,
-            tools=tools,
-            checkpointer=checkpointer,
+
+        graph = _build_react_graph(
+            request.llm_type,
+            tools,
+            checkpointer,
+            agent=agent,
             history=history,
             summary=summary,
         )
@@ -540,6 +584,7 @@ async def generate_answer_agentic_stream_helper(
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         use_rag = False
+        in_graph_fallback_used = False
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
@@ -571,9 +616,9 @@ async def generate_answer_agentic_stream_helper(
 
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
-                if elapsed > MODEL_TIMEOUT:
+                if elapsed > AGENTIC_TIMEOUT:
                     raise TimeoutError(
-                        "No final-answer token received within MODEL_TIMEOUT"
+                        "No final-answer token received within AGENTIC_TIMEOUT"
                     )
                 first_token_latency = time.perf_counter() - total_start
 
@@ -597,10 +642,10 @@ async def generate_answer_agentic_stream_helper(
             tags=["agentic", "stream", request.llm_type or "default"],
             trace_name="agentic_generation_stream",
         ):
-            async for chunk, metadata in graph.astream(
+            async for mode, payload in graph.astream(
                 {"messages": [HumanMessage(content=request.query)]},
                 config=config,
-                stream_mode="messages",
+                stream_mode=["messages", "updates"],
             ):
                 if cancelled():
                     await persist_message_state(
@@ -609,6 +654,12 @@ async def generate_answer_agentic_stream_helper(
                     yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                     return
 
+                if mode == "updates":
+                    if "agent_fallback" in payload:
+                        in_graph_fallback_used = True
+                    continue
+
+                chunk, metadata = payload
                 node = metadata.get("langgraph_node", "")
                 if node != current_node:
                     if current_node:
@@ -668,6 +719,13 @@ async def generate_answer_agentic_stream_helper(
                         continue
 
                     turn_buffer.append(content)
+                    joined = "".join(turn_buffer)
+                    if might_be_incomplete_text_tool_call and (
+                        might_be_incomplete_text_tool_call(joined)
+                    ):
+                        continue
+                    for event in _flush_turn_buffer_to_events():
+                        yield event
 
             if current_node:
                 elapsed_s = time.perf_counter() - node_start_time
@@ -689,11 +747,12 @@ async def generate_answer_agentic_stream_helper(
         }
 
         if answer:
-            agent_s = node_latencies.get("agent", gen_latency)
+            answer_node = current_node or "agent"
+            agent_s = node_latencies.get(answer_node, gen_latency)
             trace_entries.append(
                 {
                     "role": "assistant",
-                    "node": "agent",
+                    "node": answer_node,
                     "content": answer,
                     "latency_s": agent_s,
                 }
@@ -709,6 +768,8 @@ async def generate_answer_agentic_stream_helper(
                 "instruction": resolved_instruction,
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
+                "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
+                "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
             },
             trace=trace_entries if trace_entries else None,
         )

@@ -30,6 +30,7 @@ MAIN_MODEL_NAME = os.getenv("MAIN_MODEL_NAME", "eve-esa/eve_v0.1").strip()
 FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-medium-latest").strip()
 
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
+AGENTIC_TIMEOUT = int(os.getenv("AGENTIC_TIMEOUT", 120))
 
 EMBEDDING_URL = os.getenv(
     "EMBEDDING_URL", "https://api.deepinfra.com/v1/openai"

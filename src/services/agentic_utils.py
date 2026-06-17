@@ -96,6 +96,16 @@ def has_text_tool_call(content: str) -> bool:
     return _TEXT_TOOL_CALL_MARKER in content
 
 
+def might_be_incomplete_text_tool_call(content: str) -> bool:
+    """Return True while streamed text may still be building a ``[TOOL_CALLS]`` call."""
+    if not content:
+        return False
+    text = content.lstrip()
+    if _TEXT_TOOL_CALL_MARKER in text:
+        return True
+    return _TEXT_TOOL_CALL_MARKER.startswith(text)
+
+
 # ─── Message history sanitisation ─────────────────────────────────────────────
 
 # These functions depend on LangChain message types which may not be installed.

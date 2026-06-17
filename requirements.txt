@@ -2,22 +2,22 @@ gunicorn==23.0.0
 uvicorn==0.35.0
 fastapi==0.115.12
 python-dotenv==1.1.0
-langchain==1.1.3
-langchain-community==0.4.1
-langchain-huggingface==1.1.0
+langchain==1.3.6
+langchain-community==0.4.2
+langchain-huggingface==1.2.2
 langchain-qdrant==1.1.0
-langchain-openai==1.1.3
-langchain-mcp-adapters==0.2.1
-langchain-mistralai==1.1.1
-langchain-text-splitters==1.0.0
-langchain-classic==1.0.0
-langgraph==1.0.5
+langchain-openai==1.2.2
+langchain-mcp-adapters==0.3.0
+langchain-mistralai==1.1.4
+langchain-text-splitters==1.1.2
+langchain-classic==1.0.7
+langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Prefer pinning a tag/commit.
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@main
 langfuse>=2.60.0
-openai>=1.0.0,<2.0.0
-langgraph-checkpoint==3.0.1
-langgraph-checkpoint-mongodb==0.3.0
+openai>=2.26.0,<3.0.0
+langgraph-checkpoint==4.1.0
+langgraph-checkpoint-mongodb==0.4.0
 pytest==8.3.3
 httpx==0.28.1
 PyPDF2==3.0.1
