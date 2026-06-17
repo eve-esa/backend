@@ -407,13 +407,16 @@ async def create_message(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
+        # Use only private collections requested by the frontend
         user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
+            filter_dict={
+                "user_id": requesting_user.id,
+                "name": {"$in": request.private_collections},
+            }
         )
 
         request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
+        if user_collections:
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
@@ -759,13 +762,16 @@ async def create_message_stream(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
+        # Use only private collections requested by the frontend
         user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
+            filter_dict={
+                "user_id": requesting_user.id,
+                "name": {"$in": request.private_collections},
+            }
         )
 
         request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
+        if user_collections:
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
@@ -1477,13 +1483,16 @@ async def generate(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
+        # Use only private collections requested by the frontend
         user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
+            filter_dict={
+                "user_id": requesting_user.id,
+                "name": {"$in": request.private_collections},
+            }
         )
 
         request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
+        if user_collections:
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]
@@ -1579,12 +1588,16 @@ async def retrieve(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
+        # Use only private collections requested by the frontend
         user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
+            filter_dict={
+                "user_id": requesting_user.id,
+                "name": {"$in": request.private_collections},
+            }
         )
 
         request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
+        if user_collections:
             request.collection_ids = request.collection_ids + [
                 c.id for c in user_collections
             ]

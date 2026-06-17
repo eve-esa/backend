@@ -33,6 +33,10 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of public collection names to include in the search",
     )
+    private_collections: List[str] = Field(
+        default_factory=list,
+        description="List of private collection names to include in the search",
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
