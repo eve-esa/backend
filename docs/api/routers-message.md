@@ -398,7 +398,8 @@ Runs full retrieval + generation pipeline without storing a conversation message
 - `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
 - `k`: Number of retrieved documents from `0` to `10`.
 - `filters`: Optional Qdrant-compatible filter object.
-- `public_collections`: Collection names from collection listing endpoints.
+- `public_collections`: Public collection names from collection listing endpoint - /collections/public.
+- `private_collections`: Private Collection ids from collection listing endpoint - /collections
 - `temperature`: Generation temperature from `0.0` to `1.0` (lower is more deterministic).
 - `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `ship`, `eve_v05`).
 
