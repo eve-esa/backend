@@ -165,6 +165,7 @@
 - **score_threshold**: float
 - **max_new_tokens**: int
 - **public_collections**: list[string]
+- **private_collections**: list[string]
 - Note: server populates private `collection_ids` and `private_collections_map`.
 
 ### CreateMessageResponse
