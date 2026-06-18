@@ -72,7 +72,7 @@ Runs retrieval + generation and stores the response in the conversation.
 - `filters`: Optional Qdrant-compatible filter object.
 - `public_collections`: Collection names from collection listing endpoints.
 - `temperature`: Generation temperature from `0.0` to `1.0`.
-- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `ship`, `eve_v05`).
+- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `eve_jsc`).
 
 ## Create message (SSE streaming)
 
@@ -401,7 +401,7 @@ Runs full retrieval + generation pipeline without storing a conversation message
 - `public_collections`: Public collection names from collection listing endpoint - /collections/public.
 - `private_collections`: Private Collection ids from collection listing endpoint - /collections
 - `temperature`: Generation temperature from `0.0` to `1.0` (lower is more deterministic).
-- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `ship`, `eve_v05`).
+- `llm_type`: Optional model selector (for example `main`, `fallback`, `satcom_small`, `satcom_large`, `eve_jsc`).
 
 ## Retrieval-only
 

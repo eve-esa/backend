@@ -35,6 +35,7 @@ from src.config import (
     FALLBACK_MODEL_NAME,
     SATCOM_SMALL_MODEL_NAME,
     SATCOM_LARGE_MODEL_NAME,
+    EVE_JSC_MODEL_NAME,
     config,
 )
 from src.utils.deepinfra_reranker import DeepInfraReranker
@@ -213,6 +214,8 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
         return SATCOM_SMALL_MODEL_NAME
     if llm_type == LLMType.Satcom_Large.value:
         return SATCOM_LARGE_MODEL_NAME
+    if llm_type == LLMType.Eve_Jsc.value:
+        return EVE_JSC_MODEL_NAME
     return None
 
 

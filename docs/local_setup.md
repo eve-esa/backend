@@ -206,6 +206,9 @@ IS_PROD=false
 | `SATCOM_SMALL_MODEL_NAME` | No | Model name for Satcom small LLM. |
 | `SATCOM_LARGE_MODEL_NAME` | No | Model name for Satcom large LLM. |
 | `SATCOM_RUNPOD_API_KEY` | No | API key for Satcom Runpod workloads. |
+| `EVE_JSC_BASE_URL` | No | OpenAI-compatible URL for the EVE-JSC model (required when `llm_type` is `eve_jsc`). |
+| `EVE_JSC_MODEL_NAME` | No | Model name for EVE-JSC (default `alias-eve`). |
+| `EVE_JSC_API_KEY` | No | API key for EVE-JSC (falls back to `MAIN_MODEL_API_KEY` if not set). |
 | `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
 | `IS_PROD` | No | Set to `true` to enable production mode toggles. |
 
