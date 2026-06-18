@@ -55,6 +55,27 @@ from src.utils.helpers import (
     build_conversation_context,
     extract_document_data,
     get_mongodb_uri,
+)
+from src.services.mcp_client_service import MultiServerMCPClientService
+from src.config import (
+    DEEPINFRA_API_TOKEN,
+    IS_PROD,
+    SCRAPING_DOG_API_KEY,
+    SILICONFLOW_API_TOKEN,
+    SATCOM_QDRANT_URL,
+    SATCOM_QDRANT_API_KEY,
+    MODEL_TIMEOUT,
+    MAIN_MODEL_NAME,
+    FALLBACK_MODEL_NAME,
+    SATCOM_SMALL_MODEL_NAME,
+    SATCOM_LARGE_MODEL_NAME,
+    EVE_JSC_MODEL_NAME,
+)
+from src.utils.deepinfra_reranker import DeepInfraReranker
+from src.utils.template_loader import get_template
+from src.utils.siliconflow_reranker import SiliconFlowReranker
+from src.utils.helpers import (
+    get_mongodb_uri,
     tiktoken_counter,
 )
 from src.utils.langfuse_helper import flush as langfuse_flush
@@ -218,6 +239,8 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
         return SATCOM_SMALL_MODEL_NAME
     if llm_type == LLMType.Satcom_Large.value:
         return SATCOM_LARGE_MODEL_NAME
+    if llm_type == LLMType.Eve_Jsc.value:
+        return EVE_JSC_MODEL_NAME
     return None
 
 

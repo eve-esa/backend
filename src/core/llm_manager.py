@@ -24,6 +24,9 @@ from src.config import (
     SATCOM_SMALL_BASE_URL,
     SATCOM_SMALL_MODEL_NAME,
     Config,
+    EVE_JSC_BASE_URL,
+    EVE_JSC_MODEL_NAME,
+    EVE_JSC_API_KEY,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src.utils.helpers import (
@@ -42,6 +45,7 @@ class LLMType(Enum):
     Fallback = "fallback"
     Satcom_Small = "satcom_small"
     Satcom_Large = "satcom_large"
+    Eve_Jsc = "eve_jsc"
     # Legacy aliases for backward compatibility
     Runpod = "main"
     Mistral = "fallback"
@@ -126,6 +130,16 @@ class LLMManager:
             self._satcom_large_model_name = None
             self._satcom_small_chat_openai = None
             self._satcom_large_chat_openai = None
+
+        try:
+            self._eve_jsc_base_url = EVE_JSC_BASE_URL or None
+            self._eve_jsc_model_name = EVE_JSC_MODEL_NAME
+            self._eve_jsc_chat_openai: ChatOpenAI | None = None
+        except Exception as e:
+            logger.error(f"Failed to initialize EVE-JSC client config: {e}")
+            self._eve_jsc_base_url = None
+            self._eve_jsc_model_name = None
+            self._eve_jsc_chat_openai = None
 
         # Configure Fallback client lazily
         try:
@@ -221,6 +235,23 @@ class LLMManager:
             )
         return self._satcom_large_chat_openai
 
+    def _get_eve_jsc_llm(self) -> ChatOpenAI:
+        """Return a configured ChatOpenAI client for the EVE-JSC model."""
+        if self._eve_jsc_chat_openai is None:
+            if not self._eve_jsc_base_url:
+                raise RuntimeError("EVE_JSC_BASE_URL is not configured")
+            if not EVE_JSC_API_KEY:
+                raise RuntimeError("EVE_JSC_API_KEY (or MAIN_MODEL_API_KEY) is not set")
+            self._eve_jsc_chat_openai = ChatOpenAI(
+                api_key=EVE_JSC_API_KEY,
+                base_url=self._eve_jsc_base_url,
+                model=self._eve_jsc_model_name,
+                temperature=0.3,
+                timeout=MODEL_TIMEOUT,
+                max_retries=0,
+            )
+        return self._eve_jsc_chat_openai
+
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
 
@@ -247,6 +278,9 @@ class LLMManager:
             elif llm_type == LLMType.Satcom_Large.value:
                 self._selected_llm_type = LLMType.Satcom_Large.value
                 return self._get_satcom_large_llm()
+            elif llm_type == LLMType.Eve_Jsc.value:
+                self._selected_llm_type = LLMType.Eve_Jsc.value
+                return self._get_eve_jsc_llm()
             else:
                 if llm_type is None and IS_PROD:
                     self._selected_llm_type = LLMType.Fallback.value

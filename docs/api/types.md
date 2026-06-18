@@ -158,13 +158,14 @@
 - **query**: string
 - **year**: list[int] | null
 - **filters**: dict | null
-- **llm_type**: string | null (one of 'main', 'fallback', 'runpod', 'mistral', 'satcom_small', 'satcom_large', 'ship', 'eve_v05')
+- **llm_type**: string | null (one of 'main', 'fallback', 'runpod', 'mistral', 'satcom_small', 'satcom_large', 'eve_jsc')
 - **embeddings_model**: string
 - **k**: int
 - **temperature**: float
 - **score_threshold**: float
 - **max_new_tokens**: int
 - **public_collections**: list[string]
+- **private_collections**: list[string]
 - Note: server populates private `collection_ids` and `private_collections_map`.
 
 ### CreateMessageResponse

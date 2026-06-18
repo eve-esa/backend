@@ -19,7 +19,7 @@ class GenerationRequest(BaseModel):
     llm_type: Optional[str] = Field(
         default=None,
         description=(
-            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'ship', 'eve_v05'. "
+            "LLM type to use. Options: 'main', 'fallback', 'satcom_small', 'satcom_large', 'eve_jsc'. "
             "Legacy options 'runpod' and 'mistral' are also supported. "
             "Defaults to None, which means environment-based behavior."
         ),
@@ -32,6 +32,10 @@ class GenerationRequest(BaseModel):
     public_collections: List[str] = Field(
         default_factory=list,
         description="List of public collection names to include in the search",
+    )
+    private_collections: List[str] = Field(
+        default_factory=list,
+        description="List of private collection IDs to include in the search",
     )
     public_mcp_servers: List[str] = Field(
         default_factory=list,
