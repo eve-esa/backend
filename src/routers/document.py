@@ -17,6 +17,7 @@ from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP,
+    MAX_PRIVATE_DOCUMENTS,
 )
 from src.schemas.common import Pagination
 
@@ -40,6 +41,22 @@ async def get_collection_and_validate_ownership(
         )
 
     return collection
+
+
+async def _validate_private_document_upload_limit(
+    user_id: str, new_file_count: int
+) -> None:
+    """Reject uploads that would exceed the per-user private document cap."""
+    current_count = await DocumentModel.count_documents({"user_id": user_id})
+    if current_count + new_file_count > MAX_PRIVATE_DOCUMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Private document limit reached. You can upload at most "
+                f"{MAX_PRIVATE_DOCUMENTS} documents in total "
+                f"({current_count} already uploaded)."
+            ),
+        )
 
 
 @router.get(
@@ -146,11 +163,13 @@ async def upload_documents(
         Service response with ingestion details.
 
     Raises:
-        HTTPException: 404 if collection is not found; 403 if access is forbidden; 500 for processing errors.
+        HTTPException: 404 if collection is not found; 403 if access is forbidden; 400 if the private document limit is exceeded; 500 for processing errors.
     """
     collection = await get_collection_and_validate_ownership(
         collection_id, requesting_user
     )
+
+    await _validate_private_document_upload_limit(requesting_user.id, len(files))
 
     logger.info(
         f"Received {len(files)} files for processing in collection {collection_id}"

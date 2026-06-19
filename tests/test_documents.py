@@ -81,6 +81,59 @@ async def test_upload_single_file(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_private_document_upload_limit(async_client, monkeypatch):
+    """Users cannot exceed the total private document upload cap."""
+
+    _stub_vector_and_service(monkeypatch)
+    monkeypatch.setattr("src.routers.document.MAX_PRIVATE_DOCUMENTS", 2)
+
+    user, token = await create_test_user_and_token()
+    try:
+        coll_id = (
+            await async_client.post(
+                "/collections",
+                json={"name": "Limit Coll"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        files = {
+            "files": ("one.txt", io.BytesIO(b"hello"), "text/plain"),
+            "metadata_names": (None, "one.txt"),
+        }
+        resp = await async_client.post(
+            f"/collections/{coll_id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+        )
+        assert resp.status_code == 200
+
+        resp = await async_client.post(
+            f"/collections/{coll_id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+        )
+        assert resp.status_code == 200
+
+        resp = await async_client.post(
+            f"/collections/{coll_id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+        )
+        assert resp.status_code == 400
+        assert "Private document limit reached" in resp.json()["detail"]
+
+        docs = await Document.find_all(filter_dict={"user_id": user.id})
+        assert len(docs) == 2
+
+        await async_client.delete(
+            f"/collections/{coll_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
 async def test_upload_two_files(async_client, monkeypatch):
     """Uploading two files creates exactly two Document entries."""
 
