@@ -87,7 +87,7 @@ async def test_private_document_upload_limit(async_client, monkeypatch):
     """Users cannot exceed the total private document upload cap."""
 
     _stub_vector_and_service(monkeypatch)
-    monkeypatch.setattr("src.constants.MAX_PRIVATE_DOCUMENTS", 2)
+    monkeypatch.setattr("src.services.private_document_limit.MAX_PRIVATE_DOCUMENTS", 2)
 
     user, token = await create_test_user_and_token()
     try:
@@ -140,7 +140,7 @@ async def test_private_document_upload_limit_concurrent(async_client, monkeypatc
     """Concurrent uploads cannot exceed the per-user private document cap."""
 
     _stub_vector_and_service(monkeypatch)
-    monkeypatch.setattr("src.constants.MAX_PRIVATE_DOCUMENTS", 2)
+    monkeypatch.setattr("src.services.private_document_limit.MAX_PRIVATE_DOCUMENTS", 2)
 
     user, token = await create_test_user_and_token()
     try:
