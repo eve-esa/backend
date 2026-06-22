@@ -6,12 +6,13 @@ FastAPI app (404) when it is absent.
 
 import json
 import logging
+import time
 from typing import Optional
 
 import httpx
 
 from src.config import OPENAI_PROXY_API_KEY, OPENAI_PROXY_UPSTREAM_URL
-from src.middlewares.auth import get_user_id_from_bearer_token
+from src.middlewares.auth import resolve_principal_from_bearer_token
 from src.services.openai_usage import track_usage
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,8 @@ class OpenAIProxyDispatcher:
         if not auth.startswith("Bearer "):
             raise PermissionError("Missing or malformed Authorization header")
 
-        user_id: str = await get_user_id_from_bearer_token(auth[7:])
+        principal = await resolve_principal_from_bearer_token(auth[7:])
+        caller_type = principal.caller_type()
 
         path: str = scope["path"]
         # Strip /v1 prefix so it isn't doubled when the upstream URL already ends with /v1
@@ -159,6 +161,7 @@ class OpenAIProxyDispatcher:
         }
         fwd_headers["authorization"] = f"Bearer {OPENAI_PROXY_API_KEY}" if OPENAI_PROXY_API_KEY else auth
 
+        started = time.monotonic()
         async with self._client.stream(method, url, headers=fwd_headers, content=body) as resp:
             resp_headers = [
                 [k.lower().encode(), v.encode()]
@@ -195,17 +198,23 @@ class OpenAIProxyDispatcher:
                 except (json.JSONDecodeError, AttributeError):
                     response_body = full_body.decode(errors="replace")
 
+        latency_ms = (time.monotonic() - started) * 1000
         await track_usage(
-            user_id=user_id,
+            user_id=principal.user_id,
+            caller_type=caller_type,
+            api_key_id=principal.api_key_id,
             path=path,
             method=method,
             model=model,
+            streaming=is_streaming,
             request_body=req_body,
             response_body=response_body,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             status_code=resp.status_code,
+            outcome="success" if resp.status_code < 400 else "error",
+            latency_ms=latency_ms,
         )
 
     @staticmethod
