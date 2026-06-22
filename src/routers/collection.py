@@ -18,6 +18,7 @@ from src.database.mongo_model import PaginatedResponse, get_pagination_metadata
 from src.middlewares.auth import get_current_user
 from src.schemas.collection import CollectionRequest, CollectionUpdate
 from src.schemas.common import Pagination
+from src.services.private_document_limit import release_private_document_slots
 
 logger = logging.getLogger(__name__)
 vector_store = VectorStoreManager()
@@ -273,7 +274,11 @@ async def delete_collection(
                 detail="You are not allowed to delete this collection",
             )
 
-        await Document.delete_many({"collection_id": collection_id})
+        documents_deleted = await Document.delete_many({"collection_id": collection_id})
+        if documents_deleted:
+            await release_private_document_slots(
+                requesting_user.id, documents_deleted
+            )
 
         try:
             await anyio.to_thread.run_sync(
