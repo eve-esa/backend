@@ -27,11 +27,21 @@ class AsyncMongoDBManager:
 
             # Get the database
             self.database = self.client.get_database()
+            await self._ensure_indexes()
             return self.database
 
         except Exception as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
             raise
+
+    async def _ensure_indexes(self) -> None:
+        """Create indexes required for common query patterns."""
+        if self.database is None:
+            return
+
+        documents = self.database["documents"]
+        await documents.create_index("user_id")
+        await documents.create_index([("collection_id", 1), ("timestamp", -1)])
 
     def get_collection(self, collection_name: str) -> AsyncIOMotorCollection:
         """Get a collection from the database."""

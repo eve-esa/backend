@@ -1,3 +1,4 @@
+import asyncio
 import io
 import pytest
 
@@ -5,6 +6,7 @@ from tests.utils.utils import create_test_user_and_token
 from tests.utils.cleaner import cleanup_models
 from src.database.models.collection import Collection
 from src.database.models.document import Document
+from src.database.models.user import User
 from src.services.document import DocumentResult
 
 
@@ -85,7 +87,7 @@ async def test_private_document_upload_limit(async_client, monkeypatch):
     """Users cannot exceed the total private document upload cap."""
 
     _stub_vector_and_service(monkeypatch)
-    monkeypatch.setattr("src.routers.document.MAX_PRIVATE_DOCUMENTS", 2)
+    monkeypatch.setattr("src.constants.MAX_PRIVATE_DOCUMENTS", 2)
 
     user, token = await create_test_user_and_token()
     try:
@@ -125,6 +127,58 @@ async def test_private_document_upload_limit(async_client, monkeypatch):
 
         docs = await Document.find_all(filter_dict={"user_id": user.id})
         assert len(docs) == 2
+
+        await async_client.delete(
+            f"/collections/{coll_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_private_document_upload_limit_concurrent(async_client, monkeypatch):
+    """Concurrent uploads cannot exceed the per-user private document cap."""
+
+    _stub_vector_and_service(monkeypatch)
+    monkeypatch.setattr("src.constants.MAX_PRIVATE_DOCUMENTS", 2)
+
+    user, token = await create_test_user_and_token()
+    try:
+        coll_id = (
+            await async_client.post(
+                "/collections",
+                json={"name": "Concurrent Limit Coll"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        files = {
+            "files": ("one.txt", io.BytesIO(b"hello"), "text/plain"),
+            "metadata_names": (None, "one.txt"),
+        }
+        resp = await async_client.post(
+            f"/collections/{coll_id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=files,
+        )
+        assert resp.status_code == 200
+
+        async def upload_one():
+            return await async_client.post(
+                f"/collections/{coll_id}/documents",
+                headers={"Authorization": f"Bearer {token}"},
+                files=files,
+            )
+
+        results = await asyncio.gather(upload_one(), upload_one())
+        statuses = sorted(resp.status_code for resp in results)
+        assert statuses == [200, 400]
+
+        docs = await Document.find_all(filter_dict={"user_id": user.id})
+        assert len(docs) == 2
+
+        refreshed_user = await User.find_by_id(user.id)
+        assert refreshed_user.private_document_count == 2
 
         await async_client.delete(
             f"/collections/{coll_id}", headers={"Authorization": f"Bearer {token}"}
