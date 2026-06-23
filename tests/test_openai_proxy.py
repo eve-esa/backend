@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from server import app as _root_app
+from src.routers.openai_proxy import parse_proxy_model, resolve_proxy_route
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
 
@@ -12,6 +13,30 @@ from tests.utils.utils import create_test_user_and_token
 _proxy = _root_app.main_app
 
 _FAKE_UPSTREAM = "http://fake-upstream"
+_FAKE_JSC_UPSTREAM = "http://fake-jsc-upstream"
+
+
+def _enable_proxy(monkeypatch, *, runpod_url: str = _FAKE_UPSTREAM, jsc_url: str = ""):
+    monkeypatch.setattr(_proxy, "_proxy_enabled", True)
+    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_UPSTREAM_URL", runpod_url)
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_BASE_URL", jsc_url)
+    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_API_KEY", "fake-runpod-key")
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "fake-jsc-key")
+    monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "alias-eve")
+
+
+def _minimal_completion_body() -> bytes:
+    return json.dumps(
+        {
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    ).encode()
 
 
 def _mock_client(status: int = 200, body: bytes = b"{}", content_type: str = "application/json"):
@@ -31,7 +56,7 @@ def _mock_client(status: int = 200, body: bytes = b"{}", content_type: str = "ap
 
     client = MagicMock()
     client.stream.return_value = cm
-    return client
+    return client, client.stream
 
 
 # ── Proxy disabled ─────────────────────────────────────────────────────────────
@@ -39,8 +64,8 @@ def _mock_client(status: int = 200, body: bytes = b"{}", content_type: str = "ap
 
 @pytest.mark.asyncio
 async def test_proxy_disabled_falls_through(async_client, monkeypatch):
-    """When OPENAI_PROXY_UPSTREAM_URL is not set the dispatcher is a no-op."""
-    monkeypatch.setattr(_proxy, "_upstream", None)
+    """When no provider upstream URL is set the dispatcher is a no-op."""
+    monkeypatch.setattr(_proxy, "_proxy_enabled", False)
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 404
 
@@ -50,7 +75,7 @@ async def test_proxy_disabled_falls_through(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_auth_header_returns_401(async_client, monkeypatch):
-    monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
+    _enable_proxy(monkeypatch)
     resp = await async_client.post(
         "/v1/chat/completions",
         json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]},
@@ -60,7 +85,7 @@ async def test_no_auth_header_returns_401(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_wrong_auth_scheme_returns_401(async_client, monkeypatch):
-    monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
+    _enable_proxy(monkeypatch)
     resp = await async_client.post(
         "/v1/chat/completions",
         json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]},
@@ -71,7 +96,7 @@ async def test_wrong_auth_scheme_returns_401(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_invalid_jwt_returns_401(async_client, monkeypatch):
-    monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
+    _enable_proxy(monkeypatch)
     resp = await async_client.post(
         "/v1/chat/completions",
         json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hi"}]},
@@ -104,8 +129,9 @@ async def test_chat_completions_proxied(async_client, monkeypatch):
             }
         ).encode()
 
-        monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
-        monkeypatch.setattr(_proxy, "_client", _mock_client(body=upstream_body))
+        _enable_proxy(monkeypatch)
+        client, _ = _mock_client(body=upstream_body)
+        monkeypatch.setattr(_proxy, "_client", client)
 
         with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock) as mock_track:
             resp = await async_client.post(
@@ -137,8 +163,9 @@ async def test_chat_completions_upstream_error_passed_through(async_client, monk
             {"error": {"message": "upstream overloaded", "type": "server_error"}}
         ).encode()
 
-        monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
-        monkeypatch.setattr(_proxy, "_client", _mock_client(status=503, body=error_body))
+        _enable_proxy(monkeypatch)
+        client, _ = _mock_client(status=503, body=error_body)
+        monkeypatch.setattr(_proxy, "_client", client)
 
         with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock) as mock_track:
             resp = await async_client.post(
@@ -169,10 +196,9 @@ async def test_chat_completions_streaming_proxied(async_client, monkeypatch):
             b"data: [DONE]\n\n"
         )
 
-        monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
-        monkeypatch.setattr(
-            _proxy, "_client", _mock_client(body=sse_body, content_type="text/event-stream")
-        )
+        _enable_proxy(monkeypatch)
+        client, _ = _mock_client(body=sse_body, content_type="text/event-stream")
+        monkeypatch.setattr(_proxy, "_client", client)
 
         with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock) as mock_track:
             resp = await async_client.post(
@@ -207,10 +233,9 @@ async def test_chat_completions_streaming_no_usage_chunk(async_client, monkeypat
             b"data: [DONE]\n\n"
         )
 
-        monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
-        monkeypatch.setattr(
-            _proxy, "_client", _mock_client(body=sse_body, content_type="text/event-stream")
-        )
+        _enable_proxy(monkeypatch)
+        client, _ = _mock_client(body=sse_body, content_type="text/event-stream")
+        monkeypatch.setattr(_proxy, "_client", client)
 
         with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock) as mock_track:
             resp = await async_client.post(
@@ -245,8 +270,9 @@ async def test_models_endpoint_proxied(async_client, monkeypatch):
             }
         ).encode()
 
-        monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
-        monkeypatch.setattr(_proxy, "_client", _mock_client(body=models_body))
+        _enable_proxy(monkeypatch)
+        client, _ = _mock_client(body=models_body)
+        monkeypatch.setattr(_proxy, "_client", client)
 
         with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
             resp = await async_client.get(
@@ -264,9 +290,135 @@ async def test_models_endpoint_proxied(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_models_endpoint_requires_auth(async_client, monkeypatch):
-    monkeypatch.setattr(_proxy, "_upstream", _FAKE_UPSTREAM)
+    _enable_proxy(monkeypatch)
     resp = await async_client.get("/v1/models")
     assert resp.status_code == 401
+
+
+# ── Provider routing ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_provider", "expected_prefix_used"),
+    [
+        ("EVE-Instruct", "eve", False),
+        ("eve/EVE-Instruct", "eve", True),
+        ("runpod/EVE-Instruct", "runpod", True),
+        ("jsc/EVE-Instruct", "jsc", True),
+        ("jsc/alias-eve", "jsc", True),
+        ("eve-esa/EVE-Instruct", "eve", False),
+        (None, "eve", False),
+        ("no-slash-model", "eve", False),
+    ],
+)
+def test_parse_proxy_model(model, expected_provider, expected_prefix_used):
+    assert parse_proxy_model(model) == (expected_provider, expected_prefix_used)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_upstream_model"),
+    [
+        ("eve/EVE-Instruct", "eve-esa/EVE-Instruct"),
+        ("runpod/EVE-Instruct", "eve-esa/EVE-Instruct"),
+        ("jsc/EVE-Instruct", "alias-eve"),
+        ("jsc/alias-eve", "alias-eve"),
+        ("eve-esa/EVE-Instruct", "eve-esa/EVE-Instruct"),
+        ("no-slash-model", "no-slash-model"),
+        (None, None),
+    ],
+)
+def test_resolve_proxy_route_model_mapping(monkeypatch, model, expected_upstream_model):
+    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_UPSTREAM_URL", _FAKE_UPSTREAM)
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_BASE_URL", _FAKE_JSC_UPSTREAM)
+    monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "alias-eve")
+    _, _, upstream_model = resolve_proxy_route(model)
+    assert upstream_model == expected_upstream_model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_model", "jsc_url", "expected_upstream", "expected_api_key", "expected_upstream_model"),
+    [
+        ("eve/EVE-Instruct", "", _FAKE_UPSTREAM, "fake-runpod-key", "eve-esa/EVE-Instruct"),
+        ("eve-esa/EVE-Instruct", "", _FAKE_UPSTREAM, "fake-runpod-key", "eve-esa/EVE-Instruct"),
+        ("jsc/EVE-Instruct", _FAKE_JSC_UPSTREAM, _FAKE_JSC_UPSTREAM, "fake-jsc-key", "alias-eve"),
+        ("jsc/alias-eve", _FAKE_JSC_UPSTREAM, _FAKE_JSC_UPSTREAM, "fake-jsc-key", "alias-eve"),
+    ],
+)
+async def test_provider_routing(
+    async_client,
+    monkeypatch,
+    request_model,
+    jsc_url,
+    expected_upstream,
+    expected_api_key,
+    expected_upstream_model,
+):
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch, jsc_url=jsc_url)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+            resp = await async_client.post(
+                "/v1/chat/completions",
+                json={"model": request_model, "messages": [{"role": "user", "content": "Hi"}]},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert resp.status_code == 200
+        call_kwargs = stream_mock.call_args.kwargs
+        assert json.loads(call_kwargs["content"]) == {
+            "model": expected_upstream_model,
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        assert stream_mock.call_args.args[1].startswith(f"{expected_upstream}/chat/completions")
+        assert call_kwargs["headers"]["authorization"] == f"Bearer {expected_api_key}"
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_slug_forwards_unchanged(async_client, monkeypatch):
+    """org/model ids that are not proxy providers are passed through to RunPod."""
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+            resp = await async_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "unknown/EVE-Instruct",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert resp.status_code == 200
+        assert json.loads(stream_mock.call_args.kwargs["content"])["model"] == "unknown/EVE-Instruct"
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_jsc_provider_not_configured_returns_400(async_client, monkeypatch):
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch, jsc_url="")
+        resp = await async_client.post(
+            "/v1/chat/completions",
+            json={"model": "jsc/EVE-Instruct", "messages": [{"role": "user", "content": "Hi"}]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 400
+        assert "JSC provider is not configured" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
 
 
 # ── Real upstream integration tests ───────────────────────────────────────────

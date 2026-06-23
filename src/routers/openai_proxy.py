@@ -1,7 +1,15 @@
 """OpenAI-compatible gateway: user JWT on ingress, upstream API key on egress.
 
-Requires ``OPENAI_PROXY_UPSTREAM_URL`` to be set; requests fall through to the
-FastAPI app (404) when it is absent.
+Requires at least one provider upstream URL (``OPENAI_PROXY_UPSTREAM_URL`` for
+RunPod / ``eve``, or ``EVE_JSC_BASE_URL`` for JSC); requests fall through to
+the FastAPI app (404) when neither is set.
+
+Model names may use OpenRouter-style provider prefixes. The suffix is a
+logical name (e.g. ``EVE-Instruct``); the proxy maps it to the configured
+upstream model id (``MAIN_MODEL_NAME`` / ``EVE_JSC_MODEL_NAME``):
+
+- ``eve/EVE-Instruct`` or bare ``eve-esa/EVE-Instruct`` -> RunPod (default)
+- ``jsc/EVE-Instruct`` -> JSC (Jülich)
 """
 
 import json
@@ -10,7 +18,15 @@ from typing import Optional
 
 import httpx
 
-from src.config import OPENAI_PROXY_API_KEY, OPENAI_PROXY_UPSTREAM_URL
+from src.config import (
+    EVE_JSC_API_KEY,
+    EVE_JSC_BASE_URL,
+    EVE_JSC_MODEL_NAME,
+    MAIN_MODEL_API_KEY,
+    MAIN_MODEL_NAME,
+    OPENAI_PROXY_API_KEY,
+    OPENAI_PROXY_UPSTREAM_URL,
+)
 from src.middlewares.auth import get_user_id_from_bearer_token
 from src.services.openai_usage import track_usage
 
@@ -23,6 +39,62 @@ _STRIP_REQUEST_HEADERS = frozenset(
 _STRIP_RESPONSE_HEADERS = frozenset(
     {"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding", "trailer", "upgrade"}
 )
+
+_DEFAULT_PROVIDER = "eve"
+_RUNPOD_PROVIDERS = frozenset({"eve", "runpod"})
+_KNOWN_PROVIDERS = _RUNPOD_PROVIDERS | {"jsc"}
+
+
+def parse_proxy_model(model: Optional[str]) -> tuple[str, bool]:
+    """Return (provider, provider_prefix_used).
+
+    Only ``eve``, ``runpod``, and ``jsc`` are provider prefixes. Any other
+    ``org/model`` id (e.g. ``eve-esa/EVE-Instruct``) is forwarded unchanged.
+    """
+    if not model:
+        return _DEFAULT_PROVIDER, False
+
+    provider, sep, suffix = model.partition("/")
+    if sep and suffix and provider.lower() in _KNOWN_PROVIDERS:
+        return provider.lower(), True
+
+    return _DEFAULT_PROVIDER, False
+
+
+def resolve_proxy_route(model: Optional[str]) -> tuple[str, str, Optional[str]]:
+    """Return (upstream_base_url, api_key, upstream_model) for a proxy request."""
+    provider, provider_prefix_used = parse_proxy_model(model)
+
+    if provider == "jsc":
+        upstream = EVE_JSC_BASE_URL.rstrip("/")
+        if not upstream:
+            raise ValueError("JSC provider is not configured (EVE_JSC_BASE_URL)")
+        upstream_model = EVE_JSC_MODEL_NAME if provider_prefix_used else model
+        return upstream, EVE_JSC_API_KEY, upstream_model
+
+    if provider in _RUNPOD_PROVIDERS:
+        upstream = OPENAI_PROXY_UPSTREAM_URL.rstrip("/")
+        if not upstream:
+            raise ValueError("EVE provider is not configured (OPENAI_PROXY_UPSTREAM_URL)")
+        api_key = OPENAI_PROXY_API_KEY or MAIN_MODEL_API_KEY
+        upstream_model = MAIN_MODEL_NAME if provider_prefix_used else model
+        return upstream, api_key, upstream_model
+
+    raise ValueError(f"Unknown provider: {provider}")
+
+
+def _build_forward_body(
+    body: bytes,
+    req_body: Optional[dict],
+    *,
+    model: Optional[str],
+    upstream_model: Optional[str],
+    is_streaming: bool,
+) -> bytes:
+    if req_body is None or (not is_streaming and upstream_model == model):
+        return body
+    upstream_req = req_body if upstream_model == model else {**req_body, "model": upstream_model}
+    return json.dumps(upstream_req).encode()
 
 
 def _parse_usage(payload: dict) -> tuple[Optional[int], Optional[int], Optional[int]]:
@@ -87,26 +159,29 @@ def _parse_sse_chunks(chunks: list[bytes]) -> tuple[tuple, Optional[dict]]:
 class OpenAIProxyDispatcher:
     """
     ASGI middleware. Intercepts ``/v1/*`` requests, authenticates the user via
-    JWT, forwards to the configured upstream OpenAI-compatible endpoint
-    (``OPENAI_PROXY_UPSTREAM_URL``) replacing the Authorization header with the
+    JWT, forwards to a provider-specific upstream OpenAI-compatible endpoint
+    (``eve``/RunPod or ``jsc``) replacing the Authorization header with the
     upstream API key, and records token usage to MongoDB.
     All other requests pass through to the FastAPI app unchanged.
     """
 
     def __init__(self, main_app):
         self.main_app = main_app
-        upstream = OPENAI_PROXY_UPSTREAM_URL.rstrip("/")
-        self._upstream: str | None = upstream or None
-        self._client = httpx.AsyncClient(timeout=120.0) if upstream else None
+        self._proxy_enabled = bool(
+            OPENAI_PROXY_UPSTREAM_URL.strip() or EVE_JSC_BASE_URL.strip()
+        )
+        self._client = httpx.AsyncClient(timeout=120.0) if self._proxy_enabled else None
 
     async def __call__(self, scope, receive, send):
-        if self._upstream and scope["type"] == "http":
+        if self._proxy_enabled and scope["type"] == "http":
             path: str = scope.get("path", "")
             if path == "/v1" or path.startswith("/v1/"):
                 try:
                     await self._proxy(scope, receive, send)
                 except PermissionError as exc:
                     await self._send_error(send, 401, str(exc))
+                except ValueError as exc:
+                    await self._send_error(send, 400, str(exc))
                 except Exception as exc:
                     logger.exception("OpenAI proxy failed: %s", exc)
                     await self._send_error(send, 502, str(exc))
@@ -126,7 +201,6 @@ class OpenAIProxyDispatcher:
         # Strip /v1 prefix so it isn't doubled when the upstream URL already ends with /v1
         upstream_path = path[3:] if path.startswith("/v1") else path
         query = scope.get("query_string", b"").decode()
-        url = f"{self._upstream}{upstream_path}" + (f"?{query}" if query else "")
         method: str = scope.get("method", "GET")
 
         body = b""
@@ -148,18 +222,30 @@ class OpenAIProxyDispatcher:
                 is_streaming = bool(req_body.get("stream", False))
                 if is_streaming:
                     req_body.setdefault("stream_options", {})["include_usage"] = True
-                    body = json.dumps(req_body).encode()
             except (json.JSONDecodeError, AttributeError):
                 pass
+
+        upstream_base, upstream_api_key, upstream_model = resolve_proxy_route(model)
+        url = f"{upstream_base}{upstream_path}" + (f"?{query}" if query else "")
+
+        fwd_body = _build_forward_body(
+            body,
+            req_body,
+            model=model,
+            upstream_model=upstream_model,
+            is_streaming=is_streaming,
+        )
 
         fwd_headers = {
             k.decode(): v.decode()
             for k, v in scope.get("headers", [])
             if k.lower() not in _STRIP_REQUEST_HEADERS
         }
-        fwd_headers["authorization"] = f"Bearer {OPENAI_PROXY_API_KEY}" if OPENAI_PROXY_API_KEY else auth
+        fwd_headers["authorization"] = (
+            f"Bearer {upstream_api_key}" if upstream_api_key else auth
+        )
 
-        async with self._client.stream(method, url, headers=fwd_headers, content=body) as resp:
+        async with self._client.stream(method, url, headers=fwd_headers, content=fwd_body) as resp:
             resp_headers = [
                 [k.lower().encode(), v.encode()]
                 for k, v in resp.headers.items()
