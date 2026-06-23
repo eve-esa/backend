@@ -4,12 +4,12 @@ Requires at least one provider upstream URL (``OPENAI_PROXY_UPSTREAM_URL`` for
 RunPod / ``eve``, or ``EVE_JSC_BASE_URL`` for JSC); requests fall through to
 the FastAPI app (404) when neither is set.
 
-Model names may use OpenRouter-style provider prefixes. The suffix is a
-logical name (e.g. ``EVE-Instruct``); the proxy maps it to the configured
-upstream model id (``MAIN_MODEL_NAME`` / ``EVE_JSC_MODEL_NAME``):
+Model names may use LiteLLM-style provider prefixes
+(``<provider>/<model-id>``; see OpenAI-compatible providers in LiteLLM docs).
+The proxy strips only the provider segment and forwards the model id unchanged:
 
-- ``eve/EVE-Instruct`` or bare ``eve-esa/EVE-Instruct`` -> RunPod (default)
-- ``jsc/EVE-Instruct`` -> JSC (Jülich)
+- ``eve/eve-esa/EVE-Instruct`` or bare ``eve-esa/EVE-Instruct`` -> RunPod (default)
+- ``jsc/alias-eve`` -> JSC (Jülich)
 """
 
 import json
@@ -21,9 +21,7 @@ import httpx
 from src.config import (
     EVE_JSC_API_KEY,
     EVE_JSC_BASE_URL,
-    EVE_JSC_MODEL_NAME,
     MAIN_MODEL_API_KEY,
-    MAIN_MODEL_NAME,
     OPENAI_PROXY_API_KEY,
     OPENAI_PROXY_UPSTREAM_URL,
 )
@@ -45,42 +43,45 @@ _RUNPOD_PROVIDERS = frozenset({"eve", "runpod"})
 _KNOWN_PROVIDERS = _RUNPOD_PROVIDERS | {"jsc"}
 
 
-def parse_proxy_model(model: Optional[str]) -> tuple[str, bool]:
-    """Return (provider, provider_prefix_used).
+def parse_proxy_model(model: Optional[str]) -> tuple[str, Optional[str]]:
+    """Return (provider, upstream_model).
 
-    Only ``eve``, ``runpod``, and ``jsc`` are provider prefixes. Any other
-    ``org/model`` id (e.g. ``eve-esa/EVE-Instruct``) is forwarded unchanged.
+    LiteLLM-style ``provider/model-id``: only ``eve``, ``runpod``, and ``jsc``
+    are stripped; the remainder is forwarded unchanged (e.g.
+    ``eve/eve-esa/EVE-Instruct`` -> ``eve-esa/EVE-Instruct``).
     """
     if not model:
-        return _DEFAULT_PROVIDER, False
+        return _DEFAULT_PROVIDER, None
 
-    provider, sep, suffix = model.partition("/")
-    if sep and suffix and provider.lower() in _KNOWN_PROVIDERS:
-        return provider.lower(), True
+    slug, sep, rest = model.partition("/")
+    if sep and rest and slug.lower() in _KNOWN_PROVIDERS:
+        return slug.lower(), rest
 
-    return _DEFAULT_PROVIDER, False
+    return _DEFAULT_PROVIDER, model
+
+
+def _jsc_upstream() -> tuple[str, str]:
+    upstream = EVE_JSC_BASE_URL.rstrip("/")
+    if not upstream:
+        raise ValueError("JSC provider is not configured (EVE_JSC_BASE_URL)")
+    return upstream, EVE_JSC_API_KEY
+
+
+def _runpod_upstream() -> tuple[str, str]:
+    upstream = OPENAI_PROXY_UPSTREAM_URL.rstrip("/")
+    if not upstream:
+        raise ValueError("EVE provider is not configured (OPENAI_PROXY_UPSTREAM_URL)")
+    return upstream, OPENAI_PROXY_API_KEY or MAIN_MODEL_API_KEY
 
 
 def resolve_proxy_route(model: Optional[str]) -> tuple[str, str, Optional[str]]:
     """Return (upstream_base_url, api_key, upstream_model) for a proxy request."""
-    provider, provider_prefix_used = parse_proxy_model(model)
-
+    provider, upstream_model = parse_proxy_model(model)
     if provider == "jsc":
-        upstream = EVE_JSC_BASE_URL.rstrip("/")
-        if not upstream:
-            raise ValueError("JSC provider is not configured (EVE_JSC_BASE_URL)")
-        upstream_model = EVE_JSC_MODEL_NAME if provider_prefix_used else model
-        return upstream, EVE_JSC_API_KEY, upstream_model
-
-    if provider in _RUNPOD_PROVIDERS:
-        upstream = OPENAI_PROXY_UPSTREAM_URL.rstrip("/")
-        if not upstream:
-            raise ValueError("EVE provider is not configured (OPENAI_PROXY_UPSTREAM_URL)")
-        api_key = OPENAI_PROXY_API_KEY or MAIN_MODEL_API_KEY
-        upstream_model = MAIN_MODEL_NAME if provider_prefix_used else model
-        return upstream, api_key, upstream_model
-
-    raise ValueError(f"Unknown provider: {provider}")
+        upstream_base, upstream_api_key = _jsc_upstream()
+    elif provider in _RUNPOD_PROVIDERS:
+        upstream_base, upstream_api_key = _runpod_upstream()
+    return upstream_base, upstream_api_key, upstream_model
 
 
 def _build_forward_body(
@@ -91,10 +92,13 @@ def _build_forward_body(
     upstream_model: Optional[str],
     is_streaming: bool,
 ) -> bytes:
-    if req_body is None or (not is_streaming and upstream_model == model):
+    if req_body is None:
         return body
-    upstream_req = req_body if upstream_model == model else {**req_body, "model": upstream_model}
-    return json.dumps(upstream_req).encode()
+    if not is_streaming and upstream_model == model:
+        return body
+    if upstream_model == model:
+        return json.dumps(req_body).encode()
+    return json.dumps({**req_body, "model": upstream_model}).encode()
 
 
 def _parse_usage(payload: dict) -> tuple[Optional[int], Optional[int], Optional[int]]:

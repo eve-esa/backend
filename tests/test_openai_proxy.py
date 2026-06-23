@@ -22,8 +22,6 @@ def _enable_proxy(monkeypatch, *, runpod_url: str = _FAKE_UPSTREAM, jsc_url: str
     monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_BASE_URL", jsc_url)
     monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_API_KEY", "fake-runpod-key")
     monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "fake-jsc-key")
-    monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
-    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "alias-eve")
 
 
 def _minimal_completion_body() -> bytes:
@@ -297,52 +295,47 @@ async def test_models_endpoint_requires_auth(async_client, monkeypatch):
 
 # ── Provider routing ───────────────────────────────────────────────────────────
 
-
-@pytest.mark.parametrize(
-    ("model", "expected_provider", "expected_prefix_used"),
-    [
-        ("EVE-Instruct", "eve", False),
-        ("eve/EVE-Instruct", "eve", True),
-        ("runpod/EVE-Instruct", "runpod", True),
-        ("jsc/EVE-Instruct", "jsc", True),
-        ("jsc/alias-eve", "jsc", True),
-        ("eve-esa/EVE-Instruct", "eve", False),
-        (None, "eve", False),
-        ("no-slash-model", "eve", False),
-    ],
-)
-def test_parse_proxy_model(model, expected_provider, expected_prefix_used):
-    assert parse_proxy_model(model) == (expected_provider, expected_prefix_used)
+_PROVIDER_MODEL_CASES = [
+    ("eve/eve-esa/EVE-Instruct", "eve", "eve-esa/EVE-Instruct"),
+    ("runpod/eve-esa/EVE-Instruct", "runpod", "eve-esa/EVE-Instruct"),
+    ("jsc/alias-eve", "jsc", "alias-eve"),
+    ("eve-esa/EVE-Instruct", "eve", "eve-esa/EVE-Instruct"),
+    ("alias-eve", "eve", "alias-eve"),
+    (None, "eve", None),
+]
 
 
 @pytest.mark.parametrize(
-    ("model", "expected_upstream_model"),
+    ("model", "expected_provider", "expected_upstream_model"),
+    _PROVIDER_MODEL_CASES,
+)
+def test_parse_proxy_model(model, expected_provider, expected_upstream_model):
+    assert parse_proxy_model(model) == (expected_provider, expected_upstream_model)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_upstream_base", "expected_api_key"),
     [
-        ("eve/EVE-Instruct", "eve-esa/EVE-Instruct"),
-        ("runpod/EVE-Instruct", "eve-esa/EVE-Instruct"),
-        ("jsc/EVE-Instruct", "alias-eve"),
-        ("jsc/alias-eve", "alias-eve"),
-        ("eve-esa/EVE-Instruct", "eve-esa/EVE-Instruct"),
-        ("no-slash-model", "no-slash-model"),
-        (None, None),
+        ("eve/eve-esa/EVE-Instruct", _FAKE_UPSTREAM, "fake-runpod-key"),
+        ("jsc/alias-eve", _FAKE_JSC_UPSTREAM, "fake-jsc-key"),
     ],
 )
-def test_resolve_proxy_route_model_mapping(monkeypatch, model, expected_upstream_model):
+def test_resolve_proxy_route_selects_upstream(monkeypatch, model, expected_upstream_base, expected_api_key):
     monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_UPSTREAM_URL", _FAKE_UPSTREAM)
     monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_BASE_URL", _FAKE_JSC_UPSTREAM)
-    monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
-    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "alias-eve")
-    _, _, upstream_model = resolve_proxy_route(model)
-    assert upstream_model == expected_upstream_model
+    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_API_KEY", "fake-runpod-key")
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "fake-jsc-key")
+    upstream_base, api_key, _ = resolve_proxy_route(model)
+    assert upstream_base == expected_upstream_base
+    assert api_key == expected_api_key
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_model", "jsc_url", "expected_upstream", "expected_api_key", "expected_upstream_model"),
     [
-        ("eve/EVE-Instruct", "", _FAKE_UPSTREAM, "fake-runpod-key", "eve-esa/EVE-Instruct"),
+        ("eve/eve-esa/EVE-Instruct", "", _FAKE_UPSTREAM, "fake-runpod-key", "eve-esa/EVE-Instruct"),
         ("eve-esa/EVE-Instruct", "", _FAKE_UPSTREAM, "fake-runpod-key", "eve-esa/EVE-Instruct"),
-        ("jsc/EVE-Instruct", _FAKE_JSC_UPSTREAM, _FAKE_JSC_UPSTREAM, "fake-jsc-key", "alias-eve"),
         ("jsc/alias-eve", _FAKE_JSC_UPSTREAM, _FAKE_JSC_UPSTREAM, "fake-jsc-key", "alias-eve"),
     ],
 )
@@ -412,7 +405,7 @@ async def test_jsc_provider_not_configured_returns_400(async_client, monkeypatch
         _enable_proxy(monkeypatch, jsc_url="")
         resp = await async_client.post(
             "/v1/chat/completions",
-            json={"model": "jsc/EVE-Instruct", "messages": [{"role": "user", "content": "Hi"}]},
+            json={"model": "jsc/alias-eve", "messages": [{"role": "user", "content": "Hi"}]},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 400
