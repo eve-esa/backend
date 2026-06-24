@@ -81,6 +81,8 @@ def resolve_proxy_route(model: Optional[str]) -> tuple[str, str, Optional[str]]:
         upstream_base, upstream_api_key = _jsc_upstream()
     elif provider in _RUNPOD_PROVIDERS:
         upstream_base, upstream_api_key = _runpod_upstream()
+    else:
+        raise ValueError(f"Unknown proxy provider: {provider}")
     return upstream_base, upstream_api_key, upstream_model
 
 
