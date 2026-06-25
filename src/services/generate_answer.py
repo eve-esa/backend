@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from src.config import (
     DEEPINFRA_API_TOKEN,
+    EVE_JSC_MODEL_NAME,
     FALLBACK_MODEL_NAME,
     IS_PROD,
     MAIN_MODEL_NAME,
@@ -218,6 +219,8 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
         return SATCOM_SMALL_MODEL_NAME
     if llm_type == LLMType.Satcom_Large.value:
         return SATCOM_LARGE_MODEL_NAME
+    if llm_type == LLMType.Eve_Jsc.value:
+        return EVE_JSC_MODEL_NAME
     return None
 
 

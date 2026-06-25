@@ -33,6 +33,11 @@ class User(MongoModel):
     rate_limit_period_end: Optional[datetime] = Field(
         default=None, description="Current rate-limit period end timestamp"
     )
+    private_document_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of private documents owned by the user",
+    )
 
     collection_name: ClassVar[str] = "users"
 

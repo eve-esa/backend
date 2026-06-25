@@ -8,6 +8,7 @@ from typing import Dict, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from bson import ObjectId
 from pydantic import BaseModel, Field
 
 from src.config import IS_PROD, MODEL_TIMEOUT
@@ -126,6 +127,38 @@ async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
     return CO2EquivalenceResult(
         title=title, co2eq_kg=base, equivalent_count=count, text=text
     )
+
+
+async def apply_private_collections_to_request(
+    request: GenerationRequest,
+    user_id: str,
+) -> None:
+    """Resolve private collection IDs and finalize collection_ids on the request."""
+    collection_object_ids = []
+    for collection_id in request.private_collections:
+        try:
+            collection_object_ids.append(ObjectId(collection_id))
+        except Exception:
+            continue
+
+    user_collections = []
+    if collection_object_ids:
+        user_collections = await CollectionModel.find_all(
+            filter_dict={
+                "user_id": user_id,
+                "_id": {"$in": collection_object_ids},
+            }
+        )
+
+    request.private_collections_map = {c.id: c.name for c in user_collections}
+    if user_collections:
+        request.collection_ids = request.collection_ids + [
+            c.id for c in user_collections
+        ]
+    request.collection_ids = [
+        c for c in request.collection_ids if c != "Wiley AI Gateway"
+    ]
+    logger.info(f"Collection IDs: {request.collection_ids}")
 
 
 class SourceLogsRequest(BaseModel):
@@ -392,21 +425,7 @@ async def create_message(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
-        # remove "Wiley AI Gateway" from collection_ids
-        request.collection_ids = [
-            c for c in request.collection_ids if c != "Wiley AI Gateway"
-        ]
-        logger.info(f"Collection IDs: {request.collection_ids}")
+        await apply_private_collections_to_request(request, requesting_user.id)
 
         # Extract year range from filters for MCP usage
         try:
@@ -746,21 +765,7 @@ async def create_message_stream(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
-        # remove "Wiley AI Gateway" from collection_ids
-        request.collection_ids = [
-            c for c in request.collection_ids if c != "Wiley AI Gateway"
-        ]
-        logger.info(f"Collection IDs: {request.collection_ids}")
+        await apply_private_collections_to_request(request, requesting_user.id)
 
         # Extract year range from filters for MCP usage
         try:
@@ -1460,21 +1465,7 @@ async def generate(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        # All user collections are used by default
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
-        # remove "Wiley AI Gateway" from collection_ids
-        request.collection_ids = [
-            c for c in request.collection_ids if c != "Wiley AI Gateway"
-        ]
-        logger.info(f"Collection IDs: {request.collection_ids}")
+        await apply_private_collections_to_request(request, requesting_user.id)
 
         # Extract year range from filters for MCP usage
         try:
@@ -1556,19 +1547,7 @@ async def retrieve(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if len(user_collections) > 0:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
-        request.collection_ids = [
-            c for c in request.collection_ids if c != "Wiley AI Gateway"
-        ]
-        logger.info(f"Collection IDs: {request.collection_ids}")
+        await apply_private_collections_to_request(request, requesting_user.id)
 
         try:
             request.year = extract_year_range_from_filters(request.filters)

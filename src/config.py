@@ -51,6 +51,10 @@ SATCOM_LARGE_MODEL_NAME = os.getenv(
 SATCOM_SMALL_BASE_URL = os.getenv("SATCOM_SMALL_BASE_URL", "").strip()
 SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
+EVE_JSC_BASE_URL = os.getenv("EVE_JSC_BASE_URL", "").strip()
+EVE_JSC_MODEL_NAME = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip()
+EVE_JSC_API_KEY = os.getenv("EVE_JSC_API_KEY", MAIN_MODEL_API_KEY).strip()
+
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()

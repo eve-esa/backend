@@ -19,6 +19,10 @@ from src.constants import (
     DEFAULT_CHUNK_OVERLAP,
 )
 from src.schemas.common import Pagination
+from src.services.private_document_limit import (
+    reserve_private_document_slots,
+    release_private_document_slots,
+)
 
 # Setup
 router = APIRouter()
@@ -146,29 +150,34 @@ async def upload_documents(
         Service response with ingestion details.
 
     Raises:
-        HTTPException: 404 if collection is not found; 403 if access is forbidden; 500 for processing errors.
+        HTTPException: 404 if collection is not found; 403 if access is forbidden; 400 if the private document limit is exceeded; 500 for processing errors.
     """
     collection = await get_collection_and_validate_ownership(
         collection_id, requesting_user
     )
 
-    logger.info(
-        f"Received {len(files)} files for processing in collection {collection_id}"
-    )
-
-    docs_data = [
-        DocumentModel(
-            user_id=requesting_user.id,
-            collection_id=collection_id,
-            name=file.filename,
-            filename=file.filename,
-            file_type=os.path.splitext(file.filename)[1].lstrip("."),
-            source_url=metadata_urls[i] if metadata_urls else None,
-        )
-        for i, file in enumerate(files)
-    ]
-
+    file_count = len(files)
+    slots_reserved = False
     try:
+        await reserve_private_document_slots(requesting_user.id, file_count)
+        slots_reserved = True
+
+        logger.info(
+            f"Received {file_count} files for processing in collection {collection_id}"
+        )
+
+        docs_data = [
+            DocumentModel(
+                user_id=requesting_user.id,
+                collection_id=collection_id,
+                name=file.filename,
+                filename=file.filename,
+                file_type=os.path.splitext(file.filename)[1].lstrip("."),
+                source_url=metadata_urls[i] if metadata_urls else None,
+            )
+            for i, file in enumerate(files)
+        ]
+
         effective_model = collection.embeddings_model or embeddings_model
         result = await document_service.add_documents(
             collection_name=collection_id,
@@ -189,9 +198,11 @@ async def upload_documents(
 
         await DocumentModel.bulk_create(docs_data)
         return result.data
-    except HTTPException as e:
-        raise e
     except Exception as e:
+        if slots_reserved:
+            await release_private_document_slots(requesting_user.id, file_count)
+        if isinstance(e, HTTPException):
+            raise
         logger.error(f"Error processing documents: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Error processing documents: {str(e)}"
@@ -248,4 +259,5 @@ async def delete_document(
         logger.error(f"Failed to delete vectors for document {document_id}: {e}")
 
     await document.delete()
+    await release_private_document_slots(requesting_user.id, 1)
     return {"message": "Document and embeddings deleted successfully"}
