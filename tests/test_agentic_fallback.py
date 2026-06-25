@@ -11,11 +11,12 @@ import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from src.services.agents.core.runner import (
     _build_react_graph,
     _resolve_agentic_llm_type,
+    _serialise_trace_entry,
     generate_answer_agentic,
     generate_answer_agentic_stream_helper,
 )
@@ -72,6 +73,52 @@ def _patched_runner(**overrides):
             applied[name] = stack.enter_context(patch(f"{_RUNNER}.{name}", value))
         applied["error_logger"] = error_logger
         yield applied
+
+
+# ─── trace serialisation ──────────────────────────────────────────────────────
+
+
+class TestSerialiseTraceEntry:
+    def test_includes_response_and_usage_metadata(self):
+        msg = AIMessage(
+            content="answer",
+            id="msg-1",
+            response_metadata={
+                "model_name": "gpt-4",
+                "finish_reason": "stop",
+                "token_usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            usage_metadata={
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+            },
+            tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "call-1"}],
+        )
+
+        entry = _serialise_trace_entry(msg, node="agent", latency_s=1.2)
+
+        assert entry["response_metadata"]["model_name"] == "gpt-4"
+        assert entry["usage_metadata"]["total_tokens"] == 15
+        assert entry["id"] == "msg-1"
+        assert entry["tool_calls"] == [
+            {"name": "search", "args": {"q": "x"}, "id": "call-1"}
+        ]
+
+    def test_includes_tool_message_correlation_fields(self):
+        msg = ToolMessage(
+            content="geocode result",
+            name="geocode",
+            tool_call_id="call-1",
+            id="tool-1",
+            status="success",
+        )
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["tool_call_id"] == "call-1"
+        assert entry["status"] == "success"
+        assert entry["id"] == "tool-1"
 
 
 # ─── _build_react_graph ───────────────────────────────────────────────────────

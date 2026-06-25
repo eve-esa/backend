@@ -90,6 +90,51 @@ except Exception:
 # ─── Trace serialisation ──────────────────────────────────────────────────────
 
 
+def _coerce_trace_metadata(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalise LangChain metadata objects into a plain dict for persistence."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value or None
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(exclude_none=True)
+        return dumped or None
+    return None
+
+
+def _enrich_trace_entry_with_message_metadata(
+    entry: Dict[str, Any], msg: Any
+) -> None:
+    """Attach provider/model metadata and correlation ids to a trace entry."""
+    msg_id = getattr(msg, "id", None)
+    if msg_id:
+        entry["id"] = msg_id
+
+    response_metadata = _coerce_trace_metadata(
+        getattr(msg, "response_metadata", None)
+    )
+    if response_metadata:
+        entry["response_metadata"] = response_metadata
+
+    usage_metadata = _coerce_trace_metadata(getattr(msg, "usage_metadata", None))
+    if usage_metadata:
+        entry["usage_metadata"] = usage_metadata
+
+    if ToolMessage and isinstance(msg, ToolMessage):
+        tool_call_id = getattr(msg, "tool_call_id", None)
+        if tool_call_id:
+            entry["tool_call_id"] = tool_call_id
+        status = getattr(msg, "status", None)
+        if status:
+            entry["status"] = status
+
+    if AIMessage and isinstance(msg, AIMessage):
+        invalid_tool_calls = getattr(msg, "invalid_tool_calls", None)
+        if invalid_tool_calls:
+            entry["invalid_tool_calls"] = invalid_tool_calls
+
+
 def _serialise_trace_entry(
     msg: Any, *, node: str = "", latency_s: Optional[float] = None
 ) -> Dict[str, Any]:
@@ -105,9 +150,16 @@ def _serialise_trace_entry(
         )
         tc = getattr(msg, "tool_calls", None)
         if tc:
-            entry["tool_calls"] = [
-                {"name": c.get("name", ""), "args": c.get("args", {})} for c in tc
-            ]
+            tool_calls: List[Dict[str, Any]] = []
+            for c in tc:
+                tc_entry: Dict[str, Any] = {
+                    "name": c.get("name", ""),
+                    "args": c.get("args", {}),
+                }
+                if c.get("id"):
+                    tc_entry["id"] = c["id"]
+                tool_calls.append(tc_entry)
+            entry["tool_calls"] = tool_calls
     elif ToolMessage and isinstance(msg, ToolMessage):
         entry["role"] = "tool"
         entry["name"] = getattr(msg, "name", "tool")
@@ -125,6 +177,8 @@ def _serialise_trace_entry(
     else:
         entry["role"] = "unknown"
         entry["content"] = str(msg)
+
+    _enrich_trace_entry_with_message_metadata(entry, msg)
     return entry
 
 
