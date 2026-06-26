@@ -20,7 +20,11 @@ from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
 from src.config import MCP_TOOLS_CACHE_TTL
 from src.database.mongo import get_collection
-from src.middlewares.auth import Principal, resolve_principal_from_bearer_token
+from src.middlewares.auth import (
+    Principal,
+    extract_bearer_token,
+    resolve_principal_from_bearer_token,
+)
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 
@@ -404,11 +408,11 @@ class MCPProxyDispatcher:
 
     async def _resolve_proxy(self, scope, server_name: str):
         headers = dict(scope.get("headers", []))
-        auth = headers.get(b"authorization", b"").decode()
-        if not auth.startswith("Bearer "):
+        token = extract_bearer_token(headers.get(b"authorization", b"").decode())
+        if not token:
             raise PermissionError("Missing or malformed Authorization header")
 
-        principal = await resolve_principal_from_bearer_token(auth[7:])
+        principal = await resolve_principal_from_bearer_token(token)
         user_id = principal.user_id
 
         cache_key = (server_name, user_id)

@@ -12,7 +12,7 @@ from src.database.models.mcp_server import (
 )
 from src.database.models.user import User
 from src.database.mongo_model import PaginatedResponse
-from src.middlewares.auth import get_current_user
+from src.middlewares.auth import get_current_user, get_optional_bearer_token
 from src.schemas.common import Pagination
 from src.schemas.mcp_server import (
     MCPServerPublic,
@@ -152,6 +152,7 @@ async def create_mcp_server(
 @router.get("/mcp-servers/{server_id}", response_model=MCPServerPublicDetail)
 async def get_mcp_server(
     server_id: str,
+    bearer_token: Optional[str] = Depends(get_optional_bearer_token),
 ):
     """
     Get an MCP server by id owned by the current user.
@@ -169,7 +170,9 @@ async def get_mcp_server(
     mcp_server = await _get_public_mcp_server(server_id)
     tools = []
     try:
-        loaded_tools = await _load_mcp_tools_for_servers([mcp_server])
+        loaded_tools = await _load_mcp_tools_for_servers(
+            [mcp_server], mcp_proxy_bearer_token=bearer_token
+        )
         tools = [
             {
                 "name": getattr(tool, "name", "unknown"),

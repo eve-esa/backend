@@ -14,6 +14,7 @@ from src.database.models.api_key import ApiKey
 from src.database.models.user import User
 
 security = HTTPBearer()
+optional_bearer = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
 
 _API_KEY_RE = re.compile(r"^eve_[0-9a-f]{64}$")
@@ -109,6 +110,36 @@ async def resolve_principal_from_bearer_token(token: str) -> Principal:
     if not user_id:
         raise PermissionError("Invalid token payload")
     return Principal(user_id=user_id, auth_type="jwt")
+
+
+def extract_bearer_token(authorization_header: Optional[str]) -> Optional[str]:
+    """Parse a raw ``Authorization`` header value into the credential token.
+
+    Accepts JWT access tokens and ``eve_`` API keys. Returns ``None`` when the
+    header is missing or not ``Bearer <token>``.
+    """
+    if not authorization_header:
+        return None
+    scheme, _, token = authorization_header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+    return token
+
+
+async def get_bearer_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> str:
+    """FastAPI dependency: required bearer credential (JWT or ``eve_`` API key)."""
+    return credentials.credentials
+
+
+async def get_optional_bearer_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_bearer),
+) -> Optional[str]:
+    """FastAPI dependency: bearer credential when present, else ``None``."""
+    if credentials is None:
+        return None
+    return credentials.credentials
 
 
 async def get_user_id_from_bearer_token(token: str) -> str:

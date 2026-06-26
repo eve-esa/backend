@@ -65,6 +65,36 @@ class TestLoadMcpToolsForServers:
 
         assert tools == []
 
+    @pytest.mark.asyncio
+    async def test_routes_through_proxy_when_bearer_token_and_base_url_set(self):
+        captured_connections: dict = {}
+
+        def make_client(connections, **kwargs):
+            captured_connections.update(connections)
+            mock_client = MagicMock()
+            mock_client.get_tools = AsyncMock(return_value=[])
+            return mock_client
+
+        with patch(f"{_RUNNER}._mcp_adapters_available", True), patch(
+            f"{_RUNNER}.MultiServerMCPClient", side_effect=make_client
+        ), patch(
+            f"{_RUNNER}.backend_mcp_proxy_url",
+            return_value="http://127.0.0.1:8000/mcp/effis",
+        ), patch(f"{_RUNNER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_RUNNER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_RUNNER}.ErrorLoggingInterceptor", return_value=MagicMock()), patch(
+            f"{_RUNNER}.logger"
+        ):
+            await _load_mcp_tools_for_servers(
+                [_mcp_server("effis", "https://agentcore.example/mcp")],
+                mcp_proxy_bearer_token="user-jwt",
+            )
+
+        assert captured_connections["effis"]["url"] == "http://127.0.0.1:8000/mcp/effis"
+        assert captured_connections["effis"]["headers"]["Authorization"] == (
+            "Bearer user-jwt"
+        )
+
 
 class TestBuildTools:
     @pytest.mark.asyncio
@@ -76,9 +106,14 @@ class TestBuildTools:
         with patch(f"{_RUNNER}._langgraph_available", True), patch(
             f"{_RUNNER}._load_mcp_tools_for_servers",
             AsyncMock(return_value=[mcp_tool]),
-        ), patch(f"{_RUNNER}.logger"):
+        ) as load_mock, patch(f"{_RUNNER}.logger"):
+            request.mcp_proxy_bearer_token = "user-jwt"
             tools = await _build_tools(request)
 
+        load_mock.assert_awaited_once_with(
+            request.mcp_server_configs,
+            mcp_proxy_bearer_token="user-jwt",
+        )
         assert tools == [mcp_tool]
 
     @pytest.mark.asyncio

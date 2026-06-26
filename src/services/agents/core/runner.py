@@ -28,6 +28,7 @@ from src.services.generate_answer import (
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.core.registry import get_agent_graph
 from src.services.agents.graphs_bundle import graphs_base_module, graphs_utils_module
+from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp_auth import get_cognito_token_provider
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
@@ -185,17 +186,26 @@ def _serialise_trace_entry(
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
 
 
-async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any]:
-    """Connect to each MCP server, authenticate, and load its tools."""
+async def _load_mcp_tools_for_servers(
+    mcp_server_configs: List[Any],
+    *,
+    mcp_proxy_bearer_token: Optional[str] = None,
+) -> List[Any]:
+    """Connect to each MCP server, authenticate, and load its tools.
+
+    When ``mcp_proxy_bearer_token`` is set and the proxy base URL is configured,
+    routes through ``/mcp/{name}`` so listing shares the proxy cache and Cognito
+    egress auth. Otherwise falls back to a direct AgentCore connection.
+    """
     if not _mcp_adapters_available or not mcp_server_configs:
         return []
 
     token_provider = get_cognito_token_provider()
-    auth_header: Optional[str] = None
+    cognito_auth_header: Optional[str] = None
     if token_provider:
         try:
             token = await token_provider.get_token()
-            auth_header = f"Bearer {token}"
+            cognito_auth_header = f"Bearer {token}"
         except Exception as exc:
             logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
 
@@ -217,12 +227,20 @@ async def _load_mcp_tools_for_servers(mcp_server_configs: List[Any]) -> List[Any
             continue
 
         headers: Dict[str, str] = dict(srv.config.headers or {})
-        if auth_header and "Authorization" not in headers:
-            headers["Authorization"] = auth_header
+        proxy_http_url = (
+            backend_mcp_proxy_url(srv.name) if mcp_proxy_bearer_token else None
+        )
+        if proxy_http_url:
+            headers["Authorization"] = f"Bearer {mcp_proxy_bearer_token}"
+            url = proxy_http_url
+        else:
+            if cognito_auth_header and "Authorization" not in headers:
+                headers["Authorization"] = cognito_auth_header
+            url = srv.config.url
 
         connections[srv.name] = {
             "transport": "streamable_http" if transport == "streamable_http" else "sse",
-            "url": srv.config.url,
+            "url": url,
             "headers": headers,
         }
 
@@ -286,7 +304,10 @@ async def _build_tools(
 
     if getattr(request, "mcp_server_configs", None):
         try:
-            mcp_tools = await _load_mcp_tools_for_servers(request.mcp_server_configs)
+            mcp_tools = await _load_mcp_tools_for_servers(
+                request.mcp_server_configs,
+                mcp_proxy_bearer_token=request.mcp_proxy_bearer_token,
+            )
             tools.extend(mcp_tools)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)

@@ -12,6 +12,7 @@ The proxy strips only the provider segment and forwards the model id unchanged:
 - ``jsc/alias-eve`` -> JSC (Jülich)
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -26,7 +27,7 @@ from src.config import (
     OPENAI_PROXY_API_KEY,
     OPENAI_PROXY_UPSTREAM_URL,
 )
-from src.middlewares.auth import resolve_principal_from_bearer_token
+from src.middlewares.auth import extract_bearer_token, resolve_principal_from_bearer_token
 from src.services.openai_usage import track_usage
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,24 @@ class OpenAIProxyDispatcher:
         self._proxy_enabled = bool(
             OPENAI_PROXY_UPSTREAM_URL.strip() or EVE_JSC_BASE_URL.strip()
         )
-        self._client = httpx.AsyncClient(timeout=120.0) if self._proxy_enabled else None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return an httpx client bound to the current event loop.
+
+        pytest-asyncio uses a fresh loop per test; reusing a client created on a
+        prior loop causes ``Event loop is closed`` on later requests.
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is not None and self._client_loop is not None:
+            if self._client_loop is not loop or self._client_loop.is_closed():
+                self._client = None
+                self._client_loop = None
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=120.0)
+            self._client_loop = loop
+        return self._client
 
     async def __call__(self, scope, receive, send):
         if self._proxy_enabled and scope["type"] == "http":
@@ -198,11 +216,11 @@ class OpenAIProxyDispatcher:
 
     async def _proxy(self, scope, receive, send):
         headers = dict(scope.get("headers", []))
-        auth = headers.get(b"authorization", b"").decode()
-        if not auth.startswith("Bearer "):
+        token = extract_bearer_token(headers.get(b"authorization", b"").decode())
+        if not token:
             raise PermissionError("Missing or malformed Authorization header")
 
-        principal = await resolve_principal_from_bearer_token(auth[7:])
+        principal = await resolve_principal_from_bearer_token(token)
         caller_type = principal.caller_type()
 
         path: str = scope["path"]
@@ -254,7 +272,8 @@ class OpenAIProxyDispatcher:
         )
 
         started = time.monotonic()
-        async with self._client.stream(method, url, headers=fwd_headers, content=fwd_body) as resp:
+        client = self._get_client()
+        async with client.stream(method, url, headers=fwd_headers, content=fwd_body) as resp:
             resp_headers = [
                 [k.lower().encode(), v.encode()]
                 for k, v in resp.headers.items()

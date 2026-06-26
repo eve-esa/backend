@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from bson import ObjectId
@@ -19,7 +19,7 @@ from src.database.models.conversation import Conversation
 from src.database.models.mcp_server import MCPServer
 from src.database.models.message import Message
 from src.database.models.user import User
-from src.middlewares.auth import get_current_user
+from src.middlewares.auth import get_bearer_token, get_current_user
 from src.schemas.co2 import CO2EquivalenceComparison, CO2EquivalenceResult
 from src.schemas.generation_request import GenerationRequest
 from src.schemas.message import CreateMessageResponse, MessageUpdate
@@ -1654,9 +1654,9 @@ async def _prepare_agentic_request(
 async def create_agentic_message(
     request: GenerationRequest,
     conversation_id: str,
-    http_request: Request,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
+    bearer_token: str = Depends(get_bearer_token),
 ) -> CreateMessageResponse:
     """
     Create a new message using the fully agentic LangGraph pipeline.
@@ -1718,9 +1718,7 @@ async def create_agentic_message(
             ]
 
         request = await _prepare_agentic_request(request, requesting_user)
-        auth_header = http_request.headers.get("Authorization") or ""
-        if auth_header.startswith("Bearer "):
-            request.mcp_proxy_bearer_token = auth_header[7:]
+        request.mcp_proxy_bearer_token = bearer_token
         logger.info("Agentic collection IDs: %s", request.collection_ids)
 
         message = await Message.create(
@@ -1799,9 +1797,9 @@ async def create_agentic_message(
 async def create_agentic_message_stream(
     request: GenerationRequest,
     conversation_id: str,
-    http_request: Request,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
+    bearer_token: str = Depends(get_bearer_token),
 ) -> StreamingResponse:
     """
     Create a new message using the agentic pipeline and stream the result via SSE.
@@ -1868,9 +1866,7 @@ async def create_agentic_message_stream(
             ]
 
         request = await _prepare_agentic_request(request, requesting_user)
-        auth_header = http_request.headers.get("Authorization") or ""
-        if auth_header.startswith("Bearer "):
-            request.mcp_proxy_bearer_token = auth_header[7:]
+        request.mcp_proxy_bearer_token = bearer_token
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
 
         message = await Message.create(
