@@ -268,7 +268,7 @@ class OpenAIProxyDispatcher:
             if k.lower() not in _STRIP_REQUEST_HEADERS
         }
         fwd_headers["authorization"] = (
-            f"Bearer {upstream_api_key}" if upstream_api_key else auth
+            f"Bearer {upstream_api_key}" if upstream_api_key else f"Bearer {token}"
         )
 
         started = time.monotonic()

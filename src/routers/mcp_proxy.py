@@ -253,6 +253,15 @@ def _is_error_message(messages: list[dict] | None) -> bool | None:
     return False
 
 
+def _tool_call_outcome(*, http_failed: bool, is_error: bool | None) -> str:
+    """Map HTTP + MCP parse/error signals to a usage ``outcome`` value."""
+    if http_failed or is_error is True:
+        return "error"
+    if is_error is None:
+        return "unknown"
+    return "success"
+
+
 def _replay_receive(body: bytes, original_receive):
     """Build an ASGI ``receive`` that replays an already-consumed request body.
 
@@ -391,6 +400,7 @@ class MCPProxyDispatcher:
             # error) while still returning HTTP 200, so combine both signals.
             is_error = _is_error_message(messages)
             http_failed = status_code is None or status_code >= 400
+            outcome = _tool_call_outcome(http_failed=http_failed, is_error=is_error)
             await track_usage(
                 user_id=principal.user_id,
                 caller_type=caller_type,
@@ -399,8 +409,8 @@ class MCPProxyDispatcher:
                 operation="tools/call",
                 tool_name=tool_name,
                 status_code=status_code,
-                is_error=bool(is_error),
-                outcome="error" if (http_failed or is_error) else "success",
+                is_error=is_error,
+                outcome=outcome,
                 latency_ms=latency_ms,
                 request_payload=arguments,
                 response_payload=response_payload,
