@@ -20,7 +20,11 @@ from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
 from src.config import MCP_TOOLS_CACHE_TTL
 from src.database.mongo import get_collection
-from src.middlewares.auth import get_user_id_from_bearer_token
+from src.middlewares.auth import (
+    Principal,
+    extract_bearer_token,
+    resolve_principal_from_bearer_token,
+)
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 
@@ -167,6 +171,118 @@ async def shutdown_mcp_proxy_lifespans() -> None:
         _proxy_apps.clear()
 
 
+def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
+    """Return ``(tool_name, arguments)`` for a JSON-RPC ``tools/call`` request.
+
+    MCP messages are JSON-RPC 2.0 over the Streamable HTTP transport: a request
+    object (or a batch array) carrying ``method`` and ``params``; ``tools/call``
+    puts the tool name in ``params.name`` and the bulky args in
+    ``params.arguments``.
+    See https://modelcontextprotocol.io/specification (Streamable HTTP transport).
+
+    Returns ``None`` for anything that is not a ``tools/call`` (``initialize``,
+    ``tools/list``, notifications, ``ping``, GET/SSE opens with no body, …) so
+    those housekeeping hops are not logged — only real tool invocations are.
+    """
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    messages = parsed if isinstance(parsed, list) else [parsed]
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("method") != "tools/call":
+            continue
+        params = msg.get("params") or {}
+        return params.get("name"), params.get("arguments")
+    return None
+
+
+def _parse_mcp_messages(raw: bytes) -> list[dict] | None:
+    """Parse the JSON-RPC message(s) out of an MCP Streamable HTTP response body.
+
+    Responses arrive as Server-Sent Events (``event: message`` / ``data: {json}``)
+    or, less commonly, as a bare JSON object/array. This decodes them into
+    structured dicts so the stored payload is queryable (rather than an opaque
+    SSE string). Returns ``None`` when nothing could be parsed (opaque/binary
+    body) so the caller can fall back to storing the raw bytes verbatim.
+    See https://modelcontextprotocol.io/specification (Streamable HTTP transport).
+    """
+    if not raw:
+        return None
+    text = raw.decode(errors="replace")
+    messages: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            payload = line[5:].strip()
+        elif line.startswith("{") or line.startswith("["):
+            payload = line
+        else:
+            continue
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        for msg in parsed if isinstance(parsed, list) else [parsed]:
+            if isinstance(msg, dict):
+                messages.append(msg)
+    return messages or None
+
+
+def _is_error_message(messages: list[dict] | None) -> bool | None:
+    """Detect an MCP-level failure across parsed JSON-RPC messages.
+
+    A ``tools/call`` can fail in two ways that both return HTTP 200, so HTTP
+    status alone is not enough:
+      * a JSON-RPC protocol ``error`` object, or
+      * a ``result`` whose ``isError`` flag is ``true`` (the tool ran but
+        reported failure).
+    Returns ``None`` when no message could be parsed.
+    """
+    if messages is None:
+        return None
+    for msg in messages:
+        if msg.get("error") is not None:
+            return True
+        result = msg.get("result")
+        if isinstance(result, dict) and result.get("isError"):
+            return True
+    return False
+
+
+def _tool_call_outcome(*, http_failed: bool, is_error: bool | None) -> str:
+    """Map HTTP + MCP parse/error signals to a usage ``outcome`` value."""
+    if http_failed or is_error is True:
+        return "error"
+    if is_error is None:
+        return "unknown"
+    return "success"
+
+
+def _replay_receive(body: bytes, original_receive):
+    """Build an ASGI ``receive`` that replays an already-consumed request body.
+
+    The dispatcher must read the body to inspect the JSON-RPC method, but the
+    downstream FastMCP sub-app still needs to read it. This yields the buffered
+    body once, then delegates to ``original_receive`` so genuine
+    ``http.disconnect`` events still reach the sub-app (critical for long-lived
+    SSE streams, which poll ``receive`` to detect client disconnect).
+    """
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await original_receive()
+
+    return receive
+
+
 class MCPProxyDispatcher:
     """
     Outermost ASGI middleware. Intercepts ``/mcp/{server_name}/*`` requests,
@@ -194,7 +310,9 @@ class MCPProxyDispatcher:
                     tail = "/".join(parts[3:]) if len(parts) > 3 else ""
                     remaining = f"{mcp_path}/{tail}".rstrip("/") if tail else mcp_path
                     try:
-                        proxy_app = await self._resolve_proxy(scope, server_name)
+                        proxy_app, principal = await self._resolve_proxy(
+                            scope, server_name
+                        )
                     except PermissionError as exc:
                         await self._send_error(send, 401, str(exc))
                         return
@@ -207,18 +325,105 @@ class MCPProxyDispatcher:
                         return
 
                     scope = {**scope, "path": remaining, "raw_path": remaining.encode()}
-                    await proxy_app(scope, receive, send)
+                    await self._dispatch_and_track(
+                        scope, receive, send, proxy_app, principal, server_name
+                    )
                     return
 
         await self.main_app(scope, receive, send)
 
+    async def _dispatch_and_track(
+        self, scope, receive, send, proxy_app, principal: Principal, server_name: str
+    ):
+        """Forward to the proxy sub-app and record one usage event per tool call.
+
+        Buffers the JSON-RPC request body to detect ``tools/call`` (only those are
+        logged), wraps ``send`` to capture the upstream status and response body,
+        and writes the usage event after the response has been delivered so the
+        client is never blocked by the DB write.
+        """
+        # Buffer the request body once so we can both inspect it and replay it
+        # downstream (ASGI bodies are single-consumption streams).
+        body = b""
+        while True:
+            event = await receive()
+            body += event.get("body", b"")
+            if not event.get("more_body", False):
+                break
+
+        tool_call = _extract_tool_call(body)
+        downstream_receive = _replay_receive(body, receive)
+
+        if tool_call is None:
+            # Housekeeping hop (initialize/tools_list/notification/SSE) — forward
+            # without recording a usage event.
+            await proxy_app(scope, downstream_receive, send)
+            return
+
+        tool_name, arguments = tool_call
+        caller_type = principal.caller_type()
+
+        status_holder: dict[str, int] = {}
+        resp_chunks: list[bytes] = []
+
+        async def wrapped_send(message):
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                chunk = message.get("body") or b""
+                if chunk:
+                    resp_chunks.append(chunk)
+            await send(message)
+
+        started = time.monotonic()
+        try:
+            await proxy_app(scope, downstream_receive, wrapped_send)
+        finally:
+            latency_ms = (time.monotonic() - started) * 1000
+            status_code = status_holder.get("status")
+            raw_response = b"".join(resp_chunks)
+
+            # Decode the SSE/JSON-RPC body into structured objects so the stored
+            # payload is queryable for deeper stats; fall back to the raw string
+            # if it can't be parsed (so nothing is ever lost).
+            messages = _parse_mcp_messages(raw_response)
+            if messages is None:
+                response_payload = (
+                    raw_response.decode(errors="replace") if raw_response else None
+                )
+            elif len(messages) == 1:
+                response_payload = messages[0]
+            else:
+                response_payload = messages
+
+            # A tools/call can fail at the MCP level (result.isError / JSON-RPC
+            # error) while still returning HTTP 200, so combine both signals.
+            is_error = _is_error_message(messages)
+            http_failed = status_code is None or status_code >= 400
+            outcome = _tool_call_outcome(http_failed=http_failed, is_error=is_error)
+            await track_usage(
+                user_id=principal.user_id,
+                caller_type=caller_type,
+                api_key_id=principal.api_key_id,
+                server_name=server_name,
+                operation="tools/call",
+                tool_name=tool_name,
+                status_code=status_code,
+                is_error=is_error,
+                outcome=outcome,
+                latency_ms=latency_ms,
+                request_payload=arguments,
+                response_payload=response_payload,
+            )
+
     async def _resolve_proxy(self, scope, server_name: str):
         headers = dict(scope.get("headers", []))
-        auth = headers.get(b"authorization", b"").decode()
-        if not auth.startswith("Bearer "):
+        token = extract_bearer_token(headers.get(b"authorization", b"").decode())
+        if not token:
             raise PermissionError("Missing or malformed Authorization header")
 
-        user_id = await get_user_id_from_bearer_token(auth[7:])
+        principal = await resolve_principal_from_bearer_token(token)
+        user_id = principal.user_id
 
         cache_key = (server_name, user_id)
         now = time.monotonic()
@@ -264,17 +469,12 @@ class MCPProxyDispatcher:
                         MCP_TOOLS_CACHE_TTL,
                     )
 
-        await track_usage(
-            user_id=user_id,
-            server_name=server_name,
-            request_method=scope.get("method", "UNKNOWN"),
-        )
-
         provider = get_cognito_token_provider()
         if provider is None:
             raise RuntimeError("AgentCore authentication is not configured")
 
-        return await build_proxy_app(agentcore_url, provider)
+        proxy_app = await build_proxy_app(agentcore_url, provider)
+        return proxy_app, principal
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):

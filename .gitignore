@@ -171,3 +171,13 @@ populate_db/*
 testing/
 
 testing/
+
+# Editor / IDE config (local)
+.cursor/
+
+# Local tooling: CodeGraphContext & MCP client configs (contain local paths)
+.cgcignore
+.mcp.json
+
+# Externally cloned repos (not part of this codebase)
+repos/

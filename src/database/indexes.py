@@ -9,6 +9,7 @@ async def ensure_indexes() -> None:
     """Create MongoDB indexes required by MCP proxy, usage tracking, and API keys."""
     mcp_servers = get_collection("mcp_servers")
     mcp_usage = get_collection("mcp_usage")
+    openai_usage = get_collection("openai_usage")
     api_keys = get_collection("api_keys")
 
     await mcp_servers.create_index(
@@ -17,13 +18,43 @@ async def ensure_indexes() -> None:
         unique=True,
     )
 
+    # MCP proxy usage stats. Indexes mirror the back-office query dimensions:
+    # per user, per server/tool, and per caller_type (login/api_key/internal),
+    # always sliced by time. The bulky ``mcp_usage_payloads`` collection is keyed
+    # by ``_id`` (auto-indexed) and needs no extra index.
     await mcp_usage.create_index(
         [("user_id", 1), ("timestamp", -1)],
         name="mcp_usage_by_user_time",
     )
     await mcp_usage.create_index(
-        [("server_name", 1), ("timestamp", -1)],
-        name="mcp_usage_by_server_time",
+        [("server_name", 1), ("tool_name", 1), ("timestamp", -1)],
+        name="mcp_usage_by_server_tool_time",
+    )
+    await mcp_usage.create_index(
+        [("caller_type", 1), ("timestamp", -1)],
+        name="mcp_usage_by_caller_time",
+    )
+    await mcp_usage.create_index(
+        [("api_key_id", 1), ("timestamp", -1)],
+        name="mcp_usage_by_api_key_time",
+    )
+
+    # OpenAI proxy usage stats (previously unindexed). Same dimensions plus model.
+    await openai_usage.create_index(
+        [("user_id", 1), ("timestamp", -1)],
+        name="openai_usage_by_user_time",
+    )
+    await openai_usage.create_index(
+        [("model", 1), ("timestamp", -1)],
+        name="openai_usage_by_model_time",
+    )
+    await openai_usage.create_index(
+        [("caller_type", 1), ("timestamp", -1)],
+        name="openai_usage_by_caller_time",
+    )
+    await openai_usage.create_index(
+        [("api_key_id", 1), ("timestamp", -1)],
+        name="openai_usage_by_api_key_time",
     )
 
     await api_keys.create_index(

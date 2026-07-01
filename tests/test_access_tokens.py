@@ -197,3 +197,20 @@ async def test_revoke_api_key_ownership(async_client):
     finally:
         await ApiKey.delete_many({"user_id": user_a.id})
         await cleanup_models([user_a, user_b])
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        (None, None),
+        ("", None),
+        ("Bearer jwt-token", "jwt-token"),
+        ("bearer eve_abc", "eve_abc"),
+        ("Basic foo", None),
+        ("Bearertoken", None),
+    ],
+)
+def test_extract_bearer_token(header, expected):
+    from src.middlewares.auth import extract_bearer_token
+
+    assert extract_bearer_token(header) == expected

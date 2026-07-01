@@ -12,6 +12,15 @@ from tests.utils.utils import create_test_user_and_token
 # App stack: MCPProxyDispatcher → OpenAIProxyDispatcher → FastAPI
 _proxy = _root_app.main_app
 
+
+@pytest.fixture(autouse=True)
+def _reset_openai_proxy_http_client():
+    """Avoid cross-test httpx client reuse (pytest-asyncio uses one loop per test)."""
+    _proxy._client = None
+    _proxy._client_loop = None
+    yield
+
+
 _FAKE_UPSTREAM = "http://fake-upstream"
 _FAKE_JSC_UPSTREAM = "http://fake-jsc-upstream"
 
@@ -415,23 +424,53 @@ async def test_jsc_provider_not_configured_returns_400(async_client, monkeypatch
 
 
 # ── Real upstream integration tests ───────────────────────────────────────────
-# Skipped unless OPENAI_PROXY_UPSTREAM_URL is set in the environment.
+# Skipped unless at least one provider upstream URL is set in the environment.
+# Model selection mirrors testing/test-OpenAI-proxy.py: prefer OPENAI_PROXY_TEST_MODEL,
+# else jsc/{EVE_JSC_MODEL_NAME} when JSC is configured, else first model from RunPod.
 
 _upstream_configured = pytest.mark.skipif(
-    not os.getenv("OPENAI_PROXY_UPSTREAM_URL"),
+    not (
+        os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
+        or os.getenv("EVE_JSC_BASE_URL", "").strip()
+    ),
+    reason="Neither OPENAI_PROXY_UPSTREAM_URL nor EVE_JSC_BASE_URL is set",
+)
+
+_runpod_configured = pytest.mark.skipif(
+    not os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip(),
     reason="OPENAI_PROXY_UPSTREAM_URL not set",
 )
 
 
-async def _get_first_model(async_client, token: str) -> str:
-    """Return OPENAI_PROXY_TEST_MODEL if set, otherwise the first model from /v1/models."""
-    if model := os.getenv("OPENAI_PROXY_TEST_MODEL"):
+def _default_jsc_test_model() -> str:
+    name = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip() or "alias-eve"
+    return f"jsc/{name}"
+
+
+async def _resolve_test_model(async_client, token: str) -> str:
+    """Return the model id for live proxy integration tests."""
+    if model := os.getenv("OPENAI_PROXY_TEST_MODEL", "").strip():
         return model
-    resp = await async_client.get("/v1/models", headers={"Authorization": f"Bearer {token}"})
-    return resp.json()["data"][0]["id"]
+    if os.getenv("EVE_JSC_BASE_URL", "").strip():
+        return _default_jsc_test_model()
+    if os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip():
+        resp = await async_client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {token}"}
+        )
+        if resp.status_code != 200:
+            pytest.fail(
+                f"/v1/models returned {resp.status_code}: {resp.text[:500]}"
+            )
+        data = resp.json()
+        models = data.get("data")
+        if not models:
+            pytest.fail(f"/v1/models returned no models: {data!r}")
+        return models[0]["id"]
+    pytest.skip("No OpenAI proxy upstream configured")
 
 
 @_upstream_configured
+@_runpod_configured
 @pytest.mark.asyncio
 async def test_real_models_endpoint(async_client):
     user, token = await create_test_user_and_token()
@@ -454,7 +493,7 @@ async def test_real_models_endpoint(async_client):
 async def test_real_chat_completions(async_client):
     user, token = await create_test_user_and_token()
     try:
-        model = await _get_first_model(async_client, token)
+        model = await _resolve_test_model(async_client, token)
         resp = await async_client.post(
             "/v1/chat/completions",
             json={
@@ -464,7 +503,7 @@ async def test_real_chat_completions(async_client):
             },
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text[:800]
         data = resp.json()
         assert data["object"] == "chat.completion"
         assert data["choices"][0]["message"]["role"] == "assistant"
@@ -479,7 +518,7 @@ async def test_real_chat_completions(async_client):
 async def test_real_chat_completions_streaming(async_client):
     user, token = await create_test_user_and_token()
     try:
-        model = await _get_first_model(async_client, token)
+        model = await _resolve_test_model(async_client, token)
         resp = await async_client.post(
             "/v1/chat/completions",
             json={
@@ -490,7 +529,7 @@ async def test_real_chat_completions_streaming(async_client):
             },
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text[:800]
         assert "text/event-stream" in resp.headers.get("content-type", "")
 
         lines = [l for l in resp.text.splitlines() if l.startswith("data: ") and l != "data: [DONE]"]
@@ -527,7 +566,7 @@ async def test_real_missing_messages_returns_error(async_client):
     """Proxy must forward the upstream error when required fields are absent."""
     user, token = await create_test_user_and_token()
     try:
-        model = await _get_first_model(async_client, token)
+        model = await _resolve_test_model(async_client, token)
         resp = await async_client.post(
             "/v1/chat/completions",
             json={"model": model},
