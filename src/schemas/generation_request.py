@@ -61,6 +61,7 @@ class GenerationRequest(BaseModel):
     _mcp_server_configs: List[Any] = PrivateAttr(default_factory=list)
     _mcp_proxy_bearer_token: Optional[str] = PrivateAttr(default=None)
     _resolved_custom_model: Any = PrivateAttr(default=None)
+    _mcp_user_id: Optional[str] = PrivateAttr(default=None)
 
     @property
     def collection_ids(self) -> List[str]:
@@ -103,3 +104,10 @@ class GenerationRequest(BaseModel):
     @resolved_custom_model.setter
     def resolved_custom_model(self, value: Any) -> None:
         self._resolved_custom_model = value
+    def mcp_user_id(self) -> Optional[str]:
+        """Authenticated user id for MCP tool discovery cache keys."""
+        return self._mcp_user_id
+
+    @mcp_user_id.setter
+    def mcp_user_id(self, value: Optional[str]) -> None:
+        self._mcp_user_id = value
