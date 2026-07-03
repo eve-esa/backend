@@ -11,6 +11,7 @@ async def ensure_indexes() -> None:
     mcp_usage = get_collection("mcp_usage")
     openai_usage = get_collection("openai_usage")
     api_keys = get_collection("api_keys")
+    user_custom_models = get_collection("user_custom_models")
 
     await mcp_servers.create_index(
         [("user_id", 1), ("name", 1)],
@@ -65,6 +66,17 @@ async def ensure_indexes() -> None:
     await api_keys.create_index(
         [("user_id", 1)],
         name="api_keys_user_id",
+    )
+
+    await user_custom_models.create_index(
+        [("user_id", 1), ("display_name", 1)],
+        name="user_custom_models_user_display_name",
+        unique=True,
+        partialFilterExpression={"deleted_at": None},
+    )
+    await user_custom_models.create_index(
+        [("user_id", 1), ("created_at", -1)],
+        name="user_custom_models_user_created_at",
     )
 
     logger.info("MongoDB indexes ensured for MCP proxy features and API keys")
