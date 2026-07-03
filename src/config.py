@@ -136,6 +136,12 @@ MCP_TOOLS_CACHE_TTL = float(os.getenv("MCP_TOOLS_CACHE_TTL", "300"))
 # OpenAI-compatible proxy — upstream base URL (e.g. "https://example.com") and optional API key
 OPENAI_PROXY_UPSTREAM_URL = os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
 OPENAI_PROXY_API_KEY = os.getenv("OPENAI_PROXY_API_KEY", "").strip()
+
+# AWS Secrets Manager — user custom model API keys (BYOM)
+AWS_REGION = os.getenv("AWS_REGION", "eu-central-1").strip()
+AWS_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL", "").strip() or None
+CUSTOM_MODEL_SECRET_PREFIX = os.getenv("CUSTOM_MODEL_SECRET_PREFIX", "eve/dev").strip()
+CUSTOM_MODEL_MAX_PER_USER = int(os.getenv("CUSTOM_MODEL_MAX_PER_USER", "10"))
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:

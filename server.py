@@ -12,6 +12,7 @@ from src.routers import (
     auth_router,
     collection_router,
     conversation_router,
+    custom_model_router,
     document_router,
     error_log_router,
     forgot_password_router,
@@ -50,6 +51,9 @@ def register_routers(app: FastAPI):
 
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])
+
+    # Custom models
+    app.include_router(custom_model_router, tags=["Custom Models"])
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
