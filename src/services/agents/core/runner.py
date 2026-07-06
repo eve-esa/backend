@@ -378,7 +378,9 @@ async def _resolve_agentic_llm_client(
 ) -> tuple[Any, Dict[str, Any]]:
     """Resolve the LLM client and metadata for agentic generation."""
     if request.custom_model_id:
-        model = await get_owned_custom_model(request.custom_model_id, user_id)
+        model = request.resolved_custom_model
+        if model is None:
+            model = await get_owned_custom_model(request.custom_model_id, user_id)
         api_key = await get_custom_model_api_key(model.secret_arn)
         llm = get_shared_llm_manager().build_custom_client(
             base_url=model.base_url,

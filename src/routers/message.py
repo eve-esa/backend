@@ -1646,7 +1646,7 @@ async def _prepare_agentic_request(
         )
 
     if request.custom_model_id:
-        await get_owned_custom_model(
+        request.resolved_custom_model = await get_owned_custom_model(
             request.custom_model_id,
             requesting_user.id,
             action="use",
