@@ -16,3 +16,10 @@ PLATFORM_MODELS: List[PlatformModel] = [
 
 def list_platform_models() -> List[PlatformModel]:
     return list(PLATFORM_MODELS)
+
+
+def resolve_platform_llm_type(platform_id: str) -> str | None:
+    for model in PLATFORM_MODELS:
+        if model.id == platform_id:
+            return model.llm_type
+    return None

@@ -55,13 +55,19 @@ async def create_custom_model(
     await ensure_custom_model_quota(requesting_user.id)
     base_url = validate_custom_model_base_url(request.base_url)
 
-    model = await UserCustomModel.create(
-        user_id=requesting_user.id,
-        display_name=request.display_name,
-        model_name=request.model_name,
-        base_url=base_url,
-        secret_arn="",
-    )
+    try:
+        model = await UserCustomModel.create(
+            user_id=requesting_user.id,
+            display_name=request.display_name,
+            model_name=request.model_name,
+            base_url=base_url,
+            secret_arn="",
+        )
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=409,
+            detail="A custom model with this display name already exists",
+        )
 
     secret_arn: str | None = None
     try:
@@ -87,16 +93,6 @@ async def create_custom_model(
         raise HTTPException(
             status_code=500,
             detail="Failed to store custom model credentials",
-        )
-
-    try:
-        await model.save()
-    except DuplicateKeyError:
-        await delete_custom_model_secret(secret_arn)
-        await UserCustomModel.delete_many({"_id": ObjectId(model.id)})
-        raise HTTPException(
-            status_code=409,
-            detail="A custom model with this display name already exists",
         )
 
     return to_custom_model_public(model)

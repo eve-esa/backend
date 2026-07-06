@@ -229,6 +229,9 @@ async def test_resolve_agentic_llm_client_custom_model_overrides_llm_type():
         await UserCustomModel.delete_many({"user_id": user.id})
         await cleanup_models([user])
 
+
+@pytest.mark.asyncio
+async def test_resolve_agentic_llm_client_rejects_other_users_model():
     owner, _ = await create_test_user_and_token()
     other, _ = await create_test_user_and_token()
     model = await UserCustomModel.create(

@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError

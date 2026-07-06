@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
@@ -11,8 +9,6 @@ from fastapi import HTTPException
 from src.config import CUSTOM_MODEL_MAX_PER_USER, IS_PROD
 from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.custom_model import CustomModelPublic
-
-logger = logging.getLogger(__name__)
 
 
 def validate_custom_model_base_url(base_url: str) -> str:
