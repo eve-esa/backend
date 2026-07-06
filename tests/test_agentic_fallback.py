@@ -289,7 +289,9 @@ class TestGenerateAnswerAgenticInGraphFallback:
                 _latencies,
                 prompts,
                 _trace,
-            ) = await generate_answer_agentic(request, conversation_id="c1")
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
 
         assert final_answer == "final answer"
         assert prompts["used_fallback_llm"] is True
@@ -308,7 +310,10 @@ class TestStreamingEarlyFailure:
         ), patch(f"{_RUNNER}.logger"):
             events = []
             async for event in generate_answer_agentic_stream_helper(
-                request, conversation_id="c1", message_id="m1"
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
             ):
                 events.append(event)
 

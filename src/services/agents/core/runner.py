@@ -374,13 +374,10 @@ def _resolve_agentic_llm_type(
 async def _resolve_agentic_llm_client(
     request: GenerationRequest,
     *,
-    user_id: Optional[str],
-    llm_type_override: Optional[str] = None,
+    user_id: str,
 ) -> tuple[Any, Dict[str, Any]]:
     """Resolve the LLM client and metadata for agentic generation."""
     if request.custom_model_id:
-        if not user_id:
-            raise ValueError("custom_model_id requires an authenticated user")
         model = await get_owned_custom_model(request.custom_model_id, user_id)
         api_key = await get_custom_model_api_key(model.secret_arn)
         llm = get_shared_llm_manager().build_custom_client(
@@ -394,9 +391,7 @@ async def _resolve_agentic_llm_client(
             "custom_model_name": model.model_name,
         }
 
-    effective_type = _resolve_agentic_llm_type(
-        request.llm_type, override=llm_type_override
-    )
+    effective_type = _resolve_agentic_llm_type(request.llm_type)
     llm = get_shared_llm_manager().get_client_for_model(effective_type)
     return llm, {"agentic_llm_resolved": effective_type}
 
@@ -480,8 +475,9 @@ async def _fetch_conversation_context(
 
 async def generate_answer_agentic(
     request: GenerationRequest,
+    *,
+    user_id: str,
     conversation_id: Optional[str] = None,
-    user_id: Optional[str] = None,
 ) -> tuple[
     str,
     List[Dict[str, Any]],
@@ -641,10 +637,10 @@ async def generate_answer_agentic_stream_helper(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    user_id: str,
     output_format: str = "json",
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
-    user_id: Optional[str] = None,
 ):
     """Stream agentic generation as SSE events.
 
@@ -956,19 +952,19 @@ async def generate_answer_agentic_stream(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    user_id: str,
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
-    user_id: Optional[str] = None,
 ):
     """Plain-text SSE wrapper around the agentic stream helper."""
     async for chunk in generate_answer_agentic_stream_helper(
         request,
         conversation_id,
         message_id,
+        user_id,
         "plain",
         background_tasks,
         cancel_event,
-        user_id,
     ):
         yield chunk
 
@@ -977,19 +973,19 @@ async def generate_answer_agentic_json_stream(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    user_id: str,
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
-    user_id: Optional[str] = None,
 ):
     """JSON SSE wrapper around the agentic stream helper."""
     async for chunk in generate_answer_agentic_stream_helper(
         request,
         conversation_id,
         message_id,
+        user_id,
         "json",
         background_tasks,
         cancel_event,
-        user_id,
     ):
         yield chunk
 
@@ -1001,9 +997,9 @@ async def run_agentic_generation_to_bus(
     request: GenerationRequest,
     conversation_id: str,
     message_id: str,
+    user_id: str,
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
-    user_id: Optional[str] = None,
 ):
     """Run agentic generation in background, publishing chunks to stream bus."""
     bus = get_stream_bus()
@@ -1025,18 +1021,17 @@ async def run_agentic_generation_to_bus(
             f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n",
         )
     finally:
-        if user_id:
-            try:
-                user = await User.find_by_id(user_id)
-                message = await Message.find_by_id(message_id)
-                if user and message:
-                    token_count = count_tokens_for_texts(message.input, message.output)
-                    await consume_tokens_for_user(user, token_count)
-            except Exception as consume_error:
-                logger.warning(
-                    "Failed to apply token usage for agentic generation: %s",
-                    consume_error,
-                )
+        try:
+            user = await User.find_by_id(user_id)
+            message = await Message.find_by_id(message_id)
+            if user and message:
+                token_count = count_tokens_for_texts(message.input, message.output)
+                await consume_tokens_for_user(user, token_count)
+        except Exception as consume_error:
+            logger.warning(
+                "Failed to apply token usage for agentic generation: %s",
+                consume_error,
+            )
         await bus.close(message_id)
         with contextlib.suppress(Exception):
             from src.services.cancel_manager import get_cancel_manager

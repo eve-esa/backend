@@ -1748,7 +1748,7 @@ async def create_agentic_message(
             prompts,
             trace_entries,
         ) = await generate_answer_agentic(
-            request, conversation_id=conversation_id, user_id=requesting_user.id
+            request, user_id=requesting_user.id, conversation_id=conversation_id
         )
 
         message.output = answer
@@ -1896,9 +1896,9 @@ async def create_agentic_message_stream(
                 request=request,
                 conversation_id=conversation_id,
                 message_id=message.id,
+                user_id=requesting_user.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
-                user_id=requesting_user.id,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
