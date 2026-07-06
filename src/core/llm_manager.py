@@ -252,6 +252,20 @@ class LLMManager:
             )
         return self._eve_jsc_chat_openai
 
+    def build_custom_client(
+        self, *, base_url: str, model_name: str, api_key: str
+    ) -> ChatOpenAI:
+        """Build a one-off ChatOpenAI client for a user-owned custom model."""
+        self._selected_llm_type = "custom"
+        return ChatOpenAI(
+            api_key=api_key,
+            base_url=base_url.rstrip("/"),
+            model=model_name,
+            temperature=0.3,
+            timeout=MODEL_TIMEOUT,
+            max_retries=0,
+        )
+
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
 

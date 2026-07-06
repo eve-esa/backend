@@ -36,6 +36,7 @@ from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
 )
+from src.services.custom_model_service import get_owned_custom_model
 from src.services.hallucination_detector import HallucinationDetector
 from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.stream_bus import get_stream_bus
@@ -1642,6 +1643,13 @@ async def _prepare_agentic_request(
             "Resolved %d MCP server(s): %s",
             len(mcp_docs),
             [s.name for s in mcp_docs],
+        )
+
+    if request.custom_model_id:
+        await get_owned_custom_model(
+            request.custom_model_id,
+            requesting_user.id,
+            action="use",
         )
 
     return request

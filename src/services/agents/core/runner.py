@@ -18,6 +18,8 @@ from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
+from src.services.custom_model_secrets import get_custom_model_api_key
+from src.services.custom_model_service import get_owned_custom_model
 from src.services.generate_answer import (
     GenerationRequest,
     _get_conversation_history_from_db,
@@ -369,6 +371,36 @@ def _resolve_agentic_llm_type(
     return llm_type or AGENTIC_LLM_TYPE
 
 
+async def _resolve_agentic_llm_client(
+    request: GenerationRequest,
+    *,
+    user_id: Optional[str],
+    llm_type_override: Optional[str] = None,
+) -> tuple[Any, Dict[str, Any]]:
+    """Resolve the LLM client and metadata for agentic generation."""
+    if request.custom_model_id:
+        if not user_id:
+            raise ValueError("custom_model_id requires an authenticated user")
+        model = await get_owned_custom_model(request.custom_model_id, user_id)
+        api_key = await get_custom_model_api_key(model.secret_arn)
+        llm = get_shared_llm_manager().build_custom_client(
+            base_url=model.base_url,
+            model_name=model.model_name,
+            api_key=api_key,
+        )
+        return llm, {
+            "custom_model_id": model.id,
+            "custom_model_display_name": model.display_name,
+            "custom_model_name": model.model_name,
+        }
+
+    effective_type = _resolve_agentic_llm_type(
+        request.llm_type, override=llm_type_override
+    )
+    llm = get_shared_llm_manager().get_client_for_model(effective_type)
+    return llm, {"agentic_llm_resolved": effective_type}
+
+
 def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     """Return request-selected graph type, else AGENT_GRAPH_TYPE from env."""
     from src.config import AGENT_GRAPH_TYPE
@@ -396,15 +428,18 @@ def _build_react_graph(
     summary: Optional[str] = None,
     llm_type_override: Optional[str] = None,
     fallback_llm: Any = None,
+    llm: Any = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
     ``llm_type_override`` forces a specific model (e.g. ``LLMType.Fallback.value``)
     regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
     ``agent.compile()`` for in-graph node-level fallback.
+    When ``llm`` is provided it is used directly (e.g. user custom models).
     """
-    effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
-    llm = get_shared_llm_manager().get_client_for_model(effective_type)
+    if llm is None:
+        effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
+        llm = get_shared_llm_manager().get_client_for_model(effective_type)
     if fallback_llm is None:
         fallback_llm = get_shared_llm_manager().get_client_for_model(
             LLMType.Fallback.value
@@ -473,6 +508,9 @@ async def generate_answer_agentic(
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
+        llm, llm_prompts = await _resolve_agentic_llm_client(
+            request, user_id=user_id
+        )
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -480,6 +518,7 @@ async def generate_answer_agentic(
             agent=agent,
             history=history,
             summary=summary,
+            llm=llm,
         )
 
         config = {
@@ -505,7 +544,10 @@ async def generate_answer_agentic(
             with langfuse_context(
                 user_id=user_id,
                 session_id=conversation_id,
-                tags=["agentic", request.llm_type or "default"],
+                tags=[
+                    "agentic",
+                    request.custom_model_id or request.llm_type or "default",
+                ],
                 trace_name="agentic_generation",
             ):
                 async for update in g.astream(
@@ -575,8 +617,8 @@ async def generate_answer_agentic(
             "instruction": resolved_instruction,
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
-            "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
             "used_fallback_llm": used_fallback_llm,
+            **llm_prompts,
         }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
@@ -640,6 +682,9 @@ async def generate_answer_agentic_stream_helper(
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
+        llm, llm_prompts = await _resolve_agentic_llm_client(
+            request, user_id=user_id
+        )
 
         graph = _build_react_graph(
             request.llm_type,
@@ -648,6 +693,7 @@ async def generate_answer_agentic_stream_helper(
             agent=agent,
             history=history,
             summary=summary,
+            llm=llm,
         )
 
         config = {
@@ -714,7 +760,11 @@ async def generate_answer_agentic_stream_helper(
         with langfuse_context(
             user_id=user_id,
             session_id=conversation_id,
-            tags=["agentic", "stream", request.llm_type or "default"],
+            tags=[
+                "agentic",
+                "stream",
+                request.custom_model_id or request.llm_type or "default",
+            ],
             trace_name="agentic_generation_stream",
         ):
             async for mode, payload in graph.astream(
@@ -843,8 +893,8 @@ async def generate_answer_agentic_stream_helper(
                 "instruction": resolved_instruction,
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
-                "agentic_llm_resolved": _resolve_agentic_llm_type(request.llm_type),
                 "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
+                **llm_prompts,
             },
             trace=trace_entries if trace_entries else None,
         )

@@ -49,6 +49,12 @@ class GenerationRequest(BaseModel):
             "When omitted, backend uses AGENT_GRAPH_TYPE from environment."
         ),
     )
+    custom_model_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "User-owned custom model ID. When set, overrides llm_type for agentic generation."
+        ),
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
