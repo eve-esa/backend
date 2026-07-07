@@ -147,9 +147,6 @@ async def delete_custom_model(
 ) -> None:
     """Soft-delete a custom model and remove its Secrets Manager entry."""
     model = await get_owned_custom_model(model_id, requesting_user.id, action="delete")
-    model.deleted_at = datetime.now(timezone.utc)
-    model.updated_at = datetime.now(timezone.utc)
-    await model.save()
 
     try:
         await delete_custom_model_secret(model.secret_arn)
@@ -157,5 +154,9 @@ async def delete_custom_model(
         logger.exception("Failed to delete custom model secret model_id=%s", model.id)
         raise HTTPException(
             status_code=500,
-            detail="Custom model was archived but credential cleanup failed",
+            detail="Failed to delete custom model credentials",
         )
+
+    model.deleted_at = datetime.now(timezone.utc)
+    model.updated_at = datetime.now(timezone.utc)
+    await model.save()

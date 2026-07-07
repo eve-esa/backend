@@ -141,6 +141,42 @@ async def test_update_and_delete_custom_model(async_client):
 
 
 @pytest.mark.asyncio
+async def test_delete_custom_model_keeps_row_when_secret_delete_fails(async_client):
+    user, token = await create_test_user_and_token()
+    secret_arn = "arn:aws:secretsmanager:eu-central-1:123:secret:test"
+    try:
+        with patch(
+            "src.routers.custom_model.create_custom_model_secret",
+            new=AsyncMock(return_value=secret_arn),
+        ), patch(
+            "src.routers.custom_model.delete_custom_model_secret",
+            new=AsyncMock(side_effect=RuntimeError("sm down")),
+        ):
+            create_resp = await async_client.post(
+                "/users/custom-models",
+                json=CREATE_PAYLOAD,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            model_id = create_resp.json()["id"]
+
+            delete_resp = await async_client.delete(
+                f"/users/custom-models/{model_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert delete_resp.status_code == 500
+
+            list_resp = await async_client.get(
+                "/models",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert len(list_resp.json()["custom"]) == 1
+            assert list_resp.json()["custom"][0]["id"] == model_id
+    finally:
+        await UserCustomModel.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
 async def test_custom_model_ownership_enforced(async_client):
     owner, owner_token = await create_test_user_and_token()
     other, other_token = await create_test_user_and_token()
