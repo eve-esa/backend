@@ -256,7 +256,6 @@ class LLMManager:
         self, *, base_url: str, model_name: str, api_key: str
     ) -> ChatOpenAI:
         """Build a one-off ChatOpenAI client for a user-owned custom model."""
-        self._selected_llm_type = "custom"
         return ChatOpenAI(
             api_key=api_key,
             base_url=base_url.rstrip("/"),
