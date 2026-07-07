@@ -1,11 +1,14 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 
 from src.database.models.user_custom_model import UserCustomModel
 from src.services.agents.core.runner import _resolve_agentic_llm_client
-from src.services.custom_model_secrets import clear_secret_cache_for_tests
+from src.services.custom_model_secrets import (
+    clear_secret_cache_for_tests,
+    update_custom_model_secret,
+)
 from src.services.generate_answer import GenerationRequest
 from src.services.provider_catalog import clear_provider_catalog_cache_for_tests
 from tests.utils.cleaner import cleanup_models
@@ -262,3 +265,18 @@ async def test_resolve_agentic_llm_client_rejects_other_users_model():
     finally:
         await UserCustomModel.delete_many({"user_id": owner.id})
         await cleanup_models([owner, other])
+
+
+@pytest.mark.asyncio
+async def test_update_custom_model_secret_calls_put_secret_value_with_secret_id():
+    secret_arn = "arn:aws:secretsmanager:eu-central-1:123:secret:test"
+    mock_client = MagicMock()
+    with patch(
+        "src.services.custom_model_secrets._client", return_value=mock_client
+    ):
+        await update_custom_model_secret(secret_arn=secret_arn, api_key="sk-new")
+
+    mock_client.put_secret_value.assert_called_once_with(
+        SecretId=secret_arn,
+        SecretString='{"api_key": "sk-new"}',
+    )

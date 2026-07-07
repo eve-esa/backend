@@ -77,7 +77,7 @@ async def update_custom_model_secret(*, secret_arn: str, api_key: str) -> None:
 
     def _update() -> None:
         _client().put_secret_value(
-            SecretARN=secret_arn,
+            SecretId=secret_arn,
             SecretString=_encode_secret_payload(api_key),
         )
 
