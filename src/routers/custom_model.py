@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
-from pymongo.errors import DuplicateKeyError
 
 from src.database.models.user import User
 from src.database.models.user_custom_model import UserCustomModel
@@ -29,6 +28,14 @@ from src.services.provider_catalog import list_provider_catalog, resolve_catalog
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_DISPLAY_NAME_DETAIL = "A custom model with this display name already exists"
+
+
+def _raise_if_duplicate_display_name(exc: ValueError) -> None:
+    if "unique field" in str(exc):
+        raise HTTPException(status_code=409, detail=_DUPLICATE_DISPLAY_NAME_DETAIL)
+    raise exc
 
 
 @router.get("/models", response_model=ModelListResponse)
@@ -65,11 +72,8 @@ async def create_custom_model(
             model_name=entry.model.model_name,
             secret_arn="",
         )
-    except DuplicateKeyError:
-        raise HTTPException(
-            status_code=409,
-            detail="A custom model with this display name already exists",
-        )
+    except ValueError as exc:
+        _raise_if_duplicate_display_name(exc)
 
     secret_arn: str | None = None
     try:
@@ -131,11 +135,8 @@ async def update_custom_model(
     model.updated_at = datetime.now(timezone.utc)
     try:
         await model.save()
-    except DuplicateKeyError:
-        raise HTTPException(
-            status_code=409,
-            detail="A custom model with this display name already exists",
-        )
+    except ValueError as exc:
+        _raise_if_duplicate_display_name(exc)
     return to_custom_model_public(model)
 
 
