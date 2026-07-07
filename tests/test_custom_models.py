@@ -7,19 +7,29 @@ from src.database.models.user_custom_model import UserCustomModel
 from src.services.agents.core.runner import _resolve_agentic_llm_client
 from src.services.custom_model_secrets import clear_secret_cache_for_tests
 from src.services.generate_answer import GenerationRequest
+from src.services.provider_catalog import clear_provider_catalog_cache_for_tests
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
+
+CREATE_PAYLOAD = {
+    "display_name": "My OpenAI",
+    "provider_id": "openai",
+    "catalog_model_id": "gpt-5.4-2026-03-05",
+    "api_key": "sk-test-key",
+}
 
 
 @pytest.fixture(autouse=True)
 def _clear_secret_cache():
     clear_secret_cache_for_tests()
+    clear_provider_catalog_cache_for_tests()
     yield
     clear_secret_cache_for_tests()
+    clear_provider_catalog_cache_for_tests()
 
 
 @pytest.mark.asyncio
-async def test_list_models_includes_platform_and_custom(async_client):
+async def test_list_models_includes_platform_providers_and_custom(async_client):
     user, token = await create_test_user_and_token()
     try:
         with patch(
@@ -28,18 +38,15 @@ async def test_list_models_includes_platform_and_custom(async_client):
         ):
             create_resp = await async_client.post(
                 "/users/custom-models",
-                json={
-                    "display_name": "My GPT",
-                    "model_name": "gpt-4o",
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "sk-test-key",
-                },
+                json=CREATE_PAYLOAD,
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert create_resp.status_code == 201
         body = create_resp.json()
         assert "api_key" not in body
         assert body["has_api_key"] is True
+        assert body["provider_id"] == "openai"
+        assert "base_url" not in body
 
         list_resp = await async_client.get(
             "/models",
@@ -48,8 +55,9 @@ async def test_list_models_includes_platform_and_custom(async_client):
         assert list_resp.status_code == 200
         payload = list_resp.json()
         assert any(m["id"] == "eve-instruct" for m in payload["platform"])
+        assert any(p["id"] == "openai" for p in payload["providers"])
         assert len(payload["custom"]) == 1
-        assert payload["custom"][0]["display_name"] == "My GPT"
+        assert payload["custom"][0]["display_name"] == "My OpenAI"
     finally:
         await UserCustomModel.delete_many({"user_id": user.id})
         await cleanup_models([user])
@@ -59,14 +67,26 @@ async def test_list_models_includes_platform_and_custom(async_client):
 async def test_create_custom_model_requires_auth(async_client):
     response = await async_client.post(
         "/users/custom-models",
-        json={
-            "display_name": "My GPT",
-            "model_name": "gpt-4o",
-            "base_url": "https://api.openai.com/v1",
-            "api_key": "sk-test-key",
-        },
+        json=CREATE_PAYLOAD,
     )
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_create_custom_model_rejects_unknown_provider(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        response = await async_client.post(
+            "/users/custom-models",
+            json={
+                **CREATE_PAYLOAD,
+                "provider_id": "unknown-provider",
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 422
+    finally:
+        await cleanup_models([user])
 
 
 @pytest.mark.asyncio
@@ -86,12 +106,7 @@ async def test_update_and_delete_custom_model(async_client):
         ) as delete_secret:
             create_resp = await async_client.post(
                 "/users/custom-models",
-                json={
-                    "display_name": "My GPT",
-                    "model_name": "gpt-4o",
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "sk-test-key",
-                },
+                json=CREATE_PAYLOAD,
                 headers={"Authorization": f"Bearer {token}"},
             )
             model_id = create_resp.json()["id"]
@@ -133,12 +148,7 @@ async def test_custom_model_ownership_enforced(async_client):
         ):
             create_resp = await async_client.post(
                 "/users/custom-models",
-                json={
-                    "display_name": "Owner model",
-                    "model_name": "gpt-4o",
-                    "base_url": "https://api.openai.com/v1",
-                    "api_key": "sk-test-key",
-                },
+                json=CREATE_PAYLOAD,
                 headers={"Authorization": f"Bearer {owner_token}"},
             )
         model_id = create_resp.json()["id"]
@@ -156,13 +166,14 @@ async def test_custom_model_ownership_enforced(async_client):
 
 
 @pytest.mark.asyncio
-async def test_resolve_agentic_llm_client_uses_custom_model():
+async def test_resolve_agentic_llm_client_uses_catalog_base_url():
     user, _ = await create_test_user_and_token()
     model = await UserCustomModel.create(
         user_id=user.id,
         display_name="Custom",
-        model_name="gpt-4o-mini",
-        base_url="https://api.example.com/v1",
+        provider_id="openai",
+        catalog_model_id="gpt-5.4-2026-03-05",
+        model_name="gpt-5.4-2026-03-05",
         secret_arn="arn:aws:secretsmanager:eu-central-1:123:secret:abc",
     )
     try:
@@ -185,8 +196,8 @@ async def test_resolve_agentic_llm_client_uses_custom_model():
 
             assert llm is manager.build_custom_client.return_value
             manager.build_custom_client.assert_called_once_with(
-                base_url=model.base_url,
-                model_name=model.model_name,
+                base_url="https://api.openai.com/v1",
+                model_name="gpt-5.4-2026-03-05",
                 api_key="sk-custom",
             )
             assert prompts["custom_model_id"] == model.id
@@ -202,8 +213,9 @@ async def test_resolve_agentic_llm_client_custom_model_overrides_llm_type():
     model = await UserCustomModel.create(
         user_id=user.id,
         display_name="Custom",
-        model_name="gpt-4o-mini",
-        base_url="https://api.example.com/v1",
+        provider_id="openai",
+        catalog_model_id="gpt-5.4-2026-03-05",
+        model_name="gpt-5.4-2026-03-05",
         secret_arn="arn:aws:secretsmanager:eu-central-1:123:secret:abc",
     )
     try:
@@ -237,8 +249,9 @@ async def test_resolve_agentic_llm_client_rejects_other_users_model():
     model = await UserCustomModel.create(
         user_id=owner.id,
         display_name="Owner only",
-        model_name="gpt-4o-mini",
-        base_url="https://api.example.com/v1",
+        provider_id="openai",
+        catalog_model_id="gpt-5.4-2026-03-05",
+        model_name="gpt-5.4-2026-03-05",
         secret_arn="arn:aws:secretsmanager:eu-central-1:123:secret:abc",
     )
     try:

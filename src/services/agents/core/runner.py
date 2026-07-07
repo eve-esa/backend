@@ -381,16 +381,19 @@ async def _resolve_agentic_llm_client(
         model = request.resolved_custom_model
         if model is None:
             model = await get_owned_custom_model(request.custom_model_id, user_id)
+        from src.services.custom_model_service import resolve_custom_model_endpoints
+
         api_key = await get_custom_model_api_key(model.secret_arn)
+        base_url, model_name = resolve_custom_model_endpoints(model)
         llm = get_shared_llm_manager().build_custom_client(
-            base_url=model.base_url,
-            model_name=model.model_name,
+            base_url=base_url,
+            model_name=model_name,
             api_key=api_key,
         )
         return llm, {
             "custom_model_id": model.id,
             "custom_model_display_name": model.display_name,
-            "custom_model_name": model.model_name,
+            "custom_model_name": model_name,
         }
 
     effective_type = _resolve_agentic_llm_type(request.llm_type)

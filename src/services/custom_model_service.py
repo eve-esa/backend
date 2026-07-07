@@ -2,45 +2,51 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from fastapi import HTTPException
 
-from src.config import CUSTOM_MODEL_MAX_PER_USER, IS_PROD
+from src.config import CUSTOM_MODEL_MAX_PER_USER
 from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.custom_model import CustomModelPublic
+from src.services.provider_catalog import resolve_catalog_entry
 
 
-def validate_custom_model_base_url(base_url: str) -> str:
-    """Normalize and validate a custom model base URL."""
-    normalized = base_url.strip().rstrip("/")
-    parsed = urlparse(normalized)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=422, detail="base_url must be a valid HTTP(S) URL")
+def resolve_custom_model_endpoints(model: UserCustomModel) -> tuple[str, str]:
+    """Resolve base URL and model name from the fixed provider catalog."""
+    if model.provider_id and model.catalog_model_id:
+        entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
+        return entry.provider.base_url, entry.model.model_name
 
-    if IS_PROD and parsed.scheme != "https":
-        raise HTTPException(
-            status_code=422,
-            detail="base_url must use HTTPS in production",
-        )
+    if model.base_url and model.model_name:
+        return model.base_url.rstrip("/"), model.model_name
 
-    if not IS_PROD and parsed.scheme == "http":
-        host = (parsed.hostname or "").lower()
-        if host not in {"localhost", "127.0.0.1"}:
-            raise HTTPException(
-                status_code=422,
-                detail="HTTP base_url is only allowed for localhost in non-production",
-            )
-
-    return normalized
+    raise HTTPException(
+        status_code=422,
+        detail="Custom model configuration is invalid or no longer available",
+    )
 
 
 def to_custom_model_public(model: UserCustomModel) -> CustomModelPublic:
+    provider_display_name = model.provider_id
+    model_display_name = model.catalog_model_id
+    model_name = model.model_name
+
+    if model.provider_id and model.catalog_model_id:
+        try:
+            entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
+            provider_display_name = entry.provider.display_name
+            model_display_name = entry.model.display_name
+            model_name = entry.model.model_name
+        except HTTPException:
+            pass
+
     return CustomModelPublic(
         id=model.id,
         display_name=model.display_name,
-        model_name=model.model_name,
-        base_url=model.base_url,
+        provider_id=model.provider_id,
+        catalog_model_id=model.catalog_model_id,
+        provider_display_name=provider_display_name,
+        model_display_name=model_display_name,
+        model_name=model_name,
         has_api_key=bool(model.secret_arn),
         created_at=model.created_at,
         updated_at=model.updated_at,

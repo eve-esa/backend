@@ -1,0 +1,38 @@
+# Provider catalog for user-owned custom models (agentic EVE).
+# Back office can add providers/models here without code changes.
+providers:
+  - id: mistral
+    display_name: Mistral
+    base_url: https://api.mistral.ai/v1
+    models:
+      - id: mistral-small-latest
+        display_name: Mistral Small
+        model_name: mistral-small-latest
+      - id: mistral-medium-latest
+        display_name: Mistral Medium
+        model_name: mistral-medium-latest
+      - id: mistral-large-latest
+        display_name: Mistral Large
+        model_name: mistral-large-latest
+
+  - id: claude
+    display_name: Claude
+    base_url: https://api.anthropic.com/v1
+    models:
+      - id: claude-sonnet
+        display_name: Claude Sonnet
+        model_name: claude-sonnet
+      - id: claude-opus
+        display_name: Claude Opus
+        model_name: claude-opus
+
+  - id: openai
+    display_name: OpenAI
+    base_url: https://api.openai.com/v1
+    models:
+      - id: gpt-5.5-2026-04-23
+        display_name: GPT-5.5
+        model_name: gpt-5.5-2026-04-23
+      - id: gpt-5.4-2026-03-05
+        display_name: GPT-5.4
+        model_name: gpt-5.4-2026-03-05

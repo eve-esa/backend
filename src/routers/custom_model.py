@@ -23,9 +23,9 @@ from src.services.custom_model_service import (
     ensure_custom_model_quota,
     get_owned_custom_model,
     to_custom_model_public,
-    validate_custom_model_base_url,
 )
 from src.services.platform_models import list_platform_models
+from src.services.provider_catalog import list_provider_catalog, resolve_catalog_entry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -35,13 +35,14 @@ logger = logging.getLogger(__name__)
 async def list_models(
     requesting_user: User = Depends(get_current_user),
 ) -> ModelListResponse:
-    """List platform models and the authenticated user's custom models."""
+    """List platform models, provider catalog, and the user's custom models."""
     custom_models = await UserCustomModel.find_all(
         filter_dict={"user_id": requesting_user.id, "deleted_at": None},
         sort=[("created_at", -1)],
     )
     return ModelListResponse(
         platform=list_platform_models(),
+        providers=list_provider_catalog(),
         custom=[to_custom_model_public(model) for model in custom_models],
     )
 
@@ -53,14 +54,15 @@ async def create_custom_model(
 ) -> CustomModelPublic:
     """Register a user-owned custom model. The API key is stored in AWS Secrets Manager."""
     await ensure_custom_model_quota(requesting_user.id)
-    base_url = validate_custom_model_base_url(request.base_url)
+    entry = resolve_catalog_entry(request.provider_id, request.catalog_model_id)
 
     try:
         model = await UserCustomModel.create(
             user_id=requesting_user.id,
             display_name=request.display_name,
-            model_name=request.model_name,
-            base_url=base_url,
+            provider_id=entry.provider.id,
+            catalog_model_id=entry.model.id,
+            model_name=entry.model.model_name,
             secret_arn="",
         )
     except DuplicateKeyError:
@@ -109,10 +111,10 @@ async def update_custom_model(
 
     if request.display_name is not None:
         model.display_name = request.display_name
-    if request.model_name is not None:
-        model.model_name = request.model_name
-    if request.base_url is not None:
-        model.base_url = validate_custom_model_base_url(request.base_url)
+    if request.catalog_model_id is not None:
+        entry = resolve_catalog_entry(model.provider_id, request.catalog_model_id)
+        model.catalog_model_id = entry.model.id
+        model.model_name = entry.model.model_name
     if request.api_key is not None:
         try:
             await update_custom_model_secret(
