@@ -221,6 +221,28 @@ class TestBuildReactGraph:
         assert compile_kwargs["llm"] is primary_llm
         assert compile_kwargs["fallback_llm"] is fallback_llm
 
+    def test_custom_llm_disables_platform_in_graph_fallback(self):
+        agent = self._make_agent()
+        custom_llm = MagicMock(name="custom_llm")
+        fake_mgr = MagicMock()
+
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
+            "src.services.agents.core.runner.get_shared_llm_manager",
+            return_value=fake_mgr,
+        ):
+            _build_react_graph(
+                "main",
+                tools=[],
+                checkpointer=None,
+                agent=agent,
+                llm=custom_llm,
+            )
+
+        fake_mgr.get_client_for_model.assert_not_called()
+        compile_kwargs = agent.compile.call_args.kwargs
+        assert compile_kwargs["llm"] is custom_llm
+        assert compile_kwargs["fallback_llm"] is None
+
 
 # ─── _resolve_agentic_llm_type ────────────────────────────────────────────────
 

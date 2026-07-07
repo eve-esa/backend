@@ -435,12 +435,14 @@ def _build_react_graph(
     ``llm_type_override`` forces a specific model (e.g. ``LLMType.Fallback.value``)
     regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
     ``agent.compile()`` for in-graph node-level fallback.
-    When ``llm`` is provided it is used directly (e.g. user custom models).
+    When ``llm`` is provided it is used directly (e.g. user custom models) and
+    platform fallback is not wired unless ``fallback_llm`` is passed explicitly.
     """
+    using_custom_llm = llm is not None
     if llm is None:
         effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
         llm = get_shared_llm_manager().get_client_for_model(effective_type)
-    if fallback_llm is None:
+    if fallback_llm is None and not using_custom_llm:
         fallback_llm = get_shared_llm_manager().get_client_for_model(
             LLMType.Fallback.value
         )
