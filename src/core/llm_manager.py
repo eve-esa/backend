@@ -29,6 +29,7 @@ from src.config import (
     EVE_JSC_API_KEY,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
+from src.services.image_catalog import append_image_context
 from src.utils.helpers import (
     str_token_counter,
     trim_text_to_token_limit,
@@ -595,6 +596,9 @@ class LLMManager:
             else:
                 prompt = self._generate_prompt(query=query, context=context)
 
+            # Offer the curated image catalog to the model (no-op when disabled).
+            prompt = append_image_context(prompt, query)
+
             max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
             answer = await self._call_eve_instruct_fallback(
                 prompt, max_new_tokens=max_new_tokens, temperature=temperature
@@ -628,6 +632,9 @@ class LLMManager:
                 )
             else:
                 prompt = self._generate_prompt(query=query, context=context)
+
+            # Offer the curated image catalog to the model (no-op when disabled).
+            prompt = append_image_context(prompt, query)
 
             max_new_tokens = MODEL_CONTEXT_SIZE - str_token_counter(prompt)
             async for chunk in self._call_eve_instruct_fallback_stream(

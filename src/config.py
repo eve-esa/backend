@@ -179,6 +179,21 @@ ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
 )
 
 
+# Curated image catalog (demo). When enabled, a small static catalog of images
+# is offered to the answer-generation prompt so the model can embed them as
+# markdown. Disabled -> the composed generation prompts are byte-identical to
+# the catalog-free behaviour. Treat only "false"/"0" (case-insensitively) as off.
+IMAGE_CATALOG_ENABLED = os.getenv("IMAGE_CATALOG_ENABLED", "true").strip().lower() not in (
+    "false",
+    "0",
+)
+_DEFAULT_IMAGE_CATALOG_PATH = os.path.join(
+    os.path.dirname(__file__), "templates", "image_catalog.yaml"
+)
+IMAGE_CATALOG_PATH = (
+    os.getenv("IMAGE_CATALOG_PATH", "").strip() or _DEFAULT_IMAGE_CATALOG_PATH
+)
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers
