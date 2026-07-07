@@ -18,10 +18,14 @@ from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMType
 from src.database.models.message import Message
 from src.database.models.user import User
-from src.services.custom_model_secrets import get_custom_model_api_key
-from src.services.custom_model_service import get_owned_custom_model
+from src.services.custom_model_service import (
+    build_custom_model_llm,
+    custom_model_prompt_metadata,
+    ensure_custom_model_has_credentials,
+    get_owned_custom_model,
+)
+from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
-    GenerationRequest,
     _get_conversation_history_from_db,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
@@ -380,21 +384,13 @@ async def _resolve_agentic_llm_client(
     if request.custom_model_id:
         model = request.resolved_custom_model
         if model is None:
-            model = await get_owned_custom_model(request.custom_model_id, user_id)
-        from src.services.custom_model_service import resolve_custom_model_endpoints
-
-        api_key = await get_custom_model_api_key(model.secret_arn)
-        base_url, model_name = resolve_custom_model_endpoints(model)
-        llm = get_shared_llm_manager().build_custom_client(
-            base_url=base_url,
-            model_name=model_name,
-            api_key=api_key,
-        )
-        return llm, {
-            "custom_model_id": model.id,
-            "custom_model_display_name": model.display_name,
-            "custom_model_name": model_name,
-        }
+            model = await get_owned_custom_model(
+                request.custom_model_id, user_id, action="use"
+            )
+        else:
+            ensure_custom_model_has_credentials(model)
+        llm = await build_custom_model_llm(model)
+        return llm, custom_model_prompt_metadata(model)
 
     effective_type = _resolve_agentic_llm_type(request.llm_type)
     llm = get_shared_llm_manager().get_client_for_model(effective_type)

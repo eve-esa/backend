@@ -4,12 +4,18 @@ import pytest
 from fastapi import HTTPException
 
 from src.database.models.user_custom_model import UserCustomModel
+from src.schemas.generation_request import GenerationRequest
 from src.services.agents.core.runner import _resolve_agentic_llm_client
 from src.services.custom_model_secrets import (
     clear_secret_cache_for_tests,
     update_custom_model_secret,
 )
-from src.services.generate_answer import GenerationRequest
+from src.services.agentic_utils import is_agentic_generation_request
+from src.services.custom_model_service import (
+    custom_model_id_from_messages,
+    get_owned_custom_model,
+    resolve_custom_model_endpoints,
+)
 from src.services.provider_catalog import clear_provider_catalog_cache_for_tests
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
@@ -221,24 +227,15 @@ async def test_resolve_agentic_llm_client_uses_catalog_base_url():
             custom_model_id=model.id,
         )
         with patch(
-            "src.services.agents.core.runner.get_custom_model_api_key",
-            new=AsyncMock(return_value="sk-custom"),
-        ), patch(
-            "src.services.agents.core.runner.get_shared_llm_manager"
-        ) as manager_factory:
-            manager = manager_factory.return_value
-            manager.build_custom_client.return_value = object()
-
+            "src.services.agents.core.runner.build_custom_model_llm",
+            new=AsyncMock(return_value=object()),
+        ) as build_llm:
             llm, prompts = await _resolve_agentic_llm_client(
                 request, user_id=user.id
             )
 
-            assert llm is manager.build_custom_client.return_value
-            manager.build_custom_client.assert_called_once_with(
-                base_url="https://api.openai.com/v1",
-                model_name="gpt-5.4-2026-03-05",
-                api_key="sk-custom",
-            )
+            build_llm.assert_awaited_once()
+            assert llm is build_llm.return_value
             assert prompts["custom_model_id"] == model.id
             assert prompts["custom_model_display_name"] == "Custom"
     finally:
@@ -264,13 +261,12 @@ async def test_resolve_agentic_llm_client_custom_model_overrides_llm_type():
             custom_model_id=model.id,
         )
         with patch(
-            "src.services.agents.core.runner.get_custom_model_api_key",
-            new=AsyncMock(return_value="sk-custom"),
+            "src.services.agents.core.runner.build_custom_model_llm",
+            new=AsyncMock(return_value=object()),
         ), patch(
             "src.services.agents.core.runner.get_shared_llm_manager"
         ) as manager_factory:
             manager = manager_factory.return_value
-            manager.build_custom_client.return_value = object()
 
             _, prompts = await _resolve_agentic_llm_client(request, user_id=user.id)
 
@@ -316,3 +312,100 @@ async def test_update_custom_model_secret_calls_put_secret_value_with_secret_id(
         SecretId=secret_arn,
         SecretString='{"api_key": "sk-new"}',
     )
+
+
+def test_is_agentic_generation_request_detects_custom_model():
+    request = GenerationRequest(query="hi", custom_model_id="model-1")
+    assert is_agentic_generation_request(request) is True
+
+
+def test_is_agentic_generation_request_detects_trace_only():
+    request = GenerationRequest(query="hi")
+    message = MagicMock(trace=[{"role": "assistant"}])
+    assert is_agentic_generation_request(request, message) is True
+
+
+def test_custom_model_id_from_messages_uses_most_recent():
+    older = MagicMock(
+        request_input=GenerationRequest(query="a", custom_model_id="old")
+    )
+    newer = MagicMock(
+        request_input=GenerationRequest(query="b", custom_model_id="new")
+    )
+    assert custom_model_id_from_messages([older, newer]) == "new"
+
+
+@pytest.mark.asyncio
+async def test_resolve_custom_model_endpoints_requires_catalog_fields():
+    model = UserCustomModel(
+        user_id="u1",
+        display_name="x",
+        provider_id="",
+        catalog_model_id="",
+        model_name="m",
+        secret_arn="arn:test",
+    )
+    with pytest.raises(HTTPException) as exc:
+        resolve_custom_model_endpoints(model)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_owned_custom_model_requires_credentials_for_use():
+    user, _ = await create_test_user_and_token()
+    model = await UserCustomModel.create(
+        user_id=user.id,
+        display_name="No key",
+        provider_id="openai",
+        catalog_model_id="gpt-5.4-2026-03-05",
+        model_name="gpt-5.4-2026-03-05",
+        secret_arn="",
+    )
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await get_owned_custom_model(model.id, user.id, action="use")
+        assert exc.value.status_code == 422
+    finally:
+        await UserCustomModel.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_maybe_rollup_uses_custom_summarizer():
+    from src.services.generate_answer import maybe_rollup_and_trim_history
+
+    custom_llm = MagicMock()
+    request = GenerationRequest(query="hi", custom_model_id="model-1")
+    msg = MagicMock()
+    msg.input = "hi"
+    msg.output = "hello"
+    msg.request_input = request
+
+    convo = MagicMock()
+    convo.user_id = "user-1"
+    convo.summary = None
+    convo.save = AsyncMock()
+
+    with patch(
+        "src.services.generate_answer.Message.count_documents",
+        new=AsyncMock(return_value=2),
+    ), patch(
+        "src.services.generate_answer.Message.find_all",
+        new=AsyncMock(return_value=[msg]),
+    ), patch(
+        "src.services.generate_answer.Conversation.find_by_id",
+        new=AsyncMock(return_value=convo),
+    ), patch(
+        "src.services.generate_answer.build_custom_model_llm_for_user",
+        new=AsyncMock(return_value=custom_llm),
+    ), patch(
+        "src.services.generate_answer.get_shared_llm_manager"
+    ) as manager_factory:
+        manager = manager_factory.return_value
+        manager.summarize_context_in_all = AsyncMock(return_value="summary")
+
+        await maybe_rollup_and_trim_history("conv-1")
+
+        manager.summarize_context_in_all.assert_awaited_once()
+        assert manager.summarize_context_in_all.await_args.kwargs["llm"] is custom_llm
+        convo.save.assert_awaited_once()

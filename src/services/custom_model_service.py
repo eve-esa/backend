@@ -2,27 +2,75 @@
 
 from __future__ import annotations
 
+from typing import Any, Optional
+
 from fastapi import HTTPException
 
 from src.config import CUSTOM_MODEL_MAX_PER_USER
+from src.database.models.message import Message
 from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.custom_model import CustomModelPublic
+from src.services.custom_model_secrets import get_custom_model_api_key
 from src.services.provider_catalog import resolve_catalog_entry
 
 
 def resolve_custom_model_endpoints(model: UserCustomModel) -> tuple[str, str]:
     """Resolve base URL and model name from the fixed provider catalog."""
-    if model.provider_id and model.catalog_model_id:
-        entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
-        return entry.provider.base_url, entry.model.model_name
+    if not model.provider_id or not model.catalog_model_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Custom model configuration is invalid or no longer available",
+        )
+    entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
+    return entry.provider.base_url, entry.model.model_name
 
-    if model.base_url and model.model_name:
-        return model.base_url.rstrip("/"), model.model_name
 
-    raise HTTPException(
-        status_code=422,
-        detail="Custom model configuration is invalid or no longer available",
+def ensure_custom_model_has_credentials(model: UserCustomModel) -> None:
+    if not model.secret_arn:
+        raise HTTPException(
+            status_code=422,
+            detail="Custom model has no stored credentials",
+        )
+
+
+def custom_model_prompt_metadata(model: UserCustomModel) -> dict[str, str]:
+    """Agentic prompt metadata for a resolved custom model."""
+    _, model_name = resolve_custom_model_endpoints(model)
+    return {
+        "custom_model_id": model.id,
+        "custom_model_display_name": model.display_name,
+        "custom_model_name": model_name,
+    }
+
+
+async def build_custom_model_llm(model: UserCustomModel) -> Any:
+    """Build a ChatOpenAI client for a user-owned custom model."""
+    ensure_custom_model_has_credentials(model)
+    base_url, model_name = resolve_custom_model_endpoints(model)
+    api_key = await get_custom_model_api_key(model.secret_arn)
+    from src.services.generate_answer import get_shared_llm_manager
+
+    return get_shared_llm_manager().build_custom_client(
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
     )
+
+
+async def build_custom_model_llm_for_user(model_id: str, user_id: str) -> Any:
+    """Load an owned custom model and build its LLM client."""
+    model = await get_owned_custom_model(model_id, user_id, action="use")
+    return await build_custom_model_llm(model)
+
+
+def custom_model_id_from_messages(messages: list[Message]) -> Optional[str]:
+    """Return the most recent custom model id referenced by conversation messages."""
+    for message in reversed(messages):
+        request_input = getattr(message, "request_input", None)
+        custom_model_id = getattr(request_input, "custom_model_id", None)
+        if custom_model_id:
+            return custom_model_id
+    return None
 
 
 def to_custom_model_public(model: UserCustomModel) -> CustomModelPublic:
@@ -67,6 +115,8 @@ async def get_owned_custom_model(
             status_code=403,
             detail=f"Not allowed to {action} this custom model",
         )
+    if action == "use":
+        ensure_custom_model_has_credentials(model)
     return model
 
 

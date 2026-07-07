@@ -4,7 +4,7 @@ LLM Manager module that handles different language model interactions.
 
 import logging
 from enum import Enum
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -502,9 +502,17 @@ class LLMManager:
         return getattr(response, "content", str(response))
 
     async def summarize_context_in_all(
-        self, transcript: str, max_tokens: int = 5000, is_force: bool = False
+        self,
+        transcript: str,
+        max_tokens: int = 5000,
+        is_force: bool = False,
+        llm: Optional[Any] = None,
     ) -> str:
-        """Summarize entire conversation history."""
+        """Summarize entire conversation history.
+
+        When *llm* is provided (e.g. a user-owned custom model client), only that
+        client is used and platform fallback is not applied.
+        """
         if not transcript:
             return ""
         if is_force is False and str_token_counter(transcript) <= max_tokens:
@@ -519,6 +527,10 @@ class LLMManager:
             SystemMessage(content=system),
             HumanMessage(content=f"Conversation transcript:\n{transcript}"),
         ]
+        if llm is not None:
+            resp = await llm.ainvoke(messages)
+            return getattr(resp, "content", str(resp))
+
         try:
             llm = self.get_client_for_model(self._selected_llm_type)
             resp = await llm.ainvoke(messages)

@@ -19,6 +19,7 @@ from src.services.custom_model_secrets import (
     update_custom_model_secret,
 )
 from src.services.custom_model_service import (
+    ensure_custom_model_has_credentials,
     ensure_custom_model_quota,
     get_owned_custom_model,
     to_custom_model_public,
@@ -120,6 +121,7 @@ async def update_custom_model(
         model.catalog_model_id = entry.model.id
         model.model_name = entry.model.model_name
     if request.api_key is not None:
+        ensure_custom_model_has_credentials(model)
         try:
             await update_custom_model_secret(
                 secret_arn=model.secret_arn,
@@ -148,14 +150,15 @@ async def delete_custom_model(
     """Soft-delete a custom model and remove its Secrets Manager entry."""
     model = await get_owned_custom_model(model_id, requesting_user.id, action="delete")
 
-    try:
-        await delete_custom_model_secret(model.secret_arn)
-    except Exception:
-        logger.exception("Failed to delete custom model secret model_id=%s", model.id)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to delete custom model credentials",
-        )
+    if model.secret_arn:
+        try:
+            await delete_custom_model_secret(model.secret_arn)
+        except Exception:
+            logger.exception("Failed to delete custom model secret model_id=%s", model.id)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete custom model credentials",
+            )
 
     model.deleted_at = datetime.now(timezone.utc)
     model.updated_at = datetime.now(timezone.utc)

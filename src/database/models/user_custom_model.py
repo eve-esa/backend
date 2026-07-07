@@ -22,7 +22,7 @@ class UserCustomModel(MongoModel):
     )
     base_url: Optional[str] = Field(
         default=None,
-        description="Deprecated legacy field; catalog-backed models ignore user values",
+        description="Deprecated; ignored for catalog-backed models",
     )
     secret_arn: str = Field(..., description="AWS Secrets Manager ARN for the API key")
 
