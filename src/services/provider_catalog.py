@@ -12,7 +12,11 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from src.config import IS_PROD
-from src.schemas.custom_model import ProviderCatalogModelPublic, ProviderCatalogPublic
+from src.schemas.custom_model import (
+    PlatformModel,
+    ProviderCatalogModelPublic,
+    ProviderCatalogPublic,
+)
 
 PROVIDER_MODELS_PATH = os.getenv("PROVIDER_MODELS_PATH", "provider_models.yaml")
 
@@ -35,6 +39,18 @@ class CatalogModelEntry(BaseModel):
     model: CatalogModel
 
 
+class CatalogPlatformModel(BaseModel):
+    id: str
+    llm_type: str
+    display_name: str
+    description: str | None = None
+
+
+class LoadedCatalog(BaseModel):
+    platform: tuple[CatalogPlatformModel, ...]
+    providers: tuple[CatalogProvider, ...]
+
+
 def _validate_provider_base_url(base_url: str, *, provider_id: str) -> str:
     normalized = base_url.strip().rstrip("/")
     parsed = urlparse(normalized)
@@ -50,9 +66,13 @@ def _validate_provider_base_url(base_url: str, *, provider_id: str) -> str:
 
 
 @lru_cache(maxsize=1)
-def _load_catalog() -> tuple[CatalogProvider, ...]:
+def _load_catalog() -> LoadedCatalog:
     with open(PROVIDER_MODELS_PATH, encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}
+
+    platform = tuple(
+        CatalogPlatformModel.model_validate(item) for item in raw.get("platform", [])
+    )
 
     providers: list[CatalogProvider] = []
     seen_provider_ids: set[str] = set()
@@ -81,7 +101,19 @@ def _load_catalog() -> tuple[CatalogProvider, ...]:
             provider.model_copy(update={"base_url": base_url, "models": models})
         )
 
-    return tuple(providers)
+    return LoadedCatalog(platform=platform, providers=tuple(providers))
+
+
+def list_platform_models() -> List[PlatformModel]:
+    return [
+        PlatformModel(
+            id=model.id,
+            llm_type=model.llm_type,
+            display_name=model.display_name,
+            description=model.description,
+        )
+        for model in _load_catalog().platform
+    ]
 
 
 def list_provider_catalog() -> List[ProviderCatalogPublic]:
@@ -98,12 +130,12 @@ def list_provider_catalog() -> List[ProviderCatalogPublic]:
                 for model in provider.models
             ],
         )
-        for provider in _load_catalog()
+        for provider in _load_catalog().providers
     ]
 
 
 def resolve_catalog_entry(provider_id: str, catalog_model_id: str) -> CatalogModelEntry:
-    for provider in _load_catalog():
+    for provider in _load_catalog().providers:
         if provider.id != provider_id:
             continue
         for model in provider.models:

@@ -1,5 +1,12 @@
 # Provider catalog for user-owned custom models (agentic EVE).
 # Back office can add providers/models here without code changes.
+
+platform:
+  - id: eve-instruct
+    llm_type: main
+    display_name: EVE-Instruct
+    description: Default EVE instruction-tuned model hosted by the platform.
+
 providers:
   - id: mistral
     display_name: Mistral

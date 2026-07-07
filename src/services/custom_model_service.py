@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from src.config import CUSTOM_MODEL_MAX_PER_USER
 from src.database.models.message import Message
@@ -12,6 +14,37 @@ from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.custom_model import CustomModelPublic
 from src.services.custom_model_secrets import get_custom_model_api_key
 from src.services.provider_catalog import resolve_catalog_entry
+
+logger = logging.getLogger(__name__)
+
+
+def catalog_backed_custom_model_filter(user_id: str) -> dict[str, Any]:
+    """Mongo filter for catalog-backed custom models (excludes legacy BYOM rows)."""
+    return {
+        "user_id": user_id,
+        "deleted_at": None,
+        "provider_id": {"$exists": True, "$nin": [None, ""]},
+        "catalog_model_id": {"$exists": True, "$nin": [None, ""]},
+    }
+
+
+async def list_owned_catalog_custom_models(user_id: str) -> list[UserCustomModel]:
+    """List active catalog-backed custom models, skipping invalid legacy documents."""
+    collection = UserCustomModel.get_collection()
+    cursor = collection.find(catalog_backed_custom_model_filter(user_id)).sort(
+        "created_at", -1
+    )
+    models: list[UserCustomModel] = []
+    async for doc in cursor:
+        try:
+            models.append(UserCustomModel.from_dict(doc))
+        except ValidationError:
+            logger.warning(
+                "Skipping invalid custom model document id=%s user_id=%s",
+                doc.get("_id"),
+                user_id,
+            )
+    return models
 
 
 def resolve_custom_model_endpoints(model: UserCustomModel) -> tuple[str, str]:
@@ -122,7 +155,7 @@ async def get_owned_custom_model(
 
 async def count_active_custom_models(user_id: str) -> int:
     return await UserCustomModel.count_documents(
-        {"user_id": user_id, "deleted_at": None}
+        catalog_backed_custom_model_filter(user_id)
     )
 
 

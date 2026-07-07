@@ -22,10 +22,14 @@ from src.services.custom_model_service import (
     ensure_custom_model_has_credentials,
     ensure_custom_model_quota,
     get_owned_custom_model,
+    list_owned_catalog_custom_models,
     to_custom_model_public,
 )
-from src.services.platform_models import list_platform_models
-from src.services.provider_catalog import list_provider_catalog, resolve_catalog_entry
+from src.services.provider_catalog import (
+    list_platform_models,
+    list_provider_catalog,
+    resolve_catalog_entry,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -44,10 +48,7 @@ async def list_models(
     requesting_user: User = Depends(get_current_user),
 ) -> ModelListResponse:
     """List platform models, provider catalog, and the user's custom models."""
-    custom_models = await UserCustomModel.find_all(
-        filter_dict={"user_id": requesting_user.id, "deleted_at": None},
-        sort=[("created_at", -1)],
-    )
+    custom_models = await list_owned_catalog_custom_models(requesting_user.id)
     return ModelListResponse(
         platform=list_platform_models(),
         providers=list_provider_catalog(),
