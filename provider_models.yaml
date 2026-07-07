@@ -6,6 +6,10 @@ platform:
     llm_type: main
     display_name: EVE-Instruct
     description: Default EVE instruction-tuned model hosted by the platform.
+  - id: mistral-small-latest
+    llm_type: fallback
+    display_name: Mistral Small
+    description: Platform Mistral Small model. In-graph retry uses this fallback.
 
 providers:
   - id: mistral

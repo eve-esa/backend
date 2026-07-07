@@ -64,6 +64,7 @@ async def test_list_models_includes_platform_providers_and_custom(async_client):
         assert list_resp.status_code == 200
         payload = list_resp.json()
         assert any(m["id"] == "eve-instruct" for m in payload["platform"])
+        assert any(m["id"] == "mistral-small-latest" for m in payload["platform"])
         assert any(p["id"] == "openai" for p in payload["providers"])
         assert len(payload["custom"]) == 1
         assert payload["custom"][0]["display_name"] == "My OpenAI"
