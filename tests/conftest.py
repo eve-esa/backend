@@ -29,6 +29,11 @@ from server import app
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.database.mongo import async_mongo_manager
+from src.database.indexes import ensure_indexes
+from src.services.provider_catalog import (
+    clear_provider_catalog_cache_for_tests,
+    ensure_provider_catalog_seeded,
+)
 
 
 def _resolve_test_mongo_uri() -> str:
@@ -72,6 +77,9 @@ async def _db_connection():
 
     connection_string = _resolve_test_mongo_uri()
     await async_mongo_manager.connect(connection_string)
+    await ensure_indexes()
+    await ensure_provider_catalog_seeded()
+    clear_provider_catalog_cache_for_tests()
 
     try:
         yield

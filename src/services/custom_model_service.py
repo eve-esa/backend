@@ -13,7 +13,10 @@ from src.database.models.message import Message
 from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.custom_model import CustomModelPublic
 from src.services.custom_model_secrets import get_custom_model_api_key
-from src.services.provider_catalog import resolve_catalog_entry
+from src.services.provider_catalog import (
+    CatalogModelEntry,
+    resolve_catalog_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +50,31 @@ async def list_owned_catalog_custom_models(user_id: str) -> list[UserCustomModel
     return models
 
 
-def resolve_custom_model_endpoints(model: UserCustomModel) -> tuple[str, str]:
-    """Resolve base URL and model name from the fixed provider catalog."""
+async def catalog_entry_for_model(model: UserCustomModel) -> CatalogModelEntry:
+    """Resolve the catalog entry for a stored custom model."""
     if not model.provider_id or not model.catalog_model_id:
         raise HTTPException(
             status_code=422,
             detail="Custom model configuration is invalid or no longer available",
         )
-    entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
-    return entry.provider.base_url, entry.model.model_name
+    return await resolve_catalog_entry(model.provider_id, model.catalog_model_id)
+
+
+def apply_catalog_model_fields(
+    model: UserCustomModel, entry: CatalogModelEntry
+) -> None:
+    """Sync denormalized catalog fields on a custom model row."""
+    model.catalog_model_id = entry.model.id
+    model.model_name = entry.model.model_name
+
+
+def catalog_create_fields(entry: CatalogModelEntry) -> dict[str, str]:
+    """Fields required when creating a custom model from a catalog entry."""
+    return {
+        "provider_id": entry.provider.id,
+        "catalog_model_id": entry.model.id,
+        "model_name": entry.model.model_name,
+    }
 
 
 def ensure_custom_model_has_credentials(model: UserCustomModel) -> None:
@@ -66,20 +85,21 @@ def ensure_custom_model_has_credentials(model: UserCustomModel) -> None:
         )
 
 
-def custom_model_prompt_metadata(model: UserCustomModel) -> dict[str, str]:
-    """Agentic prompt metadata for a resolved custom model."""
-    _, model_name = resolve_custom_model_endpoints(model)
+def custom_model_metadata(model: UserCustomModel) -> dict[str, str]:
+    """Agentic LLM client metadata for a resolved custom model."""
     return {
         "custom_model_id": model.id,
         "custom_model_display_name": model.display_name,
-        "custom_model_name": model_name,
+        "custom_model_name": model.model_name,
     }
 
 
 async def build_custom_model_llm(model: UserCustomModel) -> Any:
     """Build a ChatOpenAI client for a user-owned custom model."""
     ensure_custom_model_has_credentials(model)
-    base_url, model_name = resolve_custom_model_endpoints(model)
+    entry = await catalog_entry_for_model(model)
+    base_url = entry.provider.base_url
+    model_name = entry.model.model_name
     api_key = await get_custom_model_api_key(model.secret_arn)
     from src.services.generate_answer import get_shared_llm_manager
 
@@ -93,7 +113,7 @@ async def build_custom_model_llm(model: UserCustomModel) -> Any:
 async def build_custom_model_llm_for_user(model_id: str, user_id: str) -> Any:
     """Load an owned custom model and build its LLM client."""
     model = await get_owned_custom_model(model_id, user_id, action="use")
-    return await build_custom_model_llm(model)
+    return build_custom_model_llm(model)
 
 
 def custom_model_id_from_messages(messages: list[Message]) -> Optional[str]:
@@ -106,14 +126,14 @@ def custom_model_id_from_messages(messages: list[Message]) -> Optional[str]:
     return None
 
 
-def to_custom_model_public(model: UserCustomModel) -> CustomModelPublic:
+async def to_custom_model_public(model: UserCustomModel) -> CustomModelPublic:
     provider_display_name = model.provider_id
     model_display_name = model.catalog_model_id
     model_name = model.model_name
 
     if model.provider_id and model.catalog_model_id:
         try:
-            entry = resolve_catalog_entry(model.provider_id, model.catalog_model_id)
+            entry = await catalog_entry_for_model(model)
             provider_display_name = entry.provider.display_name
             model_display_name = entry.model.display_name
             model_name = entry.model.model_name
@@ -157,6 +177,12 @@ async def count_active_custom_models(user_id: str) -> int:
     return await UserCustomModel.count_documents(
         catalog_backed_custom_model_filter(user_id)
     )
+
+
+async def list_custom_models_public(user_id: str) -> list[CustomModelPublic]:
+    """List a user's catalog-backed custom models as public API objects."""
+    models = await list_owned_catalog_custom_models(user_id)
+    return [await to_custom_model_public(model) for model in models]
 
 
 async def ensure_custom_model_quota(user_id: str) -> None:

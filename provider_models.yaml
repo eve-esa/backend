@@ -1,5 +1,6 @@
-# Provider catalog for user-owned custom models (agentic EVE).
-# Back office can add providers/models here without code changes.
+# Provider catalog bootstrap for user-owned custom models (agentic EVE).
+# Seeded into MongoDB on first startup when catalog collections are empty.
+# Back office can add or update providers/models in Mongo without redeploying.
 
 platform:
   - id: eve-instruct

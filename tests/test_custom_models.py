@@ -14,7 +14,6 @@ from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import (
     custom_model_id_from_messages,
     get_owned_custom_model,
-    resolve_custom_model_endpoints,
 )
 from src.services.provider_catalog import clear_provider_catalog_cache_for_tests
 from tests.utils.cleaner import cleanup_models
@@ -373,21 +372,6 @@ def test_custom_model_id_from_messages_uses_most_recent():
         request_input=GenerationRequest(query="b", custom_model_id="new")
     )
     assert custom_model_id_from_messages([older, newer]) == "new"
-
-
-@pytest.mark.asyncio
-async def test_resolve_custom_model_endpoints_requires_catalog_fields():
-    model = UserCustomModel(
-        user_id="u1",
-        display_name="x",
-        provider_id="",
-        catalog_model_id="",
-        model_name="m",
-        secret_arn="arn:test",
-    )
-    with pytest.raises(HTTPException) as exc:
-        resolve_custom_model_endpoints(model)
-    assert exc.value.status_code == 422
 
 
 @pytest.mark.asyncio

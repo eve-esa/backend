@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
+from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
     auth_router,
@@ -68,6 +69,7 @@ def create_app(debug=False, **kwargs):
     async def lifespan(app: FastAPI):
         await async_mongo_manager.connect()
         await ensure_indexes()
+        await ensure_provider_catalog_seeded()
         logging.info("Database connection established")
         try:
             yield

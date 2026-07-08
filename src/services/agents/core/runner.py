@@ -20,7 +20,7 @@ from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.custom_model_service import (
     build_custom_model_llm,
-    custom_model_prompt_metadata,
+    custom_model_metadata,
     ensure_custom_model_has_credentials,
     get_owned_custom_model,
 )
@@ -390,7 +390,7 @@ async def _resolve_agentic_llm_client(
         else:
             ensure_custom_model_has_credentials(model)
         llm = await build_custom_model_llm(model)
-        return llm, custom_model_prompt_metadata(model)
+        return llm, custom_model_metadata(model)
 
     effective_type = _resolve_agentic_llm_type(request.llm_type)
     llm = get_shared_llm_manager().get_client_for_model(effective_type)
@@ -507,7 +507,7 @@ async def generate_answer_agentic(
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
-        llm, llm_prompts = await _resolve_agentic_llm_client(
+        llm, llm_metadata = await _resolve_agentic_llm_client(
             request, user_id=user_id
         )
         graph = _build_react_graph(
@@ -617,7 +617,7 @@ async def generate_answer_agentic(
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
             "used_fallback_llm": used_fallback_llm,
-            **llm_prompts,
+            **llm_metadata,
         }
 
         return final_answer, tool_results, use_rag, latencies, prompts, trace_entries

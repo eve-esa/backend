@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -19,10 +20,12 @@ from src.services.custom_model_secrets import (
     update_custom_model_secret,
 )
 from src.services.custom_model_service import (
+    apply_catalog_model_fields,
+    catalog_create_fields,
     ensure_custom_model_has_credentials,
     ensure_custom_model_quota,
     get_owned_custom_model,
-    list_owned_catalog_custom_models,
+    list_custom_models_public,
     to_custom_model_public,
 )
 from src.services.provider_catalog import (
@@ -48,12 +51,12 @@ async def list_models(
     requesting_user: User = Depends(get_current_user),
 ) -> ModelListResponse:
     """List platform models, provider catalog, and the user's custom models."""
-    custom_models = await list_owned_catalog_custom_models(requesting_user.id)
-    return ModelListResponse(
-        platform=list_platform_models(),
-        providers=list_provider_catalog(),
-        custom=[to_custom_model_public(model) for model in custom_models],
+    platform, providers, custom = await asyncio.gather(
+        list_platform_models(),
+        list_provider_catalog(),
+        list_custom_models_public(requesting_user.id),
     )
+    return ModelListResponse(platform=platform, providers=providers, custom=custom)
 
 
 @router.post("/users/custom-models", response_model=CustomModelPublic, status_code=201)
@@ -63,16 +66,14 @@ async def create_custom_model(
 ) -> CustomModelPublic:
     """Register a user-owned custom model. The API key is stored in AWS Secrets Manager."""
     await ensure_custom_model_quota(requesting_user.id)
-    entry = resolve_catalog_entry(request.provider_id, request.catalog_model_id)
+    entry = await resolve_catalog_entry(request.provider_id, request.catalog_model_id)
 
     try:
         model = await UserCustomModel.create(
             user_id=requesting_user.id,
             display_name=request.display_name,
-            provider_id=entry.provider.id,
-            catalog_model_id=entry.model.id,
-            model_name=entry.model.model_name,
             secret_arn="",
+            **catalog_create_fields(entry),
         )
     except ValueError as exc:
         _raise_if_duplicate_display_name(exc)
@@ -103,7 +104,7 @@ async def create_custom_model(
             detail="Failed to store custom model credentials",
         )
 
-    return to_custom_model_public(model)
+    return await to_custom_model_public(model)
 
 
 @router.patch("/users/custom-models/{model_id}", response_model=CustomModelPublic)
@@ -118,9 +119,8 @@ async def update_custom_model(
     if request.display_name is not None:
         model.display_name = request.display_name
     if request.catalog_model_id is not None:
-        entry = resolve_catalog_entry(model.provider_id, request.catalog_model_id)
-        model.catalog_model_id = entry.model.id
-        model.model_name = entry.model.model_name
+        entry = await resolve_catalog_entry(model.provider_id, request.catalog_model_id)
+        apply_catalog_model_fields(model, entry)
     if request.api_key is not None:
         ensure_custom_model_has_credentials(model)
         try:
@@ -140,7 +140,7 @@ async def update_custom_model(
         await model.save()
     except ValueError as exc:
         _raise_if_duplicate_display_name(exc)
-    return to_custom_model_public(model)
+    return await to_custom_model_public(model)
 
 
 @router.delete("/users/custom-models/{model_id}", status_code=204)
