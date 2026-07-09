@@ -1805,6 +1805,7 @@ async def create_agentic_message(
             latencies,
             prompts,
             trace_entries,
+            artifact_ids,
         ) = await generate_answer_agentic(
             request, conversation_id=conversation_id, user_id=requesting_user.id
         )
@@ -1813,6 +1814,7 @@ async def create_agentic_message(
         message.documents = tool_results
         message.use_rag = use_rag
         message.trace = trace_entries if trace_entries else None
+        message.artifact_ids = artifact_ids if artifact_ids else None
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         existing_metadata.update({"latencies": latencies, "prompts": prompts})
         message.metadata = existing_metadata

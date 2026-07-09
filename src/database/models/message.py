@@ -49,6 +49,10 @@ class Message(MongoModel):
     attachments: Optional[List[Dict[str, Any]]] = Field(
         default=None, description="Image attachments associated with the message"
     )
+    artifact_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Artifacts produced by MCP tool calls during this message's generation",
+    )
 
     collection_name: ClassVar[str] = "messages"
 

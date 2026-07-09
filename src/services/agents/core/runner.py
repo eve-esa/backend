@@ -28,6 +28,11 @@ from src.services.generate_answer import (
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.core.registry import get_agent_graph
 from src.services.agents.graphs_bundle import graphs_base_module, graphs_utils_module
+from src.services.mcp.artifact_context import (
+    reset_artifact_context,
+    set_artifact_context,
+)
+from src.services.mcp.artifact_ingestion import ArtifactInterceptor
 from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp_auth import get_cognito_token_provider
 from src.services.stream_bus import get_stream_bus
@@ -247,11 +252,21 @@ async def _load_mcp_tools_for_servers(
     if not connections:
         return []
 
+    artifact_interceptor = ArtifactInterceptor()
     client = MultiServerMCPClient(
         connections,
         tool_name_prefix=True,
-        tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
+        tool_interceptors=[
+            LatencyInterceptor(),
+            ErrorLoggingInterceptor(),
+            artifact_interceptor,
+        ],
     )
+    # Read the artifact_context contextvar at call time (never the constructor):
+    # this client instance is built once per _load_mcp_tools_for_servers call but
+    # may be reused for many tool calls, potentially across requests if caching
+    # is added upstream later.
+    artifact_interceptor.bind_client(client)
     tools: List[Any] = []
     failed_servers: List[str] = []
     for server_name in connections:
@@ -454,16 +469,26 @@ async def generate_answer_agentic(
     Dict[str, Optional[float]],
     Dict[str, Any],
     List[Dict[str, Any]],
+    List[str],
 ]:
     """Run the full agentic generation pipeline without streaming.
 
-    Returns (answer, tool_results, use_rag, latencies, prompts, trace).
+    Returns (answer, tool_results, use_rag, latencies, prompts, trace, artifact_ids).
+    ``artifact_ids`` lists any Artifacts the MCP artifact interceptor persisted
+    from tool output during this run (see ``src.services.mcp.artifact_ingestion``).
     """
     if not _langgraph_available:
         raise RuntimeError("LangGraph is not available — cannot run agentic generation")
 
     error_logger = get_error_logger()
     total_start = time.perf_counter()
+    # message_id is unset here: Message.create() in the router runs before this
+    # call and there's no clean way to thread it through this signature; artifacts
+    # are still linked via conversation_id, and the router attaches artifact_ids
+    # to the Message itself once this call returns.
+    artifact_ctx, artifact_token = set_artifact_context(
+        user_id=user_id, conversation_id=conversation_id
+    )
 
     try:
         tools = await _build_tools(request)
@@ -579,7 +604,15 @@ async def generate_answer_agentic(
             "used_fallback_llm": used_fallback_llm,
         }
 
-        return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
+        return (
+            final_answer,
+            tool_results,
+            use_rag,
+            latencies,
+            prompts,
+            trace_entries,
+            list(artifact_ctx.collected_artifact_ids),
+        )
 
     except Exception as exc:
         await error_logger.log_error(
@@ -590,6 +623,8 @@ async def generate_answer_agentic(
             error_type=type(exc).__name__,
         )
         raise
+    finally:
+        reset_artifact_context(artifact_token)
 
 
 # ─── Streaming generation ─────────────────────────────────────────────────────
@@ -623,13 +658,21 @@ async def generate_answer_agentic_stream_helper(
     total_start = time.perf_counter()
     accumulated: List[str] = []
     used_fallback_llm = False
+    artifact_ctx, artifact_token = set_artifact_context(
+        user_id=user_id, conversation_id=conversation_id, message_id=message_id
+    )
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
+    def _collected_artifact_ids() -> Optional[List[str]]:
+        return list(artifact_ctx.collected_artifact_ids) or None
+
     try:
         if cancelled():
-            await persist_message_state(message_id, stopped=True)
+            await persist_message_state(
+                message_id, stopped=True, artifact_ids=_collected_artifact_ids()
+            )
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
@@ -724,7 +767,10 @@ async def generate_answer_agentic_stream_helper(
             ):
                 if cancelled():
                     await persist_message_state(
-                        message_id, stopped=True, output="".join(accumulated)
+                        message_id,
+                        stopped=True,
+                        output="".join(accumulated),
+                        artifact_ids=_collected_artifact_ids(),
                     )
                     yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                     return
@@ -847,6 +893,7 @@ async def generate_answer_agentic_stream_helper(
                 "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
             },
             trace=trace_entries if trace_entries else None,
+            artifact_ids=_collected_artifact_ids(),
         )
 
         if background_tasks:
@@ -862,7 +909,10 @@ async def generate_answer_agentic_stream_helper(
     except asyncio.CancelledError:
         logger.info("Agentic generation cancelled")
         await persist_message_state(
-            message_id, output="".join(accumulated), stopped=True
+            message_id,
+            output="".join(accumulated),
+            stopped=True,
+            artifact_ids=_collected_artifact_ids(),
         )
         return
 
@@ -877,7 +927,9 @@ async def generate_answer_agentic_stream_helper(
         )
         answer = "".join(accumulated)
         if answer:
-            await persist_message_state(message_id, output=answer)
+            await persist_message_state(
+                message_id, output=answer, artifact_ids=_collected_artifact_ids()
+            )
             if output_format == "json":
                 yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}})}\n\n"
             else:
@@ -895,8 +947,15 @@ async def generate_answer_agentic_stream_helper(
             error_type=type(exc).__name__,
         )
         with contextlib.suppress(Exception):
-            await persist_message_state(message_id, output="".join(accumulated))
+            await persist_message_state(
+                message_id,
+                output="".join(accumulated),
+                artifact_ids=_collected_artifact_ids(),
+            )
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    finally:
+        reset_artifact_context(artifact_token)
 
 
 # ─── SSE wrappers ─────────────────────────────────────────────────────────────
