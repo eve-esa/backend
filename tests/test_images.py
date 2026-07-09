@@ -295,6 +295,39 @@ async def test_list_and_delete_image(async_client, monkeypatch):
         await cleanup_models([user])
 
 
+@pytest.mark.asyncio
+async def test_delete_image_storage_failure_keeps_record(async_client, monkeypatch):
+    """If the object-store delete fails, the DB record is kept (fail-closed, no orphan)."""
+
+    fake = _use_fake_storage(monkeypatch)
+
+    async def _boom(key):
+        raise RuntimeError("s3 unavailable")
+
+    monkeypatch.setattr(fake, "delete_object", _boom)
+
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (
+            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
+        ).json()["id"]
+
+        del_resp = await async_client.delete(
+            f"/images/{image_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert del_resp.status_code == 500
+
+        # The record must survive so a retry can still reclaim the object.
+        assert await Image.find_by_id(image_id) is not None
+        get_resp = await async_client.get(
+            f"/images/{image_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert get_resp.status_code == 200
+    finally:
+        await Image.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
 # ---------------- Chat wiring -----------------
 
 

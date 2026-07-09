@@ -243,14 +243,19 @@ async def delete_image(
         Confirmation message.
 
     Raises:
-        HTTPException: 404 if not found; 403 if deletion is forbidden.
+        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 if the
+        object store delete fails (the DB record is kept so a retry can reclaim it).
     """
     image = await get_owned_image(image_id, requesting_user)
 
+    # Fail closed: only drop the DB record once the object is gone from storage.
+    # Deleting the doc on a storage failure would orphan the bytes (no record to
+    # ever reclaim them), so surface the error and let the client retry.
     try:
         await storage_service.delete_object(image.key)
-    except Exception as e:  # noqa: BLE001 - best-effort; still remove the DB record
+    except Exception as e:  # noqa: BLE001 - surfaced below; never orphan the object
         logger.error(f"Failed to delete image object {image.key}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete image object")
 
     await image.delete()
     return {"message": "Image deleted successfully"}
