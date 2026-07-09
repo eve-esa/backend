@@ -31,12 +31,12 @@ providers:
     display_name: Claude
     base_url: https://api.anthropic.com/v1
     models:
-      - id: claude-sonnet
-        display_name: Claude Sonnet
-        model_name: claude-sonnet
-      - id: claude-opus
-        display_name: Claude Opus
-        model_name: claude-opus
+      - id: claude-sonnet-5
+        display_name: Claude Sonnet 5
+        model_name: claude-sonnet-5
+      - id: claude-opus-4-8
+        display_name: Claude Opus 4.8
+        model_name: claude-opus-4-8
 
   - id: openai
     display_name: OpenAI
