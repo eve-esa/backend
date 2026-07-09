@@ -41,6 +41,16 @@ services:
       - redis
       - langfuse-web
       - minio-images
+      - dummy-mcp
+    networks:
+      - app-network
+
+  # Dummy MCP server for artifact-ingestion e2e testing (tests/e2e/test_artifact_e2e.py).
+  # No host port needed: the backend and the e2e test reach it by service name.
+  dummy-mcp:
+    build:
+      context: ./tests/e2e/dummy_mcp_server
+      dockerfile: Dockerfile
     networks:
       - app-network
 
