@@ -289,6 +289,7 @@ class TestGenerateAnswerAgenticInGraphFallback:
                 _latencies,
                 prompts,
                 _trace,
+                _artifact_ids,
             ) = await generate_answer_agentic(request, conversation_id="c1")
 
         assert final_answer == "final answer"
