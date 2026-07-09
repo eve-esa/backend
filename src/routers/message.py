@@ -90,8 +90,11 @@ async def resolve_image_attachments(
     if not image_ids:
         return None
 
+    # Dedupe (preserving order) so repeated ids can't multiply Mongo round-trips.
+    unique_image_ids = list(dict.fromkeys(image_ids))
+
     attachments = []
-    for image_id in image_ids:
+    for image_id in unique_image_ids:
         image = await Image.find_by_id(image_id)
         if not image:
             raise HTTPException(

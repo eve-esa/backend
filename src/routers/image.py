@@ -1,10 +1,12 @@
 """RESTful image endpoints: upload, owner-only serving, listing and deletion."""
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, UploadFile
 from fastapi.responses import StreamingResponse
+from pymongo import ReturnDocument
 
 from src.config import (
     IMAGE_ALLOWED_TYPES,
@@ -14,6 +16,7 @@ from src.config import (
 )
 from src.database.models.image import Image
 from src.database.models.user import User
+from src.database.mongo import get_collection
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
@@ -21,6 +24,34 @@ from src.services.storage import sniff_image_type, storage_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Collection holding the atomic per-user-per-day upload counters.
+QUOTA_COLLECTION = "image_upload_quota"
+
+
+async def reserve_daily_quota_slot(user_id: str) -> None:
+    """Atomically reserve one upload slot for the user's current UTC day.
+
+    Uses an upserted per-user-per-day counter incremented in a single Mongo op,
+    so parallel uploads cannot bypass the cap (fails closed under concurrency).
+    The counter is monotonic: deletes never decrement it, because the quota limits
+    uploads-per-day (a rate), not the number of currently stored objects. Counter
+    docs are tiny; they simply accumulate and can be reaped with a TTL index on
+    `day` if that ever becomes desirable.
+
+    Raises:
+        HTTPException: 429 if the daily upload limit has been reached.
+    """
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    counter = get_collection(QUOTA_COLLECTION)
+    doc = await counter.find_one_and_update(
+        {"_id": f"{user_id}:{day}"},
+        {"$inc": {"count": 1}, "$setOnInsert": {"day": day, "user_id": user_id}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc["count"] > IMAGE_UPLOADS_PER_DAY:
+        raise HTTPException(status_code=429, detail="Daily image upload limit reached")
 
 
 async def get_owned_image(image_id: str, requesting_user: User) -> Image:
@@ -61,18 +92,6 @@ async def upload_image(
         HTTPException: 429 if the daily quota is exceeded; 413 if the file is too
         large; 415 if the file is not an allowed image type.
     """
-    # Daily upload quota (no generic HTTP rate limiter exists in the repo).
-    start_of_day = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    uploads_today = await Image.count_documents(
-        {"user_id": requesting_user.id, "timestamp": {"$gte": start_of_day}}
-    )
-    if uploads_today >= IMAGE_UPLOADS_PER_DAY:
-        raise HTTPException(
-            status_code=429, detail="Daily image upload limit reached"
-        )
-
     # Read with a hard cap so oversize payloads never reach storage.
     data = await file.read(IMAGE_MAX_BYTES + 1)
     if len(data) > IMAGE_MAX_BYTES:
@@ -83,6 +102,10 @@ async def upload_image(
         raise HTTPException(
             status_code=415, detail="Unsupported or unrecognized image type"
         )
+
+    # Reserve a quota slot atomically once the payload is known-valid, so malformed
+    # uploads don't burn quota and concurrent valid uploads can't exceed the cap.
+    await reserve_daily_quota_slot(requesting_user.id)
 
     content_type = f"image/{subtype}"
     key = storage_service.build_user_key(requesting_user.id, subtype)
@@ -180,7 +203,16 @@ async def get_image(
     image = await get_owned_image(image_id, requesting_user)
     response = await storage_service.get_object(image.key)
 
-    headers = {"Cache-Control": "private, max-age=3600"}
+    # Sanitize the filename for the header (display-only): drop CR/LF, quotes,
+    # backslashes and path separators to prevent header injection.
+    safe_filename = re.sub(r'[\r\n"\\/]+', "_", image.filename or "image")
+
+    headers = {
+        "Cache-Control": "private, max-age=3600",
+        # Never let the browser MIME-sniff a mismatched/hostile type.
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'inline; filename="{safe_filename}"',
+    }
     etag = response.get("ETag")
     if etag:
         headers["ETag"] = etag

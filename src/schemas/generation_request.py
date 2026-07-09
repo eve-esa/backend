@@ -51,6 +51,7 @@ class GenerationRequest(BaseModel):
     )
     image_ids: Optional[List[str]] = Field(
         default=None,
+        max_length=20,
         description="IDs of previously uploaded images to attach to the message",
     )
 
