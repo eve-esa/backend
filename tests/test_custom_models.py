@@ -395,6 +395,26 @@ async def test_get_owned_custom_model_requires_credentials_for_use():
 
 
 @pytest.mark.asyncio
+async def test_build_custom_model_llm_for_user_returns_client_not_coroutine():
+    import asyncio
+
+    from src.services.custom_model_service import build_custom_model_llm_for_user
+
+    sentinel = object()
+    with patch(
+        "src.services.custom_model_service.get_owned_custom_model",
+        new=AsyncMock(return_value=MagicMock()),
+    ), patch(
+        "src.services.custom_model_service.build_custom_model_llm",
+        new=AsyncMock(return_value=sentinel),
+    ):
+        result = await build_custom_model_llm_for_user("model-1", "user-1")
+
+    assert result is sentinel
+    assert not asyncio.iscoroutine(result)
+
+
+@pytest.mark.asyncio
 async def test_maybe_rollup_uses_custom_summarizer():
     from src.services.generate_answer import maybe_rollup_and_trim_history
 

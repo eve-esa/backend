@@ -113,7 +113,7 @@ async def build_custom_model_llm(model: UserCustomModel) -> Any:
 async def build_custom_model_llm_for_user(model_id: str, user_id: str) -> Any:
     """Load an owned custom model and build its LLM client."""
     model = await get_owned_custom_model(model_id, user_id, action="use")
-    return build_custom_model_llm(model)
+    return await build_custom_model_llm(model)
 
 
 def custom_model_id_from_messages(messages: list[Message]) -> Optional[str]:
