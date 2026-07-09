@@ -32,7 +32,7 @@ from src.services.generate_answer import (
     setup_rag_and_context,
     should_use_rag,
 )
-from src.database.models.image import Image
+from src.database.models.artifact import Artifact
 from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
@@ -72,20 +72,22 @@ async def resolve_image_attachments(
 ) -> Optional[list]:
     """Resolve requested image IDs into attachment records for a message.
 
-    Validates that each image exists and belongs to the requesting user, backfills
-    the owning conversation on the image, and returns the attachment payloads to be
-    persisted on the message.
+    The request field is still named ``image_ids`` (the frontend contract), but
+    it now resolves to Artifact documents rather than the retired Image model.
+    Validates that each artifact exists and belongs to the requesting user,
+    backfills the owning conversation, and returns the attachment payloads to
+    be persisted on the message.
 
     Args:
-        image_ids (list | None): IDs of previously uploaded images to attach.
+        image_ids (list | None): IDs of previously uploaded artifacts to attach.
         conversation_id (str): Conversation the message belongs to.
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
-        A list of attachment dicts, or None if no images were requested.
+        A list of attachment dicts, or None if no artifacts were requested.
 
     Raises:
-        HTTPException: 404 if any image is missing; 403 if any belongs to another user.
+        HTTPException: 404 if any artifact is missing; 403 if any belongs to another user.
     """
     if not image_ids:
         return None
@@ -95,25 +97,26 @@ async def resolve_image_attachments(
 
     attachments = []
     for image_id in unique_image_ids:
-        image = await Image.find_by_id(image_id)
-        if not image:
+        artifact = await Artifact.find_by_id(image_id)
+        if not artifact:
             raise HTTPException(
                 status_code=404, detail=f"Image {image_id} not found"
             )
-        if image.user_id != requesting_user.id:
+        if artifact.user_id != requesting_user.id:
             raise HTTPException(
                 status_code=403, detail="You are not allowed to use this image"
             )
-        if image.conversation_id != conversation_id:
-            image.conversation_id = conversation_id
-            await image.save()
+        if artifact.conversation_id != conversation_id:
+            artifact.conversation_id = conversation_id
+            await artifact.save()
         attachments.append(
             {
-                "image_id": image.id,
-                "url": f"/images/{image.id}",
-                "filename": image.filename,
-                "content_type": image.content_type,
-                "size_bytes": image.size_bytes,
+                "image_id": artifact.id,
+                "url": f"/artifacts/{artifact.id}",
+                "filename": artifact.filename,
+                "content_type": artifact.content_type,
+                "size_bytes": artifact.size_bytes,
+                "source": artifact.source.model_dump(),
             }
         )
     return attachments

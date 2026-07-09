@@ -9,6 +9,7 @@ from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
 from src.routers import (
     OpenAIProxyDispatcher,
+    artifact_router,
     auth_router,
     collection_router,
     conversation_router,
@@ -16,7 +17,6 @@ from src.routers import (
     error_log_router,
     forgot_password_router,
     health_check_router,
-    image_router,
     mcp_server_router,
     message_router,
     user_router,
@@ -49,8 +49,8 @@ def register_routers(app: FastAPI):
     # Documents
     app.include_router(document_router, tags=["Documents"])
 
-    # Images
-    app.include_router(image_router, tags=["Images"])
+    # Artifacts
+    app.include_router(artifact_router, tags=["Artifacts"])
 
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])

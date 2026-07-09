@@ -151,9 +151,9 @@ def redis_client_kwargs() -> Dict[str, Any]:
     }
 
 
-# S3 / Image storage
+# S3 / Artifact storage
 # S3_ENDPOINT_URL empty -> real AWS S3; set to http://minio:9000 for local MinIO.
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "eve-x-images-local").strip()
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "eve-x-artifacts-local").strip()
 S3_REGION = os.getenv("S3_REGION", "eu-central-1").strip()
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
 # Dedicated credentials (do not collide with the AWS_* vars used by the CLI).
@@ -161,6 +161,8 @@ S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
 S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
 
+# User-upload path knobs (POST /artifacts with an image file). Kept as IMAGE_*
+# since they govern only the image-upload path, not artifacts in general.
 IMAGE_MAX_BYTES = int(os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
 IMAGE_ALLOWED_TYPES = [
     t.strip().lower()
@@ -168,6 +170,13 @@ IMAGE_ALLOWED_TYPES = [
     if t.strip()
 ]
 IMAGE_UPLOADS_PER_DAY = int(os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
+
+# Generic artifact knobs, consumed by MCP tool-output ingestion (next task).
+ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))
+ARTIFACT_MAX_PER_TOOL_CALL = int(os.getenv("ARTIFACT_MAX_PER_TOOL_CALL", 10))
+ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
+    os.getenv("ARTIFACT_RESOURCE_READ_TIMEOUT_S", 30)
+)
 
 
 def configure_logging(level=logging.INFO):

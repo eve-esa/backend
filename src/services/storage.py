@@ -6,6 +6,7 @@ local MinIO container. No code changes are needed to switch between the two.
 """
 
 import logging
+import mimetypes
 import uuid
 from typing import AsyncIterator, Optional
 
@@ -48,6 +49,18 @@ def sniff_image_type(header: bytes) -> Optional[str]:
     return None
 
 
+def guess_extension_from_content_type(content_type: Optional[str]) -> str:
+    """Guess a filename extension (without the leading dot) from a MIME type.
+
+    Falls back to "application/octet-stream" when no content type is given, and
+    to ".bin" when the type is unrecognized (e.g. an unusual tool-declared type).
+    Meant for artifact sources where the type isn't sniffed from magic bytes
+    (e.g. MCP tool outputs), unlike the upload path which uses sniff_image_type.
+    """
+    ext = mimetypes.guess_extension(content_type or "application/octet-stream")
+    return (ext or ".bin").lstrip(".")
+
+
 class StorageService:
     """Thin async wrapper over a boto3 S3 client (compatible with MinIO)."""
 
@@ -69,13 +82,18 @@ class StorageService:
         return self._s3
 
     @staticmethod
-    def build_user_key(user_id: str, ext: str) -> str:
-        """Build the per-user object key: ``users/{user_id}/{uuid}.{ext}``.
+    def build_user_key(user_id: str, ext: str, prefix: Optional[str] = None) -> str:
+        """Build the per-user object key: ``users/{user_id}/[{prefix}/]{uuid}.{ext}``.
 
         The per-user prefix scales naturally on S3 and matches the layout a
-        future Cognito identity policy would authorize.
+        future Cognito identity policy would authorize. ``prefix`` groups keys
+        by artifact kind (e.g. ``"artifacts"``) without changing the per-user
+        top-level layout.
         """
-        return f"users/{user_id}/{uuid.uuid4().hex}.{ext.lstrip('.').lower()}"
+        clean_ext = ext.lstrip(".").lower()
+        clean_prefix = prefix.strip("/") if prefix else None
+        base = f"users/{user_id}/{clean_prefix}" if clean_prefix else f"users/{user_id}"
+        return f"{base}/{uuid.uuid4().hex}.{clean_ext}"
 
     async def put_object(self, key: str, body: bytes, content_type: str) -> None:
         """Store an object in the bucket."""
