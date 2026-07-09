@@ -110,7 +110,13 @@ async def ensure_provider_catalog_seeded() -> None:
                 enabled=True,
                 sort_order=index,
             )
-            await doc.save()
+            try:
+                await doc.save()
+            except ValueError:
+                logger.info(
+                    "Platform model %r already seeded by another worker, skipping",
+                    item["id"],
+                )
         logger.info(
             "Seeded %d platform model(s) into catalog_platform_models",
             len(raw.get("platform", [])),
@@ -139,7 +145,13 @@ async def ensure_provider_catalog_seeded() -> None:
                 enabled=True,
                 sort_order=index,
             )
-            await doc.save()
+            try:
+                await doc.save()
+            except ValueError:
+                logger.info(
+                    "Provider %r already seeded by another worker, skipping",
+                    provider_id,
+                )
         logger.info(
             "Seeded %d provider(s) into catalog_providers",
             len(raw.get("providers", [])),
