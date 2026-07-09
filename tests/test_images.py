@@ -334,7 +334,7 @@ async def test_delete_image_storage_failure_keeps_record(async_client, monkeypat
 # ---------------- Chat wiring -----------------
 
 
-async def _mock_generate_answer(request, conversation_id=None):
+async def _mock_generate_answer(request, conversation_id=None, user_id=None):
     return "Test answer", [], False, {}, {}, []
 
 
