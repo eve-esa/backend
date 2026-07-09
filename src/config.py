@@ -151,6 +151,25 @@ def redis_client_kwargs() -> Dict[str, Any]:
     }
 
 
+# S3 / Image storage
+# S3_ENDPOINT_URL empty -> real AWS S3; set to http://minio:9000 for local MinIO.
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "eve-x-images-local").strip()
+S3_REGION = os.getenv("S3_REGION", "eu-central-1").strip()
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
+# Dedicated credentials (do not collide with the AWS_* vars used by the CLI).
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
+
+IMAGE_MAX_BYTES = int(os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
+IMAGE_ALLOWED_TYPES = [
+    t.strip().lower()
+    for t in os.getenv("IMAGE_ALLOWED_TYPES", "png,jpeg,webp,gif").split(",")
+    if t.strip()
+]
+IMAGE_UPLOADS_PER_DAY = int(os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
+
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers
