@@ -32,6 +32,7 @@ from src.services.generate_answer import (
     setup_rag_and_context,
     should_use_rag,
 )
+from src.database.models.image import Image
 from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
@@ -64,6 +65,55 @@ from src.utils.helpers import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def resolve_image_attachments(
+    image_ids: Optional[list], conversation_id: str, requesting_user: User
+) -> Optional[list]:
+    """Resolve requested image IDs into attachment records for a message.
+
+    Validates that each image exists and belongs to the requesting user, backfills
+    the owning conversation on the image, and returns the attachment payloads to be
+    persisted on the message.
+
+    Args:
+        image_ids (list | None): IDs of previously uploaded images to attach.
+        conversation_id (str): Conversation the message belongs to.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        A list of attachment dicts, or None if no images were requested.
+
+    Raises:
+        HTTPException: 404 if any image is missing; 403 if any belongs to another user.
+    """
+    if not image_ids:
+        return None
+
+    attachments = []
+    for image_id in image_ids:
+        image = await Image.find_by_id(image_id)
+        if not image:
+            raise HTTPException(
+                status_code=404, detail=f"Image {image_id} not found"
+            )
+        if image.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403, detail="You are not allowed to use this image"
+            )
+        if image.conversation_id != conversation_id:
+            image.conversation_id = conversation_id
+            await image.save()
+        attachments.append(
+            {
+                "image_id": image.id,
+                "url": f"/images/{image.id}",
+                "filename": image.filename,
+                "content_type": image.content_type,
+                "size_bytes": image.size_bytes,
+            }
+        )
+    return attachments
 
 
 async def get_lower_bound(usage_kg: float) -> Optional[CO2EquivalenceComparison]:
@@ -433,6 +483,10 @@ async def create_message(
         except Exception:
             request.year = None
 
+        attachments = await resolve_image_attachments(
+            request.image_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -441,6 +495,7 @@ async def create_message(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
 
         set_message_context(message.id)
@@ -773,6 +828,10 @@ async def create_message_stream(
         except Exception:
             request.year = None
 
+        attachments = await resolve_image_attachments(
+            request.image_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -781,6 +840,7 @@ async def create_message_stream(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
 
         set_message_context(message.id)

@@ -49,6 +49,10 @@ class GenerationRequest(BaseModel):
             "When omitted, backend uses AGENT_GRAPH_TYPE from environment."
         ),
     )
+    image_ids: Optional[List[str]] = Field(
+        default=None,
+        description="IDs of previously uploaded images to attach to the message",
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)

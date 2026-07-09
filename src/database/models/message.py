@@ -46,6 +46,9 @@ class Message(MongoModel):
         default=None,
         description="Full agentic execution trace: every LangGraph message, tool call, and result",
     )
+    attachments: Optional[List[Dict[str, Any]]] = Field(
+        default=None, description="Image attachments associated with the message"
+    )
 
     collection_name: ClassVar[str] = "messages"
 
