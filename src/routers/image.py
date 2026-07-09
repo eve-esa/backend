@@ -208,7 +208,11 @@ async def get_image(
     safe_filename = re.sub(r'[\r\n"\\/]+', "_", image.filename or "image")
 
     headers = {
-        "Cache-Control": "private, max-age=3600",
+        # Per-user authorized payload: force revalidation so a shared browser
+        # cache re-checks ownership, and key the cache on the token so one
+        # user's cached bytes can't be replayed to another (cross-account bleed).
+        "Cache-Control": "private, no-cache",
+        "Vary": "Authorization",
         # Never let the browser MIME-sniff a mismatched/hostile type.
         "X-Content-Type-Options": "nosniff",
         "Content-Disposition": f'inline; filename="{safe_filename}"',

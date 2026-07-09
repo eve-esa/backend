@@ -198,7 +198,10 @@ async def test_get_image_owner(async_client, monkeypatch):
         assert resp.status_code == 200
         assert resp.content == PNG_BYTES
         assert resp.headers["content-type"] == "image/png"
-        assert resp.headers["cache-control"] == "private, max-age=3600"
+        assert resp.headers["cache-control"] == "private, no-cache"
+        # Vary: Authorization keys any HTTP cache on the token, preventing a
+        # different user from being served another user's cached bytes.
+        assert resp.headers["vary"] == "Authorization"
         assert resp.headers["x-content-type-options"] == "nosniff"
         assert resp.headers["content-disposition"] == 'inline; filename="pic.png"'
     finally:
