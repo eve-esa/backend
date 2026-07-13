@@ -10,7 +10,7 @@ import contextlib
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
@@ -187,6 +187,11 @@ def _serialise_trace_entry(
 
     _enrich_trace_entry_with_message_metadata(entry, msg)
     return entry
+
+
+def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) -> bool:
+    """Return True when agent_fallback produced an answer but the graph still raised."""
+    return fallback_used and has_answer
 
 
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
@@ -431,14 +436,14 @@ def _build_react_graph(
     ``llm_type_override`` forces a specific model (e.g. ``LLMType.Fallback.value``)
     regardless of the request's ``llm_type``.  ``fallback_llm`` is forwarded to
     ``agent.compile()`` for in-graph node-level fallback.
-    When ``llm`` is provided it is used directly (e.g. user custom models) and
-    platform fallback is not wired unless ``fallback_llm`` is passed explicitly.
+    ``llm`` is the primary graph model (platform or user custom).  When
+    ``fallback_llm`` is not passed, the platform fallback model is wired
+    automatically.
     """
-    using_custom_llm = llm is not None
     if llm is None:
         effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
         llm = get_shared_llm_manager().get_client_for_model(effective_type)
-    if fallback_llm is None and not using_custom_llm:
+    if fallback_llm is None:
         fallback_llm = get_shared_llm_manager().get_client_for_model(
             LLMType.Fallback.value
         )
@@ -540,6 +545,7 @@ async def generate_answer_agentic(
             latency_map: Dict[str, float] = {}
             in_graph_fallback = False
             start = time.perf_counter()
+            graph_exc: Optional[Exception] = None
             with langfuse_context(
                 user_id=user_id,
                 session_id=conversation_id,
@@ -549,30 +555,50 @@ async def generate_answer_agentic(
                 ],
                 trace_name="agentic_generation",
             ):
-                async for update in g.astream(
-                    {"messages": [HumanMessage(content=request.query)]},
-                    config=config,
-                    stream_mode="updates",
-                ):
-                    step_time = time.perf_counter()
-                    for node_name, node_output in update.items():
-                        if node_name == "agent_fallback":
-                            in_graph_fallback = True
-                        step_latency_s = step_time - start
-                        latency_map.setdefault(node_name, 0.0)
-                        msgs = (
-                            node_output.get("messages", [])
-                            if isinstance(node_output, dict)
-                            else []
-                        )
-                        for msg in msgs:
-                            trace.append(
-                                _serialise_trace_entry(
-                                    msg, node=node_name, latency_s=step_latency_s
-                                )
+                try:
+                    async for update in g.astream(
+                        {"messages": [HumanMessage(content=request.query)]},
+                        config=config,
+                        stream_mode="updates",
+                    ):
+                        step_time = time.perf_counter()
+                        for node_name, node_output in update.items():
+                            if node_name == "agent_fallback":
+                                in_graph_fallback = True
+                            step_latency_s = step_time - start
+                            latency_map.setdefault(node_name, 0.0)
+                            msgs = (
+                                node_output.get("messages", [])
+                                if isinstance(node_output, dict)
+                                else []
                             )
-                            raw_msgs.append(msg)
-                        latency_map[node_name] = step_latency_s
+                            for msg in msgs:
+                                trace.append(
+                                    _serialise_trace_entry(
+                                        msg, node=node_name, latency_s=step_latency_s
+                                    )
+                                )
+                                raw_msgs.append(msg)
+                            latency_map[node_name] = step_latency_s
+                except Exception as exc:
+                    graph_exc = exc
+
+            if graph_exc is not None:
+                has_answer = any(
+                    isinstance(msg, AIMessage)
+                    and msg.content
+                    and not getattr(msg, "tool_calls", None)
+                    for msg in raw_msgs
+                )
+                if not _recoverable_after_agent_fallback(
+                    fallback_used=in_graph_fallback, has_answer=has_answer
+                ):
+                    raise graph_exc
+                logger.warning(
+                    "Agent graph raised after successful agent_fallback; "
+                    "returning fallback answer: %s",
+                    graph_exc,
+                )
             return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
 
         gen_start = time.perf_counter()
@@ -644,7 +670,7 @@ async def generate_answer_agentic_stream_helper(
     output_format: str = "json",
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
-):
+) -> AsyncGenerator[str, None]:
     """Stream agentic generation as SSE events.
 
     Event types emitted:
@@ -756,108 +782,122 @@ async def generate_answer_agentic_stream_helper(
                     events.append(f"data: {tok}\n\n")
             return events
 
-        with langfuse_context(
-            user_id=user_id,
-            session_id=conversation_id,
-            tags=[
-                "agentic",
-                "stream",
-                request.custom_model_id or request.llm_type or "default",
-            ],
-            trace_name="agentic_generation_stream",
-        ):
-            async for mode, payload in graph.astream(
-                {"messages": [HumanMessage(content=request.query)]},
-                config=config,
-                stream_mode=["messages", "updates"],
+        graph_exc: Optional[Exception] = None
+        try:
+            with langfuse_context(
+                user_id=user_id,
+                session_id=conversation_id,
+                tags=[
+                    "agentic",
+                    "stream",
+                    request.custom_model_id or request.llm_type or "default",
+                ],
+                trace_name="agentic_generation_stream",
             ):
-                if cancelled():
-                    await persist_message_state(
-                        message_id, stopped=True, output="".join(accumulated)
-                    )
-                    yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
-                    return
-
-                if mode == "updates":
-                    if "agent_fallback" in payload:
-                        in_graph_fallback_used = True
-                    continue
-
-                chunk, metadata = payload
-                node = metadata.get("langgraph_node", "")
-                if node != current_node:
-                    if current_node:
-                        elapsed_s = time.perf_counter() - node_start_time
-                        node_latencies[current_node] = (
-                            node_latencies.get(current_node, 0.0) + elapsed_s
+                async for mode, payload in graph.astream(
+                    {"messages": [HumanMessage(content=request.query)]},
+                    config=config,
+                    stream_mode=["messages", "updates"],
+                ):
+                    if cancelled():
+                        await persist_message_state(
+                            message_id, stopped=True, output="".join(accumulated)
                         )
-                    for event in _flush_turn_buffer_to_events():
-                        yield event
-                    node_start_time = time.perf_counter()
-                    current_node = node
+                        yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                        return
 
-                if ToolMessage and isinstance(chunk, ToolMessage):
-                    use_rag = True
-                    preview = str(chunk.content)[:200]
-                    step_s = time.perf_counter() - node_start_time
-                    trace_entries.append(
-                        _serialise_trace_entry(chunk, node=node, latency_s=step_s)
-                    )
-                    yield f"data: {json.dumps({'type': 'tool_result', 'content': preview})}\n\n"
-                    continue
+                    if mode == "updates":
+                        if "agent_fallback" in payload:
+                            in_graph_fallback_used = True
+                        continue
 
-                if AIMessage and isinstance(chunk, AIMessage):
-                    if getattr(chunk, "tool_calls", None):
-                        tc = chunk.tool_calls[0]
-                        tname = (
-                            tc.get("name", "tool")
-                            if isinstance(tc, dict)
-                            else getattr(tc, "name", "tool")
-                        )
-                        args = (
-                            tc.get("args", {})
-                            if isinstance(tc, dict)
-                            else getattr(tc, "args", {})
-                        )
-                        query_used = args.get("query", "")
-                        label = (
-                            tool_call_label(tname)
-                            if tool_call_label
-                            else f"Calling {tname}"
-                        )
-                        msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                    chunk, metadata = payload
+                    node = metadata.get("langgraph_node", "")
+                    if node != current_node:
+                        if current_node:
+                            elapsed_s = time.perf_counter() - node_start_time
+                            node_latencies[current_node] = (
+                                node_latencies.get(current_node, 0.0) + elapsed_s
+                            )
+                        for event in _flush_turn_buffer_to_events():
+                            yield event
+                        node_start_time = time.perf_counter()
+                        current_node = node
+
+                    if ToolMessage and isinstance(chunk, ToolMessage):
+                        use_rag = True
+                        preview = str(chunk.content)[:200]
                         step_s = time.perf_counter() - node_start_time
                         trace_entries.append(
                             _serialise_trace_entry(chunk, node=node, latency_s=step_s)
                         )
-                        yield f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                        yield f"data: {json.dumps({'type': 'tool_result', 'content': preview})}\n\n"
                         continue
 
-                    content = chunk.content
-                    if isinstance(content, list):
-                        content = "".join(
-                            c.get("text", "") if isinstance(c, dict) else str(c)
-                            for c in content
-                        )
-                    if not content:
-                        continue
+                    if AIMessage and isinstance(chunk, AIMessage):
+                        if getattr(chunk, "tool_calls", None):
+                            tc = chunk.tool_calls[0]
+                            tname = (
+                                tc.get("name", "tool")
+                                if isinstance(tc, dict)
+                                else getattr(tc, "name", "tool")
+                            )
+                            args = (
+                                tc.get("args", {})
+                                if isinstance(tc, dict)
+                                else getattr(tc, "args", {})
+                            )
+                            query_used = args.get("query", "")
+                            label = (
+                                tool_call_label(tname)
+                                if tool_call_label
+                                else f"Calling {tname}"
+                            )
+                            msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                            step_s = time.perf_counter() - node_start_time
+                            trace_entries.append(
+                                _serialise_trace_entry(chunk, node=node, latency_s=step_s)
+                            )
+                            yield f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                            continue
 
-                    turn_buffer.append(content)
-                    joined = "".join(turn_buffer)
-                    if might_be_incomplete_text_tool_call and (
-                        might_be_incomplete_text_tool_call(joined)
-                    ):
-                        continue
-                    for event in _flush_turn_buffer_to_events():
-                        yield event
+                        content = chunk.content
+                        if isinstance(content, list):
+                            content = "".join(
+                                c.get("text", "") if isinstance(c, dict) else str(c)
+                                for c in content
+                            )
+                        if not content:
+                            continue
 
-            if current_node:
-                elapsed_s = time.perf_counter() - node_start_time
-                node_latencies[current_node] = (
-                    node_latencies.get(current_node, 0.0) + elapsed_s
-                )
-            for event in _flush_turn_buffer_to_events():
-                yield event
+                        turn_buffer.append(content)
+                        joined = "".join(turn_buffer)
+                        if might_be_incomplete_text_tool_call and (
+                            might_be_incomplete_text_tool_call(joined)
+                        ):
+                            continue
+                        for event in _flush_turn_buffer_to_events():
+                            yield event
+
+                if current_node:
+                    elapsed_s = time.perf_counter() - node_start_time
+                    node_latencies[current_node] = (
+                        node_latencies.get(current_node, 0.0) + elapsed_s
+                    )
+                for event in _flush_turn_buffer_to_events():
+                    yield event
+        except Exception as exc:
+            answer = "".join(accumulated)
+            if not _recoverable_after_agent_fallback(
+                fallback_used=in_graph_fallback_used, has_answer=bool(answer)
+            ):
+                raise
+            graph_exc = exc
+            logger.warning(
+                "Agent graph raised after successful agent_fallback; "
+                "persisting streamed answer: %s",
+                exc,
+            )
 
         gen_latency = time.perf_counter() - gen_start
         answer = "".join(accumulated)
@@ -880,6 +920,17 @@ async def generate_answer_agentic_stream_helper(
                     "content": answer,
                     "latency_s": agent_s,
                 }
+            )
+
+        if graph_exc is not None:
+            await error_logger.log_error(
+                error=graph_exc,
+                component=Component.LLM,
+                pipeline_stage=PipelineStage.GENERATION,
+                description=(
+                    "Primary agent node failed after agent_fallback produced an answer"
+                ),
+                error_type=type(graph_exc).__name__,
             )
 
         await persist_message_state(
