@@ -296,3 +296,105 @@ async def test_artifact_capture_and_serving_e2e(mcp_client):
     finally:
         await Artifact.delete_many({"user_id": owner.id})
         await cleanup_models([owner, intruder])
+
+
+@pytest.mark.asyncio
+async def test_compute_metrics_effis_pattern_e2e(mcp_client):
+    """compute_metrics mimics an "effis-style" tool: it writes a file to the
+    server container's ephemeral filesystem and returns a ResourceLink to it
+    instead of the raw bytes. This is the reference fix proposed for the
+    mcp-tool-registry (docs/mcp-file-return-convention.md) — verify it flows
+    through the exact same interceptor stack and Artifact/S3 pipeline as
+    get_sample_report's ResourceLink.
+    """
+    tools, _client = mcp_client  # keep `_client` alive: see mcp_client's docstring
+    owner, _owner_test_token = await create_test_user_and_token(
+        email=f"e2e-metrics-{uuid.uuid4().hex[:8]}@example.com", password=E2E_PASSWORD
+    )
+    await _activate(owner)
+    conversation_id = f"e2e-conv-{uuid.uuid4().hex[:8]}"
+
+    try:
+        ctx, token = set_artifact_context(
+            user_id=owner.id, conversation_id=conversation_id
+        )
+        try:
+            metrics_result = await tools["dummy_compute_metrics"].ainvoke(
+                {"region": "e2e-test-region"}
+            )
+        finally:
+            reset_artifact_context(token)
+
+        # Exactly one artifact was persisted: the PNG behind the ResourceLink.
+        assert len(ctx.collected_artifact_ids) == 1
+        metrics_artifact = await Artifact.find_by_id(ctx.collected_artifact_ids[0])
+        assert metrics_artifact is not None
+        assert metrics_artifact.content_type == "image/png"
+        assert metrics_artifact.source.type == "mcp_tool"
+        assert metrics_artifact.source.mcp_server == "dummy"
+        assert metrics_artifact.source.tool_name == "compute_metrics"
+        assert metrics_artifact.user_id == owner.id
+        assert metrics_artifact.conversation_id == conversation_id
+        assert metrics_artifact.key.startswith(f"users/{owner.id}/artifacts/")
+
+        # Result content: the plain-text summary passes through untouched, and
+        # the ResourceLink block was replaced by the provenance stub carrying
+        # the "MCP: dummy/compute_metrics" title.
+        blocks = list(metrics_result)
+        summary_block = next(
+            b for b in blocks if "Computed metrics" in str(b.get("text", ""))
+        )
+        assert "region='e2e-test-region'" in summary_block["text"]
+
+        stub_block = next(b for b in blocks if b is not summary_block)
+        stub_lines = str(stub_block["text"]).split("\n")
+        assert len(stub_lines) == 2
+        assert stub_lines[0] == (
+            f'![metrics-e2e-test-region.png](/artifacts/{metrics_artifact.id} '
+            f'"MCP: dummy/compute_metrics")'
+        )
+        stub_json = json.loads(stub_lines[1])
+        assert stub_json["artifact_id"] == metrics_artifact.id
+        assert stub_json["url"] == f"/artifacts/{metrics_artifact.id}"
+        assert stub_json["content_type"] == "image/png"
+
+        # Object really present in MinIO and byte-identical to what's served.
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        from src.config import (
+            S3_ACCESS_KEY_ID,
+            S3_BUCKET_NAME,
+            S3_ENDPOINT_URL,
+            S3_REGION,
+            S3_SECRET_ACCESS_KEY,
+        )
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=S3_ENDPOINT_URL or None,
+            aws_access_key_id=S3_ACCESS_KEY_ID or None,
+            aws_secret_access_key=S3_SECRET_ACCESS_KEY or None,
+            region_name=S3_REGION or None,
+            config=BotoConfig(signature_version="s3v4"),
+        )
+        metrics_object = s3.get_object(
+            Bucket=S3_BUCKET_NAME, Key=metrics_artifact.key
+        )
+        metrics_bytes_in_s3 = metrics_object["Body"].read()
+
+        async with httpx.AsyncClient(base_url=BACKEND_BASE_URL, timeout=10.0) as client:
+            owner_token = await _login(client, owner.email, E2E_PASSWORD)
+            owner_headers = {"Authorization": f"Bearer {owner_token}"}
+
+            resp = await client.get(
+                f"/artifacts/{metrics_artifact.id}", headers=owner_headers
+            )
+            assert resp.status_code == 200
+            assert resp.content == metrics_bytes_in_s3
+            assert resp.headers["content-type"] == "image/png"
+            assert resp.headers["content-disposition"].startswith("inline")
+
+    finally:
+        await Artifact.delete_many({"user_id": owner.id})
+        await cleanup_models([owner])
