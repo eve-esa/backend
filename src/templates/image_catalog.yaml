@@ -3,7 +3,8 @@
 # Deliberately minimal, fully static "image source" for the demo: a small list
 # of publicly reachable images served from the local MinIO bucket
 # (eve-x-demo-images). It is NOT a retrieval system; it exists so the
-# answer-generation prompt can offer relevant images to embed as markdown.
+# answer-generation prompt can offer relevant images to embed as markdown so
+# they render inline in the chat (never as bare text URLs).
 # All URLs are anonymously reachable (HTTP 200) at demo time.
 images:
   - title: "Sentinel-2 satellite"

@@ -142,10 +142,20 @@ def build_image_context(query: str) -> str:
         lines.append(f"- {entry['title']} | {entry['description']} | {entry['url']}")
     lines.append(
         "If the user asks for images/pictures/visuals, or an image would "
-        "materially help the answer, embed 1-3 of the MOST relevant images "
-        "above using exact markdown: ![<title>](<url>). Use ONLY urls from this "
-        "list, never invent or modify image URLs. If none are relevant, embed "
-        "none."
+        "materially help the answer, you MUST embed 1-3 of the MOST relevant "
+        "images above using exact markdown: ![<title>](<url>). Use ONLY urls "
+        "from this list, never invent or modify image URLs. If none are "
+        "relevant, embed none and do not mention this catalog.\n"
+        "Embedding an image this way IS how you display it: the chat renders "
+        "the markdown as an inline image, so this is not affected by any "
+        "general statement elsewhere about not being able to view or generate "
+        "images - that limitation is about interpreting images the user "
+        "uploads or creating new pixels, not about presenting these catalog "
+        "images. Never say you cannot display, show, view or open images when "
+        "catalog images are available. Never print a bare URL, a 'copy this "
+        "link' instruction, or ask the user to open the URL themselves - the "
+        "markdown embed above is the only acceptable way to present these "
+        "images."
     )
     return "\n".join(lines)
 

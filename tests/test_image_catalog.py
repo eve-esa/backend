@@ -93,6 +93,10 @@ def test_build_image_context_enabled_lists_images(monkeypatch, catalog_file):
         "http://localhost:9000/eve-x-demo-images/sentinel2-satellite.jpg" in block
     )
     assert "![<title>](<url>)" in block
+    # The instructions must forbid bare URLs / "copy the link" phrasing and
+    # must not let the model disclaim image display when catalog images exist.
+    assert "bare URL" in block
+    assert "Never say you cannot display" in block
 
 
 def test_keyword_filter_narrows_to_relevant(monkeypatch, catalog_file):
