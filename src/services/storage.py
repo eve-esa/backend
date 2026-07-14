@@ -49,6 +49,80 @@ def sniff_image_type(header: bytes) -> Optional[str]:
     return None
 
 
+# Maps every allowlistable artifact "type" key (the vocabulary used by
+# ARTIFACT_ALLOWED_TYPES / IMAGE_ALLOWED_TYPES) to its MIME content type.
+# Image keys are handled by sniff_image_type; the rest are matched here.
+ARTIFACT_TYPE_CONTENT_TYPES = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "pdf": "application/pdf",
+    "csv": "text/csv",
+    "txt": "text/plain",
+    "json": "application/json",
+    "geojson": "application/geo+json",
+}
+
+# Text-like artifact types that have no magic bytes to sniff. Detecting them
+# safely requires BOTH a matching file extension AND a decodable, NUL-free
+# UTF-8 payload (see sniff_artifact_type) so an uploader can't smuggle
+# arbitrary binary content past the allowlist just by naming the file right.
+_TEXT_EXTENSION_TYPES = {"csv", "txt", "json", "geojson"}
+
+
+def _looks_like_text(data: bytes) -> bool:
+    """True if `data` decodes as UTF-8 and contains no NUL bytes.
+
+    NUL bytes are the cheapest binary tell (valid UTF-8 text never contains
+    them); rejecting them catches most non-text payloads that would otherwise
+    decode successfully (e.g. UTF-16 with mostly-ASCII content).
+    """
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def sniff_artifact_type(
+    header: bytes, filename: Optional[str], full_data: bytes
+) -> Optional[str]:
+    """Detect an artifact's type key, generalizing sniff_image_type.
+
+    Tries, in order:
+      1. Image magic bytes (png/jpeg/gif/webp) via sniff_image_type.
+      2. The PDF magic prefix ('%PDF-').
+      3. Text-like types (csv, txt, json, geojson): these have no magic bytes,
+         so both a matching file extension AND a decodable, NUL-free UTF-8
+         payload are required before trusting the extension.
+
+    Args:
+        header (bytes): The leading bytes of the uploaded file (for magic-byte checks).
+        filename (str | None): The client-supplied filename (for the text-type extension check).
+        full_data (bytes): The full uploaded payload (for the UTF-8 decodability check).
+
+    Returns:
+        The detected type key (e.g. 'png', 'pdf', 'csv') -- look up
+        ARTIFACT_TYPE_CONTENT_TYPES for the MIME content type -- or None if
+        the file cannot be safely classified.
+    """
+    image_subtype = sniff_image_type(header)
+    if image_subtype is not None:
+        return image_subtype
+
+    if header[:5] == b"%PDF-":
+        return "pdf"
+
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    if ext in _TEXT_EXTENSION_TYPES and _looks_like_text(full_data):
+        return ext
+
+    return None
+
+
 def guess_extension_from_content_type(content_type: Optional[str]) -> str:
     """Guess a filename extension (without the leading dot) from a MIME type.
 

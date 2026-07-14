@@ -161,8 +161,10 @@ S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
 S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
 
-# User-upload path knobs (POST /artifacts with an image file). Kept as IMAGE_*
-# since they govern only the image-upload path, not artifacts in general.
+# Legacy user-upload path knobs (POST /artifacts). Superseded by the
+# generalized ARTIFACT_UPLOAD_* knobs below; kept here only because their env
+# values are read as a fallback so already-deployed hosts keep working
+# unchanged after the image-only upload gate was generalized to any artifact.
 IMAGE_MAX_BYTES = int(os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
 IMAGE_ALLOWED_TYPES = [
     t.strip().lower()
@@ -171,13 +173,37 @@ IMAGE_ALLOWED_TYPES = [
 ]
 IMAGE_UPLOADS_PER_DAY = int(os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
 
-# Generic artifact knobs, consumed by MCP tool-output ingestion (next task).
+# Generic artifact knobs, consumed by MCP tool-output ingestion.
 ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))
 ARTIFACT_MAX_PER_TOOL_CALL = int(os.getenv("ARTIFACT_MAX_PER_TOOL_CALL", 10))
 ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
     os.getenv("ARTIFACT_RESOURCE_READ_TIMEOUT_S", 30)
 )
 
+# Generalized user-upload path knobs (POST /artifacts with any allowed file
+# type: images, pdf, csv, txt, json, geojson). Each falls back to the legacy
+# IMAGE_* env value when its ARTIFACT_* counterpart isn't set, so hosts that
+# never migrate their environment keep the old image-only behaviour.
+# NOTE: the byte cap is named ARTIFACT_UPLOAD_MAX_BYTES rather than
+# ARTIFACT_MAX_BYTES because that name is already taken above by the
+# unrelated MCP tool-output ingestion cap (different default, different
+# purpose); reusing it here would silently couple two independent limits.
+ARTIFACT_UPLOAD_ALLOWED_TYPES = [
+    t.strip().lower()
+    for t in os.getenv(
+        "ARTIFACT_ALLOWED_TYPES",
+        os.getenv("IMAGE_ALLOWED_TYPES", "png,jpeg,webp,gif,pdf,csv,txt,json,geojson"),
+    ).split(",")
+    if t.strip()
+]
+ARTIFACT_UPLOAD_MAX_BYTES = int(
+    os.getenv(
+        "ARTIFACT_UPLOAD_MAX_BYTES", os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024)
+    )
+)
+ARTIFACT_UPLOADS_PER_DAY = int(
+    os.getenv("ARTIFACT_UPLOADS_PER_DAY", os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
+)
 
 # Curated image catalog (demo). When enabled, a small static catalog of images
 # is offered to the answer-generation prompt so the model can embed them as

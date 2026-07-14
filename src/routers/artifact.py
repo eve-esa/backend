@@ -2,8 +2,9 @@
 
 Artifacts generalize the former image-only storage to any file a user attaches
 or an MCP tool produces (source.type "upload" vs "mcp_tool"). User uploads are
-still restricted to the sniffed image allowlist below; MCP-produced artifacts
-are ingested by a separate path (not this router) and are read-only here.
+restricted to the sniffed/extension-checked allowlist below (images, pdf, and
+a handful of text-like formats); MCP-produced artifacts are ingested by a
+separate path (not this router) and are read-only here.
 """
 
 import logging
@@ -16,9 +17,9 @@ from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 
 from src.config import (
-    IMAGE_ALLOWED_TYPES,
-    IMAGE_MAX_BYTES,
-    IMAGE_UPLOADS_PER_DAY,
+    ARTIFACT_UPLOAD_ALLOWED_TYPES,
+    ARTIFACT_UPLOAD_MAX_BYTES,
+    ARTIFACT_UPLOADS_PER_DAY,
     S3_PRESIGN_TTL_SECONDS,
 )
 from src.database.models.artifact import Artifact, ArtifactSource
@@ -27,7 +28,11 @@ from src.database.mongo import get_collection
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
-from src.services.storage import sniff_image_type, storage_service
+from src.services.storage import (
+    ARTIFACT_TYPE_CONTENT_TYPES,
+    sniff_artifact_type,
+    storage_service,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -70,8 +75,8 @@ async def reserve_daily_quota_slot(user_id: str) -> None:
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
-    if doc["count"] > IMAGE_UPLOADS_PER_DAY:
-        raise HTTPException(status_code=429, detail="Daily image upload limit reached")
+    if doc["count"] > ARTIFACT_UPLOADS_PER_DAY:
+        raise HTTPException(status_code=429, detail="Daily upload limit reached")
 
 
 async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifact:
@@ -94,15 +99,17 @@ async def upload_artifact(
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Upload an image artifact, validating quota, size and magic bytes before storing it.
+    Upload an artifact, validating quota, size and type before storing it.
 
-    The Content-Type declared by the client is never trusted: the image type is
-    sniffed from the file's magic bytes. The stored object lives under the
-    per-user prefix ``users/{user_id}/artifacts/`` and is served through the
-    stable ``/artifacts/{id}`` route.
+    The Content-Type declared by the client is never trusted: images are
+    sniffed from magic bytes, pdf from its magic prefix, and text-like types
+    (csv, txt, json, geojson) require both a matching file extension and a
+    decodable UTF-8 payload. The stored object lives under the per-user
+    prefix ``users/{user_id}/artifacts/`` and is served through the stable
+    ``/artifacts/{id}`` route.
 
     Args:
-        file (UploadFile): The image to upload.
+        file (UploadFile): The file to upload.
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
@@ -110,31 +117,33 @@ async def upload_artifact(
 
     Raises:
         HTTPException: 429 if the daily quota is exceeded; 413 if the file is too
-        large; 415 if the file is not an allowed image type.
+        large; 415 if the file is not an allowed/recognized type.
     """
     # Read with a hard cap so oversize payloads never reach storage.
-    data = await file.read(IMAGE_MAX_BYTES + 1)
-    if len(data) > IMAGE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="Image exceeds maximum size")
+    data = await file.read(ARTIFACT_UPLOAD_MAX_BYTES + 1)
+    if len(data) > ARTIFACT_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds maximum size")
 
-    subtype = sniff_image_type(data[:16])
-    if subtype is None or subtype not in IMAGE_ALLOWED_TYPES:
+    type_key = sniff_artifact_type(data[:16], file.filename, data)
+    if type_key is None or type_key not in ARTIFACT_UPLOAD_ALLOWED_TYPES:
         raise HTTPException(
-            status_code=415, detail="Unsupported or unrecognized image type"
+            status_code=415, detail="Unsupported or unrecognized file type"
         )
 
     # Reserve a quota slot atomically once the payload is known-valid, so malformed
     # uploads don't burn quota and concurrent valid uploads can't exceed the cap.
     await reserve_daily_quota_slot(requesting_user.id)
 
-    content_type = f"image/{subtype}"
-    key = storage_service.build_user_key(requesting_user.id, subtype, prefix="artifacts")
+    content_type = ARTIFACT_TYPE_CONTENT_TYPES[type_key]
+    key = storage_service.build_user_key(
+        requesting_user.id, type_key, prefix="artifacts"
+    )
     await storage_service.put_object(key, data, content_type)
 
     artifact = await Artifact.create(
         user_id=requesting_user.id,
         key=key,
-        filename=file.filename or f"image.{subtype}",
+        filename=file.filename or f"artifact.{type_key}",
         content_type=content_type,
         size_bytes=len(data),
         source=ArtifactSource(type="upload"),

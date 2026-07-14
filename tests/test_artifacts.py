@@ -17,12 +17,33 @@ JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 GIF_BYTES = b"GIF89a" + b"\x00" * 64
 WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 64
 
+# Minimal valid payloads for the generalized non-image artifact types.
+PDF_BYTES = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n" + b"0 0 obj\n<< >>\nendobj\n"
+CSV_TEXT = b"name,value\nfoo,1\nbar,2\n"
+TXT_TEXT = b"just a plain text file\n"
+JSON_TEXT = b'{"hello": "world"}'
+GEOJSON_TEXT = b'{"type": "FeatureCollection", "features": []}'
+
 
 def _use_fake_storage(monkeypatch) -> FakeStorage:
     """Monkeypatch the router's storage singleton with an in-memory fake."""
     fake = FakeStorage()
     monkeypatch.setattr("src.routers.artifact.storage_service", fake)
     return fake
+
+
+# The full generalized allowlist, set explicitly by tests that exercise the
+# non-image types: the ambient ARTIFACT_UPLOAD_ALLOWED_TYPES may resolve to
+# the legacy image-only IMAGE_ALLOWED_TYPES value depending on which env vars
+# happen to be set in the environment the tests run in (see config.py's
+# fallback chain), so tests must not rely on it.
+FULL_ARTIFACT_ALLOWED_TYPES = ["png", "jpeg", "webp", "gif", "pdf", "csv", "txt", "json", "geojson"]
+
+
+def _use_full_artifact_allowlist(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.routers.artifact.ARTIFACT_UPLOAD_ALLOWED_TYPES", FULL_ARTIFACT_ALLOWED_TYPES
+    )
 
 
 async def _upload(async_client, token, filename, data, content_type):
@@ -99,11 +120,94 @@ async def test_upload_spoofed_content_type_rejected(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_upload_oversize_rejected(async_client, monkeypatch):
-    """A payload larger than IMAGE_MAX_BYTES is rejected (413)."""
+async def test_upload_valid_pdf(async_client, monkeypatch):
+    """A valid PDF is accepted via its magic prefix, regardless of the declared Content-Type."""
 
     _use_fake_storage(monkeypatch)
-    monkeypatch.setattr("src.routers.artifact.IMAGE_MAX_BYTES", 16)
+    _use_full_artifact_allowlist(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await _upload(
+            async_client, token, "doc.pdf", PDF_BYTES, "application/octet-stream"
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["content_type"] == "application/pdf"
+        assert body["size_bytes"] == len(PDF_BYTES)
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.parametrize(
+    "filename,data,expected_content_type",
+    [
+        ("data.csv", CSV_TEXT, "text/csv"),
+        ("notes.txt", TXT_TEXT, "text/plain"),
+        ("config.json", JSON_TEXT, "application/json"),
+        ("shape.geojson", GEOJSON_TEXT, "application/geo+json"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_upload_valid_text_like_types(
+    async_client, monkeypatch, filename, data, expected_content_type
+):
+    """Text-like types are accepted when the extension matches a decodable UTF-8 payload."""
+
+    _use_fake_storage(monkeypatch)
+    _use_full_artifact_allowlist(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await _upload(async_client, token, filename, data, "application/octet-stream")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["content_type"] == expected_content_type
+        assert body["size_bytes"] == len(data)
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_extension_content_mismatch_rejected(async_client, monkeypatch):
+    """A .csv extension over undecodable binary content is rejected (415), not smuggled through."""
+
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await _upload(
+            async_client, token, "data.csv", b"\x00\x01\xff\xfe binary", "text/csv"
+        )
+        assert resp.status_code == 415
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_unrecognized_extension_rejected(async_client, monkeypatch):
+    """A file with no magic bytes and an extension outside the text-like allowlist is rejected (415)."""
+
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        resp = await _upload(
+            async_client, token, "script.exe", b"MZ\x90\x00", "application/octet-stream"
+        )
+        assert resp.status_code == 415
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_oversize_rejected(async_client, monkeypatch):
+    """A payload larger than ARTIFACT_UPLOAD_MAX_BYTES is rejected (413)."""
+
+    _use_fake_storage(monkeypatch)
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOAD_MAX_BYTES", 16)
     user, token = await create_test_user_and_token()
     try:
         resp = await _upload(
@@ -120,7 +224,7 @@ async def test_upload_quota_exceeded(async_client, monkeypatch):
     """Reaching the daily quota returns 429."""
 
     _use_fake_storage(monkeypatch)
-    monkeypatch.setattr("src.routers.artifact.IMAGE_UPLOADS_PER_DAY", 0)
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOADS_PER_DAY", 0)
     user, token = await create_test_user_and_token()
     try:
         resp = await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
@@ -136,7 +240,7 @@ async def test_upload_quota_enforced_by_atomic_counter(async_client, monkeypatch
     """The atomic per-day counter caps uploads: the 2nd upload with limit=1 is 429."""
 
     _use_fake_storage(monkeypatch)
-    monkeypatch.setattr("src.routers.artifact.IMAGE_UPLOADS_PER_DAY", 1)
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOADS_PER_DAY", 1)
     user, token = await create_test_user_and_token()
     try:
         first = await _upload(async_client, token, "a.png", PNG_BYTES, "image/png")
@@ -300,6 +404,82 @@ async def test_disposition_attachment_for_unknown_type(async_client, monkeypatch
         await cleanup_models([user])
 
 
+@pytest.mark.asyncio
+async def test_disposition_attachment_for_csv(async_client, monkeypatch):
+    """text/csv is forced to attachment, never inline as text/html (anti-XSS posture)."""
+
+    _use_fake_storage(monkeypatch)
+    _use_full_artifact_allowlist(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact_id = (
+            await _upload(async_client, token, "data.csv", CSV_TEXT, "text/csv")
+        ).json()["id"]
+
+        resp = await async_client.get(
+            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("attachment")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_disposition_attachment_for_geojson(async_client, monkeypatch):
+    """application/geo+json is forced to attachment (outside the inline allowlist)."""
+
+    _use_fake_storage(monkeypatch)
+    _use_full_artifact_allowlist(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact_id = (
+            await _upload(
+                async_client, token, "shape.geojson", GEOJSON_TEXT, "application/geo+json"
+            )
+        ).json()["id"]
+
+        resp = await async_client.get(
+            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("attachment")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_disposition_inline_for_pdf(async_client, monkeypatch):
+    """application/pdf renders inline (already in the safe-types allowlist)."""
+
+    _use_fake_storage(monkeypatch)
+    _use_full_artifact_allowlist(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact_id = (
+            await _upload(
+                async_client, token, "doc.pdf", PDF_BYTES, "application/octet-stream"
+            )
+        ).json()["id"]
+
+        resp = await async_client.get(
+            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("inline")
+        assert resp.headers["x-content-type-options"] == "nosniff"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
 # ---------------- List / delete -----------------
 
 
@@ -434,8 +614,8 @@ async def _mock_generate_answer(request, conversation_id=None, user_id=None):
 
 
 @pytest.mark.asyncio
-async def test_message_with_image_ids_persists_attachments(async_client, monkeypatch):
-    """image_ids on a message persist attachments and backfill conversation_id."""
+async def test_message_with_artifact_ids_persists_attachments(async_client, monkeypatch):
+    """artifact_ids on a message persist attachments and backfill conversation_id."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -456,7 +636,7 @@ async def test_message_with_image_ids_persists_attachments(async_client, monkeyp
 
         msg_resp = await async_client.post(
             f"/conversations/{conv_id}/messages",
-            json={"query": "look", "image_ids": [image_id]},
+            json={"query": "look", "artifact_ids": [image_id]},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert msg_resp.status_code == 200
@@ -476,6 +656,48 @@ async def test_message_with_image_ids_persists_attachments(async_client, monkeyp
         # conversation_id was backfilled on the artifact
         artifact = await Artifact.find_by_id(image_id)
         assert artifact.conversation_id == conv_id
+
+        await async_client.delete(
+            f"/conversations/{conv_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_message_with_legacy_image_ids_alias_accepted(async_client, monkeypatch):
+    """The legacy ``image_ids`` field name is still accepted as an alias for artifact_ids."""
+
+    _use_fake_storage(monkeypatch)
+    monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
+
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (
+            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
+        ).json()["id"]
+
+        conv_id = (
+            await async_client.post(
+                "/conversations",
+                json={"name": "Legacy Alias Conv"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        msg_resp = await async_client.post(
+            f"/conversations/{conv_id}/messages",
+            json={"query": "look", "image_ids": [image_id]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert msg_resp.status_code == 200
+
+        detail = await async_client.get(
+            f"/conversations/{conv_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        attachments = detail.json()["messages"][0]["attachments"]
+        assert attachments and attachments[0]["image_id"] == image_id
 
         await async_client.delete(
             f"/conversations/{conv_id}", headers={"Authorization": f"Bearer {token}"}
@@ -509,7 +731,7 @@ async def test_message_with_other_users_image_forbidden(async_client, monkeypatc
 
         resp = await async_client.post(
             f"/conversations/{conv_id}/messages",
-            json={"query": "look", "image_ids": [image_id]},
+            json={"query": "look", "artifact_ids": [image_id]},
             headers={"Authorization": f"Bearer {intr_token}"},
         )
         assert resp.status_code == 403
@@ -524,8 +746,8 @@ async def test_message_with_other_users_image_forbidden(async_client, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_message_image_ids_over_cap_rejected(async_client, monkeypatch):
-    """More than the allowed number of image_ids fails validation (422)."""
+async def test_message_artifact_ids_over_cap_rejected(async_client, monkeypatch):
+    """More than the allowed number of artifact_ids fails validation (422)."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -542,7 +764,7 @@ async def test_message_image_ids_over_cap_rejected(async_client, monkeypatch):
 
         resp = await async_client.post(
             f"/conversations/{conv_id}/messages",
-            json={"query": "look", "image_ids": [f"id{i}" for i in range(21)]},
+            json={"query": "look", "artifact_ids": [f"id{i}" for i in range(21)]},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 422
@@ -555,8 +777,8 @@ async def test_message_image_ids_over_cap_rejected(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_message_image_ids_deduped(async_client, monkeypatch):
-    """Duplicate image_ids collapse to a single attachment."""
+async def test_message_artifact_ids_deduped(async_client, monkeypatch):
+    """Duplicate artifact_ids collapse to a single attachment."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -577,7 +799,7 @@ async def test_message_image_ids_deduped(async_client, monkeypatch):
 
         msg_resp = await async_client.post(
             f"/conversations/{conv_id}/messages",
-            json={"query": "look", "image_ids": [image_id, image_id, image_id]},
+            json={"query": "look", "artifact_ids": [image_id, image_id, image_id]},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert msg_resp.status_code == 200
