@@ -104,6 +104,8 @@ class GenerationRequest(BaseModel):
     @resolved_custom_model.setter
     def resolved_custom_model(self, value: Any) -> None:
         self._resolved_custom_model = value
+
+    @property
     def mcp_user_id(self) -> Optional[str]:
         """Authenticated user id for MCP tool discovery cache keys."""
         return self._mcp_user_id
