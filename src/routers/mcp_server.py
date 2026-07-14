@@ -173,7 +173,7 @@ async def get_mcp_server(
     tools = []
     try:
         loaded_tools = await _load_mcp_tools_for_servers(
-            [mcp_server], mcp_proxy_bearer_token=bearer_token
+            [mcp_server], mcp_proxy_bearer_token=bearer_token, mcp_user_id=requesting_user.id
         )
         tools = [
             {
