@@ -1295,8 +1295,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                 )
             except Exception:
                 logger.warning(
-                    "Skipping rollup for conversation %s: custom summarizer unavailable",
-                    conversation_id,
+                    "Unable to use custom summarizer for conversation summary, using fallback model"
                 )
                 summarizer_llm = get_shared_llm_manager().get_client_for_model(LLMType.Fallback.value)
 
