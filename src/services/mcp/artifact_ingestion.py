@@ -63,6 +63,29 @@ def _filename_from_uri(uri: Any) -> Optional[str]:
         return None
 
 
+def _provenance_title(server_name: Optional[str], tool_name: Optional[str]) -> str:
+    """Build a plain, quote-safe markdown title attributing the MCP source.
+
+    Double quotes are stripped from both names since markdown's title syntax
+    delimits with them (`"title"`); an unescaped quote in a server/tool name
+    would otherwise break the link/image syntax. Falls back to a bare "MCP"
+    when either name is missing/unresolved rather than embedding one of this
+    module's internal placeholder defaults ("unknown", "tool") as if it were
+    real data.
+    """
+
+    def _clean(value: Optional[str]) -> Optional[str]:
+        if not value or value in ("unknown", "tool"):
+            return None
+        return value.replace('"', "")
+
+    server = _clean(server_name)
+    tool = _clean(tool_name)
+    if server and tool:
+        return f"MCP: {server}/{tool}"
+    return "MCP"
+
+
 def _stub_text(
     *,
     is_image: bool,
@@ -70,15 +93,21 @@ def _stub_text(
     artifact_id: str,
     content_type: str,
     size_bytes: int,
+    server_name: Optional[str] = None,
+    tool_name: Optional[str] = None,
 ) -> "TextContent":
     """Build the one-TextContent-per-artifact stub replacing a persisted block.
 
     Line 1 is a markdown reference (image embed for images, plain link
-    otherwise); line 2 is a one-line JSON payload with the same data so a
+    otherwise) carrying a title that attributes the originating MCP
+    server/tool; line 2 is a one-line JSON payload with the same data so a
     consumer that doesn't render markdown can still parse it out.
     """
     url = f"/artifacts/{artifact_id}"
-    link_line = f"![{filename}]({url})" if is_image else f"[{filename}]({url})"
+    title = _provenance_title(server_name, tool_name)
+    link_line = (
+        f'![{filename}]({url} "{title}")' if is_image else f'[{filename}]({url} "{title}")'
+    )
     meta_line = json.dumps(
         {
             "artifact_id": artifact_id,
@@ -177,6 +206,8 @@ class ArtifactInterceptor:
                         artifact_id=artifact.id,
                         content_type=content_type,
                         size_bytes=len(data),
+                        server_name=server_name,
+                        tool_name=tool_name,
                     )
                 )
                 persisted_count += 1
@@ -221,6 +252,8 @@ class ArtifactInterceptor:
                         artifact_id=artifact.id,
                         content_type=content_type,
                         size_bytes=len(data),
+                        server_name=server_name,
+                        tool_name=tool_name,
                     )
                 )
                 persisted_count += 1
@@ -349,6 +382,8 @@ class ArtifactInterceptor:
                     artifact_id=artifact.id,
                     content_type=content_type,
                     size_bytes=len(data),
+                    server_name=server_name,
+                    tool_name=tool_name,
                 )
             )
             persisted_count += 1

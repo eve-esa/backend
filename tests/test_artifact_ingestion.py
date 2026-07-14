@@ -124,6 +124,10 @@ async def test_image_content_persisted_and_stubbed(interceptor, with_context):
         block = out.content[0]
         assert isinstance(block, TextContent)
         assert "/artifacts/" in block.text
+        # The markdown image line carries a title attributing the MCP source.
+        markdown_line = block.text.split("\n", 1)[0]
+        assert markdown_line.startswith("![")
+        assert ' "MCP: wiley/search")' in markdown_line
         payload = _parse_stub(block)
         assert payload["content_type"] == "image/png"
         assert payload["size_bytes"] == len(PNG_BYTES)
@@ -138,6 +142,39 @@ async def test_image_content_persisted_and_stubbed(interceptor, with_context):
         assert artifact.conversation_id == "conv-1"
         assert artifact.key in fake.objects
         assert with_context.collected_artifact_ids == [artifact.id]
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_stub_title_strips_quotes_and_falls_back_to_mcp(interceptor, with_context):
+    """The provenance title strips embedded quotes and degrades to a bare 'MCP'."""
+    icept, _fake = interceptor
+
+    # A server/tool name containing a double quote must not break the markdown
+    # title syntax: the quote is stripped rather than escaped.
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+    out = await icept(
+        _request(name='shady"tool', server_name='ser"ver'), _handler(result)
+    )
+    try:
+        markdown_line = out.content[0].text.split("\n", 1)[0]
+        assert ' "MCP: server/shadytool")' in markdown_line
+    finally:
+        await _cleanup()
+
+    # When the request carries no resolvable name, the title degrades to a
+    # bare "MCP" rather than embedding the internal "unknown"/"tool" defaults.
+    result2 = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+    bare_request = SimpleNamespace(args={})
+    out2 = await icept(bare_request, _handler(result2))
+    try:
+        markdown_line2 = out2.content[0].text.split("\n", 1)[0]
+        assert ' "MCP")' in markdown_line2
     finally:
         await _cleanup()
 
