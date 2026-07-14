@@ -1298,7 +1298,7 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
                     "Skipping rollup for conversation %s: custom summarizer unavailable",
                     conversation_id,
                 )
-                return
+                summarizer_llm = get_shared_llm_manager().get_client_for_model(LLMType.Fallback.value)
 
         summary_text = await get_shared_llm_manager().summarize_context_in_all(
             transcript=summarizer_input,
