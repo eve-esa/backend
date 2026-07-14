@@ -50,7 +50,7 @@ def sniff_image_type(header: bytes) -> Optional[str]:
 
 
 # Maps every allowlistable artifact "type" key (the vocabulary used by
-# ARTIFACT_ALLOWED_TYPES / IMAGE_ALLOWED_TYPES) to its MIME content type.
+# ARTIFACT_UPLOAD_ALLOWED_TYPES / IMAGE_ALLOWED_TYPES) to its MIME content type.
 # Image keys are handled by sniff_image_type; the rest are matched here.
 ARTIFACT_TYPE_CONTENT_TYPES = {
     "png": "image/png",

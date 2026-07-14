@@ -191,7 +191,7 @@ ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
 ARTIFACT_UPLOAD_ALLOWED_TYPES = [
     t.strip().lower()
     for t in os.getenv(
-        "ARTIFACT_ALLOWED_TYPES",
+        "ARTIFACT_UPLOAD_ALLOWED_TYPES",
         os.getenv("IMAGE_ALLOWED_TYPES", "png,jpeg,webp,gif,pdf,csv,txt,json,geojson"),
     ).split(",")
     if t.strip()
