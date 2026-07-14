@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr
 
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
@@ -13,6 +13,8 @@ from src.constants import (
 
 
 class GenerationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     query: str = DEFAULT_QUERY
     year: Optional[List[int]] = None
     filters: Optional[Dict[str, Any]] = None
@@ -49,10 +51,14 @@ class GenerationRequest(BaseModel):
             "When omitted, backend uses AGENT_GRAPH_TYPE from environment."
         ),
     )
-    image_ids: Optional[List[str]] = Field(
+    artifact_ids: Optional[List[str]] = Field(
         default=None,
         max_length=20,
-        description="IDs of previously uploaded images to attach to the message",
+        validation_alias=AliasChoices("artifact_ids", "image_ids"),
+        description=(
+            "IDs of previously uploaded artifacts to attach to the message. "
+            "The legacy field name 'image_ids' is still accepted."
+        ),
     )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)

@@ -902,7 +902,7 @@ async def generate_answer_agentic_stream_helper(
             asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
         if output_format == "json":
-            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies})}\n\n"
+            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
         else:
             yield "data: [DONE]\n\n"
 
@@ -931,7 +931,7 @@ async def generate_answer_agentic_stream_helper(
                 message_id, output=answer, artifact_ids=_collected_artifact_ids()
             )
             if output_format == "json":
-                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}})}\n\n"
+                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}, 'artifact_ids': _collected_artifact_ids()})}\n\n"
             else:
                 yield "data: [DONE]\n\n"
         else:

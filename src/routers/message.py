@@ -67,19 +67,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def resolve_image_attachments(
-    image_ids: Optional[list], conversation_id: str, requesting_user: User
+async def resolve_artifact_attachments(
+    artifact_ids: Optional[list], conversation_id: str, requesting_user: User
 ) -> Optional[list]:
-    """Resolve requested image IDs into attachment records for a message.
+    """Resolve requested artifact IDs into attachment records for a message.
 
-    The request field is still named ``image_ids`` (the frontend contract), but
-    it now resolves to Artifact documents rather than the retired Image model.
-    Validates that each artifact exists and belongs to the requesting user,
-    backfills the owning conversation, and returns the attachment payloads to
-    be persisted on the message.
+    The request field is named ``artifact_ids`` (the legacy alias ``image_ids``
+    is still accepted for backward compatibility). Validates that each artifact
+    exists and belongs to the requesting user, backfills the owning
+    conversation, and returns the attachment payloads to be persisted on the
+    message.
 
     Args:
-        image_ids (list | None): IDs of previously uploaded artifacts to attach.
+        artifact_ids (list | None): IDs of previously uploaded artifacts to attach.
         conversation_id (str): Conversation the message belongs to.
         requesting_user (User): Authenticated user injected by dependency.
 
@@ -89,18 +89,18 @@ async def resolve_image_attachments(
     Raises:
         HTTPException: 404 if any artifact is missing; 403 if any belongs to another user.
     """
-    if not image_ids:
+    if not artifact_ids:
         return None
 
     # Dedupe (preserving order) so repeated ids can't multiply Mongo round-trips.
-    unique_image_ids = list(dict.fromkeys(image_ids))
+    unique_artifact_ids = list(dict.fromkeys(artifact_ids))
 
     attachments = []
-    for image_id in unique_image_ids:
-        artifact = await Artifact.find_by_id(image_id)
+    for artifact_id in unique_artifact_ids:
+        artifact = await Artifact.find_by_id(artifact_id)
         if not artifact:
             raise HTTPException(
-                status_code=404, detail=f"Image {image_id} not found"
+                status_code=404, detail=f"Image {artifact_id} not found"
             )
         if artifact.user_id != requesting_user.id:
             raise HTTPException(
@@ -489,8 +489,8 @@ async def create_message(
         except Exception:
             request.year = None
 
-        attachments = await resolve_image_attachments(
-            request.image_ids, conversation_id, requesting_user
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
         )
 
         message = await Message.create(
@@ -834,8 +834,8 @@ async def create_message_stream(
         except Exception:
             request.year = None
 
-        attachments = await resolve_image_attachments(
-            request.image_ids, conversation_id, requesting_user
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
         )
 
         message = await Message.create(
