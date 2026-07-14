@@ -12,7 +12,7 @@ from src.database.models.mcp_server import (
 )
 from src.database.models.user import User
 from src.database.mongo_model import PaginatedResponse
-from src.middlewares.auth import get_current_user, get_optional_bearer_token
+from src.middlewares.auth import get_bearer_token, get_current_user
 from src.schemas.common import Pagination
 from src.schemas.mcp_server import (
     MCPServerPublic,
@@ -77,14 +77,13 @@ async def _get_owned_mcp_server(
         )
     return mcp_server
 
-async def _get_public_mcp_server(
-    server_id: str
-) -> MCPServer:
+
+async def _get_mcp_server_by_id(server_id: str) -> MCPServer:
     mcp_server = await MCPServer.find_by_id(server_id)
     if not mcp_server:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    
     return mcp_server
+
 
 @router.get("/mcp-servers", response_model=PaginatedResponse[MCPServerPublic])
 async def list_mcp_servers(
@@ -92,13 +91,13 @@ async def list_mcp_servers(
     requesting_user: User = Depends(get_current_user),
 ):
     """
-    List MCP servers owned by the current user.
+    List all MCP servers visible to registered users.
 
     :param pagination: Pagination parameters.\n
     :type pagination: Pagination\n
     :param requesting_user: Authenticated user injected by dependency.\n
     :type requesting_user: User\n
-    :return: Paginated sanitized MCP servers for the user.\n
+    :return: Paginated sanitized MCP servers.\n
     :rtype: PaginatedResponse[MCPServerPublic]\n
     """
     result = await MCPServer.find_all_with_pagination(
@@ -152,10 +151,13 @@ async def create_mcp_server(
 @router.get("/mcp-servers/{server_id}", response_model=MCPServerPublicDetail)
 async def get_mcp_server(
     server_id: str,
-    bearer_token: Optional[str] = Depends(get_optional_bearer_token),
+    requesting_user: User = Depends(get_current_user),
+    bearer_token: str = Depends(get_bearer_token),
 ):
     """
-    Get an MCP server by id owned by the current user.
+    Get an MCP server by id.
+
+    Any authenticated user may read MCP servers from the shared catalog.
 
     :param server_id: MCP server identifier.\n
     :type server_id: str\n
@@ -164,10 +166,10 @@ async def get_mcp_server(
     :return: MCP server (sanitized).\n
     :rtype: MCPServerPublicDetail\n
     :raises HTTPException:\n
+        - 401: Missing or invalid authentication.
         - 404: MCP server not found.
-        - 403: Not allowed to access this MCP server.
     """
-    mcp_server = await _get_public_mcp_server(server_id)
+    mcp_server = await _get_mcp_server_by_id(server_id)
     tools = []
     try:
         loaded_tools = await _load_mcp_tools_for_servers(
