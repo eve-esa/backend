@@ -27,7 +27,7 @@ from src.services.generate_answer import (
 )
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.core.registry import get_agent_graph
-from src.services.agents.graphs_bundle import graphs_base_module, graphs_utils_module
+from src.services.agents.graphs_bundle import graphs_base_module
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
@@ -78,19 +78,30 @@ try:
 except Exception:
     MultiServerMCPClient = None  # type: ignore
 
+# Text-format tool-call helpers come from this backend's OWN
+# `src.services.agentic_utils` rather than the external `graphs_utils_module()`
+# package: the installed `eve-esa-agents` package's `utils.py` doesn't define
+# `might_be_incomplete_text_tool_call` at all, so importing that single
+# attribute used to raise inside the `try` block below and silently set
+# *every* name in this group (including `has_text_tool_call` and
+# `parse_text_tool_calls`, which DO exist there) to None — permanently
+# disabling text-format tool-call detection in the streaming path with no
+# error surfaced anywhere. `agentic_utils.py` is vendored in this repo and
+# kept in sync with what the streaming/turn-buffer logic below needs.
 try:
-    _graphs_utils = graphs_utils_module()
-    has_text_tool_call = _graphs_utils.has_text_tool_call
-    might_be_incomplete_text_tool_call = (
-        _graphs_utils.might_be_incomplete_text_tool_call
+    from src.services.agentic_utils import (
+        has_text_tool_call,
+        might_be_incomplete_text_tool_call,
+        parse_text_tool_calls,
+        split_tool_calls_and_answer_text,
+        tool_call_label,
     )
-    parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
-    tool_call_label = _graphs_utils.tool_call_label
 except Exception:
     tool_call_label = None  # type: ignore
     has_text_tool_call = None  # type: ignore
     might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
+    split_tool_calls_and_answer_text = None  # type: ignore
 
 
 # ─── Trace serialisation ──────────────────────────────────────────────────────
@@ -189,6 +200,31 @@ def _serialise_trace_entry(
 
 
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
+
+
+class _MCPToolsWithClient(list):
+    """A plain ``list`` of tools that also keeps its ``MultiServerMCPClient`` alive.
+
+    ``ArtifactInterceptor.bind_client()`` only holds a *weakref* to the client
+    (see ``artifact_ingestion.py``), so once the local ``client`` variable in
+    ``_load_mcp_tools_for_servers`` goes out of scope, nothing keeps the real
+    object alive — it is garbage-collected as soon as the function returns,
+    and ``ArtifactInterceptor._resolve_resource_link`` silently gives up
+    (``self._client_ref()`` resolves to ``None``) the next time a
+    ``ResourceLink`` needs to be read via ``client.session(...)``. This is
+    exactly the bug ``tests/e2e/test_artifact_e2e.py``'s ``mcp_client`` fixture
+    works around by having the *caller* hold `client` alive explicitly.
+
+    Subclassing ``list`` (rather than returning a ``(tools, client)`` tuple)
+    keeps this a drop-in replacement: existing callers and tests that compare
+    the result with ``==`` against a plain list, or pass it straight into
+    ``tools.extend(...)``, are unaffected — only the strong reference on
+    ``._mcp_client`` is new.
+    """
+
+    def __init__(self, tools: List[Any], client: Any) -> None:
+        super().__init__(tools)
+        self._mcp_client = client
 
 
 async def _load_mcp_tools_for_servers(
@@ -301,7 +337,10 @@ async def _load_mcp_tools_for_servers(
             len(failed_servers),
             failed_servers,
         )
-    return tools
+    # Wrap (rather than return the bare list) so `client` — and therefore the
+    # weakref `artifact_interceptor` holds on it — survives at least as long as
+    # whatever the caller does with `tools` (see _MCPToolsWithClient docstring).
+    return _MCPToolsWithClient(tools, client)
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -324,6 +363,14 @@ async def _build_tools(
                 mcp_proxy_bearer_token=request.mcp_proxy_bearer_token,
             )
             tools.extend(mcp_tools)
+            # `tools.extend(...)` above only copies the individual tool
+            # references, not `mcp_tools`'s own `_mcp_client` attribute — carry
+            # it over explicitly so the client stays alive for as long as the
+            # caller holds onto this function's return value (see
+            # _MCPToolsWithClient docstring in _load_mcp_tools_for_servers).
+            mcp_client = getattr(mcp_tools, "_mcp_client", None)
+            if mcp_client is not None:
+                tools = _MCPToolsWithClient(tools, mcp_client)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
 
@@ -396,6 +443,87 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
         s = s[1:-1].strip()
     return s or AGENT_GRAPH_TYPE
+
+
+# ─── Artifact-reproduction instruction ────────────────────────────────────────
+
+# The ReAct graph's own lead-in instruction lives in `prompts.yaml` bundled
+# with the `eve-esa-agents` package resolved by graphs_bundle.py (see its
+# `_prompts_yaml_path`) — that package is an external git dependency, not part
+# of this repo, so it can't be edited here. This backend-owned instruction is
+# injected as an extra SystemMessage ahead of the user's query instead: it
+# ends up positioned *after* the graph's own system prompt in every `agent`
+# node invocation (ReactAgent._invoke prepends its instruction fresh each
+# call), so it stays visible for the whole tool-calling loop.
+_ARTIFACT_MARKDOWN_INSTRUCTION = (
+    "Tool results may contain a markdown stub for a file the tool produced: "
+    'an image embed (`![name](/artifacts/{id} "MCP: server/tool")`) or a '
+    'link (`[name](/artifacts/{id} "MCP: server/tool")`), each followed on '
+    "the next line by a one-line JSON blob with the same data. When your "
+    "answer references that file, reproduce the markdown line VERBATIM — "
+    "do not rewrite, reformat, translate, or invent a different URL for it. "
+    "`/artifacts/{id}` URLs are the ONLY valid way to reference a "
+    "tool-produced file; never emit a `resource://` URI or any other URL "
+    "(e.g. a `storage.googleapis.com` link) for it, even if one appears "
+    "elsewhere in the tool output."
+)
+
+
+def _build_initial_messages(request: GenerationRequest, tools: List[Any]) -> List[Any]:
+    """Return the graph's initial ``messages`` state for this turn.
+
+    Prepends :data:`_ARTIFACT_MARKDOWN_INSTRUCTION` as a ``SystemMessage``
+    when MCP tools are in play, since only then can a tool result carry an
+    artifact stub worth guarding against being rewritten.
+    """
+    messages: List[Any] = []
+    if tools and SystemMessage:
+        messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
+    messages.append(HumanMessage(content=request.query))
+    return messages
+
+
+async def append_missing_artifact_stubs(
+    answer: str, artifact_ids: Optional[List[str]]
+) -> str:
+    """Append markdown stubs for collected artifacts the answer never references.
+
+    The instruction above asks the model to reproduce `/artifacts/{id}` stubs
+    verbatim, but models routinely paraphrase them into invented URLs (seen
+    live with EVE-Instruct emitting `storage.googleapis.com` links). The
+    captured files are too valuable to lose to prompt non-compliance, so this
+    deterministic pass re-attaches every collected artifact whose serving URL
+    is absent from the final answer. Fail-open: any lookup error leaves the
+    answer untouched.
+    """
+    if not answer or not artifact_ids:
+        return answer
+    try:
+        from src.database.models.artifact import Artifact
+
+        lines: List[str] = []
+        for artifact_id in artifact_ids:
+            url = f"/artifacts/{artifact_id}"
+            if url in answer:
+                continue
+            artifact = await Artifact.find_by_id(artifact_id)
+            if not artifact:
+                continue
+            source = getattr(artifact, "source", None)
+            server = getattr(source, "mcp_server", None) or "unknown"
+            tool = getattr(source, "tool_name", None) or "tool"
+            title = f"MCP: {server}/{tool}"
+            if (artifact.content_type or "").startswith("image/"):
+                lines.append(f'![{artifact.filename}]({url} "{title}")')
+            else:
+                lines.append(f'[{artifact.filename}]({url} "{title}")')
+        if lines:
+            answer = answer.rstrip() + "\n\n" + "\n\n".join(lines) + "\n"
+    except Exception:
+        logger.warning(
+            "Failed to append missing artifact stubs to the answer", exc_info=True
+        )
+    return answer
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
@@ -534,7 +662,7 @@ async def generate_answer_agentic(
                 trace_name="agentic_generation",
             ):
                 async for update in g.astream(
-                    {"messages": [HumanMessage(content=request.query)]},
+                    {"messages": _build_initial_messages(request, tools)},
                     config=config,
                     stream_mode="updates",
                 ):
@@ -579,6 +707,9 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
+        final_answer = await append_missing_artifact_stubs(
+            final_answer, list(artifact_ctx.collected_artifact_ids)
+        )
 
         tool_results: List[Dict[str, Any]] = []
         use_rag = False
@@ -718,19 +849,40 @@ async def generate_answer_agentic_stream_helper(
             joined = "".join(items)
             turn_buffer.clear()
 
+            events: List[str] = []
+            answer_items = items
+
             if has_text_tool_call and has_text_tool_call(joined):
-                parsed = parse_text_tool_calls(joined) if parse_text_tool_calls else []
-                if not parsed:
+                # A turn can contain one or more `[TOOL_CALLS]name{...}` segments
+                # (each call gets its own marker) directly followed by real
+                # answer prose in the SAME turn — split_tool_calls_and_answer_text
+                # walks every recognized call and returns whatever text is left
+                # over so it's emitted as an answer instead of silently dropped
+                # or, worse, leaking the raw "[TOOL_CALLS]..." syntax verbatim
+                # into `accumulated`/the persisted answer.
+                calls, answer_text = (
+                    split_tool_calls_and_answer_text(joined)
+                    if split_tool_calls_and_answer_text
+                    else (parse_text_tool_calls(joined) if parse_text_tool_calls else [], "")
+                )
+                if not calls:
                     return []
-                tc = parsed[0]
-                tname = tc.get("name", "tool")
-                args = tc.get("args", {})
-                query_used = args.get("query", "")
-                label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
-                msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                return [
-                    f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
-                ]
+                for tc in calls:
+                    tname = tc.get("name", "tool")
+                    args = tc.get("args", {})
+                    query_used = args.get("query", "")
+                    label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
+                    msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                    events.append(
+                        f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                    )
+                if not answer_text:
+                    return events
+                # Streaming granularity is inherently lost for this leftover
+                # text: we can't know the tool-call syntax has ended until the
+                # whole turn is buffered, so it's emitted as a single chunk
+                # rather than token-by-token.
+                answer_items = [answer_text]
 
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
@@ -740,8 +892,7 @@ async def generate_answer_agentic_stream_helper(
                     )
                 first_token_latency = time.perf_counter() - total_start
 
-            events: List[str] = []
-            for tok in items:
+            for tok in answer_items:
                 if not tok:
                     continue
                 tokens_yielded += 1
@@ -761,7 +912,7 @@ async def generate_answer_agentic_stream_helper(
             trace_name="agentic_generation_stream",
         ):
             async for mode, payload in graph.astream(
-                {"messages": [HumanMessage(content=request.query)]},
+                {"messages": _build_initial_messages(request, tools)},
                 config=config,
                 stream_mode=["messages", "updates"],
             ):
@@ -857,7 +1008,9 @@ async def generate_answer_agentic_stream_helper(
                 yield event
 
         gen_latency = time.perf_counter() - gen_start
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         total_latency = time.perf_counter() - total_start
 
         latencies: Dict[str, Optional[float]] = {
@@ -925,7 +1078,9 @@ async def generate_answer_agentic_stream_helper(
             description="Agentic generation timed out",
             error_type=type(exc).__name__,
         )
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         if answer:
             await persist_message_state(
                 message_id, output=answer, artifact_ids=_collected_artifact_ids()

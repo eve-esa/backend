@@ -96,6 +96,76 @@ def has_text_tool_call(content: str) -> bool:
     return _TEXT_TOOL_CALL_MARKER in content
 
 
+def split_tool_calls_and_answer_text(content: str) -> tuple[List[Dict[str, Any]], str]:
+    """Split *content* into (parsed tool calls, trailing answer text).
+
+    ``parse_text_tool_calls`` alone stops at the first token that isn't a
+    valid ``name{...}``/``name`` call, which is correct for detecting where
+    the tool-call syntax ends but silently swallows everything after it
+    (including real answer prose) if the caller only looks at the parsed
+    calls. This wrapper walks the SAME ``[TOOL_CALLS]name{...}`` segments —
+    each call gets its own leading marker in the EVE-Instruct/Mistral
+    convention, e.g. ``[TOOL_CALLS]a{}[TOOL_CALLS]b{}rest of the answer`` —
+    and returns whatever text follows the last recognized call so it is
+    never lost.
+
+    Returns ``([], content)`` unchanged when no marker is present.
+    """
+    if _TEXT_TOOL_CALL_MARKER not in content:
+        return [], content
+
+    calls: List[Dict[str, Any]] = []
+    text = content
+    while text.startswith(_TEXT_TOOL_CALL_MARKER):
+        rest = text[len(_TEXT_TOOL_CALL_MARKER) :]
+        stripped = rest.lstrip()
+        m = re.match(r"([A-Za-z_]\w*)", stripped)
+        if not m:
+            break
+        name = m.group(1)
+        i = m.end()
+        while i < len(stripped) and stripped[i] in " \t":
+            i += 1
+        if i < len(stripped) and stripped[i] == "{":
+            depth, j, closed = 0, i, False
+            while j < len(stripped):
+                if stripped[j] == "{":
+                    depth += 1
+                elif stripped[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        closed = True
+                        break
+                j += 1
+            if not closed:
+                break
+            try:
+                args = json.loads(stripped[i : j + 1])
+            except Exception:
+                args = {}
+            calls.append(
+                {
+                    "id": f"call_{len(calls)}_{name}",
+                    "name": name,
+                    "args": args,
+                    "type": "tool_call",
+                }
+            )
+            text = stripped[j + 1 :]
+        else:
+            calls.append(
+                {
+                    "id": f"call_{len(calls)}_{name}",
+                    "name": name,
+                    "args": {},
+                    "type": "tool_call",
+                }
+            )
+            text = stripped[i:]
+
+    return calls, text
+
+
 def might_be_incomplete_text_tool_call(content: str) -> bool:
     """Return True while streamed text may still be building a ``[TOOL_CALLS]`` call."""
     if not content:
