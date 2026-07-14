@@ -509,9 +509,6 @@ class LLMManager:
         llm: Optional[Any] = None,
     ) -> str:
         """Summarize entire conversation history.
-
-        When *llm* is provided (e.g. a user-owned custom model client), only that
-        client is used and platform fallback is not applied.
         """
         if not transcript:
             return ""
