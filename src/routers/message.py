@@ -36,6 +36,8 @@ from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
 )
+from src.services.agentic_utils import is_agentic_generation_request
+from src.services.custom_model_service import get_owned_custom_model
 from src.services.hallucination_detector import HallucinationDetector
 from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.stream_bus import get_stream_bus
@@ -520,6 +522,7 @@ async def retry(
     message_id: str,
     background_tasks: BackgroundTasks,
     requesting_user: User = Depends(get_current_user),
+    bearer_token: str = Depends(get_bearer_token),
 ) -> dict:
     """
     Retry generation for an existing message.
@@ -564,6 +567,53 @@ async def retry(
                 detail="This message cannot be retried",
             )
         await enforce_token_budget_or_raise(requesting_user)
+
+        if is_agentic_generation_request(message.request_input, message):
+            request = await _prepare_agentic_request(
+                message.request_input, requesting_user
+            )
+            request.mcp_proxy_bearer_token = bearer_token
+            (
+                answer,
+                tool_results,
+                use_rag,
+                latencies,
+                prompts,
+                trace_entries,
+            ) = await generate_answer_agentic(
+                request,
+                user_id=requesting_user.id,
+                conversation_id=conversation_id,
+            )
+
+            message.output = answer
+            message.documents = tool_results
+            message.use_rag = use_rag
+            message.trace = trace_entries if trace_entries else None
+            existing_metadata = dict(getattr(message, "metadata", {}) or {})
+            existing_metadata.update({"latencies": latencies, "prompts": prompts})
+            message.metadata = existing_metadata
+            await message.save()
+            await consume_tokens_for_user(
+                requesting_user, count_tokens_for_texts(message.input, answer)
+            )
+
+            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+
+            return {
+                "id": message.id,
+                "query": message.input,
+                "answer": answer,
+                "documents": tool_results,
+                "use_rag": use_rag,
+                "conversation_id": conversation_id,
+                "collection_ids": request.collection_ids,
+                "trace": trace_entries if trace_entries else None,
+                "metadata": {
+                    "latencies": latencies,
+                    "prompts": prompts,
+                },
+            }
 
         (
             answer,
@@ -1644,6 +1694,13 @@ async def _prepare_agentic_request(
             [s.name for s in mcp_docs],
         )
 
+    if request.custom_model_id:
+        request.resolved_custom_model = await get_owned_custom_model(
+            request.custom_model_id,
+            requesting_user.id,
+            action="use",
+        )
+
     return request
 
 
@@ -1740,7 +1797,7 @@ async def create_agentic_message(
             prompts,
             trace_entries,
         ) = await generate_answer_agentic(
-            request, conversation_id=conversation_id, user_id=requesting_user.id
+            request, user_id=requesting_user.id, conversation_id=conversation_id
         )
 
         message.output = answer
@@ -1888,9 +1945,9 @@ async def create_agentic_message_stream(
                 request=request,
                 conversation_id=conversation_id,
                 message_id=message.id,
+                user_id=requesting_user.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
-                user_id=requesting_user.id,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)

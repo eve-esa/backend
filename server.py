@@ -7,11 +7,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.config import CORS_ALLOWED_ORIGINS, configure_logging
 from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
+from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
     auth_router,
     collection_router,
     conversation_router,
+    custom_model_router,
     document_router,
     error_log_router,
     forgot_password_router,
@@ -51,6 +53,9 @@ def register_routers(app: FastAPI):
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])
 
+    # Custom models
+    app.include_router(custom_model_router, tags=["Custom Models"])
+
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
 
@@ -64,6 +69,7 @@ def create_app(debug=False, **kwargs):
     async def lifespan(app: FastAPI):
         await async_mongo_manager.connect()
         await ensure_indexes()
+        await ensure_provider_catalog_seeded()
         logging.info("Database connection established")
         try:
             yield

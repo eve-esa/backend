@@ -25,6 +25,23 @@ from src.schemas.generation_request import GenerationRequest
 _RUNNER = "src.services.agents.core.runner"
 
 
+class _FakeStreamGraph:
+    """Graph that streams fallback output then raises the primary-node error."""
+
+    def __init__(self, updates=None, messages=None, raise_exc=None):
+        self._updates = updates or []
+        self._messages = messages or []
+        self._raise = raise_exc
+
+    async def astream(self, *args, **kwargs):
+        for update in self._updates:
+            yield "updates", update
+        for message in self._messages:
+            yield "messages", message
+        if self._raise is not None:
+            raise self._raise
+
+
 class _FakeUpdatesGraph:
     """Minimal stand-in for a compiled graph driving ``astream(stream_mode=...)``."""
 
@@ -33,10 +50,10 @@ class _FakeUpdatesGraph:
         self._raise = raise_exc
 
     async def astream(self, *args, **kwargs):
-        if self._raise is not None:
-            raise self._raise
         for update in self._updates:
             yield update
+        if self._raise is not None:
+            raise self._raise
 
 
 def _fake_agent():
@@ -221,6 +238,30 @@ class TestBuildReactGraph:
         assert compile_kwargs["llm"] is primary_llm
         assert compile_kwargs["fallback_llm"] is fallback_llm
 
+    def test_custom_llm_still_wires_platform_fallback(self):
+        agent = self._make_agent()
+        custom_llm = MagicMock(name="custom_llm")
+        fallback_llm = MagicMock(name="fallback_llm")
+        fake_mgr = MagicMock()
+        fake_mgr.get_client_for_model.return_value = fallback_llm
+
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
+            "src.services.agents.core.runner.get_shared_llm_manager",
+            return_value=fake_mgr,
+        ):
+            _build_react_graph(
+                "main",
+                tools=[],
+                checkpointer=None,
+                agent=agent,
+                llm=custom_llm,
+            )
+
+        fake_mgr.get_client_for_model.assert_called_once_with("fallback")
+        compile_kwargs = agent.compile.call_args.kwargs
+        assert compile_kwargs["llm"] is custom_llm
+        assert compile_kwargs["fallback_llm"] is fallback_llm
+
 
 # ─── _resolve_agentic_llm_type ────────────────────────────────────────────────
 
@@ -289,10 +330,39 @@ class TestGenerateAnswerAgenticInGraphFallback:
                 _latencies,
                 prompts,
                 _trace,
-            ) = await generate_answer_agentic(request, conversation_id="c1")
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
 
         assert final_answer == "final answer"
         assert prompts["used_fallback_llm"] is True
+
+    async def test_in_graph_fallback_survives_graph_raise(self):
+        """Non-streaming must return fallback output when the graph raises afterward."""
+        updates = [
+            {"agent_fallback": {"messages": [AIMessage(content="")]}},
+            {"agent_fallback": {"messages": [AIMessage(content="fallback answer")]}},
+        ]
+        graph = _FakeUpdatesGraph(updates, raise_exc=TimeoutError("agent timeout"))
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+        ):
+            (
+                final_answer,
+                _tool_results,
+                _use_rag,
+                _latencies,
+                prompts,
+                trace,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert final_answer == "fallback answer"
+        assert prompts["used_fallback_llm"] is True
+        assert trace
 
 
 # ─── generate_answer_agentic_stream_helper (streaming) ────────────────────────
@@ -308,9 +378,52 @@ class TestStreamingEarlyFailure:
         ), patch(f"{_RUNNER}.logger"):
             events = []
             async for event in generate_answer_agentic_stream_helper(
-                request, conversation_id="c1", message_id="m1"
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
             ):
                 events.append(event)
 
         assert events, "expected at least one SSE event"
         assert any('"type": "error"' in e for e in events)
+
+    async def test_agent_fallback_success_persists_metadata_and_trace(self):
+        """Fallback answers must persist metadata/trace even if the graph later raises."""
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            updates=[
+                {"agent_fallback": {"messages": [AIMessage(content="")]}},
+            ],
+            messages=[
+                (
+                    AIMessage(content="fallback answer"),
+                    {"langgraph_node": "agent_fallback"},
+                ),
+            ],
+            raise_exc=TimeoutError("Node 'agent' exceeded its idle timeout"),
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            events = []
+            async for event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                events.append(event)
+
+        assert any('"type": "final"' in e for e in events)
+        assert not any('"type": "error"' in e for e in events)
+        persist.assert_awaited_once()
+        kwargs = persist.await_args.kwargs
+        assert kwargs["output"] == "fallback answer"
+        assert kwargs["latencies"]["generation_latency"] is not None
+        assert kwargs["prompts"]["used_fallback_llm"] is True
+        assert kwargs["trace"]
+        assert kwargs["trace"][-1]["node"] == "agent_fallback"

@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from src.database.models.message import Message
+from src.schemas.generation_request import GenerationRequest
+
 _TEXT_TOOL_CALL_MARKER = "[TOOL_CALLS]"
 
 
@@ -24,6 +27,16 @@ def tool_call_label(tool_name: str) -> str:
         return "Searching Wiley Gateway"
     pretty = tool_name.replace("_", " ").replace("-", " ").strip()
     return f"Calling {pretty}" if pretty else "Calling tool"
+
+
+def is_agentic_generation_request(
+    request: GenerationRequest,
+    message: Optional[Message] = None,
+) -> bool:
+    """Return True when the stored request should use the agentic pipeline."""
+    if request.custom_model_id or request.agent or request.public_mcp_servers:
+        return True
+    return message is not None and bool(getattr(message, "trace", None))
 
 
 # ─── Text-format tool-call parsing (EVE-Instruct / Mistral) ───────────────────

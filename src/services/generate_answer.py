@@ -39,6 +39,10 @@ from src.database.models.message import Message
 from src.database.models.user import User
 from src.schemas.generation_request import GenerationRequest
 from src.services.cancel_manager import get_cancel_manager
+from src.services.custom_model_service import (
+    build_custom_model_llm_for_user,
+    custom_model_id_from_messages,
+)
 from src.services.mcp_client_service import MultiServerMCPClientService
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
@@ -1282,8 +1286,23 @@ async def maybe_rollup_and_trim_history(conversation_id: str, summary_every: int
             else f"Recent turns:\n{transcript}"
         )
 
+        summarizer_llm = None
+        custom_model_id = custom_model_id_from_messages(messages)
+        if custom_model_id and convo is not None:
+            try:
+                summarizer_llm = await build_custom_model_llm_for_user(
+                    custom_model_id, convo.user_id
+                )
+            except Exception:
+                logger.warning(
+                    "Unable to use custom summarizer for conversation summary, using fallback model"
+                )
+                summarizer_llm = get_shared_llm_manager().get_client_for_model(LLMType.Fallback.value)
+
         summary_text = await get_shared_llm_manager().summarize_context_in_all(
-            transcript=summarizer_input, is_force=True
+            transcript=summarizer_input,
+            is_force=True,
+            llm=summarizer_llm,
         )
         if not summary_text:
             return

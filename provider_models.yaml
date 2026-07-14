@@ -1,0 +1,50 @@
+# Provider catalog bootstrap for user-owned custom models (agentic EVE).
+# Seeded into MongoDB on first startup when catalog collections are empty.
+# Back office can add or update providers/models in Mongo without redeploying.
+
+platform:
+  - id: eve-instruct
+    llm_type: main
+    display_name: EVE-Instruct
+    description: Default EVE instruction-tuned model hosted by the platform.
+  - id: mistral-small-latest
+    llm_type: fallback
+    display_name: Mistral Small
+    description: Platform Mistral Small model. In-graph retry uses this fallback.
+
+providers:
+  - id: mistral
+    display_name: Mistral
+    base_url: https://api.mistral.ai/v1
+    models:
+      - id: mistral-small-latest
+        display_name: Mistral Small
+        model_name: mistral-small-latest
+      - id: mistral-medium-latest
+        display_name: Mistral Medium
+        model_name: mistral-medium-latest
+      - id: mistral-large-latest
+        display_name: Mistral Large
+        model_name: mistral-large-latest
+
+  - id: claude
+    display_name: Claude
+    base_url: https://api.anthropic.com/v1
+    models:
+      - id: claude-sonnet-5
+        display_name: Claude Sonnet 5
+        model_name: claude-sonnet-5
+      - id: claude-opus-4-8
+        display_name: Claude Opus 4.8
+        model_name: claude-opus-4-8
+
+  - id: openai
+    display_name: OpenAI
+    base_url: https://api.openai.com/v1
+    models:
+      - id: gpt-5.5-2026-04-23
+        display_name: GPT-5.5
+        model_name: gpt-5.5-2026-04-23
+      - id: gpt-5.4-2026-03-05
+        display_name: GPT-5.4
+        model_name: gpt-5.4-2026-03-05

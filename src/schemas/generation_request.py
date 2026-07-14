@@ -49,11 +49,18 @@ class GenerationRequest(BaseModel):
             "When omitted, backend uses AGENT_GRAPH_TYPE from environment."
         ),
     )
+    custom_model_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "User-owned custom model ID. When set, overrides llm_type for agentic generation."
+        ),
+    )
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
     _mcp_server_configs: List[Any] = PrivateAttr(default_factory=list)
     _mcp_proxy_bearer_token: Optional[str] = PrivateAttr(default=None)
+    _resolved_custom_model: Any = PrivateAttr(default=None)
 
     @property
     def collection_ids(self) -> List[str]:
@@ -87,3 +94,12 @@ class GenerationRequest(BaseModel):
     @mcp_proxy_bearer_token.setter
     def mcp_proxy_bearer_token(self, value: Optional[str]) -> None:
         self._mcp_proxy_bearer_token = value
+
+    @property
+    def resolved_custom_model(self) -> Any:
+        """User-owned custom model loaded during agentic request preparation."""
+        return self._resolved_custom_model
+
+    @resolved_custom_model.setter
+    def resolved_custom_model(self, value: Any) -> None:
+        self._resolved_custom_model = value
