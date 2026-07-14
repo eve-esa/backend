@@ -1776,6 +1776,7 @@ async def create_agentic_message(
 
         request = await _prepare_agentic_request(request, requesting_user)
         request.mcp_proxy_bearer_token = bearer_token
+        request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic collection IDs: %s", request.collection_ids)
 
         message = await Message.create(
@@ -1924,6 +1925,7 @@ async def create_agentic_message_stream(
 
         request = await _prepare_agentic_request(request, requesting_user)
         request.mcp_proxy_bearer_token = bearer_token
+        request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
 
         message = await Message.create(

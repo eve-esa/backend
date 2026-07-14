@@ -31,11 +31,9 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
 )
-from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.core.registry import get_agent_graph
-from src.services.agents.graphs_bundle import graphs_base_module, graphs_utils_module
-from src.services.mcp.proxy_url import backend_mcp_proxy_url
-from src.services.mcp_auth import get_cognito_token_provider
+from src.services.agents.graphs_bundle import graphs_utils_module
+from src.services.mcp.tool_loader import load_mcp_tools_for_servers as _load_mcp_tools_for_servers
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -44,8 +42,6 @@ from src.services.token_rate_limiter import (
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
 from src.utils.helpers import get_mongodb_uri
 from src.utils.langfuse_helper import get_callbacks, langfuse_context
-
-LatencyInterceptor = graphs_base_module().LatencyInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +66,6 @@ try:
     from langgraph.checkpoint.memory import InMemorySaver
 except Exception:
     InMemorySaver = None  # type: ignore
-
-_mcp_adapters_available = False
-try:
-    from langchain_mcp_adapters.client import MultiServerMCPClient
-
-    _mcp_adapters_available = True
-except Exception:
-    MultiServerMCPClient = None  # type: ignore
 
 try:
     _graphs_utils = graphs_utils_module()
@@ -195,109 +183,7 @@ def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) 
 
 
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
-
-
-async def _load_mcp_tools_for_servers(
-    mcp_server_configs: List[Any],
-    *,
-    mcp_proxy_bearer_token: Optional[str] = None,
-) -> List[Any]:
-    """Connect to each MCP server, authenticate, and load its tools.
-
-    When ``mcp_proxy_bearer_token`` is set and the proxy base URL is configured,
-    routes through ``/mcp/{name}`` so listing shares the proxy cache and Cognito
-    egress auth. Otherwise falls back to a direct AgentCore connection.
-    """
-    if not _mcp_adapters_available or not mcp_server_configs:
-        return []
-
-    token_provider = get_cognito_token_provider()
-    cognito_auth_header: Optional[str] = None
-    if token_provider:
-        try:
-            token = await token_provider.get_token()
-            cognito_auth_header = f"Bearer {token}"
-        except Exception as exc:
-            logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
-
-    connections: Dict[str, Any] = {}
-    for srv in mcp_server_configs:
-        transport = (
-            srv.config.transport.value if srv.config.transport else "streamable_http"
-        )
-        if transport not in ("streamable_http", "sse"):
-            raise ValueError(
-                f"MCP server {srv.name!r} uses unsupported transport {transport!r}. "
-                "Only 'streamable_http' and 'sse' are supported."
-            )
-
-        if not srv.config.url:
-            logger.warning(
-                "Skipping MCP server %r: missing URL in config", srv.name
-            )
-            continue
-
-        headers: Dict[str, str] = dict(srv.config.headers or {})
-        proxy_http_url = (
-            backend_mcp_proxy_url(srv.name) if mcp_proxy_bearer_token else None
-        )
-        if proxy_http_url:
-            headers["Authorization"] = f"Bearer {mcp_proxy_bearer_token}"
-            url = proxy_http_url
-        else:
-            if cognito_auth_header and "Authorization" not in headers:
-                headers["Authorization"] = cognito_auth_header
-            url = srv.config.url
-
-        connections[srv.name] = {
-            "transport": "streamable_http" if transport == "streamable_http" else "sse",
-            "url": url,
-            "headers": headers,
-        }
-
-    if not connections:
-        return []
-
-    client = MultiServerMCPClient(
-        connections,
-        tool_name_prefix=True,
-        tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
-    )
-    tools: List[Any] = []
-    failed_servers: List[str] = []
-    for server_name in connections:
-        try:
-            server_tools = await client.get_tools(server_name=server_name)
-            tools.extend(server_tools)
-            logger.info(
-                "Loaded %d MCP tool(s) from server %r: %s",
-                len(server_tools),
-                server_name,
-                [t.name for t in server_tools],
-            )
-        except Exception as exc:
-            failed_servers.append(server_name)
-            logger.error(
-                "Failed to load MCP tools from server %r: %s",
-                server_name,
-                exc,
-                exc_info=True,
-            )
-
-    if tools:
-        logger.info(
-            "Loaded %d MCP tool(s) total from %d/%d MCP server(s)",
-            len(tools),
-            len(connections) - len(failed_servers),
-            len(connections),
-        )
-    elif failed_servers:
-        logger.warning(
-            "No MCP tools loaded; all %d configured server(s) failed: %s",
-            len(failed_servers),
-            failed_servers,
-        )
-    return tools
+# Implemented in src.services.mcp.tool_loader; re-exported for backward compat.
 
 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
@@ -318,6 +204,7 @@ async def _build_tools(
             mcp_tools = await _load_mcp_tools_for_servers(
                 request.mcp_server_configs,
                 mcp_proxy_bearer_token=request.mcp_proxy_bearer_token,
+                mcp_user_id=request.mcp_user_id,
             )
             tools.extend(mcp_tools)
         except Exception:

@@ -66,14 +66,19 @@ def _resolve_test_mongo_uri() -> str:
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _db_connection():
+async def _db_connection(request):
     """Connect to MongoDB before each test and close afterwards.
 
     The connection string is resolved via :func:`_resolve_test_mongo_uri`, which
     prefers explicit overrides and otherwise reuses the same host/credentials
     as the running app but always targets the dedicated ``eve_backend_test``
     database so test runs don't pollute production data.
+
+    Tests marked ``no_db`` skip this fixture (pure unit tests with no Mongo I/O).
     """
+    if request.node.get_closest_marker("no_db"):
+        yield
+        return
 
     connection_string = _resolve_test_mongo_uri()
     await async_mongo_manager.connect(connection_string)
