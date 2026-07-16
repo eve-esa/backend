@@ -74,6 +74,7 @@ def catalog_create_fields(entry: CatalogModelEntry) -> dict[str, str]:
         "provider_id": entry.provider.id,
         "catalog_model_id": entry.model.id,
         "model_name": entry.model.model_name,
+        "base_url": entry.provider.base_url,
     }
 
 
