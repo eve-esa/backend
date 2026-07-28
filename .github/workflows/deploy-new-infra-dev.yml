@@ -50,11 +50,14 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set short SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - name: Build Docker image
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_SHA_TAG: sha-${{ github.sha | truncate(7) }}
+          IMAGE_SHA_TAG: sha-${{ env.SHORT_SHA }}
           IMAGE_LATEST_TAG: latest
         run: |
           docker build -t ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_SHA_TAG }} \
@@ -127,7 +130,7 @@ jobs:
           **Environment:** esa-eve-dev
 
           **Image Tags:**
-          - sha-${{ github.sha | truncate(7) }}
+          - sha-${{ env.SHORT_SHA }}
           - latest
 
           **Image URI:** ${{ env.ECR_REPOSITORY }}
