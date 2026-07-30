@@ -9,6 +9,7 @@ on:
 concurrency:
   group: deploy-dev
   cancel-in-progress: false
+  queue: max
 
 jobs:
   build:
