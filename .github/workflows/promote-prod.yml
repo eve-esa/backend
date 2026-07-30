@@ -32,6 +32,6 @@ jobs:
     with:
       environment: prod
       version: ${{ inputs.version }}
-      promote-from-account: ${{ vars.SOURCE_ACCOUNT_ID }}
+      promote: true
       promote-from-repository: esa-eve-staging-app-backend
     secrets: inherit
