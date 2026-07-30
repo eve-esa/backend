@@ -1,4 +1,4 @@
-name: Deploy backend to ECS
+name: deploy ecs
 
 on:
   workflow_call:

@@ -1,4 +1,5 @@
-name: Promote to staging (tag v*)
+name: promote staging
+run-name: promote staging ${{ github.ref_name }}
 
 on:
   push:
