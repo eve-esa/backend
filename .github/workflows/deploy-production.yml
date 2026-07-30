@@ -1,8 +1,21 @@
 name: legacy ec2 deploy prod
+# Application code only. Without this filter every push to main redeployed LIVE legacy
+# production, including commits touching nothing but .github/ or docs (five such deploys on
+# 2026-07-30 alone). Frozen until the cutover retires this file.
 on:
   push:
     branches:
       - main
+    paths:
+      - "src/**"
+      - "templates/**"
+      - "server.py"
+      - "config.yaml"
+      - "provider_models.yaml"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "start.sh"
+      - "create_user.sh"
 
 permissions:
   id-token: write

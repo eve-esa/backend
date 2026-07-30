@@ -1,9 +1,23 @@
 name: deploy dev
 
+# Application code plus this pipeline's own files: dev is where a pipeline change gets
+# exercised. paths-ignore alone was too broad, it rebuilt and redeployed on every
+# non-markdown commit, workflow edits included.
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"]
+    paths:
+      - "src/**"
+      - "templates/**"
+      - "server.py"
+      - "config.yaml"
+      - "provider_models.yaml"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "start.sh"
+      - "create_user.sh"
+      - ".github/workflows/deploy-dev.yml"
+      - ".github/workflows/deploy-ecs.yml"
   workflow_dispatch:
 
 concurrency:
