@@ -1,0 +1,141 @@
+name: Deploy backend to ECS
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "GitHub Environment name (esa-eve-dev/staging/prod)"
+        required: true
+        type: string
+      image-digest:
+        description: "ECR image digest (sha256:...)"
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.PUBLIC_URL }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Fetch current task definition
+        id: current-task
+        run: |
+          # Describe the task definition family's latest ACTIVE revision (not the service's live one)
+          FAMILY="esa-eve-${{ inputs.environment }}-app-backend"
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "$FAMILY" \
+            --query 'taskDefinition' \
+            --output json)
+
+          # Strip read-only fields: revision, taskDefinitionArn, status, requiresAttributes, compatibilities,
+          # registeredAt, registeredBy, deregisteredAt
+          echo "$TASK_DEF" | jq 'del(.revision, .taskDefinitionArn, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' > /tmp/task-def.json
+          echo "family=$FAMILY" >> $GITHUB_OUTPUT
+
+      - name: Render task definition with new image digest
+        uses: aws-actions/amazon-ecs-render-task-definition@4d302f94bb9275c6253c27e1e57119618c74391a # v1.9.0
+        with:
+          task-definition: /tmp/task-def.json
+          container-name: backend
+          image: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend@${{ inputs.image-digest }}
+
+      - name: Deploy task definition to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@f717abb86a63184d161f5d28244192a907d6ac54 # v2.6.3
+        id: deploy
+        with:
+          task-definition: ${{ env.TASK_DEFINITION }}
+          service: esa-eve-${{ inputs.environment }}-app-backend
+          cluster: esa-eve-${{ inputs.environment }}-app-cluster
+          wait-for-service-stability: true
+
+      - name: Assert service's PRIMARY deployment uses new task definition
+        run: |
+          # Circuit-breaker rollback guard: verify the service's PRIMARY deployment is using the revision we just pushed
+          # Ref: https://github.com/aws-actions/amazon-ecs-deploy-task-definition/issues/417
+          CLUSTER="esa-eve-${{ inputs.environment }}-app-cluster"
+          SERVICE="esa-eve-${{ inputs.environment }}-app-backend"
+          EXPECTED_ARN="${{ steps.deploy.outputs.task-definition-arn }}"
+
+          PRIMARY_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].deployments[?status==`PRIMARY`].taskDefinition' \
+            --output text)
+
+          if [ "$PRIMARY_ARN" != "$EXPECTED_ARN" ]; then
+            echo "ERROR: Service PRIMARY deployment task definition mismatch"
+            echo "Expected: $EXPECTED_ARN"
+            echo "Actual: $PRIMARY_ARN"
+            exit 1
+          fi
+          echo "PRIMARY deployment uses correct task definition"
+
+      - name: Health check (conditional)
+        run: |
+          CLUSTER="esa-eve-${{ inputs.environment }}-app-cluster"
+          SERVICE="esa-eve-${{ inputs.environment }}-app-backend"
+
+          # Only run health check if tasks are running
+          RUNNING_COUNT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].runningCount' \
+            --output text)
+
+          if [ "$RUNNING_COUNT" -eq 0 ]; then
+            echo "No running tasks, skipping health check"
+            exit 0
+          fi
+
+          # Get ALB endpoint from service load balancer
+          ALB_ARN=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].loadBalancers[0].targetGroupArn' \
+            --output text)
+
+          if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" = "None" ]; then
+            echo "No load balancer attached to service"
+            exit 0
+          fi
+
+          # Get the ALB DNS name from target group
+          ALB_DNS=$(aws elbv2 describe-target-groups \
+            --target-group-arns "$ALB_ARN" \
+            --query 'TargetGroups[0].LoadBalancerArns[0]' \
+            --output text | xargs -I {} aws elbv2 describe-load-balancers --load-balancer-arns {} --query 'LoadBalancers[0].DNSName' --output text)
+
+          HEALTH_URL="http://${ALB_DNS}/api/health"
+
+          # Retry loop with exponential backoff: ~6 attempts over ~30s
+          for attempt in {1..6}; do
+            if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
+              echo "Health check passed"
+              exit 0
+            fi
+            if [ $attempt -lt 6 ]; then
+              wait=$((2 ** (attempt - 1)))
+              echo "Health check attempt $attempt failed, waiting ${wait}s..."
+              sleep $wait
+            fi
+          done
+
+          echo "ERROR: Health check failed after 6 attempts"
+          exit 1
+
+      # Note: This workflow preserves valueFrom secret references only (Terraform owns secret VALUES).
+      # Task definitions accumulate by design; future cleanup via aws ecs deregister-task-definition
+      # is not automated in v1.
