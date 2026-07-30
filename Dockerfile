@@ -20,6 +20,11 @@ WORKDIR /code
 
 COPY --from=builder /opt/venv /opt/venv
 
+# Amazon DocumentDB TLS CA bundle: the cluster's CAs are AWS-private and not in any system
+# trust store, so the client must be pointed at this file (tlsCAFile=/code/global-bundle.pem).
+# https://docs.aws.amazon.com/documentdb/latest/devguide/connect_programmatically.html
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /code/global-bundle.pem
+
 COPY *.py ./
 COPY config.yaml provider_models.yaml start.sh create_user.sh ./
 RUN chmod +x start.sh create_user.sh
