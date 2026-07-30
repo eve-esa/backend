@@ -1,0 +1,130 @@
+name: Promote to staging (tag v*)
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  promote:
+    name: Promote
+    runs-on: ubuntu-latest
+    environment: esa-eve-staging
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      digest: ${{ steps.copy.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tagged commit
+        id: resolve
+        run: |
+          # Dereference annotated tag to commit SHA (safe for both annotated and lightweight tags)
+          COMMIT_SHA=$(git rev-list -n 1 ${{ github.ref }})
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          echo "commit-sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Tag ${{ github.ref }} resolves to commit $COMMIT_SHA (short: $SHORT_SHA)"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Resolve source image digest
+        id: source-digest
+        run: |
+          # Look up the digest of the sha-<short7> tag in dev ECR
+          # Use destination role with --registry-id to access source account
+          TAG="sha-${{ steps.resolve.outputs.short-sha }}"
+          DIGEST=$(aws ecr describe-images \
+            --registry-id ${{ vars.SOURCE_ACCOUNT_ID }} \
+            --repository-name esa-eve-dev-app-backend \
+            --image-ids "imageTag=$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>&1)
+
+          if [ "$DIGEST" = "None" ] || [ -z "$DIGEST" ]; then
+            echo "ERROR: Cannot find image $TAG in dev ECR. Image may have aged out."
+            exit 1
+          fi
+
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "Found digest for dev:$TAG -> $DIGEST"
+
+      - name: Download and verify crane binary
+        id: crane
+        run: |
+          # Download crane from go-containerregistry pinned release
+          CRANE_VERSION="v0.21.7"
+          CRANE_RELEASE_URL="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          # Verified sha256: https://github.com/google/go-containerregistry/releases/download/v0.21.7/checksums.txt
+          CRANE_EXPECTED_SHA="1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230"
+
+          echo "Downloading crane ${CRANE_VERSION}..."
+          cd /tmp
+          curl -sL "$CRANE_RELEASE_URL" -o crane.tar.gz
+
+          # Verify the tarball hash
+          ACTUAL_SHA=$(sha256sum crane.tar.gz | awk '{print $1}')
+          if [ "$ACTUAL_SHA" != "$CRANE_EXPECTED_SHA" ]; then
+            echo "ERROR: Crane tarball SHA256 mismatch"
+            echo "Expected: $CRANE_EXPECTED_SHA"
+            echo "Actual: $ACTUAL_SHA"
+            exit 1
+          fi
+
+          tar -xzf crane.tar.gz
+          chmod +x crane
+          ./crane version
+          echo "crane-path=/tmp/crane" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR (dual registries)
+        run: |
+          # Configure auth for both source and destination registries using single token
+          AUTH_TOKEN=$(aws ecr get-login-password --region eu-west-1)
+          echo "$AUTH_TOKEN" | /tmp/crane auth login -u AWS --password-stdin \
+            ${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com
+          echo "$AUTH_TOKEN" | /tmp/crane auth login -u AWS --password-stdin \
+            ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com
+
+      - name: Copy image from dev to staging
+        id: copy
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          SOURCE_IMAGE="${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend@${{ steps.source-digest.outputs.digest }}"
+          DEST_IMAGE="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-staging-app-backend"
+
+          echo "Copying $SOURCE_IMAGE -> $DEST_IMAGE:$TAG"
+          /tmp/crane copy "$SOURCE_IMAGE" "$DEST_IMAGE:$TAG"
+
+          # Resolve the destination digest
+          DIGEST=$(aws ecr describe-images \
+            --repository-name esa-eve-staging-app-backend \
+            --image-ids "imageTag=$TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "Promoted to staging as $TAG with digest $DIGEST"
+
+  deploy:
+    name: Deploy
+    needs: promote
+    uses: ./.github/workflows/deploy-ecs.yml
+    with:
+      environment: staging
+      image-digest: ${{ needs.promote.outputs.digest }}
+    secrets: inherit
