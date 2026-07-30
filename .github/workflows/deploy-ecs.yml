@@ -87,7 +87,21 @@ jobs:
           fi
           echo "PRIMARY deployment uses correct task definition"
 
+      # Only meaningful when the service actually runs tasks. Staging and prod deliberately sit
+      # at desired_count 0 until their cutover, and an environment with nothing running must not
+      # fail a promotion that did exactly what it was asked to do.
+      - name: Read running task count
+        id: running
+        run: |
+          COUNT=$(aws ecs describe-services \
+            --cluster "esa-eve-${{ inputs.environment }}-app-cluster" \
+            --services "esa-eve-${{ inputs.environment }}-app-backend" \
+            --query 'services[0].runningCount' --output text)
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Service reports ${COUNT} running task(s)"
+
       - name: Health check via CloudFront
+        if: steps.running.outputs.count != '0'
         run: |
           HEALTH_URL="${{ vars.PUBLIC_URL }}/api/health"
           MAX_ATTEMPTS=6
