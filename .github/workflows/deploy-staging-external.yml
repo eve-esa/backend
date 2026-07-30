@@ -1,4 +1,4 @@
-name: Deploy AWS EC2 staging instance (Eve ESA BE)
+name: legacy ec2 deploy staging external
 on:
   push:
     branches:

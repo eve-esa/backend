@@ -1,4 +1,4 @@
-name: Deploy AWS EC2 production instance (Eve ESA BE)
+name: legacy ec2 deploy prod
 on:
   push:
     branches:

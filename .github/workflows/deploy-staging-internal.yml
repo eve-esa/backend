@@ -1,4 +1,4 @@
-name: Deploy AWS EC2 prod-agentic instance (Eve ESA BE - Agentic)
+name: legacy ec2 deploy staging internal
 on:
   push:
     branches:
