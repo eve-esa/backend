@@ -42,8 +42,10 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          # Normalize version (remove leading 'v' if present)
-          VERSION="${VERSION#v}"
+          # Normalize to exactly one leading v: the git tag, the staging ECR tag and the prod
+          # ECR tag are the same string by design, and promote-staging pushes it as vX.Y.Z.
+          # Stripping the v made this step look for a tag that is never created.
+          VERSION="v${VERSION#v}"
 
           # Verify the version tag exists in staging ECR
           DIGEST=$(aws ecr describe-images \
