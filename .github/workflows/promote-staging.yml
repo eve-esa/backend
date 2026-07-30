@@ -1,9 +1,18 @@
 name: promote staging
-run-name: promote staging ${{ github.ref_name }}
+run-name: promote staging ${{ inputs.version || github.ref_name }}
 
 on:
   push:
     tags: ["v*"]
+  # Re-promote a version that was already tagged. Both re-running a tag's run and dispatching
+  # against the tag itself execute the workflow file as it was at that commit, so a published
+  # version can never pick up a later pipeline fix. Dispatching from main is the only way in.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to promote (e.g., v1.2.3)"
+        required: true
+        type: string
 
 concurrency:
   group: deploy-staging
@@ -26,16 +35,33 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # A dispatch checks out main; the version tag has to come with it or it cannot be resolved.
+          fetch-tags: true
 
       - name: Resolve tagged commit
         id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          # On dispatch the checkout is main, so github.ref names the branch, not the version
+          # being promoted. Take the version from the input and resolve the tag by name.
+          # Normalize to exactly one leading v, as promote-prod does: the git tag and both ECR
+          # tags are the same string by design.
+          VERSION="${INPUT_VERSION:-${{ github.ref_name }}}"
+          VERSION="v${VERSION#v}"
+
+          if ! git rev-parse -q --verify "refs/tags/$VERSION" > /dev/null; then
+            echo "ERROR: tag $VERSION does not exist"
+            exit 1
+          fi
+
           # Dereference annotated tag to commit SHA (safe for both annotated and lightweight tags)
-          COMMIT_SHA=$(git rev-list -n 1 ${{ github.ref }})
+          COMMIT_SHA=$(git rev-list -n 1 "refs/tags/$VERSION")
           SHORT_SHA="${COMMIT_SHA:0:7}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "commit-sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
           echo "short-sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "Tag ${{ github.ref }} resolves to commit $COMMIT_SHA (short: $SHORT_SHA)"
+          echo "Tag $VERSION resolves to commit $COMMIT_SHA (short: $SHORT_SHA)"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -103,7 +129,7 @@ jobs:
       - name: Copy image from dev to staging
         id: copy
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.resolve.outputs.version }}
         run: |
           SOURCE_IMAGE="${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend@${{ steps.source-digest.outputs.digest }}"
           DEST_IMAGE="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-staging-app-backend"
