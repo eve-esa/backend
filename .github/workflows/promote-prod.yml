@@ -1,3 +1,6 @@
+# Production promotion: the version already validated in staging is copied into the production
+# registry and deployed, by digest, without rebuilding anything. A single job on purpose, so the
+# reviewer approves the decision once rather than approving the copy and the deploy separately.
 name: promote prod
 run-name: promote prod ${{ inputs.version }}
 
@@ -5,9 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to promote (e.g., v1.2.3)"
+        description: "Version tag to promote, for example v0.1.0"
         required: true
         type: string
+
+permissions:
+  contents: read
 
 concurrency:
   group: deploy-prod
@@ -16,120 +22,16 @@ concurrency:
 
 jobs:
   promote:
-    name: Promote
-    runs-on: ubuntu-latest
-    environment: esa-eve-prod
-    permissions:
-      id-token: write
-      contents: read
-    outputs:
-      digest: ${{ steps.copy.outputs.digest }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: eu-west-1
-
-      - name: Validate version exists in staging registry
-        id: validate
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          # Normalize to exactly one leading v: the git tag, the staging ECR tag and the prod
-          # ECR tag are the same string by design, and promote-staging pushes it as vX.Y.Z.
-          # Stripping the v made this step look for a tag that is never created.
-          VERSION="v${VERSION#v}"
-
-          # Verify the version tag exists in staging ECR
-          DIGEST=$(aws ecr describe-images \
-            --registry-id ${{ vars.SOURCE_ACCOUNT_ID }} \
-            --repository-name esa-eve-staging-app-backend \
-            --image-ids "imageTag=$VERSION" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text 2>&1)
-
-          if [ "$DIGEST" = "None" ] || [ -z "$DIGEST" ]; then
-            echo "ERROR: Cannot find version $VERSION in staging ECR"
-            exit 1
-          fi
-
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Found $VERSION in staging ECR with digest $DIGEST"
-
-      - name: Download and verify crane binary
-        id: crane
-        run: |
-          # Download crane from go-containerregistry pinned release
-          CRANE_VERSION="v0.21.7"
-          CRANE_RELEASE_URL="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
-          # Verified sha256: https://github.com/google/go-containerregistry/releases/download/v0.21.7/checksums.txt
-          CRANE_EXPECTED_SHA="1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230"
-
-          echo "Downloading crane ${CRANE_VERSION}..."
-          cd /tmp
-          curl -sL "$CRANE_RELEASE_URL" -o crane.tar.gz
-
-          # Verify the tarball hash
-          ACTUAL_SHA=$(sha256sum crane.tar.gz | awk '{print $1}')
-          if [ "$ACTUAL_SHA" != "$CRANE_EXPECTED_SHA" ]; then
-            echo "ERROR: Crane tarball SHA256 mismatch"
-            echo "Expected: $CRANE_EXPECTED_SHA"
-            echo "Actual: $ACTUAL_SHA"
-            exit 1
-          fi
-
-          tar -xzf crane.tar.gz
-          chmod +x crane
-          ./crane version
-          echo "crane-path=/tmp/crane" >> $GITHUB_OUTPUT
-
-      - name: Login to ECR (dual registries)
-        run: |
-          # Configure auth for both source and destination registries using single token
-          AUTH_TOKEN=$(aws ecr get-login-password --region eu-west-1)
-          echo "$AUTH_TOKEN" | /tmp/crane auth login -u AWS --password-stdin \
-            ${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com
-          echo "$AUTH_TOKEN" | /tmp/crane auth login -u AWS --password-stdin \
-            ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com
-
-      - name: Copy image from staging to prod
-        id: copy
-        env:
-          VERSION: ${{ steps.validate.outputs.version }}
-        run: |
-          SOURCE_IMAGE="${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-staging-app-backend@${{ steps.validate.outputs.digest }}"
-          DEST_IMAGE="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-prod-app-backend"
-
-          echo "Copying $SOURCE_IMAGE -> $DEST_IMAGE:$VERSION"
-          /tmp/crane copy "$SOURCE_IMAGE" "$DEST_IMAGE:$VERSION"
-
-          # Resolve the destination digest
-          DIGEST=$(aws ecr describe-images \
-            --repository-name esa-eve-prod-app-backend \
-            --image-ids "imageTag=$VERSION" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text)
-
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-          echo "Promoted to prod as $VERSION with digest $DIGEST"
-
-  deploy:
-    name: Deploy
-    needs: promote
-    # The called workflow's job requests id-token; a caller job must grant at least that.
+    name: Promote and deploy
+    # The called job carries the esa-eve-prod environment: that is where the reviewer gate and
+    # the OIDC subject the AWS role trusts both come from.
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/deploy-ecs.yml
     with:
       environment: prod
-      image-digest: ${{ needs.promote.outputs.digest }}
+      version: ${{ inputs.version }}
+      promote-from-account: ${{ vars.SOURCE_ACCOUNT_ID }}
+      promote-from-repository: esa-eve-staging-app-backend
     secrets: inherit
