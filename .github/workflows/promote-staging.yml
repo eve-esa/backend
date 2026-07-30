@@ -48,7 +48,7 @@ jobs:
     with:
       environment: staging
       version: ${{ github.ref_name }}
-      promote-from-account: ${{ vars.SOURCE_ACCOUNT_ID }}
+      promote: true
       promote-from-repository: esa-eve-dev-app-backend
       promote-from-tag: sha-${{ needs.resolve.outputs.short-sha }}
     secrets: inherit
