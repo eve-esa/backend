@@ -8,8 +8,24 @@ on:
         required: true
         type: string
       image-digest:
-        description: "ECR image digest (sha256:...)"
-        required: true
+        description: "ECR image digest (sha256:...). Omit when promoting: the digest is then resolved from the source registry."
+        required: false
+        type: string
+      promote-from-account:
+        description: "Source account to copy the image from before deploying. Omit for a plain deploy."
+        required: false
+        type: string
+      promote-from-repository:
+        description: "Source ECR repository name, required with promote-from-account."
+        required: false
+        type: string
+      version:
+        description: "Version tag to apply in this environment's registry, required with promote-from-account."
+        required: false
+        type: string
+      promote-from-tag:
+        description: "Tag to read in the SOURCE registry. Defaults to the version: staging reads a sha-<short> tag from dev, prod reads the version from staging."
+        required: false
         type: string
 
 jobs:
@@ -29,6 +45,88 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: eu-west-1
+
+
+      # Promotion happens INSIDE the deploy job on purpose. Both the copy and the deploy need
+      # this environment's credentials, and an environment gate fires per job: as two jobs they
+      # asked the reviewer twice for one decision, and a gate people click through twice is a
+      # gate people stop reading. One job, one approval, one credential mint, and the deploy
+      # path stays the single shared one for every environment.
+      - name: Resolve the version digest in the source registry
+        id: source
+        if: inputs.promote-from-account != ''
+        env:
+          VERSION: ${{ inputs.version }}
+          SRC_ACCOUNT: ${{ inputs.promote-from-account }}
+          SRC_REPO: ${{ inputs.promote-from-repository }}
+          SRC_TAG: ${{ inputs.promote-from-tag }}
+        run: |
+          set -euo pipefail
+          # Exactly one leading v: the git tag and the tag this registry receives are the same
+          # string end to end. The SOURCE tag can differ: staging reads dev's sha-<short> tag.
+          VERSION="v${VERSION#v}"
+          SRC_TAG="${SRC_TAG:-$VERSION}"
+          DIGEST=$(aws ecr describe-images \
+            --registry-id "$SRC_ACCOUNT" \
+            --repository-name "$SRC_REPO" \
+            --image-ids "imageTag=$SRC_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          if [ "$DIGEST" = "None" ] || [ -z "$DIGEST" ]; then
+            echo "ERROR: $SRC_TAG is not in $SRC_ACCOUNT/$SRC_REPO"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Found $SRC_TAG in the source registry: $DIGEST"
+
+      - name: Download and verify crane
+        if: inputs.promote-from-account != ''
+        run: |
+          set -euo pipefail
+          CRANE_VERSION="v0.21.7"
+          # Checksum from the release's published checksums.txt: this job holds credentials for
+          # two accounts at once, so the binary that moves images between them is pinned.
+          CRANE_SHA="1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230"
+          cd /tmp
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o crane.tar.gz
+          echo "${CRANE_SHA}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane
+          chmod +x crane
+
+      - name: Login to both registries
+        if: inputs.promote-from-account != ''
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
+        with:
+          registries: "${{ inputs.promote-from-account }},${{ vars.AWS_ACCOUNT_ID }}"
+
+      - name: Copy the image into this environment
+        id: promote
+        if: inputs.promote-from-account != ''
+        env:
+          SRC: ${{ inputs.promote-from-account }}.dkr.ecr.eu-west-1.amazonaws.com/${{ inputs.promote-from-repository }}@${{ steps.source.outputs.digest }}
+          DST: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "copying $SRC to $DST:$VERSION"
+          /tmp/crane copy "$SRC" "$DST:$VERSION"
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "esa-eve-${{ inputs.environment }}-app-backend" \
+            --image-ids "imageTag=$VERSION" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "promoted $VERSION with digest $DIGEST"
+
+      # The digest the caller passed, or the one the copy just produced.
+      - name: Resolve the digest to deploy
+        id: image
+        run: |
+          DIGEST="${{ inputs.image-digest || steps.promote.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            echo "ERROR: no digest to deploy, pass image-digest or promote-from-account"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
@@ -54,7 +152,7 @@ jobs:
         with:
           task-definition: /tmp/task-def.json
           container-name: backend
-          image: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend@${{ inputs.image-digest }}
+          image: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend@${{ steps.image.outputs.digest }}
 
       - name: Deploy task definition to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@c465972ecbd160473f22e683363b422a5412a3de # v2.6.3
