@@ -123,6 +123,10 @@ jobs:
   deploy:
     name: Deploy
     needs: promote
+    # The called workflow's job requests id-token; a caller job must grant at least that.
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/deploy-ecs.yml
     with:
       environment: staging
