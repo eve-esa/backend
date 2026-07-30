@@ -4,9 +4,11 @@ run-name: promote staging ${{ inputs.version || github.ref_name }}
 on:
   push:
     tags: ["v*"]
-  # Re-promote a version that was already tagged. Both re-running a tag's run and dispatching
-  # against the tag itself execute the workflow file as it was at that commit, so a published
-  # version can never pick up a later pipeline fix. Dispatching from main is the only way in.
+  # Re-promote a version that was already tagged, without moving or re-cutting the tag
+  # (release-tags-immutable forbids both). Dispatch AGAINST THE TAG, never main: the
+  # esa-eve-staging environment admits refs matching v* only, and a dispatch from a branch is
+  # rejected before the first step runs. Note this therefore executes the workflow as it stood
+  # at that tag, so a later pipeline fix reaches a released version only via a new tag.
   workflow_dispatch:
     inputs:
       version:
@@ -35,7 +37,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # A dispatch checks out main; the version tag has to come with it or it cannot be resolved.
+          # The tag is resolved by name below, so it has to be in the clone, not just checked out.
           fetch-tags: true
 
       - name: Resolve tagged commit
@@ -43,8 +45,8 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          # On dispatch the checkout is main, so github.ref names the branch, not the version
-          # being promoted. Take the version from the input and resolve the tag by name.
+          # Resolve by tag NAME rather than github.ref: on dispatch the input is the authority on
+          # what is being promoted, and it need not equal the ref the run was started from.
           # Normalize to exactly one leading v, as promote-prod does: the git tag and both ECR
           # tags are the same string by design.
           VERSION="${INPUT_VERSION:-${{ github.ref_name }}}"
