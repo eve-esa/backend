@@ -186,6 +186,12 @@ jobs:
           service: esa-eve-${{ inputs.environment }}-app-backend
           cluster: esa-eve-${{ inputs.environment }}-app-cluster
           wait-for-service-stability: true
+          # Without this the SDK backs off exponentially, up to 120 seconds between polls, so the
+          # step keeps running for minutes after ECS has already reported the service stable.
+          # Measured on the v0.0.5 staging promotion: ECS reached steady state at 20:15:17 UTC and
+          # the step was still waiting at 20:19:22. 15 is the value the action's own documentation
+          # gives for consistent polling intervals.
+          wait-max-delay-seconds: 15
 
       - name: Assert service's PRIMARY deployment uses new task definition
         run: |
