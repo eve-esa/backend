@@ -31,4 +31,12 @@ RUN chmod +x start.sh create_user.sh
 COPY src/ ./src/
 COPY templates/ ./templates/
 
+# Build-time identity. The image is built on push to main, before any version tag exists, and is
+# then promoted to staging and prod by digest without being rebuilt, so the commit is the only
+# thing that can be baked in here. The human version arrives at deploy time as APP_VERSION.
+# Declared last on purpose: an ARG/ENV pair that changes on every commit must not invalidate the
+# dependency or source layers above it.
+ARG GIT_SHA
+ENV APP_GIT_SHA=${GIT_SHA}
+
 CMD ["./start.sh"]

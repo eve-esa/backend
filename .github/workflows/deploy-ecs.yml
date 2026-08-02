@@ -147,6 +147,25 @@ jobs:
           echo "$TASK_DEF" | jq 'del(.revision, .taskDefinitionArn, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' > /tmp/task-def.json
           echo "family=$FAMILY" >> $GITHUB_OUTPUT
 
+      # Deploy-time identity. The commit is already inside the image (Dockerfile ARG GIT_SHA);
+      # the human version is not, because the build ran before the tag existed. Deploy is the
+      # first moment the pipeline knows it: promotions pass the tag, dev has none and falls back
+      # to the short sha of the commit the image was built from.
+      - name: Resolve the application version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$VERSION" ]; then
+            APP_VERSION="v${VERSION#v}"
+          else
+            APP_VERSION="sha-${SHA:0:7}"
+          fi
+          echo "app-version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Deploying as $APP_VERSION"
+
       - name: Render task definition with new image digest
         id: render
         uses: aws-actions/amazon-ecs-render-task-definition@138c24f321fdbdf7edee4a685519d253cae2cdea # v1.9.0
@@ -154,6 +173,10 @@ jobs:
           task-definition: /tmp/task-def.json
           container-name: backend
           image: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend@${{ steps.image.outputs.digest }}
+          # Upserted into the container's existing environment array by name, every other
+          # variable and every valueFrom secret reference is left untouched.
+          environment-variables: |
+            APP_VERSION=${{ steps.version.outputs.app-version }}
 
       - name: Deploy task definition to ECS
         uses: aws-actions/amazon-ecs-deploy-task-definition@c465972ecbd160473f22e683363b422a5412a3de # v2.6.3

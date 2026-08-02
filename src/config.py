@@ -90,6 +90,19 @@ FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 IS_PROD = os.getenv("IS_PROD", "").strip().lower() == "true"
 
+# Which build is running. The two halves are set at different moments and neither is ever
+# required: unset means "unknown", never a crash.
+#   APP_GIT_SHA is baked into the image at build time (Dockerfile ARG GIT_SHA), because the
+#     image is built once on push to main and promoted by digest without a rebuild.
+#   APP_VERSION is injected on the container at deploy time (deploy-ecs.yml), because no
+#     version tag exists yet when the image is built.
+APP_VERSION = os.getenv("APP_VERSION", "").strip() or "unknown"
+APP_GIT_SHA = os.getenv("APP_GIT_SHA", "").strip() or "unknown"
+
+# IS_PROD is the only environment indicator the container receives (infra sets it from the
+# workspace: stacks/app/locals.tf), so dev and staging are not distinguishable from inside.
+APP_ENVIRONMENT = "prod" if IS_PROD else "non-prod"
+
 SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 
 # Optional Redis URL for cross-process cancel/pubsub
