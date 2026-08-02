@@ -65,6 +65,11 @@ jobs:
         with:
           context: .
           push: true
+          # Baked into the image because this is the only build: staging and prod receive this
+          # exact digest, never a rebuild. The human version cannot be baked in here, no tag
+          # exists yet at this point, so deploy-ecs.yml injects it as APP_VERSION instead.
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.short-sha }}
           tags: |
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:sha-${{ steps.meta.outputs.short-sha }}
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:latest

@@ -30,12 +30,25 @@ print(resp.json())
 
 ### Explanation
 
-Returns a simple status payload for liveness checks.
+Returns a status payload for liveness checks, plus the identity of the running build:
+
+```json
+{
+  "status": "healthy",
+  "version": "v0.1.0",
+  "commit": "1a2b3c4",
+  "environment": "prod"
+}
+```
 
 ### Notes
 
 - Commonly used by load balancers and uptime monitors.
 - Does not require authentication.
+- `status` is the only field the ALB health check and the deploy verification read, and its
+  value never changes.
+- `commit` is baked into the image at build time, `version` is injected at deploy time. Either
+  reads `unknown` when the corresponding variable is not set, for example in local development.
 
 ## Full API reference
 

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.config import CORS_ALLOWED_ORIGINS, configure_logging
+from src.config import APP_VERSION, CORS_ALLOWED_ORIGINS, configure_logging
 from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
 from src.services.provider_catalog import ensure_provider_catalog_seeded
@@ -80,6 +80,10 @@ def create_app(debug=False, **kwargs):
                 logging.exception("MCP proxy sub-app shutdown failed")
             await async_mongo_manager.close()
             logging.info("Database connection closed")
+
+    # Surfaces the running version in /docs and in the OpenAPI document. setdefault so an
+    # explicit version= from a caller still wins.
+    kwargs.setdefault("version", APP_VERSION)
 
     app = FastAPI(debug=debug, lifespan=lifespan, **kwargs)
 
