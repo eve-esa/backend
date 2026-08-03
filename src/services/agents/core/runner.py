@@ -88,6 +88,7 @@ try:
         has_text_tool_call,
         might_be_incomplete_text_tool_call,
         parse_text_tool_calls,
+        split_tool_calls_and_answer_text,
         tool_call_label,
     )
 except Exception:
@@ -95,6 +96,7 @@ except Exception:
     has_text_tool_call = None  # type: ignore
     might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
+    split_tool_calls_and_answer_text = None  # type: ignore
 
 
 # ─── Trace serialisation ──────────────────────────────────────────────────────
@@ -722,19 +724,40 @@ async def generate_answer_agentic_stream_helper(
             joined = "".join(items)
             turn_buffer.clear()
 
+            events: List[str] = []
+            answer_items = items
+
             if has_text_tool_call and has_text_tool_call(joined):
-                parsed = parse_text_tool_calls(joined) if parse_text_tool_calls else []
-                if not parsed:
+                # A turn can contain one or more `[TOOL_CALLS]name{...}` segments
+                # (each call gets its own marker) directly followed by real
+                # answer prose in the SAME turn — split_tool_calls_and_answer_text
+                # walks every recognized call and returns whatever text is left
+                # over so it's emitted as an answer instead of silently dropped
+                # or, worse, leaking the raw "[TOOL_CALLS]..." syntax verbatim
+                # into `accumulated`/the persisted answer.
+                calls, answer_text = (
+                    split_tool_calls_and_answer_text(joined)
+                    if split_tool_calls_and_answer_text
+                    else (parse_text_tool_calls(joined) if parse_text_tool_calls else [], "")
+                )
+                if not calls:
                     return []
-                tc = parsed[0]
-                tname = tc.get("name", "tool")
-                args = tc.get("args", {})
-                query_used = args.get("query", "")
-                label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
-                msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                return [
-                    f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
-                ]
+                for tc in calls:
+                    tname = tc.get("name", "tool")
+                    args = tc.get("args", {})
+                    query_used = args.get("query", "")
+                    label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
+                    msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                    events.append(
+                        f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                    )
+                if not answer_text:
+                    return events
+                # Streaming granularity is inherently lost for this leftover
+                # text: we can't know the tool-call syntax has ended until the
+                # whole turn is buffered, so it's emitted as a single chunk
+                # rather than token-by-token.
+                answer_items = [answer_text]
 
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
@@ -744,8 +767,7 @@ async def generate_answer_agentic_stream_helper(
                     )
                 first_token_latency = time.perf_counter() - total_start
 
-            events: List[str] = []
-            for tok in items:
+            for tok in answer_items:
                 if not tok:
                     continue
                 tokens_yielded += 1
