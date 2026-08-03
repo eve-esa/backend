@@ -169,6 +169,7 @@ async def persist_message_state(
     stopped: Optional[bool] = None,
     error: Optional[Dict[str, Any]] = None,
     trace: Optional[List[Dict[str, Any]]] = None,
+    artifact_ids: Optional[List[str]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -177,6 +178,7 @@ async def persist_message_state(
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
     - Sets Message.trace (agentic execution trace) if provided.
+    - Sets Message.artifact_ids (MCP-produced artifacts from this run) if provided.
     """
     try:
         message = await Message.find_by_id(message_id)
@@ -192,6 +194,8 @@ async def persist_message_state(
             message.use_rag = bool(use_rag)
         if trace is not None:
             message.trace = trace
+        if artifact_ids is not None:
+            message.artifact_ids = artifact_ids
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         if latencies is not None:
             existing_metadata["latencies"] = latencies

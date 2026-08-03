@@ -32,6 +32,7 @@ from src.services.generate_answer import (
     setup_rag_and_context,
     should_use_rag,
 )
+from src.database.models.artifact import Artifact
 from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
@@ -66,6 +67,61 @@ from src.utils.helpers import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def resolve_artifact_attachments(
+    artifact_ids: Optional[list], conversation_id: str, requesting_user: User
+) -> Optional[list]:
+    """Resolve requested artifact IDs into attachment records for a message.
+
+    The request field is named ``artifact_ids`` (the legacy alias ``image_ids``
+    is still accepted for backward compatibility). Validates that each artifact
+    exists and belongs to the requesting user, backfills the owning
+    conversation, and returns the attachment payloads to be persisted on the
+    message.
+
+    Args:
+        artifact_ids (list | None): IDs of previously uploaded artifacts to attach.
+        conversation_id (str): Conversation the message belongs to.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        A list of attachment dicts, or None if no artifacts were requested.
+
+    Raises:
+        HTTPException: 404 if any artifact is missing; 403 if any belongs to another user.
+    """
+    if not artifact_ids:
+        return None
+
+    # Dedupe (preserving order) so repeated ids can't multiply Mongo round-trips.
+    unique_artifact_ids = list(dict.fromkeys(artifact_ids))
+
+    attachments = []
+    for artifact_id in unique_artifact_ids:
+        artifact = await Artifact.find_by_id(artifact_id)
+        if not artifact:
+            raise HTTPException(
+                status_code=404, detail=f"Image {artifact_id} not found"
+            )
+        if artifact.user_id != requesting_user.id:
+            raise HTTPException(
+                status_code=403, detail="You are not allowed to use this image"
+            )
+        if artifact.conversation_id != conversation_id:
+            artifact.conversation_id = conversation_id
+            await artifact.save()
+        attachments.append(
+            {
+                "image_id": artifact.id,
+                "url": f"/artifacts/{artifact.id}",
+                "filename": artifact.filename,
+                "content_type": artifact.content_type,
+                "size_bytes": artifact.size_bytes,
+                "source": artifact.source.model_dump(),
+            }
+        )
+    return attachments
 
 
 async def get_lower_bound(usage_kg: float) -> Optional[CO2EquivalenceComparison]:
@@ -435,6 +491,10 @@ async def create_message(
         except Exception:
             request.year = None
 
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -443,6 +503,7 @@ async def create_message(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
 
         set_message_context(message.id)
@@ -823,6 +884,10 @@ async def create_message_stream(
         except Exception:
             request.year = None
 
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -831,6 +896,7 @@ async def create_message_stream(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
 
         set_message_context(message.id)
@@ -1797,6 +1863,7 @@ async def create_agentic_message(
             latencies,
             prompts,
             trace_entries,
+            artifact_ids,
         ) = await generate_answer_agentic(
             request, user_id=requesting_user.id, conversation_id=conversation_id
         )
@@ -1805,6 +1872,7 @@ async def create_agentic_message(
         message.documents = tool_results
         message.use_rag = use_rag
         message.trace = trace_entries if trace_entries else None
+        message.artifact_ids = artifact_ids if artifact_ids else None
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         existing_metadata.update({"latencies": latencies, "prompts": prompts})
         message.metadata = existing_metadata
