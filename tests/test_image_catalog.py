@@ -135,3 +135,48 @@ def test_append_image_context_disabled_is_byte_identical(monkeypatch, catalog_fi
 
     # With the catalog off, the composed prompt must be unchanged.
     assert append_image_context(base, "sentinel-2 images") == base
+
+
+class TestRewriteCatalogImageUrls:
+    """The model reliably paraphrases catalog URLs into invented ones."""
+
+    def _catalog(self, tmp_path, monkeypatch):
+        catalog = tmp_path / "catalog.yaml"
+        catalog.write_text(
+            "images:\n"
+            '  - title: "Sentinel-2 satellite"\n'
+            '    url: "/demo-images/sentinel2-satellite.jpg"\n'
+            '    tags: [sentinel-2]\n'
+        )
+        monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", True)
+        monkeypatch.setattr(config, "IMAGE_CATALOG_PATH", str(catalog))
+        image_catalog._catalog_cache.clear()
+
+    def test_rewrites_invented_url_by_title(self, tmp_path, monkeypatch):
+        self._catalog(tmp_path, monkeypatch)
+        text = "![Sentinel-2 satellite](https://storage.googleapis.com/fake/sat.jpg)"
+        assert (
+            image_catalog.rewrite_catalog_image_urls(text)
+            == "![Sentinel-2 satellite](/demo-images/sentinel2-satellite.jpg)"
+        )
+
+    def test_rewrites_mutated_filename(self, tmp_path, monkeypatch):
+        self._catalog(tmp_path, monkeypatch)
+        text = "![some pic](https://fake.example/img/sentinel-2-satellite.jpg)"
+        assert (
+            image_catalog.rewrite_catalog_image_urls(text)
+            == "![some pic](/demo-images/sentinel2-satellite.jpg)"
+        )
+
+    def test_leaves_correct_and_unrelated_urls_alone(self, tmp_path, monkeypatch):
+        self._catalog(tmp_path, monkeypatch)
+        ok = "![Sentinel-2 satellite](/demo-images/sentinel2-satellite.jpg)"
+        other = "![chart](/artifacts/abc123) and ![ext](https://example.com/x.png)"
+        assert image_catalog.rewrite_catalog_image_urls(ok) == ok
+        assert image_catalog.rewrite_catalog_image_urls(other) == other
+
+    def test_noop_when_disabled(self, tmp_path, monkeypatch):
+        self._catalog(tmp_path, monkeypatch)
+        monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", False)
+        text = "![Sentinel-2 satellite](https://fake.example/sat.jpg)"
+        assert image_catalog.rewrite_catalog_image_urls(text) == text

@@ -160,6 +160,54 @@ def build_image_context(query: str) -> str:
     return "\n".join(lines)
 
 
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+
+
+def _normalize(text: str) -> str:
+    """Lowercase and strip every non-alphanumeric character."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def rewrite_catalog_image_urls(text: str) -> str:
+    """Deterministically re-point catalog images the model paraphrased.
+
+    The model reliably embeds the catalog images but often invents the URL
+    (fabricated hosts, mutated filenames) instead of copying it verbatim —
+    prompt instructions alone do not stop this. Any markdown image whose alt
+    text matches a catalog title, or whose filename fuzzily matches a catalog
+    filename, is rewritten to the real catalog URL. Everything else (artifact
+    stubs, genuine external images) is left untouched. No-op when the catalog
+    is disabled or empty; never raises.
+    """
+    if not text or not config.IMAGE_CATALOG_ENABLED:
+        return text
+    try:
+        entries = _load_catalog(config.IMAGE_CATALOG_PATH)
+        if not entries:
+            return text
+        by_title = {_normalize(e["title"]): e["url"] for e in entries}
+        by_filename = {
+            _normalize(e["url"].rsplit("/", 1)[-1]): e["url"] for e in entries
+        }
+        catalog_urls = {e["url"] for e in entries}
+
+        def _replace(match: "re.Match[str]") -> str:
+            alt, url = match.group(1), match.group(2)
+            if url in catalog_urls:
+                return match.group(0)
+            target = by_title.get(_normalize(alt)) or by_filename.get(
+                _normalize(url.rsplit("/", 1)[-1])
+            )
+            if target:
+                return f"![{alt}]({target})"
+            return match.group(0)
+
+        return _MD_IMAGE_RE.sub(_replace, text)
+    except Exception:
+        logger.warning("Failed to rewrite catalog image URLs", exc_info=True)
+        return text
+
+
 def append_image_context(text: str, query: str) -> str:
     """Append the image prompt block to ``text`` when the catalog is active.
 
