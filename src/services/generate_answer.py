@@ -55,7 +55,7 @@ from src.utils.error_logger import (
     PipelineStage,
     get_error_logger,
 )
-from src.services.image_catalog import append_image_context
+from src.services.image_catalog import append_image_context, rewrite_catalog_image_urls
 from src.utils.helpers import (
     build_context,
     build_conversation_context,
@@ -188,7 +188,7 @@ async def persist_message_state(
         if stopped is not None:
             message.stopped = bool(stopped)
         if output is not None:
-            message.output = output
+            message.output = rewrite_catalog_image_urls(output)
         if documents is not None:
             message.documents = [extract_document_data(d) for d in documents]
         if use_rag is not None:
@@ -1762,7 +1762,7 @@ async def generate_answer_stream_generator_helper(
         if output_format == "json":
             final_payload = {
                 "type": "final",
-                "answer": answer,
+                "answer": rewrite_catalog_image_urls(answer),
                 "latencies": latencies,
                 "generated_model_name": generated_model_name,
             }
