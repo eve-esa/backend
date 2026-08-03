@@ -38,11 +38,12 @@ async def _create_index(collection: AsyncIOMotorCollection, keys, **kwargs) -> N
 
 
 async def ensure_indexes() -> None:
-    """Create MongoDB indexes required by MCP proxy, usage tracking, and API keys."""
+    """Create MongoDB indexes required by MCP proxy, usage tracking, API keys, and artifacts."""
     mcp_servers = get_collection("mcp_servers")
     mcp_usage = get_collection("mcp_usage")
     openai_usage = get_collection("openai_usage")
     api_keys = get_collection("api_keys")
+    artifacts = get_collection("artifacts")
     user_custom_models = get_collection("user_custom_models")
     catalog_platform_models = get_collection("catalog_platform_models")
     catalog_providers = get_collection("catalog_providers")
@@ -113,6 +114,19 @@ async def ensure_indexes() -> None:
         name="api_keys_user_id",
     )
 
+    # Artifacts: per-user listing sorted by recency, and the conversation_id filter
+    # used by GET /artifacts.
+    await _create_index(
+        artifacts,
+        [("user_id", 1), ("timestamp", -1)],
+        name="artifacts_by_user_time",
+    )
+    await _create_index(
+        artifacts,
+        [("user_id", 1), ("conversation_id", 1)],
+        name="artifacts_by_user_conversation",
+    )
+
     await _create_index(
         user_custom_models,
         [("user_id", 1), ("display_name", 1)],
@@ -150,4 +164,6 @@ async def ensure_indexes() -> None:
         name="catalog_providers_enabled_sort",
     )
 
-    logger.info("MongoDB indexes ensured for MCP proxy features and API keys")
+    logger.info(
+        "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, and custom models"
+    )
