@@ -30,6 +30,7 @@ from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
+    ObjectNotFoundError,
     sniff_artifact_type,
     storage_service,
 )
@@ -236,10 +237,21 @@ async def get_artifact(
         Streaming response with the stored media type and caching headers.
 
     Raises:
-        HTTPException: 404 if not found; 403 if access is forbidden.
+        HTTPException: 404 if the record is missing or its bytes are gone from
+        storage; 403 if access is forbidden.
     """
     artifact = await get_owned_artifact(artifact_id, requesting_user)
-    response = await storage_service.get_object(artifact.key)
+    try:
+        response = await storage_service.get_object(artifact.key)
+    except ObjectNotFoundError:
+        # The record outlived its bytes. Report it as missing rather than as a
+        # server fault, and log the key so the orphan can be reclaimed.
+        logger.warning(
+            f"Artifact {artifact_id} has no object at key {artifact.key}"
+        )
+        raise HTTPException(
+            status_code=404, detail="Artifact content is no longer available"
+        )
 
     # Sanitize the filename for the header (display-only): drop CR/LF, quotes,
     # backslashes and path separators to prevent header injection.

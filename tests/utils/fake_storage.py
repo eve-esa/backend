@@ -2,6 +2,8 @@
 
 import uuid
 
+from src.services.storage import ObjectNotFoundError
+
 
 class _FakeBody:
     """Stand-in for a boto3 StreamingBody used by the fake storage."""
@@ -32,6 +34,9 @@ class FakeStorage:
         self.objects[key] = {"body": body, "content_type": content_type}
 
     async def get_object(self, key):
+        # Mirror StorageService, which turns a botocore NoSuchKey into this.
+        if key not in self.objects:
+            raise ObjectNotFoundError(key)
         obj = self.objects[key]
         return {
             "Body": _FakeBody(obj["body"]),

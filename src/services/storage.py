@@ -12,6 +12,7 @@ from typing import AsyncIterator, Optional
 
 import boto3
 from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 from fastapi.concurrency import run_in_threadpool
 
 from src.config import (
@@ -27,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 # Chunk size used when proxy-streaming an object back to the client.
 STREAM_CHUNK_SIZE = 64 * 1024
+
+# Error codes S3 and MinIO use for "the key isn't there". S3 answers GetObject
+# with NoSuchKey, but a bucket the credentials can't enumerate answers 403-as-404
+# (AccessDenied is deliberately not treated as missing), and HeadObject-style
+# paths surface a bare 404/NotFound instead.
+_MISSING_OBJECT_ERROR_CODES = {"NoSuchKey", "NoSuchBucket", "NotFound", "404"}
+
+
+class ObjectNotFoundError(Exception):
+    """Raised when an object key is absent from the bucket.
+
+    Metadata lives in Mongo while the bytes live in the bucket, so the two can
+    drift (a lifecycle rule, a manual cleanup, a failed upload that still wrote
+    its document). Callers translate this into a 404 rather than letting a
+    botocore ClientError escape as an unhandled 500.
+    """
 
 
 def sniff_image_type(header: bytes) -> Optional[str]:
@@ -181,10 +198,20 @@ class StorageService:
         )
 
     async def get_object(self, key: str) -> dict:
-        """Fetch an object; returns the raw boto3 response (Body is a StreamingBody)."""
-        return await run_in_threadpool(
-            lambda: self._client().get_object(Bucket=S3_BUCKET_NAME, Key=key)
-        )
+        """Fetch an object; returns the raw boto3 response (Body is a StreamingBody).
+
+        Raises:
+            ObjectNotFoundError: if the key is absent from the bucket.
+        """
+        try:
+            return await run_in_threadpool(
+                lambda: self._client().get_object(Bucket=S3_BUCKET_NAME, Key=key)
+            )
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _MISSING_OBJECT_ERROR_CODES:
+                raise ObjectNotFoundError(key) from exc
+            raise
 
     async def stream_body(
         self, body, chunk_size: int = STREAM_CHUNK_SIZE

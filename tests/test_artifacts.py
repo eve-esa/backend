@@ -2,13 +2,18 @@ import io
 import re
 
 import pytest
+from botocore.exceptions import ClientError
 
 from tests.utils.utils import create_test_user_and_token
 from tests.utils.cleaner import cleanup_models
 from tests.utils.fake_storage import FakeStorage
 from src.database.models.artifact import Artifact, ArtifactSource
 from src.database.mongo import get_collection
-from src.services.storage import StorageService, sniff_image_type
+from src.services.storage import (
+    ObjectNotFoundError,
+    StorageService,
+    sniff_image_type,
+)
 
 
 # Minimal valid magic-byte headers for the allowed image types.
@@ -338,6 +343,70 @@ async def test_get_artifact_missing(async_client, monkeypatch):
         assert resp.status_code == 404
     finally:
         await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_get_artifact_object_missing_from_storage(async_client, monkeypatch):
+    """A record whose bytes are gone returns 404, not an unhandled 500."""
+
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact_id = (
+            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
+        ).json()["id"]
+
+        # Drop the bytes but keep the Mongo record, reproducing the drift seen
+        # in production (lifecycle rule, manual cleanup, half-failed upload).
+        fake.objects.clear()
+
+        resp = await async_client.get(
+            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Artifact content is no longer available"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_storage_get_object_translates_no_such_key(monkeypatch):
+    """StorageService turns botocore's NoSuchKey into ObjectNotFoundError."""
+
+    service = StorageService()
+
+    class _Boom:
+        def get_object(self, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "The key does not exist"}},
+                "GetObject",
+            )
+
+    monkeypatch.setattr(service, "_client", lambda: _Boom())
+    with pytest.raises(ObjectNotFoundError):
+        await service.get_object("users/u1/artifacts/gone.png")
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_storage_get_object_reraises_other_client_errors(monkeypatch):
+    """A permissions failure is not silently reported as a missing object."""
+
+    service = StorageService()
+
+    class _Denied:
+        def get_object(self, **kwargs):
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+                "GetObject",
+            )
+
+    monkeypatch.setattr(service, "_client", lambda: _Denied())
+    with pytest.raises(ClientError):
+        await service.get_object("users/u1/artifacts/forbidden.png")
 
 
 # ---------------- Disposition policy -----------------
