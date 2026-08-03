@@ -1,5 +1,7 @@
 """Tests for resilient per-server MCP tool loading and discovery cache."""
 
+import gc
+import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -105,6 +107,41 @@ class TestLoadMcpToolsForServers:
         assert captured_connections["effis"]["headers"]["Authorization"] == (
             "Bearer user-jwt"
         )
+
+    @pytest.mark.asyncio
+    async def test_client_survives_gc_after_load_returns(self):
+        """Live-repro bug: ArtifactInterceptor.bind_client() only keeps a
+        weakref to the MultiServerMCPClient (see artifact_ingestion.py). The
+        local ``client`` variable inside the tool_loader discovery path used
+        to be the only strong reference, so it was garbage-collected the
+        moment the loader returned — silently breaking ResourceLink
+        resolution for every subsequent tool call in the run. The returned
+        tools list must itself keep the client alive, even on the
+        no-user-id / uncached path (see ``test_no_user_id_bypasses_cache``).
+        """
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(return_value=[])
+
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient",
+            return_value=mock_client,
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.ErrorLoggingInterceptor", return_value=MagicMock()), patch(
+            f"{_LOADER}.logger"
+        ):
+            tools = await _load_mcp_tools_for_servers(
+                [_mcp_server("effis", "https://effis.example/mcp")]
+            )
+
+        ref = weakref.ref(mock_client)
+        del mock_client
+        gc.collect()
+        assert ref() is not None, (
+            "the MultiServerMCPClient was garbage-collected even though the "
+            "returned tools list should hold a strong reference to it"
+        )
+        assert getattr(tools, "_mcp_client", None) is ref()
 
     @pytest.mark.asyncio
     async def test_cache_hit_skips_second_get_tools(self):
@@ -227,6 +264,32 @@ class TestBuildTools:
             tools = await _build_tools(request)
 
         assert tools == []
+
+    @pytest.mark.asyncio
+    async def test_client_keepalive_survives_tools_extend(self):
+        """_build_tools copies elements via tools.extend(mcp_tools) — a plain
+        list.extend does NOT carry over mcp_tools's own `_mcp_client`
+        attribute, so the client reference must be re-attached to the final
+        list _build_tools returns, or it's lost right where the caller needs
+        it kept alive for the whole graph run.
+        """
+        from src.services.agents.core.runner import _MCPToolsWithClient
+
+        mcp_tool = MagicMock(name="effis_search")
+        sentinel_client = MagicMock()
+        wrapped = _MCPToolsWithClient([mcp_tool], sentinel_client)
+
+        request = GenerationRequest(query="test")
+        request.mcp_server_configs = [_mcp_server("effis", "https://effis.example/mcp")]
+
+        with patch(f"{_RUNNER}._langgraph_available", True), patch(
+            f"{_RUNNER}._load_mcp_tools_for_servers",
+            AsyncMock(return_value=wrapped),
+        ), patch(f"{_RUNNER}.logger"):
+            tools = await _build_tools(request)
+
+        assert tools == [mcp_tool]
+        assert getattr(tools, "_mcp_client", None) is sentinel_client
 
 
 class TestMcpToolCache:
