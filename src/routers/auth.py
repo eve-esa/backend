@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException
 from jose import JWTError, jwt
@@ -26,6 +27,15 @@ from src.services.email import email_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def build_verification_url(email: str, code: str) -> str:
+    """Build the account activation link with a properly encoded query string.
+
+    Plus-addressed emails (user+tag@domain) would otherwise arrive as a space
+    when the browser decodes the query, making the lookup fail.
+    """
+    return f"{FRONTEND_URL}/verify?{urlencode({'email': email, 'code': code})}"
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -124,9 +134,7 @@ async def signup(request: SignupRequest) -> SignupResponse:
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    verification_url = (
-        f"{FRONTEND_URL}/verify?email={user.email}&code={user.activation_code}"
-    )
+    verification_url = build_verification_url(user.email, user.activation_code)
     email_service.send_email(
         to_email=user.email,
         subject="Activate your EVE account",
@@ -166,9 +174,7 @@ async def resend_activation(request: ResendActivationRequest) -> dict:
         return {"message": "Account already activated."}
     user.activation_code = generate_activation_code()
     await user.save()
-    verification_url = (
-        f"{FRONTEND_URL}/verify?email={user.email}&code={user.activation_code}"
-    )
+    verification_url = build_verification_url(user.email, user.activation_code)
     email_service.send_email(
         to_email=user.email,
         subject="Activate your EVE account",
