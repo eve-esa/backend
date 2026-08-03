@@ -366,6 +366,49 @@ def _build_initial_messages(request: GenerationRequest, tools: List[Any]) -> Lis
     return messages
 
 
+async def append_missing_artifact_stubs(
+    answer: str, artifact_ids: Optional[List[str]]
+) -> str:
+    """Append markdown stubs for collected artifacts the answer never references.
+
+    The instruction above asks the model to reproduce `/artifacts/{id}` stubs
+    verbatim, but models routinely paraphrase them into invented URLs (seen
+    live with EVE-Instruct emitting `storage.googleapis.com` links). The
+    captured files are too valuable to lose to prompt non-compliance, so this
+    deterministic pass re-attaches every collected artifact whose serving URL
+    is absent from the final answer. Fail-open: any lookup error leaves the
+    answer untouched.
+    """
+    if not answer or not artifact_ids:
+        return answer
+    try:
+        from src.database.models.artifact import Artifact
+
+        lines: List[str] = []
+        for artifact_id in artifact_ids:
+            url = f"/artifacts/{artifact_id}"
+            if url in answer:
+                continue
+            artifact = await Artifact.find_by_id(artifact_id)
+            if not artifact:
+                continue
+            source = getattr(artifact, "source", None)
+            server = getattr(source, "mcp_server", None) or "unknown"
+            tool = getattr(source, "tool_name", None) or "tool"
+            title = f"MCP: {server}/{tool}"
+            if (artifact.content_type or "").startswith("image/"):
+                lines.append(f'![{artifact.filename}]({url} "{title}")')
+            else:
+                lines.append(f'[{artifact.filename}]({url} "{title}")')
+        if lines:
+            answer = answer.rstrip() + "\n\n" + "\n\n".join(lines) + "\n"
+    except Exception:
+        logger.warning(
+            "Failed to append missing artifact stubs to the answer", exc_info=True
+        )
+    return answer
+
+
 # ─── Graph compile helpers ────────────────────────────────────────────────────
 
 
@@ -581,6 +624,9 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
+        final_answer = await append_missing_artifact_stubs(
+            final_answer, list(artifact_ctx.collected_artifact_ids)
+        )
 
         tool_results: List[Dict[str, Any]] = []
         use_rag = False
@@ -901,7 +947,9 @@ async def generate_answer_agentic_stream_helper(
             )
 
         gen_latency = time.perf_counter() - gen_start
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         total_latency = time.perf_counter() - total_start
 
         latencies: Dict[str, Optional[float]] = {
@@ -957,7 +1005,7 @@ async def generate_answer_agentic_stream_helper(
             asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
         if output_format == "json":
-            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies})}\n\n"
+            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
         else:
             yield "data: [DONE]\n\n"
 
@@ -980,13 +1028,15 @@ async def generate_answer_agentic_stream_helper(
             description="Agentic generation timed out",
             error_type=type(exc).__name__,
         )
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         if answer:
             await persist_message_state(
                 message_id, output=answer, artifact_ids=_collected_artifact_ids()
             )
             if output_format == "json":
-                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}})}\n\n"
+                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}, 'artifact_ids': _collected_artifact_ids()})}\n\n"
             else:
                 yield "data: [DONE]\n\n"
         else:
