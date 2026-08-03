@@ -55,6 +55,7 @@ from src.utils.error_logger import (
     PipelineStage,
     get_error_logger,
 )
+from src.services.image_catalog import append_image_context
 from src.utils.helpers import (
     build_context,
     build_conversation_context,
@@ -1143,6 +1144,8 @@ async def generate_answer(
             context=context or "",
             query=origin_query or "",
         )
+        # Offer the curated image catalog to the model (no-op when disabled).
+        user_content = append_image_context(user_content, origin_query or "")
 
         # Append the templated user message
         messages_for_turn.append(_make_message("user", user_content))
@@ -1513,6 +1516,8 @@ async def generate_answer_stream_generator_helper(
             context=context or "",
             query=origin_query or "",
         )
+        # Offer the curated image catalog to the model (no-op when disabled).
+        user_content = append_image_context(user_content, origin_query or "")
 
         # Stream generation
         accumulated = []

@@ -88,6 +88,7 @@ try:
         has_text_tool_call,
         might_be_incomplete_text_tool_call,
         parse_text_tool_calls,
+        split_tool_calls_and_answer_text,
         tool_call_label,
     )
 except Exception:
@@ -95,6 +96,7 @@ except Exception:
     has_text_tool_call = None  # type: ignore
     might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
+    split_tool_calls_and_answer_text = None  # type: ignore
 
 
 # ─── Trace serialisation ──────────────────────────────────────────────────────
@@ -364,6 +366,49 @@ def _build_initial_messages(request: GenerationRequest, tools: List[Any]) -> Lis
     return messages
 
 
+async def append_missing_artifact_stubs(
+    answer: str, artifact_ids: Optional[List[str]]
+) -> str:
+    """Append markdown stubs for collected artifacts the answer never references.
+
+    The instruction above asks the model to reproduce `/artifacts/{id}` stubs
+    verbatim, but models routinely paraphrase them into invented URLs (seen
+    live with EVE-Instruct emitting `storage.googleapis.com` links). The
+    captured files are too valuable to lose to prompt non-compliance, so this
+    deterministic pass re-attaches every collected artifact whose serving URL
+    is absent from the final answer. Fail-open: any lookup error leaves the
+    answer untouched.
+    """
+    if not answer or not artifact_ids:
+        return answer
+    try:
+        from src.database.models.artifact import Artifact
+
+        lines: List[str] = []
+        for artifact_id in artifact_ids:
+            url = f"/artifacts/{artifact_id}"
+            if url in answer:
+                continue
+            artifact = await Artifact.find_by_id(artifact_id)
+            if not artifact:
+                continue
+            source = getattr(artifact, "source", None)
+            server = getattr(source, "mcp_server", None) or "unknown"
+            tool = getattr(source, "tool_name", None) or "tool"
+            title = f"MCP: {server}/{tool}"
+            if (artifact.content_type or "").startswith("image/"):
+                lines.append(f'![{artifact.filename}]({url} "{title}")')
+            else:
+                lines.append(f'[{artifact.filename}]({url} "{title}")')
+        if lines:
+            answer = answer.rstrip() + "\n\n" + "\n\n".join(lines) + "\n"
+    except Exception:
+        logger.warning(
+            "Failed to append missing artifact stubs to the answer", exc_info=True
+        )
+    return answer
+
+
 # ─── Graph compile helpers ────────────────────────────────────────────────────
 
 
@@ -579,6 +624,9 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
+        final_answer = await append_missing_artifact_stubs(
+            final_answer, list(artifact_ctx.collected_artifact_ids)
+        )
 
         tool_results: List[Dict[str, Any]] = []
         use_rag = False
@@ -722,19 +770,40 @@ async def generate_answer_agentic_stream_helper(
             joined = "".join(items)
             turn_buffer.clear()
 
+            events: List[str] = []
+            answer_items = items
+
             if has_text_tool_call and has_text_tool_call(joined):
-                parsed = parse_text_tool_calls(joined) if parse_text_tool_calls else []
-                if not parsed:
+                # A turn can contain one or more `[TOOL_CALLS]name{...}` segments
+                # (each call gets its own marker) directly followed by real
+                # answer prose in the SAME turn — split_tool_calls_and_answer_text
+                # walks every recognized call and returns whatever text is left
+                # over so it's emitted as an answer instead of silently dropped
+                # or, worse, leaking the raw "[TOOL_CALLS]..." syntax verbatim
+                # into `accumulated`/the persisted answer.
+                calls, answer_text = (
+                    split_tool_calls_and_answer_text(joined)
+                    if split_tool_calls_and_answer_text
+                    else (parse_text_tool_calls(joined) if parse_text_tool_calls else [], "")
+                )
+                if not calls:
                     return []
-                tc = parsed[0]
-                tname = tc.get("name", "tool")
-                args = tc.get("args", {})
-                query_used = args.get("query", "")
-                label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
-                msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                return [
-                    f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
-                ]
+                for tc in calls:
+                    tname = tc.get("name", "tool")
+                    args = tc.get("args", {})
+                    query_used = args.get("query", "")
+                    label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
+                    msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                    events.append(
+                        f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                    )
+                if not answer_text:
+                    return events
+                # Streaming granularity is inherently lost for this leftover
+                # text: we can't know the tool-call syntax has ended until the
+                # whole turn is buffered, so it's emitted as a single chunk
+                # rather than token-by-token.
+                answer_items = [answer_text]
 
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
@@ -744,8 +813,7 @@ async def generate_answer_agentic_stream_helper(
                     )
                 first_token_latency = time.perf_counter() - total_start
 
-            events: List[str] = []
-            for tok in items:
+            for tok in answer_items:
                 if not tok:
                     continue
                 tokens_yielded += 1
@@ -879,7 +947,9 @@ async def generate_answer_agentic_stream_helper(
             )
 
         gen_latency = time.perf_counter() - gen_start
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         total_latency = time.perf_counter() - total_start
 
         latencies: Dict[str, Optional[float]] = {
@@ -935,7 +1005,7 @@ async def generate_answer_agentic_stream_helper(
             asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
         if output_format == "json":
-            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies})}\n\n"
+            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
         else:
             yield "data: [DONE]\n\n"
 
@@ -958,13 +1028,15 @@ async def generate_answer_agentic_stream_helper(
             description="Agentic generation timed out",
             error_type=type(exc).__name__,
         )
-        answer = "".join(accumulated)
+        answer = await append_missing_artifact_stubs(
+            "".join(accumulated), _collected_artifact_ids()
+        )
         if answer:
             await persist_message_state(
                 message_id, output=answer, artifact_ids=_collected_artifact_ids()
             )
             if output_format == "json":
-                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}})}\n\n"
+                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}, 'artifact_ids': _collected_artifact_ids()})}\n\n"
             else:
                 yield "data: [DONE]\n\n"
         else:
