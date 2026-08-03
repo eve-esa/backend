@@ -1232,7 +1232,7 @@ async def generate_answer(
             "generation_prompt": user_content,
         }
         return (
-            final_answer,
+            rewrite_catalog_image_urls(final_answer),
             results,
             rag_decision_result.use_rag,
             latencies,
