@@ -1,25 +1,25 @@
 # Curated demo image catalog.
 #
 # Deliberately minimal, fully static "image source" for the demo: a small list
-# of publicly reachable images served from the local MinIO bucket
-# (eve-x-demo-images). It is NOT a retrieval system; it exists so the
+# of publicly reachable images served by this backend at /demo-images
+# (see server.py; files in src/templates/demo_images/). It is NOT a retrieval system; it exists so the
 # answer-generation prompt can offer relevant images to embed as markdown so
 # they render inline in the chat (never as bare text URLs).
 # All URLs are anonymously reachable (HTTP 200) at demo time.
 images:
   - title: "Sentinel-2 satellite"
-    url: "http://localhost:9000/eve-x-demo-images/sentinel2-satellite.jpg"
+    url: "/demo-images/sentinel2-satellite.jpg"
     description: "Photo of the Sentinel-2 satellite (ESA Copernicus optical imaging mission)."
     tags: [sentinel-2, satellite, spacecraft, copernicus]
   - title: "Sentinel-2A orbit path"
-    url: "http://localhost:9000/eve-x-demo-images/sentinel2-orbit.png"
+    url: "/demo-images/sentinel2-orbit.png"
     description: "Descending day orbit ground track of Sentinel-2A."
     tags: [sentinel-2, orbit, ground-track]
   - title: "Landsat 8 vs Sentinel-2 band comparison"
-    url: "http://localhost:9000/eve-x-demo-images/sentinel2-bands-comparison.jpg"
+    url: "/demo-images/sentinel2-bands-comparison.jpg"
     description: "Spectral bands / resolution comparison between Landsat 8 and Sentinel-2 MSI."
     tags: [sentinel-2, bands, spectral, landsat, msi]
   - title: "South Georgia Island seen by Sentinel-2"
-    url: "http://localhost:9000/eve-x-demo-images/sentinel2-south-georgia.jpg"
+    url: "/demo-images/sentinel2-south-georgia.jpg"
     description: "Example Sentinel-2 true-color acquisition of South Georgia Island."
     tags: [sentinel-2, image, acquisition, true-color]

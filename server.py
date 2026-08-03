@@ -1,8 +1,10 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from src.config import APP_VERSION, CORS_ALLOWED_ORIGINS, configure_logging
 from src.database.indexes import ensure_indexes
@@ -102,6 +104,21 @@ def create_app(debug=False, **kwargs):
     @app.get(path="/")
     def main_page():
         return "Welcome to Eve"
+
+    # Public demo images referenced by the curated image catalog
+    # (src/templates/image_catalog.yaml). Served by the backend so the
+    # catalog can use environment-independent relative URLs: the frontend
+    # resolves them against its API base, which is this app on every
+    # environment. Licenses in the folder's ATTRIBUTION.md.
+    app.mount(
+        "/demo-images",
+        StaticFiles(
+            directory=os.path.join(
+                os.path.dirname(__file__), "src", "templates", "demo_images"
+            )
+        ),
+        name="demo-images",
+    )
 
     register_routers(app)
     app = OpenAIProxyDispatcher(app)
