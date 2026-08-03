@@ -1845,6 +1845,10 @@ async def create_agentic_message(
         request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic collection IDs: %s", request.collection_ids)
 
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -1853,6 +1857,7 @@ async def create_agentic_message(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
         set_message_context(message.id)
 
@@ -1996,6 +2001,10 @@ async def create_agentic_message_stream(
         request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
 
+        attachments = await resolve_artifact_attachments(
+            request.artifact_ids, conversation_id, requesting_user
+        )
+
         message = await Message.create(
             conversation_id=conversation_id,
             input=request.query,
@@ -2004,6 +2013,7 @@ async def create_agentic_message_stream(
             use_rag=False,
             request_input=request,
             metadata={},
+            attachments=attachments,
         )
         set_message_context(message.id)
 
