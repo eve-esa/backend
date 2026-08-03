@@ -2,6 +2,7 @@
 from .collection import router as collection_router
 from .health_check import router as health_check_router
 from .document import router as document_router
+from .artifact import router as artifact_router
 from .message import router as message_router
 from .conversation import router as conversation_router
 from .user import router as user_router
@@ -16,6 +17,7 @@ __all__ = [
     "collection_router",
     "health_check_router",
     "document_router",
+    "artifact_router",
     "message_router",
     "conversation_router",
     "user_router",

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.graphs_bundle import graphs_base_module
+from src.services.mcp.artifact_ingestion import ArtifactInterceptor
 from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp.tool_cache import get_or_load_mcp_tools
 from src.services.mcp_auth import get_cognito_token_provider
@@ -23,6 +24,31 @@ try:
     _mcp_adapters_available = True
 except Exception:
     MultiServerMCPClient = None  # type: ignore[misc, assignment]
+
+
+class _MCPToolsWithClient(list):
+    """A plain ``list`` of tools that also keeps its ``MultiServerMCPClient`` alive.
+
+    ``ArtifactInterceptor.bind_client()`` only holds a *weakref* to the client
+    (see ``artifact_ingestion.py``). On the uncached load path nothing else
+    keeps the real object alive once ``_discover_mcp_tools_uncached`` returns —
+    it would be garbage-collected and ``ArtifactInterceptor._resolve_resource_link``
+    would silently give up (``self._client_ref()`` resolves to ``None``) the
+    next time a ``ResourceLink`` needs to be read via ``client.session(...)``.
+    The TTL cache does hold a strong ref for cached entries, but empty results
+    and user-less requests are never cached, so the wrapper is what guarantees
+    the client lives at least as long as the tools list the caller holds.
+
+    Subclassing ``list`` (rather than returning a ``(tools, client)`` tuple)
+    keeps this a drop-in replacement: callers and tests that compare the result
+    with ``==`` against a plain list, or pass it straight into
+    ``tools.extend(...)``, are unaffected — only the strong reference on
+    ``._mcp_client`` is new.
+    """
+
+    def __init__(self, tools: List[Any], client: Any) -> None:
+        super().__init__(tools)
+        self._mcp_client = client
 
 
 def _build_mcp_connections(
@@ -94,11 +120,21 @@ async def _discover_mcp_tools_uncached(
     if not connections:
         return MultiServerMCPClient({}), [], uses_proxy
 
+    artifact_interceptor = ArtifactInterceptor()
     client = MultiServerMCPClient(
         connections,
         tool_name_prefix=True,
-        tool_interceptors=[LatencyInterceptor(), ErrorLoggingInterceptor()],
+        tool_interceptors=[
+            LatencyInterceptor(),
+            ErrorLoggingInterceptor(),
+            artifact_interceptor,
+        ],
     )
+    # The interceptor reads the artifact_context contextvar at call time (never
+    # at construction): this client instance may be cached and reused for many
+    # tool calls across requests, and each call must land on the context of the
+    # request that made it.
+    artifact_interceptor.bind_client(client)
 
     async def _load_one(server_name: str) -> tuple[str, Optional[List[Any]]]:
         try:
@@ -144,7 +180,10 @@ async def _discover_mcp_tools_uncached(
             len(failed_servers),
             failed_servers,
         )
-    return client, tools, uses_proxy
+    # Wrap (rather than return the bare list) so `client` — and therefore the
+    # weakref `artifact_interceptor` holds on it — survives at least as long as
+    # whatever the caller does with `tools` (see _MCPToolsWithClient docstring).
+    return client, _MCPToolsWithClient(tools, client), uses_proxy
 
 
 async def load_mcp_tools_for_servers(

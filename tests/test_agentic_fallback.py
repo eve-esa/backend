@@ -330,6 +330,7 @@ class TestGenerateAnswerAgenticInGraphFallback:
                 _latencies,
                 prompts,
                 _trace,
+                _artifact_ids,
             ) = await generate_answer_agentic(
                 request, user_id="test-user", conversation_id="c1"
             )
@@ -356,6 +357,7 @@ class TestGenerateAnswerAgenticInGraphFallback:
                 _latencies,
                 prompts,
                 trace,
+                _artifact_ids,
             ) = await generate_answer_agentic(
                 request, user_id="test-user", conversation_id="c1"
             )

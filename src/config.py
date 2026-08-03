@@ -170,6 +170,61 @@ def redis_client_kwargs() -> Dict[str, Any]:
     }
 
 
+# S3 / Artifact storage
+# S3_ENDPOINT_URL empty -> real AWS S3; set to http://minio:9000 for local MinIO.
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "eve-x-artifacts-local").strip()
+S3_REGION = os.getenv("S3_REGION", "eu-central-1").strip()
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
+# Dedicated credentials (do not collide with the AWS_* vars used by the CLI).
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
+
+# Legacy user-upload path knobs (POST /artifacts). Superseded by the
+# generalized ARTIFACT_UPLOAD_* knobs below; kept here only because their env
+# values are read as a fallback so already-deployed hosts keep working
+# unchanged after the image-only upload gate was generalized to any artifact.
+IMAGE_MAX_BYTES = int(os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024))
+IMAGE_ALLOWED_TYPES = [
+    t.strip().lower()
+    for t in os.getenv("IMAGE_ALLOWED_TYPES", "png,jpeg,webp,gif").split(",")
+    if t.strip()
+]
+IMAGE_UPLOADS_PER_DAY = int(os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
+
+# Generic artifact knobs, consumed by MCP tool-output ingestion.
+ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))
+ARTIFACT_MAX_PER_TOOL_CALL = int(os.getenv("ARTIFACT_MAX_PER_TOOL_CALL", 10))
+ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
+    os.getenv("ARTIFACT_RESOURCE_READ_TIMEOUT_S", 30)
+)
+
+# Generalized user-upload path knobs (POST /artifacts with any allowed file
+# type: images, pdf, csv, txt, json, geojson). Each falls back to the legacy
+# IMAGE_* env value when its ARTIFACT_* counterpart isn't set, so hosts that
+# never migrate their environment keep the old image-only behaviour.
+# NOTE: the byte cap is named ARTIFACT_UPLOAD_MAX_BYTES rather than
+# ARTIFACT_MAX_BYTES because that name is already taken above by the
+# unrelated MCP tool-output ingestion cap (different default, different
+# purpose); reusing it here would silently couple two independent limits.
+ARTIFACT_UPLOAD_ALLOWED_TYPES = [
+    t.strip().lower()
+    for t in os.getenv(
+        "ARTIFACT_UPLOAD_ALLOWED_TYPES",
+        os.getenv("IMAGE_ALLOWED_TYPES", "png,jpeg,webp,gif,pdf,csv,txt,json,geojson"),
+    ).split(",")
+    if t.strip()
+]
+ARTIFACT_UPLOAD_MAX_BYTES = int(
+    os.getenv(
+        "ARTIFACT_UPLOAD_MAX_BYTES", os.getenv("IMAGE_MAX_BYTES", 10 * 1024 * 1024)
+    )
+)
+ARTIFACT_UPLOADS_PER_DAY = int(
+    os.getenv("ARTIFACT_UPLOADS_PER_DAY", os.getenv("IMAGE_UPLOADS_PER_DAY", 100))
+)
+
+
 def configure_logging(level=logging.INFO):
     """Configure logging for the entire application."""
     # Check if already configured to avoid duplicate handlers

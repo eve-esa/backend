@@ -10,6 +10,7 @@ from src.database.mongo import async_mongo_manager
 from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
+    artifact_router,
     auth_router,
     collection_router,
     conversation_router,
@@ -49,6 +50,9 @@ def register_routers(app: FastAPI):
 
     # Documents
     app.include_router(document_router, tags=["Documents"])
+
+    # Artifacts
+    app.include_router(artifact_router, tags=["Artifacts"])
 
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])

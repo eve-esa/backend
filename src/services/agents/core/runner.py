@@ -32,8 +32,14 @@ from src.services.generate_answer import (
     persist_message_state,
 )
 from src.services.agents.core.registry import get_agent_graph
-from src.services.agents.graphs_bundle import graphs_utils_module
-from src.services.mcp.tool_loader import load_mcp_tools_for_servers as _load_mcp_tools_for_servers
+from src.services.mcp.artifact_context import (
+    reset_artifact_context,
+    set_artifact_context,
+)
+from src.services.mcp.tool_loader import (
+    _MCPToolsWithClient,
+    load_mcp_tools_for_servers as _load_mcp_tools_for_servers,
+)
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -67,14 +73,23 @@ try:
 except Exception:
     InMemorySaver = None  # type: ignore
 
+# Text-format tool-call helpers come from this backend's OWN
+# `src.services.agentic_utils` rather than the external `graphs_utils_module()`
+# package: the installed `eve-esa-agents` package's `utils.py` doesn't define
+# `might_be_incomplete_text_tool_call` at all, so importing that single
+# attribute used to raise inside the `try` block below and silently set
+# *every* name in this group (including `has_text_tool_call` and
+# `parse_text_tool_calls`, which DO exist there) to None — permanently
+# disabling text-format tool-call detection in the streaming path with no
+# error surfaced anywhere. `agentic_utils.py` is vendored in this repo and
+# kept in sync with what the streaming/turn-buffer logic below needs.
 try:
-    _graphs_utils = graphs_utils_module()
-    has_text_tool_call = _graphs_utils.has_text_tool_call
-    might_be_incomplete_text_tool_call = (
-        _graphs_utils.might_be_incomplete_text_tool_call
+    from src.services.agentic_utils import (
+        has_text_tool_call,
+        might_be_incomplete_text_tool_call,
+        parse_text_tool_calls,
+        tool_call_label,
     )
-    parse_text_tool_calls = _graphs_utils.parse_text_tool_calls
-    tool_call_label = _graphs_utils.tool_call_label
 except Exception:
     tool_call_label = None  # type: ignore
     has_text_tool_call = None  # type: ignore
@@ -207,6 +222,14 @@ async def _build_tools(
                 mcp_user_id=request.mcp_user_id,
             )
             tools.extend(mcp_tools)
+            # `tools.extend(...)` above only copies the individual tool
+            # references, not `mcp_tools`'s own `_mcp_client` attribute — carry
+            # it over explicitly so the client stays alive for as long as the
+            # caller holds onto this function's return value (see
+            # _MCPToolsWithClient docstring in _load_mcp_tools_for_servers).
+            mcp_client = getattr(mcp_tools, "_mcp_client", None)
+            if mcp_client is not None:
+                tools = _MCPToolsWithClient(tools, mcp_client)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
 
@@ -303,6 +326,44 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     return s or AGENT_GRAPH_TYPE
 
 
+# ─── Artifact-reproduction instruction ────────────────────────────────────────
+
+# The ReAct graph's own lead-in instruction lives in `prompts.yaml` bundled
+# with the `eve-esa-agents` package resolved by graphs_bundle.py (see its
+# `_prompts_yaml_path`) — that package is an external git dependency, not part
+# of this repo, so it can't be edited here. This backend-owned instruction is
+# injected as an extra SystemMessage ahead of the user's query instead: it
+# ends up positioned *after* the graph's own system prompt in every `agent`
+# node invocation (ReactAgent._invoke prepends its instruction fresh each
+# call), so it stays visible for the whole tool-calling loop.
+_ARTIFACT_MARKDOWN_INSTRUCTION = (
+    "Tool results may contain a markdown stub for a file the tool produced: "
+    'an image embed (`![name](/artifacts/{id} "MCP: server/tool")`) or a '
+    'link (`[name](/artifacts/{id} "MCP: server/tool")`), each followed on '
+    "the next line by a one-line JSON blob with the same data. When your "
+    "answer references that file, reproduce the markdown line VERBATIM — "
+    "do not rewrite, reformat, translate, or invent a different URL for it. "
+    "`/artifacts/{id}` URLs are the ONLY valid way to reference a "
+    "tool-produced file; never emit a `resource://` URI or any other URL "
+    "(e.g. a `storage.googleapis.com` link) for it, even if one appears "
+    "elsewhere in the tool output."
+)
+
+
+def _build_initial_messages(request: GenerationRequest, tools: List[Any]) -> List[Any]:
+    """Return the graph's initial ``messages`` state for this turn.
+
+    Prepends :data:`_ARTIFACT_MARKDOWN_INSTRUCTION` as a ``SystemMessage``
+    when MCP tools are in play, since only then can a tool result carry an
+    artifact stub worth guarding against being rewritten.
+    """
+    messages: List[Any] = []
+    if tools and SystemMessage:
+        messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
+    messages.append(HumanMessage(content=request.query))
+    return messages
+
+
 # ─── Graph compile helpers ────────────────────────────────────────────────────
 
 
@@ -380,16 +441,26 @@ async def generate_answer_agentic(
     Dict[str, Optional[float]],
     Dict[str, Any],
     List[Dict[str, Any]],
+    List[str],
 ]:
     """Run the full agentic generation pipeline without streaming.
 
-    Returns (answer, tool_results, use_rag, latencies, prompts, trace).
+    Returns (answer, tool_results, use_rag, latencies, prompts, trace, artifact_ids).
+    ``artifact_ids`` lists any Artifacts the MCP artifact interceptor persisted
+    from tool output during this run (see ``src.services.mcp.artifact_ingestion``).
     """
     if not _langgraph_available:
         raise RuntimeError("LangGraph is not available — cannot run agentic generation")
 
     error_logger = get_error_logger()
     total_start = time.perf_counter()
+    # message_id is unset here: Message.create() in the router runs before this
+    # call and there's no clean way to thread it through this signature; artifacts
+    # are still linked via conversation_id, and the router attaches artifact_ids
+    # to the Message itself once this call returns.
+    artifact_ctx, artifact_token = set_artifact_context(
+        user_id=user_id, conversation_id=conversation_id
+    )
 
     try:
         tools = await _build_tools(request)
@@ -444,7 +515,7 @@ async def generate_answer_agentic(
             ):
                 try:
                     async for update in g.astream(
-                        {"messages": [HumanMessage(content=request.query)]},
+                        {"messages": _build_initial_messages(request, tools)},
                         config=config,
                         stream_mode="updates",
                     ):
@@ -533,7 +604,15 @@ async def generate_answer_agentic(
             **llm_metadata,
         }
 
-        return final_answer, tool_results, use_rag, latencies, prompts, trace_entries
+        return (
+            final_answer,
+            tool_results,
+            use_rag,
+            latencies,
+            prompts,
+            trace_entries,
+            list(artifact_ctx.collected_artifact_ids),
+        )
 
     except Exception as exc:
         await error_logger.log_error(
@@ -544,6 +623,8 @@ async def generate_answer_agentic(
             error_type=type(exc).__name__,
         )
         raise
+    finally:
+        reset_artifact_context(artifact_token)
 
 
 # ─── Streaming generation ─────────────────────────────────────────────────────
@@ -577,13 +658,21 @@ async def generate_answer_agentic_stream_helper(
     total_start = time.perf_counter()
     accumulated: List[str] = []
     used_fallback_llm = False
+    artifact_ctx, artifact_token = set_artifact_context(
+        user_id=user_id, conversation_id=conversation_id, message_id=message_id
+    )
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
+    def _collected_artifact_ids() -> Optional[List[str]]:
+        return list(artifact_ctx.collected_artifact_ids) or None
+
     try:
         if cancelled():
-            await persist_message_state(message_id, stopped=True)
+            await persist_message_state(
+                message_id, stopped=True, artifact_ids=_collected_artifact_ids()
+            )
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
 
@@ -682,13 +771,16 @@ async def generate_answer_agentic_stream_helper(
                 trace_name="agentic_generation_stream",
             ):
                 async for mode, payload in graph.astream(
-                    {"messages": [HumanMessage(content=request.query)]},
+                    {"messages": _build_initial_messages(request, tools)},
                     config=config,
                     stream_mode=["messages", "updates"],
                 ):
                     if cancelled():
                         await persist_message_state(
-                            message_id, stopped=True, output="".join(accumulated)
+                            message_id,
+                            stopped=True,
+                            output="".join(accumulated),
+                            artifact_ids=_collected_artifact_ids(),
                         )
                         yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                         return
@@ -834,6 +926,7 @@ async def generate_answer_agentic_stream_helper(
                 **llm_prompts,
             },
             trace=trace_entries if trace_entries else None,
+            artifact_ids=_collected_artifact_ids(),
         )
 
         if background_tasks:
@@ -849,7 +942,10 @@ async def generate_answer_agentic_stream_helper(
     except asyncio.CancelledError:
         logger.info("Agentic generation cancelled")
         await persist_message_state(
-            message_id, output="".join(accumulated), stopped=True
+            message_id,
+            output="".join(accumulated),
+            stopped=True,
+            artifact_ids=_collected_artifact_ids(),
         )
         return
 
@@ -864,7 +960,9 @@ async def generate_answer_agentic_stream_helper(
         )
         answer = "".join(accumulated)
         if answer:
-            await persist_message_state(message_id, output=answer)
+            await persist_message_state(
+                message_id, output=answer, artifact_ids=_collected_artifact_ids()
+            )
             if output_format == "json":
                 yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}})}\n\n"
             else:
@@ -882,8 +980,15 @@ async def generate_answer_agentic_stream_helper(
             error_type=type(exc).__name__,
         )
         with contextlib.suppress(Exception):
-            await persist_message_state(message_id, output="".join(accumulated))
+            await persist_message_state(
+                message_id,
+                output="".join(accumulated),
+                artifact_ids=_collected_artifact_ids(),
+            )
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    finally:
+        reset_artifact_context(artifact_token)
 
 
 # ─── SSE wrappers ─────────────────────────────────────────────────────────────
