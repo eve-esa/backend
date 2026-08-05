@@ -100,23 +100,83 @@ jobs:
         with:
           registries: "${{ vars.SOURCE_ACCOUNT_ID }},${{ vars.AWS_ACCOUNT_ID }}"
 
+      # Re-dispatching a promotion has to be safe. These repositories run tag mutability
+      # IMMUTABLE_WITH_EXCLUSION, which locks the v* release series while leaving latest and
+      # sha-* mutable, so a second unconditional `crane copy` of an already-promoted version
+      # answers ImageTagAlreadyExistsException. That is precisely the case people hit: the copy
+      # lands, a step AFTER it fails (the ECS health check timing out is the one we have seen),
+      # and the natural fix is to dispatch the same promotion again. No deploy role carries
+      # ecr:BatchDeleteImage, deliberately, so a hard failure here could only be cleared by a
+      # human with separate admin credentials untagging the version by hand. Hence: look before
+      # copying, and treat "already there, same digest" as success rather than as a collision.
       - name: Copy the image into this environment
         id: promote
         if: inputs.promote
         env:
           SRC: ${{ vars.SOURCE_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/${{ inputs.promote-from-repository }}@${{ steps.source.outputs.digest }}
+          SRC_DIGEST: ${{ steps.source.outputs.digest }}
           DST: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-${{ inputs.environment }}-app-backend
+          DST_REPO: esa-eve-${{ inputs.environment }}-app-backend
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           set -euo pipefail
-          echo "copying $SRC to $DST:$VERSION"
-          /tmp/crane copy "$SRC" "$DST:$VERSION"
-          DIGEST=$(aws ecr describe-images \
-            --repository-name "esa-eve-${{ inputs.environment }}-app-backend" \
-            --image-ids "imageTag=$VERSION" \
-            --query 'imageDetails[0].imageDigest' --output text)
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "promoted $VERSION with digest $DIGEST"
+
+          # describe-images has no boolean "does this tag exist": an absent tag is an
+          # ImageNotFoundException and a non-zero exit, which under `set -e` would kill the step
+          # before it got to decide anything. Running the call as the condition of an `if`
+          # suspends `set -e` for it, and stderr is kept because the two non-zero outcomes must
+          # not be conflated: only ImageNotFoundException means "not promoted yet", whereas an
+          # AccessDenied or a throttle has to stop the run instead of being read as permission to
+          # copy over a tag whose current contents we in fact failed to read.
+          if DST_DIGEST=$(aws ecr describe-images \
+                --repository-name "$DST_REPO" \
+                --image-ids "imageTag=$VERSION" \
+                --query 'imageDetails[0].imageDigest' --output text 2>/tmp/promote-describe-dst.err); then
+            # A tag that resolves always carries a digest, so an empty or None answer means the
+            # call did not tell us what is really there: same conclusion as an API error.
+            if [ -z "$DST_DIGEST" ] || [ "$DST_DIGEST" = "None" ]; then
+              echo "ERROR: describe-images returned no digest for $DST_REPO:$VERSION"
+              exit 1
+            fi
+            ALREADY_TAGGED=true
+          elif grep -q 'ImageNotFoundException' /tmp/promote-describe-dst.err; then
+            ALREADY_TAGGED=false
+          else
+            echo "ERROR: could not determine whether $DST_REPO:$VERSION already exists"
+            cat /tmp/promote-describe-dst.err >&2
+            exit 1
+          fi
+
+          if [ "$ALREADY_TAGGED" = true ] && [ "$DST_DIGEST" != "$SRC_DIGEST" ]; then
+            # A released version that already points somewhere else is not a re-run, it is a
+            # rewrite of history: the git tag, the APP_VERSION the API reports and every task
+            # definition that ever ran this version all assert that v<x> IS one specific
+            # artifact. Print both digests, because the operator's next move depends on which
+            # side is wrong: cut a new version, or fix what the promotion source resolves to.
+            echo "ERROR: $DST_REPO:$VERSION already exists and points at a DIFFERENT image."
+            echo "  already in this registry: $DST_DIGEST"
+            echo "  asked to promote:         $SRC_DIGEST (from $SRC)"
+            echo "Refusing to re-point a released version. Promote a new version instead."
+            exit 1
+          fi
+
+          if [ "$ALREADY_TAGGED" = true ]; then
+            # The re-run path. The registry is already correct, so the copy is skipped and the
+            # steps below still deploy this digest, which is the entire reason for re-dispatching.
+            echo "$DST_REPO:$VERSION was already promoted with digest $DST_DIGEST, skipping the copy"
+          else
+            echo "copying $SRC to $DST:$VERSION"
+            /tmp/crane copy "$SRC" "$DST:$VERSION"
+            # Read the tag back rather than reusing SRC_DIGEST: this is what the destination
+            # registry actually resolves the version to, and it is what gets deployed.
+            DST_DIGEST=$(aws ecr describe-images \
+              --repository-name "$DST_REPO" \
+              --image-ids "imageTag=$VERSION" \
+              --query 'imageDetails[0].imageDigest' --output text)
+            echo "promoted $VERSION with digest $DST_DIGEST"
+          fi
+
+          echo "digest=$DST_DIGEST" >> "$GITHUB_OUTPUT"
 
       # The digest the caller passed, or the one the copy just produced.
       - name: Resolve the digest to deploy
