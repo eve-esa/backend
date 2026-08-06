@@ -171,6 +171,7 @@ async def get_mcp_server(
     """
     mcp_server = await _get_mcp_server_by_id(server_id)
     tools = []
+    tools_error: Optional[str] = None
     try:
         loaded_tools = await _load_mcp_tools_for_servers(
             [mcp_server], mcp_proxy_bearer_token=bearer_token, mcp_user_id=requesting_user.id
@@ -184,15 +185,22 @@ async def get_mcp_server(
             for tool in loaded_tools
         ]
     except Exception as exc:
+        # Still not a 5xx: one unreachable server must not break a page that lists many. But the
+        # failure now reaches the caller instead of being flattened into an empty list, which is the
+        # whole point. The class name is included because the message alone is often empty
+        # (TimeoutError) or a bare status code.
+        tools_error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         logger.warning(
             "Failed loading tools for MCP server '%s' (%s): %s",
             mcp_server.name,
             mcp_server.id,
-            exc,
+            tools_error,
         )
 
     return MCPServerPublicDetail(
-        **_to_public_mcp_server(mcp_server).model_dump(), tools=tools
+        **_to_public_mcp_server(mcp_server).model_dump(),
+        tools=tools,
+        tools_error=tools_error,
     )
 
 

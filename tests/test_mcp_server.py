@@ -78,3 +78,56 @@ async def test_get_mcp_server_allows_any_authenticated_user(mock_load_tools, asy
         mock_load_tools.assert_awaited_once()
     finally:
         await cleanup_models([server, owner, other])
+
+
+@pytest.mark.asyncio
+@patch(f"{_ROUTER}._load_mcp_tools_for_servers", new_callable=AsyncMock, return_value=[])
+async def test_get_mcp_server_reports_no_error_when_discovery_returns_nothing(
+    mock_load_tools, async_client
+):
+    """A server that genuinely exposes no tools must NOT look like a failure."""
+    owner, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=owner.id, name="empty-but-healthy")
+    await server.save()
+    try:
+        response = await async_client.get(
+            f"/mcp-servers/{server.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["tools"] == []
+        assert body["tools_error"] is None
+    finally:
+        await cleanup_models([server, owner])
+
+
+@pytest.mark.asyncio
+@patch(
+    f"{_ROUTER}._load_mcp_tools_for_servers",
+    new_callable=AsyncMock,
+    side_effect=RuntimeError("421 Misdirected Request"),
+)
+async def test_get_mcp_server_surfaces_discovery_failure(mock_load_tools, async_client):
+    """An unreachable server still answers 200, but says why the list is empty.
+
+    Before tools_error existed this response was byte-identical to the healthy-but-empty
+    case above, which is how a wall of unreachable toolkits could read as a wall of
+    empty ones.
+    """
+    owner, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=owner.id, name="unreachable")
+    await server.save()
+    try:
+        response = await async_client.get(
+            f"/mcp-servers/{server.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["tools"] == []
+        assert body["tools_error"] is not None
+        assert "RuntimeError" in body["tools_error"]
+        assert "421" in body["tools_error"]
+    finally:
+        await cleanup_models([server, owner])

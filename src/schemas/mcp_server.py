@@ -99,6 +99,17 @@ class MCPServerPublicDetail(MCPServerPublic):
     tools: List[Dict[str, Any]] = Field(
         default_factory=list, description="Tools available on this MCP server"
     )
+    # An empty tools list has two very different meanings, and until this field existed a client
+    # could not tell them apart: a server that genuinely exposes nothing, and a server we failed to
+    # reach. Both rendered as "No tools available", which is how six unreachable toolkits could look
+    # exactly like six empty ones. None means the discovery call succeeded.
+    tools_error: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why tool discovery failed, or null when it succeeded. When set, `tools` is empty "
+            "because the server could not be queried, NOT because it exposes no tools."
+        ),
+    )
 
 
 # Backward compatibility aliases for existing imports.
