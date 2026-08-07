@@ -242,7 +242,7 @@ class LLMManager:
             if not self._eve_jsc_base_url:
                 raise RuntimeError("EVE_JSC_BASE_URL is not configured")
             if not EVE_JSC_API_KEY:
-                raise RuntimeError("EVE_JSC_API_KEY (or MAIN_MODEL_API_KEY) is not set")
+                raise RuntimeError("EVE_JSC_API_KEY is not set")
             self._eve_jsc_chat_openai = ChatOpenAI(
                 api_key=EVE_JSC_API_KEY,
                 base_url=self._eve_jsc_base_url,

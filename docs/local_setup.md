@@ -208,7 +208,9 @@ IS_PROD=false
 | `SATCOM_RUNPOD_API_KEY` | No | API key for Satcom Runpod workloads. |
 | `EVE_JSC_BASE_URL` | No | OpenAI-compatible URL for the EVE-JSC model (required when `llm_type` is `eve_jsc`). |
 | `EVE_JSC_MODEL_NAME` | No | Model name for EVE-JSC (default `alias-eve`). |
-| `EVE_JSC_API_KEY` | No | API key for EVE-JSC (falls back to `MAIN_MODEL_API_KEY` if not set). |
+| `EVE_JSC_API_KEY` | No | API key for EVE-JSC, issued by Jülich (required when `llm_type` is `eve_jsc` or a model is called with the `jsc/` prefix; a blank value counts as unset). |
+| `OPENAI_PROXY_UPSTREAM_URL` | No | OpenAI-compatible URL the `/v1/*` proxy forwards `eve`/`runpod` models to. Setting this or `EVE_JSC_BASE_URL` enables the proxy. |
+| `OPENAI_PROXY_API_KEY` | No | API key for that upstream (falls back to `MAIN_MODEL_API_KEY`, which is the same RunPod endpoint). |
 | `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
 | `IS_PROD` | No | Set to `true` to enable production mode toggles. |
 

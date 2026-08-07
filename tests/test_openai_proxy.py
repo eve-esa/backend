@@ -267,30 +267,55 @@ async def test_chat_completions_streaming_no_usage_chunk(async_client, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_models_endpoint_proxied(async_client, monkeypatch):
+async def test_models_endpoint_lists_configured_providers(async_client, monkeypatch):
+    """Answered locally, not proxied.
+
+    A GET carries no model name, so a passthrough would always resolve to the
+    default provider and could never list ``jsc/*`` -- while still claiming to
+    describe the whole gateway.
+    """
     user, token = await create_test_user_and_token()
     try:
-        models_body = json.dumps(
-            {
-                "object": "list",
-                "data": [{"id": "gpt-4", "object": "model", "created": 0, "owned_by": "openai"}],
-            }
-        ).encode()
-
-        _enable_proxy(monkeypatch)
-        client, _ = _mock_client(body=models_body)
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
+        monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "alias-eve")
+        # No upstream client is mocked: reaching one would itself be the bug.
+        client, _ = _mock_client(body=b"{}")
         monkeypatch.setattr(_proxy, "_client", client)
 
-        with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
-            resp = await async_client.get(
-                "/v1/models",
-                headers={"Authorization": f"Bearer {token}"},
-            )
+        resp = await async_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["object"] == "list"
-        assert data["data"][0]["id"] == "gpt-4"
+        assert [m["id"] for m in data["data"]] == [
+            "eve/eve-esa/EVE-Instruct",
+            "jsc/alias-eve",
+        ]
+        client.stream.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_models_endpoint_omits_unusable_provider(async_client, monkeypatch):
+    """A provider with a base URL but no key is not offered to the caller."""
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        monkeypatch.setattr("src.routers.openai_proxy.MAIN_MODEL_NAME", "eve-esa/EVE-Instruct")
+        monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "")
+
+        resp = await async_client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 200
+        assert [m["id"] for m in resp.json()["data"]] == ["eve/eve-esa/EVE-Instruct"]
     finally:
         await cleanup_models([user])
 
@@ -419,6 +444,59 @@ async def test_jsc_provider_not_configured_returns_400(async_client, monkeypatch
         )
         assert resp.status_code == 400
         assert "JSC provider is not configured" in resp.json()["detail"]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_jsc_without_api_key_fails_closed(async_client, monkeypatch):
+    """A base URL without a key is a misconfiguration, not a licence to improvise.
+
+    The proxy used to fall back to forwarding the caller's own EVE credential
+    upstream, which cannot authenticate at Jülich and hands a third party a
+    working token for this API.
+    """
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "")
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await async_client.post(
+            "/v1/chat/completions",
+            json={"model": "jsc/alias-eve", "messages": [{"role": "user", "content": "Hi"}]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 400
+        assert "EVE_JSC_API_KEY" in resp.json()["detail"]
+        stream_mock.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_caller_credentials_are_not_forwarded_upstream(async_client, monkeypatch):
+    """The caller's bearer token and cookies must not reach the provider."""
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+            resp = await async_client.post(
+                "/v1/chat/completions",
+                json={"model": "eve-esa/EVE-Instruct", "messages": [{"role": "user", "content": "Hi"}]},
+                headers={"Authorization": f"Bearer {token}", "Cookie": "session=secret"},
+            )
+
+        assert resp.status_code == 200
+        fwd = stream_mock.call_args.kwargs["headers"]
+        assert fwd["authorization"] == "Bearer fake-runpod-key"
+        assert token not in json.dumps(dict(fwd))
+        assert not any(k.lower() == "cookie" for k in fwd)
     finally:
         await cleanup_models([user])
 
