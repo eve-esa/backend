@@ -4,7 +4,13 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException
 from jose import JWTError, jwt
 
-from src.config import FRONTEND_URL, JWT_ALGORITHM, JWT_AUDIENCE_REFRESH, JWT_SECRET_KEY
+from src.config import (
+    FEATURE_SELF_SIGNUP,
+    FRONTEND_URL,
+    JWT_ALGORITHM,
+    JWT_AUDIENCE_REFRESH,
+    JWT_SECRET_KEY,
+)
 from src.database.models.user import User
 from src.schemas.auth import (
     LoginRequest,
@@ -123,8 +129,16 @@ async def signup(request: SignupRequest) -> SignupResponse:
         Created user summary.
 
     Raises:
-        HTTPException: 400 if invalid or duplicate signup data.
+        HTTPException: 404 if self-signup is not enabled, 400 if invalid or duplicate signup data.
     """
+    # The frontend already declines to publish the signup route when the feature
+    # is off, but that is a decision about what to render, not about who may
+    # register: the endpoint answers whatever a client sends it. This is the
+    # guard that actually closes registration. 404 rather than 403, so a probe
+    # cannot tell a disabled feature from one that was never built.
+    if not FEATURE_SELF_SIGNUP:
+        raise HTTPException(status_code=404, detail="Not Found")
+
     try:
         user = await create_user(
             email=request.email,
