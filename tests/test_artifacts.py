@@ -553,17 +553,15 @@ async def test_disposition_inline_for_pdf(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_and_delete_artifact(async_client, monkeypatch):
-    """Listing returns the user's artifacts; delete removes it from storage and DB."""
+async def test_list_artifacts(async_client, monkeypatch):
+    """Listing returns the user's artifacts, with their source."""
 
-    fake = _use_fake_storage(monkeypatch)
+    _use_fake_storage(monkeypatch)
     user, token = await create_test_user_and_token()
     try:
         artifact_id = (
             await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
         ).json()["id"]
-        key = (await Artifact.find_by_id(artifact_id)).key
-
         listing = await async_client.get(
             "/artifacts", headers={"Authorization": f"Bearer {token}"}
         )
@@ -574,13 +572,6 @@ async def test_list_and_delete_artifact(async_client, monkeypatch):
         # source is included in the list payload.
         matched = next(item for item in items if item["id"] == artifact_id)
         assert matched["source"]["type"] == "upload"
-
-        del_resp = await async_client.delete(
-            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert del_resp.status_code == 200
-        assert await Artifact.find_by_id(artifact_id) is None
-        assert key not in fake.objects
     finally:
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user])
@@ -621,55 +612,41 @@ async def test_list_artifacts_filtered_by_conversation(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_delete_artifact_storage_failure_keeps_record(async_client, monkeypatch):
-    """If the object-store delete fails, the DB record is kept (fail-closed, no orphan)."""
+async def test_artifacts_cannot_be_deleted(async_client, monkeypatch):
+    """An uploaded artifact is permanent: there is no endpoint to remove it.
+
+    This replaces three tests that exercised DELETE /artifacts/{id} — the happy
+    path, the storage-failure path that kept the record, and the 403 that spared
+    MCP artifacts. None of that has to be right any more, because the method is
+    not served: once a file is uploaded it stays, which is how the products this
+    one is measured against behave.
+
+    405 rather than 404 is the point. The path still exists for GET, so FastAPI
+    answers "method not allowed" — that is what tells a client the resource is
+    real and the operation is gone, instead of leaving it to guess.
+    """
 
     fake = _use_fake_storage(monkeypatch)
-
-    async def _boom(key):
-        raise RuntimeError("s3 unavailable")
-
-    monkeypatch.setattr(fake, "delete_object", _boom)
-
     user, token = await create_test_user_and_token()
     try:
         artifact_id = (
             await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
         ).json()["id"]
+        key = (await Artifact.find_by_id(artifact_id)).key
 
         del_resp = await async_client.delete(
             f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
         )
-        assert del_resp.status_code == 500
+        assert del_resp.status_code == 405
 
-        # The record must survive so a retry can still reclaim the object.
+        # Not merely refused: still there, in the database and in the object store,
+        # and still readable. A 405 with the bytes gone would be worse than a 200.
         assert await Artifact.find_by_id(artifact_id) is not None
+        assert key in fake.objects
         get_resp = await async_client.get(
             f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
         )
         assert get_resp.status_code == 200
-    finally:
-        await Artifact.delete_many({"user_id": user.id})
-        await cleanup_models([user])
-
-
-@pytest.mark.asyncio
-async def test_delete_mcp_artifact_forbidden(async_client, monkeypatch):
-    """MCP-generated artifacts cannot be deleted through this endpoint (403)."""
-
-    fake = _use_fake_storage(monkeypatch)
-    user, token = await create_test_user_and_token()
-    try:
-        artifact = await _seed_mcp_artifact(fake, user.id, "application/json")
-
-        del_resp = await async_client.delete(
-            f"/artifacts/{artifact.id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert del_resp.status_code == 403
-
-        # The record and object must survive.
-        assert await Artifact.find_by_id(artifact.id) is not None
-        assert artifact.key in fake.objects
     finally:
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user])
