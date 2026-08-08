@@ -40,7 +40,7 @@ def catalog_file(tmp_path):
 
 
 def _enable(monkeypatch, path):
-    monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", True)
+    monkeypatch.setattr(config, "FEATURE_IMAGE_CATALOG", True)
     monkeypatch.setattr(config, "IMAGE_CATALOG_PATH", path)
 
 
@@ -77,7 +77,7 @@ def test_load_catalog_without_images_key_returns_empty(tmp_path):
 
 
 def test_build_image_context_disabled_returns_empty(monkeypatch, catalog_file):
-    monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", False)
+    monkeypatch.setattr(config, "FEATURE_IMAGE_CATALOG", False)
     monkeypatch.setattr(config, "IMAGE_CATALOG_PATH", catalog_file)
 
     assert build_image_context("show me sentinel-2 images") == ""
@@ -129,7 +129,7 @@ def test_append_image_context_enabled_contains_block(monkeypatch, catalog_file):
 
 
 def test_append_image_context_disabled_is_byte_identical(monkeypatch, catalog_file):
-    monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", False)
+    monkeypatch.setattr(config, "FEATURE_IMAGE_CATALOG", False)
     monkeypatch.setattr(config, "IMAGE_CATALOG_PATH", catalog_file)
     base = "You are a helpful assistant.\n\nAnswer:"
 
@@ -148,7 +148,7 @@ class TestRewriteCatalogImageUrls:
             '    url: "/demo-images/sentinel2-satellite.jpg"\n'
             '    tags: [sentinel-2]\n'
         )
-        monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", True)
+        monkeypatch.setattr(config, "FEATURE_IMAGE_CATALOG", True)
         monkeypatch.setattr(config, "IMAGE_CATALOG_PATH", str(catalog))
         image_catalog._catalog_cache.clear()
 
@@ -177,6 +177,6 @@ class TestRewriteCatalogImageUrls:
 
     def test_noop_when_disabled(self, tmp_path, monkeypatch):
         self._catalog(tmp_path, monkeypatch)
-        monkeypatch.setattr(config, "IMAGE_CATALOG_ENABLED", False)
+        monkeypatch.setattr(config, "FEATURE_IMAGE_CATALOG", False)
         text = "![Sentinel-2 satellite](https://fake.example/sat.jpg)"
         assert image_catalog.rewrite_catalog_image_urls(text) == text

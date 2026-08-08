@@ -1,8 +1,17 @@
-"""OpenAI-compatible gateway: user JWT on ingress, upstream API key on egress.
+"""OpenAI-compatible gateway: EVE credential on ingress, upstream API key on egress.
+
+Callers authenticate with ``Authorization: Bearer``, carrying either an ``eve_``
+API key or a login JWT (see ``src/middlewares/auth.py``). That credential is
+never relayed upstream: a provider is only usable once it has both a base URL
+and a key of its own, and a provider missing either one answers 400.
 
 Requires at least one provider upstream URL (``OPENAI_PROXY_UPSTREAM_URL`` for
 RunPod / ``eve``, or ``EVE_JSC_BASE_URL`` for JSC); requests fall through to
 the FastAPI app (404) when neither is set.
+
+``GET /v1/models`` is answered locally, listing the providers that resolve,
+rather than proxied: a GET carries no model name, so a passthrough would always
+go to the default provider and could never list ``jsc/*``.
 
 Model names may use LiteLLM-style provider prefixes
 (``<provider>/<model-id>``; see OpenAI-compatible providers in LiteLLM docs).
@@ -23,7 +32,9 @@ import httpx
 from src.config import (
     EVE_JSC_API_KEY,
     EVE_JSC_BASE_URL,
+    EVE_JSC_MODEL_NAME,
     MAIN_MODEL_API_KEY,
+    MAIN_MODEL_NAME,
     OPENAI_PROXY_API_KEY,
     OPENAI_PROXY_UPSTREAM_URL,
 )
@@ -34,7 +45,12 @@ logger = logging.getLogger(__name__)
 
 _STRIP_REQUEST_HEADERS = frozenset(
     {b"host", b"connection", b"keep-alive", b"transfer-encoding", b"te", b"trailer", b"upgrade",
-     b"content-length"}  # recalculated by httpx after body is potentially rewritten
+     b"content-length",  # recalculated by httpx after body is potentially rewritten
+     # Caller credentials. Never relay them to a third-party upstream: the
+     # authorization header is replaced with the upstream key below, and the
+     # frontend is same-origin with the API, so a browser call to /api/v1/*
+     # would otherwise carry EVE session cookies to the provider.
+     b"authorization", b"cookie"}
 )
 _STRIP_RESPONSE_HEADERS = frozenset(
     {"content-length", "content-encoding", "connection", "keep-alive", "transfer-encoding", "trailer", "upgrade"}
@@ -66,6 +82,8 @@ def _jsc_upstream() -> tuple[str, str]:
     upstream = EVE_JSC_BASE_URL.rstrip("/")
     if not upstream:
         raise ValueError("JSC provider is not configured (EVE_JSC_BASE_URL)")
+    if not EVE_JSC_API_KEY:
+        raise ValueError("JSC provider is not configured (EVE_JSC_API_KEY)")
     return upstream, EVE_JSC_API_KEY
 
 
@@ -73,7 +91,40 @@ def _runpod_upstream() -> tuple[str, str]:
     upstream = OPENAI_PROXY_UPSTREAM_URL.rstrip("/")
     if not upstream:
         raise ValueError("EVE provider is not configured (OPENAI_PROXY_UPSTREAM_URL)")
-    return upstream, OPENAI_PROXY_API_KEY or MAIN_MODEL_API_KEY
+    api_key = OPENAI_PROXY_API_KEY or MAIN_MODEL_API_KEY
+    if not api_key:
+        raise ValueError("EVE provider is not configured (OPENAI_PROXY_API_KEY)")
+    return upstream, api_key
+
+
+def _configured_models() -> dict:
+    """An OpenAI ``/v1/models`` listing built from the providers that resolve.
+
+    Not a passthrough. A GET carries no body, so ``parse_proxy_model(None)``
+    always picks the default provider, and proxying the call would answer with
+    one provider's catalogue while claiming to describe the whole gateway --
+    never listing ``jsc/*`` at all. Clients call ``models.list()`` before their
+    first completion, so this is the first thing a partner sees.
+    """
+    created = int(time.time())
+    data = []
+    for provider, resolver, model_name in (
+        ("eve", _runpod_upstream, MAIN_MODEL_NAME),
+        ("jsc", _jsc_upstream, EVE_JSC_MODEL_NAME),
+    ):
+        try:
+            resolver()
+        except ValueError:
+            continue
+        if not model_name:
+            continue
+        data.append({
+            "id": f"{provider}/{model_name}",
+            "object": "model",
+            "created": created,
+            "owned_by": provider,
+        })
+    return {"object": "list", "data": data}
 
 
 def resolve_proxy_route(model: Optional[str]) -> tuple[str, str, Optional[str]]:
@@ -180,6 +231,27 @@ class OpenAIProxyDispatcher:
         )
         self._client: Optional[httpx.AsyncClient] = None
         self._client_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._log_provider_status()
+
+    @staticmethod
+    def _log_provider_status() -> None:
+        """Say at startup which providers resolved and which are half-configured.
+
+        A provider with a base URL but no key enables the dispatcher without
+        being usable: /v1/* stops falling through to 404 and answers 400
+        instead. Log it rather than raising, so one misconfigured provider
+        cannot take down chat, auth and health along with itself.
+        """
+        for provider, resolver in (("eve", _runpod_upstream), ("jsc", _jsc_upstream)):
+            try:
+                upstream, _ = resolver()
+            except ValueError as exc:
+                # Absent entirely is a choice; configured-but-incomplete is a bug.
+                base = OPENAI_PROXY_UPSTREAM_URL if provider == "eve" else EVE_JSC_BASE_URL
+                if base.strip():
+                    logger.error("OpenAI proxy: provider %r is unusable: %s", provider, exc)
+                continue
+            logger.info("OpenAI proxy: provider %r -> %s", provider, upstream)
 
     def _get_client(self) -> httpx.AsyncClient:
         """Return an httpx client bound to the current event loop.
@@ -224,6 +296,10 @@ class OpenAIProxyDispatcher:
         caller_type = principal.caller_type()
 
         path: str = scope["path"]
+        if path == "/v1/models" and scope.get("method", "GET").upper() == "GET":
+            await self._send_json(send, 200, _configured_models())
+            return
+
         # Strip /v1 prefix so it isn't doubled when the upstream URL already ends with /v1
         upstream_path = path[3:] if path.startswith("/v1") else path
         query = scope.get("query_string", b"").decode()
@@ -267,9 +343,10 @@ class OpenAIProxyDispatcher:
             for k, v in scope.get("headers", [])
             if k.lower() not in _STRIP_REQUEST_HEADERS
         }
-        fwd_headers["authorization"] = (
-            f"Bearer {upstream_api_key}" if upstream_api_key else f"Bearer {token}"
-        )
+        # resolve_proxy_route guarantees a non-empty key; never fall back to the
+        # caller's own EVE credential, which is meaningless upstream and would
+        # hand a third party a working token for this API.
+        fwd_headers["authorization"] = f"Bearer {upstream_api_key}"
 
         started = time.monotonic()
         client = self._get_client()
@@ -330,7 +407,11 @@ class OpenAIProxyDispatcher:
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
-        body = json.dumps({"detail": detail}).encode()
+        await OpenAIProxyDispatcher._send_json(send, status, {"detail": detail})
+
+    @staticmethod
+    async def _send_json(send, status: int, payload: dict):
+        body = json.dumps(payload).encode()
         await send({
             "type": "http.response.start",
             "status": status,

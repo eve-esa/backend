@@ -128,7 +128,7 @@ def build_image_context(query: str) -> str:
         block listing candidate images and instructing the model on how to
         embed them as markdown.
     """
-    if not config.IMAGE_CATALOG_ENABLED:
+    if not config.FEATURE_IMAGE_CATALOG:
         return ""
 
     entries = _load_catalog(config.IMAGE_CATALOG_PATH)
@@ -179,7 +179,7 @@ def rewrite_catalog_image_urls(text: str) -> str:
     stubs, genuine external images) is left untouched. No-op when the catalog
     is disabled or empty; never raises.
     """
-    if not text or not config.IMAGE_CATALOG_ENABLED:
+    if not text or not config.FEATURE_IMAGE_CATALOG:
         return text
     try:
         entries = _load_catalog(config.IMAGE_CATALOG_PATH)

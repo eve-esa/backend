@@ -10,6 +10,18 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+
+def getenv_or(name: str, default: str = "") -> str:
+    """Read an env var, treating a blank value as absent.
+
+    The infrastructure seeds intentionally-unused Secrets Manager secrets with a
+    single space (infra/docs/RUNBOOK.md), because ECS cannot resolve a secret
+    that has no version. ``os.getenv(name, default)`` returns that space, so the
+    default never applies and the caller ends up with "" after stripping.
+    """
+    return (os.getenv(name) or "").strip() or default
+
+
 # ENV VARIABLES
 QDRANT_URL = os.getenv("QDRANT_URL").strip()
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY").strip()
@@ -53,7 +65,15 @@ SATCOM_LARGE_BASE_URL = os.getenv("SATCOM_LARGE_BASE_URL", "").strip()
 
 EVE_JSC_BASE_URL = os.getenv("EVE_JSC_BASE_URL", "").strip()
 EVE_JSC_MODEL_NAME = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip()
-EVE_JSC_API_KEY = os.getenv("EVE_JSC_API_KEY", MAIN_MODEL_API_KEY).strip()
+# No fallback to MAIN_MODEL_API_KEY: that is a RunPod key, and JSC is a different
+# provider (Jülich), so inheriting it only turns a missing-config error into a
+# confusing 401 from the upstream. Blank means unusable, and says so.
+EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
+
+# Feature flags. A flag names the feature, never the environment it runs in.
+# Off means the feature is not published: /signup answers 404, as if it had never
+# been built, rather than 403, which would confirm it exists and is merely shut.
+FEATURE_SELF_SIGNUP = getenv_or("FEATURE_SELF_SIGNUP").lower() == "true"
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
@@ -88,7 +108,6 @@ FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
 )
 
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
-IS_PROD = os.getenv("IS_PROD", "").strip().lower() == "true"
 
 # Which build is running. The two halves are set at different moments and neither is ever
 # required: unset means "unknown", never a crash.
@@ -99,9 +118,30 @@ IS_PROD = os.getenv("IS_PROD", "").strip().lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "").strip() or "unknown"
 APP_GIT_SHA = os.getenv("APP_GIT_SHA", "").strip() or "unknown"
 
-# IS_PROD is the only environment indicator the container receives (infra sets it from the
-# workspace: stacks/app/locals.tf), so dev and staging are not distinguishable from inside.
-APP_ENVIRONMENT = "prod" if IS_PROD else "non-prod"
+# Which environment this is. Terraform has always known the answer (var.environment, one of
+# dev/staging/prod, with no default), but it used to reach the container collapsed into a
+# boolean IS_PROD, so dev and staging were indistinguishable from inside and /health could
+# only ever answer "non-prod". The tri-state now travels intact and IS_PROD is derived from
+# it, which is the direction that loses no information.
+#
+# Unknown values read as non-production on purpose: a typo must not silently grant a
+# container production behaviour. Terraform validates the value at plan time as well.
+_KNOWN_ENVIRONMENTS = ("dev", "staging", "prod")
+APP_ENVIRONMENT = getenv_or("APP_ENVIRONMENT").lower()
+if APP_ENVIRONMENT and APP_ENVIRONMENT not in _KNOWN_ENVIRONMENTS:
+    logging.getLogger(__name__).warning(
+        "APP_ENVIRONMENT=%r is not one of %s; treating this as non-production",
+        APP_ENVIRONMENT,
+        ", ".join(_KNOWN_ENVIRONMENTS),
+    )
+if not APP_ENVIRONMENT:
+    # Transitional: infra still sends IS_PROD until the tfvars change is applied, and the two
+    # deploy independently. Delete this branch, and IS_PROD from backend_environment_managed,
+    # one release after APP_ENVIRONMENT is live in all three environments.
+    _legacy_is_prod = getenv_or("IS_PROD").lower() == "true"
+    APP_ENVIRONMENT = "prod" if _legacy_is_prod else "non-prod"
+
+IS_PROD = APP_ENVIRONMENT == "prod"
 
 SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 
@@ -228,7 +268,9 @@ ARTIFACT_UPLOADS_PER_DAY = int(
 # is offered to the answer-generation prompt so the model can embed them as
 # markdown. Disabled -> the composed generation prompts are byte-identical to
 # the catalog-free behaviour. Treat only "false"/"0" (case-insensitively) as off.
-IMAGE_CATALOG_ENABLED = os.getenv("IMAGE_CATALOG_ENABLED", "true").strip().lower() not in (
+FEATURE_IMAGE_CATALOG = getenv_or(
+    "FEATURE_IMAGE_CATALOG", getenv_or("IMAGE_CATALOG_ENABLED", "true")
+).lower() not in (
     "false",
     "0",
 )
@@ -326,7 +368,11 @@ class Config:
         token_cfg = self.config.get("token_rate_limit")
         token_cfg = dict(token_cfg) if isinstance(token_cfg, dict) else {}
 
-        enabled = self._parse_bool_env("TOKEN_RATE_LIMIT_ENABLED")
+        # Transitional: the old name is still what the deployed tfvars send, and infra and
+        # code deploy independently. Drop the fallback one release after the rename lands.
+        enabled = self._parse_bool_env("FEATURE_TOKEN_RATE_LIMIT")
+        if enabled is None:
+            enabled = self._parse_bool_env("TOKEN_RATE_LIMIT_ENABLED")
         if enabled is not None:
             token_cfg["enabled"] = enabled
 

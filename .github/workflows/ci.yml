@@ -1,0 +1,100 @@
+name: CI
+
+# The test suite had no trigger at all until now: every workflow in this repo runs
+# on a push to a branch that deploys somewhere. So a pull request showed zero
+# checks and GitHub presented it as mergeable, which is a green by absence rather
+# than a green — nothing had run, and nothing had failed. 251 tests existed and
+# none of them guarded a merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    # tests/conftest.py installs an autouse fixture that connects to MongoDB and
+    # runs ensure_indexes() before every test that is not marked no_db, and almost
+    # none are. Without a database the suite does not fail informatively, it errors
+    # in setup for every test.
+    services:
+      mongo:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # _resolve_test_mongo_uri (tests/conftest.py) would fall back to this exact
+      # value, but naming it here keeps the dependency visible instead of implicit.
+      TEST_MONGO_URI: mongodb://localhost:27017/eve_backend_test
+      REDIS_URL: redis://localhost:6379/0
+
+      # src/config.py reads these five with os.getenv(NAME).strip() and no default,
+      # so an unset one is an AttributeError at import time and every test errors on
+      # collection. They are deliberately empty: the suite must not reach a real
+      # vector store or a real model, and a blank value is what getenv_or treats as
+      # unconfigured. JWT_SECRET_KEY needs a value because tokens get signed.
+      QDRANT_URL: ""
+      QDRANT_API_KEY: ""
+      SATCOM_QDRANT_URL: ""
+      SATCOM_QDRANT_API_KEY: ""
+      JWT_SECRET_KEY: ci-only-not-a-real-secret
+
+      # Unroutable on purpose. Several tests patch the LLM client but still go
+      # through llm_manager, which refuses to build one without a base URL and
+      # fails the test with "Main model base URL is not configured". A real URL
+      # would make the suite depend on a live endpoint — the RunPod one is
+      # serverless and a cold start can hang a test for minutes.
+      MAIN_MODEL_URL: http://127.0.0.1:1/v1
+      FALLBACK_MODEL_URL: http://127.0.0.1:1/v1
+      # llm_manager refuses to build a client without a key as well as without a
+      # URL, and the agentic fallback tests reach that code before their patches
+      # take effect. The value is never sent anywhere: the URL above goes nowhere.
+      MAIN_MODEL_API_KEY: ci-only-not-a-real-key
+      FALLBACK_MODEL_API_KEY: ci-only-not-a-real-key
+
+      # The token budget for the free group. config.yaml enables token_rate_limit
+      # but defines no `groups`, so without this eve_free has no max_tokens, the
+      # limit can never trigger, and the eight tests that assert a 429 get a 200.
+      # They have been read as "known failures that need Redis" — they do not.
+      # They need a budget, and 100 is enough for a test that spends 1000.
+      FREE_TOKENS: "100"
+      FREE_PERIOD_MONTHS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        # e2e is excluded on purpose: those tests talk to real deployed services and
+        # would make this check depend on an environment being up, which is exactly
+        # the kind of unrelated red that teaches people to ignore a red.
+        run: pytest -m "not e2e"
