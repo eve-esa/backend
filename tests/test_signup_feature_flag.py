@@ -10,7 +10,6 @@ account on any environment.
 import pytest
 
 from tests.utils.cleaner import cleanup_models
-from tests.utils.utils import create_test_user_and_token  # noqa: F401  (fixture wiring parity)
 
 
 _SIGNUP_PAYLOAD = {

@@ -135,13 +135,12 @@ def test_placeholder_secret_leaves_jsc_key_empty(monkeypatch):
     Exercises the real config module rather than monkeypatching the constant,
     which is what let this class of bug through the existing proxy tests.
     """
-    monkeypatch.setenv("EVE_JSC_API_KEY", " ")
-    reloaded = importlib.reload(importlib.import_module("src.config"))
+    reloaded = _reload_config(monkeypatch, EVE_JSC_API_KEY=" ")
     try:
         assert reloaded.EVE_JSC_API_KEY == ""
     finally:
         monkeypatch.delenv("EVE_JSC_API_KEY", raising=False)
-        importlib.reload(reloaded)
+        _reload_config(monkeypatch)
 
 
 # ── Environment identity ──────────────────────────────────────────────────────
