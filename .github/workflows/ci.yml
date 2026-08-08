@@ -59,6 +59,22 @@ jobs:
       SATCOM_QDRANT_API_KEY: ""
       JWT_SECRET_KEY: ci-only-not-a-real-secret
 
+      # Unroutable on purpose. Several tests patch the LLM client but still go
+      # through llm_manager, which refuses to build one without a base URL and
+      # fails the test with "Main model base URL is not configured". A real URL
+      # would make the suite depend on a live endpoint — the RunPod one is
+      # serverless and a cold start can hang a test for minutes.
+      MAIN_MODEL_URL: http://127.0.0.1:1/v1
+      FALLBACK_MODEL_URL: http://127.0.0.1:1/v1
+
+      # The token budget for the free group. config.yaml enables token_rate_limit
+      # but defines no `groups`, so without this eve_free has no max_tokens, the
+      # limit can never trigger, and the eight tests that assert a 429 get a 200.
+      # They have been read as "known failures that need Redis" — they do not.
+      # They need a budget, and 100 is enough for a test that spends 1000.
+      FREE_TOKENS: "100"
+      FREE_PERIOD_MONTHS: "1"
+
     steps:
       - uses: actions/checkout@v4
 
