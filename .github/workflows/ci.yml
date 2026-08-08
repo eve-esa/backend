@@ -66,6 +66,11 @@ jobs:
       # serverless and a cold start can hang a test for minutes.
       MAIN_MODEL_URL: http://127.0.0.1:1/v1
       FALLBACK_MODEL_URL: http://127.0.0.1:1/v1
+      # llm_manager refuses to build a client without a key as well as without a
+      # URL, and the agentic fallback tests reach that code before their patches
+      # take effect. The value is never sent anywhere: the URL above goes nowhere.
+      MAIN_MODEL_API_KEY: ci-only-not-a-real-key
+      FALLBACK_MODEL_API_KEY: ci-only-not-a-real-key
 
       # The token budget for the free group. config.yaml enables token_rate_limit
       # but defines no `groups`, so without this eve_free has no max_tokens, the
