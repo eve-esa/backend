@@ -293,18 +293,32 @@ jobs:
           fi
           echo "PRIMARY deployment uses correct task definition"
 
-      # Only meaningful when the service actually runs tasks. Staging and prod deliberately sit
-      # at desired_count 0 until their cutover, and an environment with nothing running must not
-      # fail a promotion that did exactly what it was asked to do.
-      - name: Read running task count
+      # An environment parked at desired_count 0 must not fail a promotion that did exactly what it
+      # was asked to do. But "nobody wants tasks here" and "tasks were wanted and none are running"
+      # are different states, and reading only runningCount conflated them: a deploy that started
+      # nothing skipped its own verification and reported success. Read both counts and say which
+      # case this is.
+      - name: Read task counts
         id: running
         run: |
-          COUNT=$(aws ecs describe-services \
+          set -euo pipefail
+          read -r DESIRED COUNT <<<"$(aws ecs describe-services \
             --cluster "esa-eve-${{ inputs.environment }}-app-cluster" \
             --services "esa-eve-${{ inputs.environment }}-app-backend" \
-            --query 'services[0].runningCount' --output text)
+            --query 'services[0].[desiredCount,runningCount]' --output text)"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
-          echo "Service reports ${COUNT} running task(s)"
+          echo "Service wants ${DESIRED} task(s) and reports ${COUNT} running"
+
+          if [ "$DESIRED" != "0" ] && [ "$COUNT" = "0" ]; then
+            echo "ERROR: the service wants ${DESIRED} task(s) but none are running."
+            echo "The deployment reported stable, so this is not a rollout still in progress."
+            echo "Check the service events and the task stop reasons before promoting further."
+            exit 1
+          fi
+
+          if [ "$DESIRED" = "0" ]; then
+            echo "::warning::${{ inputs.environment }} is scaled to zero, so the image was deployed but nothing was verified."
+          fi
 
       - name: Health check via CloudFront
         if: steps.running.outputs.count != '0'
