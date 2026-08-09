@@ -1,0 +1,82 @@
+# release-please keeps one pull request open, "chore(main): release x.y.z", and rewrites it on
+# every merge to main. Its diff is the CHANGELOG entries plus version.txt. Merging that pull
+# request is what cuts a release: it commits the version, creates the tag, publishes the GitHub
+# Release, and from here builds dev and promotes staging.
+#
+# Production is untouched: still an explicit dispatch of "promote prod" with one approval.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Draft or cut the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      released: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      # The default GITHUB_TOKEN, deliberately. GitHub does not start workflow runs from events
+      # raised with it, which is its guard against a workflow triggering itself forever. The
+      # consequence to know about: no CI runs on the release pull request, so CI cannot be a
+      # required check on it. Accepted, in exchange for having no App or long-lived token to own.
+      # The staging promotion does not depend on this, it is dispatched explicitly below rather
+      # than triggered by the tag.
+      - name: Run release-please
+        id: rp
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # The release commit changes only version.txt and CHANGELOG.md, which are outside deploy-dev's
+  # path filter, so nothing builds it on its own. The staging promotion looks the image up by the
+  # tagged commit's short SHA, so that image has to exist first. Calling the build here rather
+  # than widening the path filter keeps the ordering deterministic: widening it would start the
+  # build and this workflow on the same push, racing each other.
+  deploy-dev:
+    name: Build the release commit
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/deploy-dev.yml
+    secrets: inherit
+
+  # Dispatched rather than called. A reusable-workflow call would run under this workflow's ref,
+  # refs/heads/main, and the esa-eve-staging environment accepts only refs matching v*, so the
+  # deployment would be refused. Dispatching at the tag gives the promotion its own run with the
+  # tag as its ref. workflow_dispatch is also one of the two events that still fire when raised
+  # with GITHUB_TOKEN, so no App token is needed here.
+  promote-staging:
+    name: Promote to staging
+    needs: [release-please, deploy-dev]
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the staging promotion at the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run "promote staging" --ref "$TAG" -f version="$TAG"
+          echo "Dispatched promote staging for $TAG"

@@ -87,9 +87,26 @@ The server will be available at [http://localhost:8000/docs](http://localhost:80
 
 ### Deployment
 
-- Branches: `staging` (pre-production), `main` (production).
-- Staging: open a PR to `staging` and merge. This deploys to the staging environment.
-- Production: after verifying on staging, open a PR from `staging` to `main` and merge. This deploys to production.
+`main` is the only long-lived branch. The image is built once, on merge to `main`, and the same digest
+is then copied forward; nothing is rebuilt per environment.
+
+| Environment | URL | Reached by |
+|---|---|---|
+| dev | https://dev.eve-chat.chat | merging a pull request into `main` |
+| staging | https://staging.eve-chat.chat | merging the open `chore(main): release ...` pull request |
+| production | https://eve-chat.chat | `gh workflow run "promote prod" --ref <tag> -f version=<tag>`, then one approval |
+
+Versions and release notes are produced by [release-please](https://github.com/googleapis/release-please)
+from the pull request titles merged into `main`, which is why those titles must follow
+[Conventional Commits](https://www.conventionalcommits.org/). Merging the release pull request commits
+the version and `CHANGELOG.md`, creates the `vX.Y.Z` tag, publishes the GitHub Release and promotes
+staging. Do not create release tags by hand.
+
+Ask any environment what it is running:
+
+```bash
+curl -s https://staging.eve-chat.chat/api/health
+```
 
 ## Funding
 

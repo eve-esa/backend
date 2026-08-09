@@ -1,12 +1,25 @@
-# Staging promotion, triggered by cutting a v* tag. The image built for that commit in dev is
-# copied into the staging registry and deployed by digest: built once, never rebuilt. Same
-# single-job shape as the production promotion.
+# Staging promotion. The image built for that commit in dev is copied into the staging registry
+# and deployed by digest: built once, never rebuilt. Same single-job shape as the production
+# promotion.
+#
+# Dispatch only, and it must be dispatched at the tag. release.yml fires it automatically after
+# a release is cut; running it by hand is the break-glass path. The v* tag no longer triggers it
+# on push: release-please owns the tags now, and a tag pushed by hand would both desync
+# .release-please-manifest.json and promote whatever it happened to point at. Cutting tags for
+# documentation did exactly that on 2026-08-07 and had to be rolled back.
+#
+# --ref is not optional: the esa-eve-staging environment accepts only refs matching v*, so a
+# dispatch defaulting to main is refused.
 name: promote staging
-run-name: promote staging ${{ github.ref_name }}
+run-name: promote staging ${{ inputs.version }}
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to promote, for example v0.0.8"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -29,14 +42,17 @@ jobs:
           fetch-depth: 0
 
       # rev-list resolves lightweight and annotated tags alike to the commit, which is what the
-      # dev image was tagged with.
+      # dev image was tagged with. Read from the input rather than the ref: the run is dispatched
+      # at the tag, but the version is what the promotion is named after.
       - name: Resolve the commit behind the tag
         id: sha
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          SHA=$(git rev-list -n 1 "${GITHUB_REF_NAME}")
+          SHA=$(git rev-list -n 1 "$VERSION")
           echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "${GITHUB_REF_NAME} is commit ${SHA:0:7}"
+          echo "$VERSION is commit ${SHA:0:7}"
 
   promote:
     name: Promote and deploy
@@ -47,7 +63,7 @@ jobs:
     uses: ./.github/workflows/deploy-ecs.yml
     with:
       environment: staging
-      version: ${{ github.ref_name }}
+      version: ${{ inputs.version }}
       promote: true
       promote-from-repository: esa-eve-dev-app-backend
       promote-from-tag: sha-${{ needs.resolve.outputs.short-sha }}
