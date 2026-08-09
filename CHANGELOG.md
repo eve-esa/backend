@@ -13,6 +13,13 @@ Release and promotes staging. Production is promoted from there by an explicit d
 
 ## [0.0.8](https://github.com/eve-esa/backend/compare/v0.0.7...v0.0.8) (2026-08-09)
 
+### Added
+
+* Feature flags are named for the features they control, each environment reports its own identity, and the OpenAI proxy no longer forwards the caller's token upstream ([#149](https://github.com/eve-esa/backend/pull/149))
+
+### Removed
+
+* `DELETE /artifacts/{id}`. An uploaded artifact is permanent ([#150](https://github.com/eve-esa/backend/pull/150))
 
 ### Fixed
 
