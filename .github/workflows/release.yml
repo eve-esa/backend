@@ -5,6 +5,9 @@
 #
 # Production is untouched: still an explicit dispatch of "promote prod" with one approval.
 name: release
+# GitHub titles a run with the commit subject, so this workflow and CI, which both fire on a
+# push to main, appeared as two identical rows. Same convention promote-staging.yml already uses.
+run-name: release on ${{ github.ref_name }}
 
 on:
   push:
