@@ -11,6 +11,14 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.0.8](https://github.com/eve-esa/backend/compare/v0.0.7...v0.0.8) (2026-08-09)
+
+
+### Fixed
+
+* **ci:** report a missing dev image instead of dying on a raw AWS error ([#152](https://github.com/eve-esa/backend/issues/152)) ([207b0e4](https://github.com/eve-esa/backend/commit/207b0e44122f5a051434bc10e345e84cc202d105))
+* **ci:** stop reporting success when a deploy started no tasks ([#153](https://github.com/eve-esa/backend/issues/153)) ([c27bf59](https://github.com/eve-esa/backend/commit/c27bf59b11c2227958ab36c38facbb779ae3bd62))
+
 ## [0.0.7] - 2026-08-07
 
 ### Added
