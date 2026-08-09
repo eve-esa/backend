@@ -67,13 +67,31 @@ jobs:
           # string end to end. The SOURCE tag can differ: staging reads dev's sha-<short> tag.
           VERSION="v${VERSION#v}"
           SRC_TAG="${SRC_TAG:-$VERSION}"
-          DIGEST=$(aws ecr describe-images \
-            --registry-id "$SRC_ACCOUNT" \
-            --repository-name "$SRC_REPO" \
-            --image-ids "imageTag=$SRC_TAG" \
-            --query 'imageDetails[0].imageDigest' --output text)
+
+          # Same reason the destination lookup below runs inside an `if`: an absent tag is an
+          # ImageNotFoundException and a non-zero exit, so under `set -e` the step died here with a
+          # raw traceback and the message underneath was never reached. That is the single most
+          # likely failure of a promotion, and it deserves to say what is actually wrong.
+          if ! DIGEST=$(aws ecr describe-images \
+                --registry-id "$SRC_ACCOUNT" \
+                --repository-name "$SRC_REPO" \
+                --image-ids "imageTag=$SRC_TAG" \
+                --query 'imageDetails[0].imageDigest' --output text 2>/tmp/promote-describe-src.err); then
+            if grep -q 'ImageNotFoundException' /tmp/promote-describe-src.err; then
+              echo "ERROR: no image tagged $SRC_TAG in $SRC_ACCOUNT/$SRC_REPO."
+              echo "The commit behind $VERSION was never built for dev, so there is nothing to promote."
+              echo "Tag a commit that dev has already built, then dispatch the promotion again."
+              exit 1
+            fi
+            echo "ERROR: could not read $SRC_REPO:$SRC_TAG from $SRC_ACCOUNT"
+            cat /tmp/promote-describe-src.err
+            exit 1
+          fi
+
+          # A tag that resolves always carries a digest, so an empty answer means the call did not
+          # tell us what is really there: same conclusion as an API error.
           if [ "$DIGEST" = "None" ] || [ -z "$DIGEST" ]; then
-            echo "ERROR: $SRC_TAG is not in $SRC_ACCOUNT/$SRC_REPO"
+            echo "ERROR: describe-images returned no digest for $SRC_REPO:$SRC_TAG"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
