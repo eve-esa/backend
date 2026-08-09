@@ -19,6 +19,10 @@ on:
       - ".github/workflows/deploy-dev.yml"
       - ".github/workflows/deploy-ecs.yml"
   workflow_dispatch:
+  # release.yml calls this for the release commit, which touches only version.txt and
+  # CHANGELOG.md and so falls outside the path filter above. The staging promotion resolves the
+  # image from the tagged commit's short SHA, so that commit has to be built before it runs.
+  workflow_call:
 
 concurrency:
   group: deploy-dev
