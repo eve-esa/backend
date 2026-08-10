@@ -1,9 +1,11 @@
-name: CI
+# Entry point workflow: runs the backend test suite on every pull request and on
+# pushes to main. Nothing else calls it, it is triggered directly by those events.
+name: "check: ci"
 
 # The test suite had no trigger at all until now: every workflow in this repo runs
 # on a push to a branch that deploys somewhere. So a pull request showed zero
 # checks and GitHub presented it as mergeable, which is a green by absence rather
-# than a green — nothing had run, and nothing had failed. 251 tests existed and
+# than a green in fact: nothing had run, and nothing had failed. 251 tests existed and
 # none of them guarded a merge.
 on:
   pull_request:
@@ -17,6 +19,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     # tests/conftest.py installs an autouse fixture that connects to MongoDB and
     # runs ensure_indexes() before every test that is not marked no_db, and almost
@@ -62,7 +65,7 @@ jobs:
       # Unroutable on purpose. Several tests patch the LLM client but still go
       # through llm_manager, which refuses to build one without a base URL and
       # fails the test with "Main model base URL is not configured". A real URL
-      # would make the suite depend on a live endpoint — the RunPod one is
+      # would make the suite depend on a live endpoint, the RunPod one is
       # serverless and a cold start can hang a test for minutes.
       MAIN_MODEL_URL: http://127.0.0.1:1/v1
       FALLBACK_MODEL_URL: http://127.0.0.1:1/v1
@@ -75,15 +78,15 @@ jobs:
       # The token budget for the free group. config.yaml enables token_rate_limit
       # but defines no `groups`, so without this eve_free has no max_tokens, the
       # limit can never trigger, and the eight tests that assert a 429 get a 200.
-      # They have been read as "known failures that need Redis" — they do not.
+      # They have been read as "known failures that need Redis", they do not.
       # They need a budget, and 100 is enough for a test that spends 1000.
       FREE_TOKENS: "100"
       FREE_PERIOD_MONTHS: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.13"
           cache: pip

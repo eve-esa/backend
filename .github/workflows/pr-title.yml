@@ -6,7 +6,7 @@
 # Deliberately not an action and not a git hook. The rule is one regular expression on one
 # string, so a third-party dependency buys nothing, and a local hook would not run for a
 # contributor who never installs it.
-name: PR title
+name: "check: pr title"
 
 on:
   pull_request:
@@ -22,6 +22,7 @@ jobs:
   conventional-title:
     name: Conventional Commits title
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Validate the PR title
         env:

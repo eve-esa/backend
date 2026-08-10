@@ -1,4 +1,8 @@
-name: deploy dev
+# Builds the backend image and deploys it to the dev environment.
+# Three triggers: push to main behind the path filter below, manual workflow_dispatch,
+# and workflow_call from release.yml for the release commit.
+# The deploy half is delegated to deploy-ecs.yml.
+name: "deploy: dev"
 
 # Application code plus this pipeline's own files: dev is where a pipeline change gets
 # exercised. paths-ignore alone was too broad, it rebuilt and redeployed on every
@@ -33,6 +37,7 @@ jobs:
   build:
     name: Build and push
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: esa-eve-dev
     permissions:
       id-token: write

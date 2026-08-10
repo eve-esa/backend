@@ -1,4 +1,9 @@
-name: deploy ecs
+# Reusable workflow, workflow_call only. It can never be run directly: there is no push,
+# no schedule and no workflow_dispatch trigger, so it has zero runs of its own by design and
+# its page in the Actions sidebar stays empty. Its jobs appear inside the run of whichever
+# workflow called it. The three callers are deploy-dev.yml, promote-staging.yml and
+# promote-prod.yml.
+name: "internal: deploy to ecs"
 
 on:
   workflow_call:
@@ -33,6 +38,7 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: esa-eve-${{ inputs.environment }}
       url: ${{ vars.PUBLIC_URL }}

@@ -1,7 +1,11 @@
 # Production promotion: the version already validated in staging is copied into the production
 # registry and deployed, by digest, without rebuilding anything. A single job on purpose, so the
 # reviewer approves the decision once rather than approving the copy and the deploy separately.
-name: promote prod
+#
+# Manual dispatch only, there is no automatic trigger. The --ref you dispatch with must be a v* tag,
+# because the esa-eve-prod environment only allows v* refs to deploy and anything else is rejected
+# before the job runs. One approval is required before the job starts.
+name: "promote: prod"
 run-name: promote prod ${{ inputs.version }}
 
 on:

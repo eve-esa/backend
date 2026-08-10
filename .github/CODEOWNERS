@@ -1,0 +1,13 @@
+# CI/CD and release surface.
+# Anything under here decides what runs in CI, which secrets that run can
+# read, and what reaches an environment. A change to it deserves a review
+# from whoever owns the pipeline, not just from whoever owns the app code.
+# The actions entry is kept in both repos even where the directory is not
+# there yet, so a composite action is owned the day someone adds one.
+# Deliberately scoped: no global owner, so ordinary code changes do not put
+# the pipeline owner on every pull request.
+
+/.github/workflows/            @mime-pi
+/.github/actions/              @mime-pi
+/release-please-config.json    @mime-pi
+/.release-please-manifest.json @mime-pi
