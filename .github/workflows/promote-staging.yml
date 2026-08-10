@@ -10,7 +10,9 @@
 #
 # --ref is not optional: the esa-eve-staging environment accepts only refs matching v*, so a
 # dispatch defaulting to main is refused.
-name: promote staging
+#
+# release.yml dispatches this by filename (promote-staging.yml), so renaming the file breaks it.
+name: "promote: staging"
 run-name: promote staging ${{ inputs.version }}
 
 on:
@@ -33,6 +35,7 @@ jobs:
   resolve:
     name: Resolve the tagged commit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       short-sha: ${{ steps.sha.outputs.short }}
     steps:
