@@ -3,6 +3,7 @@
 Covers:
 - _resolve_agentic_llm_type: request llm_type precedence over AGENTIC_LLM_TYPE
 - _build_react_graph: delegates llm_type resolution + in-graph fallback_llm wiring
+- _resolve_agentic_llm_client: endpoint chain resolution and honest attribution
 - generate_answer_agentic: records in-graph fallback via agent_fallback node
 - generate_answer_agentic_stream_helper: no UnboundLocalError on early setup failure
 """
@@ -13,8 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from src.core.llm_manager import LLMManager
 from src.services.agents.core.runner import (
     _build_react_graph,
+    _resolve_agentic_llm_client,
     _resolve_agentic_llm_type,
     _serialise_trace_entry,
     generate_answer_agentic,
@@ -23,6 +26,15 @@ from src.services.agents.core.runner import (
 from src.schemas.generation_request import GenerationRequest
 
 _RUNNER = "src.services.agents.core.runner"
+
+
+def _chain_manager(configured=("eve_jsc", "main", "fallback")) -> LLMManager:
+    """A manager with a real chain resolver and no real endpoint behind it."""
+    manager = LLMManager()
+    manager._is_configured = lambda name: name in configured
+    for getter in ("_get_eve_jsc_llm", "_get_main_llm", "_get_fallback_llm"):
+        setattr(manager, getter, MagicMock(return_value=MagicMock(name=getter)))
+    return manager
 
 
 class _FakeStreamGraph:
@@ -238,6 +250,16 @@ class TestBuildReactGraph:
         assert compile_kwargs["llm"] is primary_llm
         assert compile_kwargs["fallback_llm"] is fallback_llm
 
+    def test_llm_run_timeout_forwarded_to_compile(self):
+        agent = self._make_agent()
+        fake_mgr = MagicMock()
+        fake_mgr.get_client_for_model.return_value = MagicMock()
+
+        with patch(f"{_RUNNER}.get_shared_llm_manager", return_value=fake_mgr):
+            _build_react_graph("main", [], None, agent=agent, llm_run_timeout=120)
+
+        assert agent.compile.call_args.kwargs["llm_run_timeout"] == 120
+
     def test_custom_llm_still_wires_platform_fallback(self):
         agent = self._make_agent()
         custom_llm = MagicMock(name="custom_llm")
@@ -305,6 +327,58 @@ class TestBuildReactGraphHonoursRequestLlmType:
 
         fake_mgr.get_client_for_model.assert_any_call("main")
         fake_mgr.get_client_for_model.assert_any_call("fallback")
+
+
+# ─── _resolve_agentic_llm_client ──────────────────────────────────────────────
+
+
+class TestResolveAgenticLlmClient:
+    async def test_unnamed_request_takes_the_head_of_the_chain(self):
+        manager = _chain_manager()
+        request = GenerationRequest(query="hi", agent="react")
+
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
+            f"{_RUNNER}.get_shared_llm_manager", return_value=manager
+        ), patch("src.core.llm_manager.EVE_ENDPOINT_ORDER", "eve_jsc,main,fallback"):
+            _llm, metadata = await _resolve_agentic_llm_client(
+                request, user_id="test-user"
+            )
+
+        assert metadata["agentic_llm_resolved"] == "eve_jsc"
+        assert metadata["endpoint"]["chain"] == ["eve_jsc", "main", "fallback"]
+        assert metadata["endpoint"]["substituted"] is False
+
+    async def test_open_circuit_moves_the_pick_to_the_next_candidate(self):
+        """The resolved name must be the endpoint that will really be called."""
+        manager = _chain_manager()
+        manager.health.record_failure("eve_jsc", TimeoutError("cold start"))
+        request = GenerationRequest(query="hi", agent="react")
+
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
+            f"{_RUNNER}.get_shared_llm_manager", return_value=manager
+        ), patch("src.core.llm_manager.EVE_ENDPOINT_ORDER", "eve_jsc,main,fallback"):
+            llm, metadata = await _resolve_agentic_llm_client(
+                request, user_id="test-user"
+            )
+
+        assert metadata["agentic_llm_resolved"] == "main"
+        assert metadata["endpoint"]["answered"] == "main"
+        assert metadata["endpoint"]["circuit_open"] == ["eve_jsc"]
+        assert llm is manager._get_main_llm.return_value
+
+    async def test_an_unconfigured_explicit_pick_reports_the_substitution(self):
+        manager = _chain_manager(configured=("main", "fallback"))
+        request = GenerationRequest(query="hi", llm_type="eve_jsc", agent="react")
+
+        with patch(f"{_RUNNER}.AGENTIC_LLM_TYPE", None), patch(
+            f"{_RUNNER}.get_shared_llm_manager", return_value=manager
+        ):
+            _llm, metadata = await _resolve_agentic_llm_client(
+                request, user_id="test-user"
+            )
+
+        assert metadata["agentic_llm_resolved"] == "fallback"
+        assert metadata["endpoint"]["substituted"] is True
 
 
 # ─── generate_answer_agentic (non-streaming) ──────────────────────────────────
@@ -429,3 +503,59 @@ class TestStreamingEarlyFailure:
         assert kwargs["prompts"]["used_fallback_llm"] is True
         assert kwargs["trace"]
         assert kwargs["trace"][-1]["node"] == "agent_fallback"
+
+    async def test_in_graph_fallback_reattributes_and_opens_the_primary(self):
+        """The graph swallows the primary's error, so the switch is the evidence."""
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            updates=[{"agent_fallback": {"messages": [AIMessage(content="")]}}],
+            messages=[
+                (
+                    AIMessage(content="fallback answer"),
+                    {"langgraph_node": "agent_fallback"},
+                ),
+            ],
+        )
+        persist = AsyncMock()
+        manager = _chain_manager()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+            get_shared_llm_manager=MagicMock(return_value=manager),
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        endpoint = persist.await_args.kwargs["endpoint"]
+        assert endpoint["requested"] == "main"
+        assert endpoint["answered"] == "fallback"
+        assert endpoint["substituted"] is True
+        assert manager.health.is_open("main") is True
+
+    async def test_a_streaming_failure_opens_the_resolved_endpoint(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(raise_exc=TimeoutError("no first token"))
+        manager = _chain_manager()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            get_shared_llm_manager=MagicMock(return_value=manager),
+        ), patch(f"{_RUNNER}.logger"):
+            events = [
+                event
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert any('"type": "error"' in event for event in events)
+        assert manager.health.is_open("main") is True

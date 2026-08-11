@@ -31,6 +31,7 @@ from src.services.generate_answer import (
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
+    resolve_generated_model_name,
     run_generation_to_bus,
     setup_rag_and_context,
     should_use_rag,
@@ -669,7 +670,17 @@ async def retry(
             message.trace = trace_entries if trace_entries else None
             message.artifact_ids = artifact_ids if artifact_ids else None
             existing_metadata = dict(getattr(message, "metadata", {}) or {})
+            # A retry that lands on another endpoint must re-stamp attribution,
+            # or the message keeps the failed endpoint from the first attempt.
+            endpoint = (
+                prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
+            )
             existing_metadata.update({"latencies": latencies, "prompts": prompts})
+            if endpoint:
+                existing_metadata["endpoint"] = endpoint
+                existing_metadata["generated_model_name"] = (
+                    resolve_generated_model_name(endpoint)
+                )
             if answer:
                 existing_metadata.pop("error", None)
             else:
@@ -720,6 +731,9 @@ async def retry(
         message.use_rag = is_rag
         message.stopped = False
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        # Same re-stamp as the agentic branch above: stale attribution outlives
+        # the answer it described otherwise.
+        endpoint = prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
         existing_metadata.update(
             {
                 "latencies": latencies,
@@ -727,6 +741,11 @@ async def retry(
                 "retrieved_docs": retrieved_docs,
             }
         )
+        if endpoint:
+            existing_metadata["endpoint"] = endpoint
+            existing_metadata["generated_model_name"] = resolve_generated_model_name(
+                endpoint
+            )
         if answer:
             existing_metadata.pop("error", None)
         else:
