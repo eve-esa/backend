@@ -2106,6 +2106,7 @@ async def create_agentic_message_stream(
         cancel_mgr = get_cancel_manager()
         cancel_event = cancel_mgr.create(message.id)
         cancel_mgr.link_conversation(conversation_id, message.id)
+        subscriber_ready = asyncio.Event()
         gen_task = asyncio.create_task(
             run_agentic_generation_to_bus(
                 request=request,
@@ -2114,6 +2115,7 @@ async def create_agentic_message_stream(
                 user_id=requesting_user.id,
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
+                subscriber_ready=subscriber_ready,
             )
         )
         cancel_mgr.set_task(message.id, gen_task)
@@ -2126,7 +2128,7 @@ async def create_agentic_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id):
+            async for data in bus.subscribe(message.id, ready=subscriber_ready):
                 yield data
 
         response = StreamingResponse(
