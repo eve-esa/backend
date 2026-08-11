@@ -25,9 +25,11 @@ from src.schemas.generation_request import GenerationRequest
 from src.schemas.message import CreateMessageResponse, MessageUpdate
 from src.services.cancel_manager import get_cancel_manager
 from src.services.generate_answer import (
+    build_error_payload,
     generate_answer,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
+    persist_message_state,
     run_generation_to_bus,
     setup_rag_and_context,
     should_use_rag,
@@ -654,10 +656,12 @@ async def retry(
             message.output = answer
             message.documents = tool_results
             message.use_rag = use_rag
+            message.stopped = False
             message.trace = trace_entries if trace_entries else None
             message.artifact_ids = artifact_ids if artifact_ids else None
             existing_metadata = dict(getattr(message, "metadata", {}) or {})
             existing_metadata.update({"latencies": latencies, "prompts": prompts})
+            existing_metadata.pop("error", None)
             message.metadata = existing_metadata
             await message.save()
             await consume_tokens_for_user(
@@ -699,6 +703,7 @@ async def retry(
         message.output = answer
         message.documents = documents_data
         message.use_rag = is_rag
+        message.stopped = False
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         existing_metadata.update(
             {
@@ -707,6 +712,7 @@ async def retry(
                 "retrieved_docs": retrieved_docs,
             }
         )
+        existing_metadata.pop("error", None)
         message.metadata = existing_metadata
         await message.save()
         await consume_tokens_for_user(
@@ -733,6 +739,10 @@ async def retry(
     except HTTPException:
         raise
     except Exception as e:
+        # A failed retry must stay visible as a failure: without this write the
+        # document keeps its pre-retry state and the frontend cannot tell the
+        # retry ever happened, let alone that it failed.
+        await persist_message_state(message_id, error=build_error_payload(e))
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
@@ -1865,7 +1875,7 @@ async def create_agentic_message(
             documents=[],
             use_rag=False,
             request_input=request,
-            metadata={},
+            metadata={"pipeline": "agentic"},
             attachments=attachments,
         )
         set_message_context(message.id)
@@ -2021,7 +2031,7 @@ async def create_agentic_message_stream(
             documents=[],
             use_rag=False,
             request_input=request,
-            metadata={},
+            metadata={"pipeline": "agentic"},
             attachments=attachments,
         )
         set_message_context(message.id)

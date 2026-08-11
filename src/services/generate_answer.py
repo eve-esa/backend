@@ -157,6 +157,31 @@ def _filter_null_values(data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+_TIMEOUT_ERROR_NAMES = {
+    "NodeTimeoutError",
+    "TimeoutError",
+    "APITimeoutError",
+    "ReadTimeout",
+    "ConnectTimeout",
+}
+
+
+def build_error_payload(exc: BaseException) -> Dict[str, Any]:
+    """Shape an exception for Message.metadata.error and the SSE error event.
+
+    ``code`` is what the frontend keys its copy on: "timeout" almost always
+    means a serverless cold start (retry succeeds once the endpoint is warm),
+    anything else is a generic upstream failure.
+    """
+    name = type(exc).__name__
+    code = (
+        "timeout"
+        if isinstance(exc, TimeoutError) or name in _TIMEOUT_ERROR_NAMES
+        else "upstream_error"
+    )
+    return {"code": code, "type": name, "message": str(exc)[:500]}
+
+
 async def persist_message_state(
     message_id: str,
     *,
@@ -1793,7 +1818,12 @@ async def generate_answer_stream_generator_helper(
             description="Error during streaming generation",
             error_type=type(e).__name__,
         )
-        err_payload = {"type": "error", "message": str(e)}
+        error_info = build_error_payload(e)
+        err_payload = {
+            "type": "error",
+            "code": error_info["code"],
+            "message": str(e),
+        }
         await persist_message_state(
             message_id,
             output=("".join(locals().get("accumulated") or [])),
@@ -1803,6 +1833,7 @@ async def generate_answer_stream_generator_helper(
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
             generated_model_name=locals().get("generated_model_name"),
+            error=error_info,
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"

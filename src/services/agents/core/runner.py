@@ -27,6 +27,7 @@ from src.services.custom_model_service import (
 from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
     _get_conversation_history_from_db,
+    build_error_payload,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -1047,7 +1048,15 @@ async def generate_answer_agentic_stream_helper(
             else:
                 yield "data: [DONE]\n\n"
         else:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Generation timed out'})}\n\n"
+            error_info = build_error_payload(exc)
+            with contextlib.suppress(Exception):
+                await persist_message_state(
+                    message_id,
+                    output="",
+                    error=error_info,
+                    artifact_ids=_collected_artifact_ids(),
+                )
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': 'Generation timed out'})}\n\n"
 
     except Exception as exc:
         logger.error("Agentic streaming error: %s", exc)
@@ -1058,13 +1067,15 @@ async def generate_answer_agentic_stream_helper(
             description="Agentic streaming error",
             error_type=type(exc).__name__,
         )
+        error_info = build_error_payload(exc)
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
                 output="".join(accumulated),
+                error=error_info,
                 artifact_ids=_collected_artifact_ids(),
             )
-        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': str(exc)})}\n\n"
 
     finally:
         reset_artifact_context(artifact_token)
