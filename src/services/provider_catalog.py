@@ -18,7 +18,7 @@ import yaml
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from src.config import IS_PROD
+from src.config import EVE_JSC_BASE_URL, FEATURE_JSC_MODEL, IS_PROD
 from src.database.models.catalog_platform_model import CatalogPlatformModelDoc
 from src.database.models.catalog_provider import (
     CatalogProviderDoc,
@@ -36,6 +36,9 @@ PROVIDER_MODELS_PATH = os.getenv("PROVIDER_MODELS_PATH", "provider_models.yaml")
 PROVIDER_CATALOG_CACHE_TTL_SECONDS = float(
     os.getenv("PROVIDER_CATALOG_CACHE_TTL_SECONDS", "60")
 )
+
+JSC_PLATFORM_MODEL_ID = "eve-instruct-jsc"
+JSC_LLM_TYPE = "eve_jsc"
 
 
 class CatalogModel(BaseModel):
@@ -167,7 +170,14 @@ def invalidate_catalog_cache() -> None:
 
 
 def clear_provider_catalog_cache_for_tests() -> None:
+    # The lock is replaced, not only the cache: /models loads the catalog through
+    # asyncio.gather, and a contended acquire binds the lock to the running event
+    # loop. pytest-asyncio gives every test a fresh loop, so a binding left behind
+    # by one test makes the next contended acquire raise "bound to a different
+    # event loop".
+    global _cache_lock
     invalidate_catalog_cache()
+    _cache_lock = asyncio.Lock()
 
 
 async def _fetch_catalog_from_mongo() -> LoadedCatalog:
@@ -230,9 +240,25 @@ async def _load_catalog() -> LoadedCatalog:
         return catalog
 
 
+def _should_inject_jsc(catalog: LoadedCatalog) -> bool:
+    """Whether to prepend the JSC platform model at serve time.
+
+    Injected here rather than seeded: the flag must be able to make the entry
+    disappear, and a Mongo document would survive the flag being turned off.
+    A blank base URL wins over the flag. If the back office ever inserts a JSC
+    document into Mongo, that document wins and this injection steps aside.
+    """
+    if not (FEATURE_JSC_MODEL and EVE_JSC_BASE_URL):
+        return False
+    return not any(
+        model.id == JSC_PLATFORM_MODEL_ID or model.llm_type == JSC_LLM_TYPE
+        for model in catalog.platform
+    )
+
+
 async def list_platform_models() -> List[PlatformModel]:
     catalog = await _load_catalog()
-    return [
+    models = [
         PlatformModel(
             id=model.id,
             llm_type=model.llm_type,
@@ -241,6 +267,20 @@ async def list_platform_models() -> List[PlatformModel]:
         )
         for model in catalog.platform
     ]
+    if _should_inject_jsc(catalog):
+        models.insert(
+            0,
+            PlatformModel(
+                id=JSC_PLATFORM_MODEL_ID,
+                llm_type=JSC_LLM_TYPE,
+                display_name="EVE-Instruct (JSC)",
+                description=(
+                    "EVE instruction-tuned model served by the "
+                    "Jülich Supercomputing Centre"
+                ),
+            ),
+        )
+    return models
 
 
 async def list_provider_catalog() -> List[ProviderCatalogPublic]:
