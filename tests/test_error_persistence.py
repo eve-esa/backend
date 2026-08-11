@@ -20,11 +20,13 @@ class _NodeTimeoutError(Exception):
 _NodeTimeoutError.__name__ = "NodeTimeoutError"
 
 
+@pytest.mark.no_db
 def test_timeout_errors_map_to_the_timeout_code():
     assert build_error_payload(TimeoutError("first token"))["code"] == "timeout"
     assert build_error_payload(_NodeTimeoutError("node"))["code"] == "timeout"
 
 
+@pytest.mark.no_db
 def test_other_errors_map_to_upstream_error():
     payload = build_error_payload(ValueError("No generations found in stream."))
     assert payload["code"] == "upstream_error"
@@ -32,6 +34,7 @@ def test_other_errors_map_to_upstream_error():
     assert "No generations" in payload["message"]
 
 
+@pytest.mark.no_db
 def test_error_message_is_truncated():
     payload = build_error_payload(RuntimeError("x" * 2000))
     assert len(payload["message"]) == 500

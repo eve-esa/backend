@@ -632,6 +632,11 @@ async def retry(
             )
         await enforce_token_budget_or_raise(requesting_user)
 
+        # Flips as soon as the regenerated answer is saved: a later failure
+        # (token accounting, rollup scheduling) must not stamp an error onto a
+        # message that now carries a perfectly good answer.
+        generation_persisted = False
+
         if is_agentic_generation_request(message.request_input, message):
             request = await _prepare_agentic_request(
                 message.request_input, requesting_user
@@ -661,9 +666,19 @@ async def retry(
             message.artifact_ids = artifact_ids if artifact_ids else None
             existing_metadata = dict(getattr(message, "metadata", {}) or {})
             existing_metadata.update({"latencies": latencies, "prompts": prompts})
-            existing_metadata.pop("error", None)
+            if answer:
+                existing_metadata.pop("error", None)
+            else:
+                # An empty regeneration is not a success: without a marker the
+                # frontend would render a blank bubble with no explanation.
+                existing_metadata["error"] = {
+                    "code": "upstream_error",
+                    "type": "EmptyAnswer",
+                    "message": "The model returned an empty answer",
+                }
             message.metadata = existing_metadata
             await message.save()
+            generation_persisted = True
             await consume_tokens_for_user(
                 requesting_user, count_tokens_for_texts(message.input, answer)
             )
@@ -712,9 +727,17 @@ async def retry(
                 "retrieved_docs": retrieved_docs,
             }
         )
-        existing_metadata.pop("error", None)
+        if answer:
+            existing_metadata.pop("error", None)
+        else:
+            existing_metadata["error"] = {
+                "code": "upstream_error",
+                "type": "EmptyAnswer",
+                "message": "The model returned an empty answer",
+            }
         message.metadata = existing_metadata
         await message.save()
+        generation_persisted = True
         await consume_tokens_for_user(
             requesting_user, count_tokens_for_texts(message.input, answer)
         )
@@ -741,8 +764,11 @@ async def retry(
     except Exception as e:
         # A failed retry must stay visible as a failure: without this write the
         # document keeps its pre-retry state and the frontend cannot tell the
-        # retry ever happened, let alone that it failed.
-        await persist_message_state(message_id, error=build_error_payload(e))
+        # retry ever happened, let alone that it failed. Skipped once the fresh
+        # answer is saved, so post-save bookkeeping failures cannot stamp an
+        # error onto a good answer.
+        if not locals().get("generation_persisted"):
+            await persist_message_state(message_id, error=build_error_payload(e))
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 

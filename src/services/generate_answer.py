@@ -235,6 +235,11 @@ async def persist_message_state(
             filtered_error = _filter_null_values(error)
             if filtered_error:
                 existing_error = existing_metadata.get("error", {}) or {}
+                # Legacy router handlers stored metadata.error as a plain
+                # string; merging into one raises and the blanket except below
+                # would drop the whole write.
+                if not isinstance(existing_error, dict):
+                    existing_error = {"legacy_message": str(existing_error)}
                 existing_metadata["error"] = {**existing_error, **filtered_error}
         message.metadata = existing_metadata
         await message.save()
@@ -1801,7 +1806,10 @@ async def generate_answer_stream_generator_helper(
             message_id,
             output="".join(locals().get("accumulated") or []),
             documents=locals().get("results") or [],
-            use_rag=locals().get("rag_decision_result").use_rag,
+            # A failure before the RAG decision leaves rag_decision_result
+            # unbound; a raw attribute access here would crash the handler
+            # before anything is persisted.
+            use_rag=getattr(locals().get("rag_decision_result"), "use_rag", None),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
@@ -1828,7 +1836,10 @@ async def generate_answer_stream_generator_helper(
             message_id,
             output=("".join(locals().get("accumulated") or [])),
             documents=locals().get("results") or [],
-            use_rag=(locals().get("rag_decision_result").use_rag),
+            # Same guard as the cancellation handler: the whole point of this
+            # branch is to persist the failure, so it must not crash on state
+            # that a pre-RAG failure never bound.
+            use_rag=getattr(locals().get("rag_decision_result"), "use_rag", None),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
