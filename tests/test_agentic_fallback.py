@@ -6,9 +6,12 @@ Covers:
 - _resolve_agentic_llm_client: endpoint chain resolution and honest attribution
 - generate_answer_agentic: records in-graph fallback via agent_fallback node
 - generate_answer_agentic_stream_helper: no UnboundLocalError on early setup failure
+- generate_answer_agentic_stream_helper: pre-answer status event
 """
 
+import asyncio
 import contextlib
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -561,3 +564,51 @@ class TestStreamingEarlyFailure:
 
         assert any('"type": "error"' in event for event in events)
         assert manager.health.is_open("main") is True
+
+
+def _event_payload(event: str) -> dict:
+    return json.loads(event.removeprefix("data: ").strip())
+
+
+class TestStreamingStatusEvent:
+    async def test_status_is_the_first_event(self):
+        """Tool building blocks for seconds: the UI needs a notice before it."""
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})],
+        )
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            events = [
+                event
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert events, "expected at least one SSE event"
+        assert _event_payload(events[0]) == {"type": "status", "content": "Thinking…"}
+
+    async def test_cancelled_turn_emits_only_stopped(self):
+        """A turn cancelled before setup must not announce work it never starts."""
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        cancel_event = asyncio.Event()
+        cancel_event.set()
+
+        with _patched_runner() as patched:
+            events = [
+                event
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                    cancel_event=cancel_event,
+                )
+            ]
+
+        assert [_event_payload(event)["type"] for event in events] == ["stopped"]
+        patched["_build_tools"].assert_not_awaited()

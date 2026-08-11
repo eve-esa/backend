@@ -766,6 +766,8 @@ async def generate_answer_agentic_stream_helper(
     """Stream agentic generation as SSE events.
 
     Event types emitted:
+      status      — pre-answer progress notice (emitted immediately so the
+                    stream starts promptly)
       tool_call   — agent invoked a tool (query shown)
       tool_result — tool returned (preview)
       token       — LLM final-answer token
@@ -803,6 +805,8 @@ async def generate_answer_agentic_stream_helper(
             )
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
+
+        yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
 
         tools = await _build_tools(request, cancel_event=cancel_event)
         checkpointer = await _get_agentic_checkpointer()
