@@ -74,6 +74,10 @@ EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
 # Off means the feature is not published: /signup answers 404, as if it had never
 # been built, rather than 403, which would confirm it exists and is merely shut.
 FEATURE_SELF_SIGNUP = getenv_or("FEATURE_SELF_SIGNUP").lower() == "true"
+# On: GET /models lists the JSC-hosted EVE model first, and the frontend takes the
+# first entry as its default. A blank EVE_JSC_BASE_URL wins over the flag: an
+# endpoint that is not configured must not be offered, whatever the flag says.
+FEATURE_JSC_MODEL = getenv_or("FEATURE_JSC_MODEL").lower() == "true"
 
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
