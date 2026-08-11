@@ -25,6 +25,7 @@ from src.schemas.generation_request import GenerationRequest
 from src.schemas.message import CreateMessageResponse, MessageUpdate
 from src.services.cancel_manager import get_cancel_manager
 from src.services.generate_answer import (
+    build_empty_answer_payload,
     build_error_payload,
     generate_answer,
     get_shared_llm_manager,
@@ -562,7 +563,7 @@ async def create_message(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                existing_metadata["error"] = build_error_payload(http_exc)
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
@@ -572,7 +573,7 @@ async def create_message(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(e)
+                existing_metadata["error"] = build_error_payload(e)
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
@@ -605,6 +606,13 @@ async def retry(
     Raises:
         HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.
     """
+    # Hoisted so the failure handler reads plain locals. ownership_validated
+    # arms the error persist only after the caller's right to touch this
+    # message is proven; generation_persisted disarms it once a fresh answer
+    # is saved, so post-save bookkeeping failures cannot stamp an error onto a
+    # good answer.
+    ownership_validated = False
+    generation_persisted = False
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -630,12 +638,8 @@ async def retry(
                 status_code=400,
                 detail="This message cannot be retried",
             )
+        ownership_validated = True
         await enforce_token_budget_or_raise(requesting_user)
-
-        # Flips as soon as the regenerated answer is saved: a later failure
-        # (token accounting, rollup scheduling) must not stamp an error onto a
-        # message that now carries a perfectly good answer.
-        generation_persisted = False
 
         if is_agentic_generation_request(message.request_input, message):
             request = await _prepare_agentic_request(
@@ -671,11 +675,7 @@ async def retry(
             else:
                 # An empty regeneration is not a success: without a marker the
                 # frontend would render a blank bubble with no explanation.
-                existing_metadata["error"] = {
-                    "code": "upstream_error",
-                    "type": "EmptyAnswer",
-                    "message": "The model returned an empty answer",
-                }
+                existing_metadata["error"] = build_empty_answer_payload()
             message.metadata = existing_metadata
             await message.save()
             generation_persisted = True
@@ -730,11 +730,7 @@ async def retry(
         if answer:
             existing_metadata.pop("error", None)
         else:
-            existing_metadata["error"] = {
-                "code": "upstream_error",
-                "type": "EmptyAnswer",
-                "message": "The model returned an empty answer",
-            }
+            existing_metadata["error"] = build_empty_answer_payload()
         message.metadata = existing_metadata
         await message.save()
         generation_persisted = True
@@ -764,12 +760,18 @@ async def retry(
     except Exception as e:
         # A failed retry must stay visible as a failure: without this write the
         # document keeps its pre-retry state and the frontend cannot tell the
-        # retry ever happened, let alone that it failed. Skipped once the fresh
-        # answer is saved, so post-save bookkeeping failures cannot stamp an
-        # error onto a good answer.
-        if not locals().get("generation_persisted"):
-            await persist_message_state(message_id, error=build_error_payload(e))
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        # retry ever happened, let alone that it failed. stopped is reset too,
+        # or a retried stopped message that fails again would render as a dead
+        # end (no error text, no retry affordance).
+        error_info = build_error_payload(e)
+        if ownership_validated and not generation_persisted:
+            await persist_message_state(
+                message_id, stopped=False, error=error_info
+            )
+        raise HTTPException(
+            status_code=500,
+            detail={"code": error_info["code"], "message": error_info["message"]},
+        ) from e
 
 
 @router.patch("/conversations/{conversation_id}/messages/{message_id}")
@@ -1524,10 +1526,12 @@ async def stream_hallucination(
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         except Exception as e:
-            # Persist error and stream error event
+            # Persist error and stream error event. Namespaced key: a failed
+            # hallucination check on a good answer must not plant a generation
+            # error that a later retry would clear.
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(e)
+                existing_metadata["hallucination_error"] = build_error_payload(e)
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
@@ -1948,7 +1952,7 @@ async def create_agentic_message(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(getattr(http_exc, "detail", http_exc))
+                existing_metadata["error"] = build_error_payload(http_exc)
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
@@ -1958,7 +1962,7 @@ async def create_agentic_message(
         if message:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["error"] = str(e)
+                existing_metadata["error"] = build_error_payload(e)
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:

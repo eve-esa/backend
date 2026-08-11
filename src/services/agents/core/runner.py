@@ -707,7 +707,10 @@ async def generate_answer_agentic_stream_helper(
 
     """
     if not _langgraph_available:
-        yield f"data: {json.dumps({'type': 'error', 'message': 'LangGraph not available'})}\n\n"
+        error_info = build_error_payload(RuntimeError("LangGraph not available"))
+        with contextlib.suppress(Exception):
+            await persist_message_state(message_id, error=error_info)
+        yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
         return
 
     error_logger = get_error_logger()
@@ -1056,7 +1059,7 @@ async def generate_answer_agentic_stream_helper(
                     error=error_info,
                     artifact_ids=_collected_artifact_ids(),
                 )
-            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': 'Generation timed out'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     except Exception as exc:
         logger.error("Agentic streaming error: %s", exc)
@@ -1075,7 +1078,7 @@ async def generate_answer_agentic_stream_helper(
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
             )
-        yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': str(exc)})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
         reset_artifact_context(artifact_token)
@@ -1152,9 +1155,14 @@ async def run_agentic_generation_to_bus(
     except asyncio.CancelledError:
         pass
     except Exception as exc:
+        # Outer safety net: it fires exactly when the inner handlers did not,
+        # so it must persist the marker itself or the turn stays a blank shell.
+        error_info = build_error_payload(exc)
+        with contextlib.suppress(Exception):
+            await persist_message_state(message_id, error=error_info)
         await bus.publish(
             message_id,
-            f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n",
+            f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n",
         )
     finally:
         try:
