@@ -504,8 +504,10 @@ class TestStreamingEarlyFailure:
         assert kwargs["trace"]
         assert kwargs["trace"][-1]["node"] == "agent_fallback"
 
-    async def test_in_graph_fallback_reattributes_and_opens_the_primary(self):
-        """The graph swallows the primary's error, so the switch is the evidence."""
+    async def test_in_graph_fallback_reattributes_without_opening_the_circuit(self):
+        """The graph swallows the primary's error, so it cannot be classified:
+        re-attribute the answer, but never park the endpoint on evidence that
+        could be a prompt-level 400 reproducing on every send."""
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
         graph = _FakeStreamGraph(
             updates=[{"agent_fallback": {"messages": [AIMessage(content="")]}}],
@@ -536,7 +538,7 @@ class TestStreamingEarlyFailure:
         assert endpoint["requested"] == "main"
         assert endpoint["answered"] == "fallback"
         assert endpoint["substituted"] is True
-        assert manager.health.is_open("main") is True
+        assert manager.health.is_open("main") is False
 
     async def test_a_streaming_failure_opens_the_resolved_endpoint(self):
         request = GenerationRequest(query="hi", llm_type="main", agent="react")

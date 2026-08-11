@@ -35,10 +35,13 @@ treat unknown codes as `upstream_error`.
 
 ## `metadata.endpoint`
 
-A turn walks an ordered chain of model endpoints (`EVE_ENDPOINT_ORDER`) and
-skips the ones whose circuit a recent failure has opened. `metadata.endpoint`
-records what that walk did, additively; no error code is involved, because a
-turn that fell through to the next endpoint succeeded:
+A streaming turn walks an ordered chain of model endpoints
+(`EVE_ENDPOINT_ORDER`) and skips the ones whose circuit a recent failure has
+opened; non-streaming turns take the head of the chain only (no in-request
+walk, and their failures do not feed the circuit). `metadata.endpoint` records
+what happened, additively; no error code is involved when a turn that fell
+through to the next endpoint succeeded. A mid-stream failure persists the
+payload with `answered: null` and the failed attempt listed:
 
 ```json
 {"requested": "eve_jsc",

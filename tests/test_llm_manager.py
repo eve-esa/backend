@@ -1,6 +1,7 @@
 import pytest
 
 from src.config import EVE_JSC_TIMEOUT, MAIN_MODEL_TIMEOUT
+from src.core.llm_health import EndpointHealth
 from src.core.llm_manager import LLMManager, LLMType
 
 
@@ -173,3 +174,30 @@ def test_each_endpoint_carries_its_own_first_token_budget(
 
     assert captured["timeout"] == expected_timeout
     assert captured["max_retries"] == 0
+
+
+@pytest.mark.no_db
+def test_chain_without_configured_fallback_keeps_every_candidate(monkeypatch):
+    """The walk must not assume a trailing fallback: with the fallback model
+    unconfigured the chain ends on a real candidate, and dropping it would
+    skip a healthy endpoint entirely."""
+    manager = LLMManager.__new__(LLMManager)
+    manager._health = EndpointHealth(120)
+    monkeypatch.setattr(
+        manager,
+        "_is_configured",
+        lambda name: name in {"eve_jsc", "main"},
+    )
+    assert manager.resolve_chain(None) == ["eve_jsc", "main"]
+    assert manager.resolve_chain("eve_jsc") == ["eve_jsc"]
+
+
+@pytest.mark.no_db
+def test_legacy_names_in_endpoint_order_are_canonicalised(monkeypatch):
+    manager = LLMManager.__new__(LLMManager)
+    manager._health = EndpointHealth(120)
+    monkeypatch.setattr(manager, "_is_configured", lambda name: True)
+    monkeypatch.setattr(
+        "src.core.llm_manager.EVE_ENDPOINT_ORDER", "runpod,mistral"
+    )
+    assert manager.resolve_chain(None) == ["main", "fallback"]

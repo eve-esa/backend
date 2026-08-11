@@ -532,6 +532,9 @@ async def create_message(
         message.documents = documents_data
         message.use_rag = is_rag
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        # Same lift as the retry branches: metadata.endpoint is the contract
+        # location, prompts is only the transport out of generate_answer.
+        endpoint = prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
         existing_metadata.update(
             {
                 "latencies": latencies,
@@ -539,6 +542,11 @@ async def create_message(
                 "retrieved_docs": retrieved_docs,
             }
         )
+        if endpoint:
+            existing_metadata["endpoint"] = endpoint
+            existing_metadata["generated_model_name"] = resolve_generated_model_name(
+                endpoint
+            )
         message.metadata = existing_metadata
         await message.save()
         await consume_tokens_for_user(
@@ -1949,7 +1957,15 @@ async def create_agentic_message(
         message.trace = trace_entries if trace_entries else None
         message.artifact_ids = artifact_ids if artifact_ids else None
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
+        # Same lift as the retry branches: metadata.endpoint is the contract
+        # location, prompts is only the transport out of the generator.
+        endpoint = prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
         existing_metadata.update({"latencies": latencies, "prompts": prompts})
+        if endpoint:
+            existing_metadata["endpoint"] = endpoint
+            existing_metadata["generated_model_name"] = resolve_generated_model_name(
+                endpoint
+            )
         message.metadata = existing_metadata
         await message.save()
         await consume_tokens_for_user(

@@ -337,6 +337,9 @@ class LLMManager:
 
         candidates: list[str] = []
         for name in names:
+            # Legacy spellings are valid in the env var too, not only in
+            # stored requests.
+            name = canonical_llm_type(name) or ""
             if not name or name in candidates:
                 continue
             if name not in _KNOWN_LLM_TYPES:

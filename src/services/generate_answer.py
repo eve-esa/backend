@@ -1655,6 +1655,15 @@ async def generate_answer_stream_generator_helper(
         # fallback model, which the Mistral branch below already serves, so the
         # loop walks everything before it.
         chain = llm_manager.resolve_chain(request.llm_type)
+        # Strip ONLY a trailing fallback, and only when something precedes it:
+        # with the fallback model unconfigured the chain has no such tail, and
+        # an explicit fallback pick must still stream through the graph (its
+        # turns belong in the conversation thread like any other model's).
+        walkable = (
+            chain[:-1]
+            if len(chain) > 1 and chain[-1] == LLMType.Fallback.value
+            else chain
+        )
         circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
         endpoint_attempts: List[Dict[str, str]] = []
         answered_by: Optional[str] = None
@@ -1669,7 +1678,7 @@ async def generate_answer_stream_generator_helper(
 
         # Try optimized LangGraph streaming first
         if _langgraph_available and conversation_id and not is_main_LLM_fail:
-            for candidate in chain[:-1]:
+            for candidate in walkable:
                 try:
                     gen_start = time.perf_counter()
                     graph, mode = await _get_or_create_compiled_graph()
@@ -1790,7 +1799,11 @@ async def generate_answer_stream_generator_helper(
                             )
                             used_stream = False
                             note_failed_candidate(candidate, e)
-                            if tokens_yielded:
+                            # accumulated, not tokens_yielded: the first delta
+                            # is often role-only with empty content, and only
+                            # text actually sent to the client forbids trying
+                            # the next candidate.
+                            if accumulated:
                                 stream_error = e
                         finally:
                             # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
@@ -1815,13 +1828,13 @@ async def generate_answer_stream_generator_helper(
                         error_type=type(e).__name__,
                     )
                     note_failed_candidate(candidate, e)
-                    if tokens_yielded:
+                    if accumulated:
                         stream_error = e
 
                 if used_stream:
                     break
                 if stream_error is not None:
-                    # Tokens are already on the wire: another candidate would
+                    # Text is already on the wire: another candidate would
                     # append a second answer to the same message, so this turn
                     # ends here with the partial the client already has. The
                     # handler below persists it alongside metadata.error.
@@ -1975,6 +1988,22 @@ async def generate_answer_stream_generator_helper(
             "code": error_info["code"],
             "message": error_info["message"],
         }
+        # The mid-stream commit-to-partial raise lands here: the walk state is
+        # in scope, and the partial is exactly the message the endpoint
+        # attribution exists to explain.
+        failed_chain = locals().get("chain")
+        endpoint_info = (
+            build_endpoint_metadata(
+                requested=request.llm_type,
+                chain=failed_chain,
+                answered=locals().get("answered_by"),
+                attempts=locals().get("endpoint_attempts"),
+                circuit_open=locals().get("circuit_open"),
+            )
+            if failed_chain
+            else None
+        )
+        answered = locals().get("answered_by")
         await persist_message_state(
             message_id,
             output=("".join(locals().get("accumulated") or [])),
@@ -1986,7 +2015,10 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
-            generated_model_name=locals().get("generated_model_name"),
+            generated_model_name=(
+                _resolve_model_name_for_llm_type(answered) if answered else None
+            ),
+            endpoint=endpoint_info,
             error=error_info,
         )
 

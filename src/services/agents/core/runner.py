@@ -334,10 +334,21 @@ async def _resolve_agentic_llm_client(
     }
 
 
+class _AgenticBudgetTimeout(TimeoutError):
+    """The whole-run AGENTIC_TIMEOUT guard fired.
+
+    Distinct type on purpose: that budget includes tool execution, so it says
+    nothing about the LLM endpoint's health and must never open its circuit
+    (slow MCP tools would otherwise park a healthy endpoint for everyone).
+    """
+
+
 def _record_endpoint_failure(
     endpoint: Optional[Dict[str, Any]], exc: BaseException
 ) -> None:
     """Open the answering endpoint's circuit when *exc* means it is down."""
+    if isinstance(exc, _AgenticBudgetTimeout):
+        return
     answered = (endpoint or {}).get("answered")
     if answered and is_endpoint_failure(exc):
         get_shared_llm_manager().health.record_failure(answered, exc)
@@ -346,17 +357,14 @@ def _record_endpoint_failure(
 def _record_in_graph_fallback(
     endpoint: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Re-attribute to the fallback model and open the primary's circuit.
+    """Re-attribute the answer to the fallback model.
 
-    The graph's own error_handler swallows the primary node's exception, so the
-    switch to ``agent_fallback`` is the only evidence this backend gets that the
-    endpoint it picked could not answer.
+    Deliberately does NOT open the primary's circuit: the graph's error_handler
+    swallows the node's exception, so the failure cannot be classified here,
+    and a prompt-level 400 (the strict-template class) reproducing on every
+    send would otherwise park a healthy endpoint indefinitely. Transport-level
+    failures still open the circuit through the classified paths.
     """
-    answered = (endpoint or {}).get("answered")
-    if answered and answered != LLMType.Fallback.value:
-        get_shared_llm_manager().health.record_failure(
-            answered, RuntimeError("agent node fell back to the fallback model")
-        )
     return endpoint_answered_by(endpoint, LLMType.Fallback.value)
 
 
@@ -705,6 +713,8 @@ async def generate_answer_agentic(
         }
         if used_fallback_llm:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
+            # Same re-point as the streaming path: the footer reads this key.
+            llm_metadata["agentic_llm_resolved"] = LLMType.Fallback.value
         prompts: Dict[str, Any] = {
             "query": request.query,
             "instruction": resolved_instruction,
@@ -880,7 +890,7 @@ async def generate_answer_agentic_stream_helper(
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
                 if elapsed > AGENTIC_TIMEOUT:
-                    raise TimeoutError(
+                    raise _AgenticBudgetTimeout(
                         "No final-answer token received within AGENTIC_TIMEOUT"
                     )
                 first_token_latency = time.perf_counter() - total_start
@@ -1056,6 +1066,9 @@ async def generate_answer_agentic_stream_helper(
 
         if in_graph_fallback_used:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
+            # The footer prefers agentic_llm_resolved when a fallback ran; it
+            # must name the model that answered, not the one that died.
+            llm_prompts["agentic_llm_resolved"] = LLMType.Fallback.value
         await persist_message_state(
             message_id,
             output=answer,
