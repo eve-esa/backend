@@ -15,7 +15,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import BackgroundTasks
 
 from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
-from src.core.llm_manager import LLMType
+from src.core.llm_health import is_endpoint_failure
+from src.core.llm_manager import LLMType, endpoint_timeout
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.custom_model_service import (
@@ -27,7 +28,9 @@ from src.services.custom_model_service import (
 from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
     _get_conversation_history_from_db,
+    build_endpoint_metadata,
     build_error_payload,
+    endpoint_answered_by,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -310,9 +313,59 @@ async def _resolve_agentic_llm_client(
         llm = await build_custom_model_llm(model)
         return llm, custom_model_metadata(model)
 
+    manager = get_shared_llm_manager()
     effective_type = _resolve_agentic_llm_type(request.llm_type)
-    llm = get_shared_llm_manager().get_client_for_model(effective_type)
-    return llm, {"agentic_llm_resolved": effective_type}
+    chain = manager.resolve_chain(effective_type)
+    circuit_open = [name for name in chain if manager.health.is_open(name)]
+    # resolve_chain has already sunk open circuits to the back, and kept the
+    # configured order when every one of them is open, so the head is the pick.
+    candidate = chain[0]
+    # client_for_candidate raises instead of quietly substituting Mistral, so
+    # agentic_llm_resolved reports the endpoint that will actually be called.
+    llm = manager.client_for_candidate(candidate)
+    return llm, {
+        "agentic_llm_resolved": candidate,
+        "endpoint": build_endpoint_metadata(
+            requested=request.llm_type,
+            chain=chain,
+            answered=candidate,
+            circuit_open=circuit_open,
+        ),
+    }
+
+
+class _AgenticBudgetTimeout(TimeoutError):
+    """The whole-run AGENTIC_TIMEOUT guard fired.
+
+    Distinct type on purpose: that budget includes tool execution, so it says
+    nothing about the LLM endpoint's health and must never open its circuit
+    (slow MCP tools would otherwise park a healthy endpoint for everyone).
+    """
+
+
+def _record_endpoint_failure(
+    endpoint: Optional[Dict[str, Any]], exc: BaseException
+) -> None:
+    """Open the answering endpoint's circuit when *exc* means it is down."""
+    if isinstance(exc, _AgenticBudgetTimeout):
+        return
+    answered = (endpoint or {}).get("answered")
+    if answered and is_endpoint_failure(exc):
+        get_shared_llm_manager().health.record_failure(answered, exc)
+
+
+def _record_in_graph_fallback(
+    endpoint: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Re-attribute the answer to the fallback model.
+
+    Deliberately does NOT open the primary's circuit: the graph's error_handler
+    swallows the node's exception, so the failure cannot be classified here,
+    and a prompt-level 400 (the strict-template class) reproducing on every
+    send would otherwise park a healthy endpoint indefinitely. Transport-level
+    failures still open the circuit through the classified paths.
+    """
+    return endpoint_answered_by(endpoint, LLMType.Fallback.value)
 
 
 def _resolve_agent_graph_type(request: GenerationRequest) -> str:
@@ -431,6 +484,7 @@ def _build_react_graph(
     llm_type_override: Optional[str] = None,
     fallback_llm: Any = None,
     llm: Any = None,
+    llm_run_timeout: Optional[int] = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -439,7 +493,8 @@ def _build_react_graph(
     ``agent.compile()`` for in-graph node-level fallback.
     ``llm`` is the primary graph model (platform or user custom).  When
     ``fallback_llm`` is not passed, the platform fallback model is wired
-    automatically.
+    automatically.  ``llm_run_timeout`` is the resolved endpoint's own node
+    budget; without one the generic MODEL_TIMEOUT applies.
     """
     if llm is None:
         effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
@@ -455,7 +510,9 @@ def _build_react_graph(
         history=history,
         summary=summary,
         fallback_llm=fallback_llm,
-        llm_run_timeout=MODEL_TIMEOUT,
+        llm_run_timeout=(
+            llm_run_timeout if llm_run_timeout is not None else MODEL_TIMEOUT
+        ),
     )
 
 
@@ -514,6 +571,7 @@ async def generate_answer_agentic(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
+    endpoint_metadata: Optional[Dict[str, Any]] = None
 
     try:
         tools = await _build_tools(request)
@@ -526,6 +584,7 @@ async def generate_answer_agentic(
         llm, llm_metadata = await _resolve_agentic_llm_client(
             request, user_id=user_id
         )
+        endpoint_metadata = llm_metadata.pop("endpoint", None)
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -534,6 +593,7 @@ async def generate_answer_agentic(
             history=history,
             summary=summary,
             llm=llm,
+            llm_run_timeout=endpoint_timeout((endpoint_metadata or {}).get("answered")),
         )
 
         config = {
@@ -651,6 +711,10 @@ async def generate_answer_agentic(
             "total_latency": total_latency,
             **{f"node_{k}_s": v for k, v in node_latencies.items()},
         }
+        if used_fallback_llm:
+            endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
+            # Same re-point as the streaming path: the footer reads this key.
+            llm_metadata["agentic_llm_resolved"] = LLMType.Fallback.value
         prompts: Dict[str, Any] = {
             "query": request.query,
             "instruction": resolved_instruction,
@@ -658,6 +722,9 @@ async def generate_answer_agentic(
             "agent_graph_type": agent_graph_type,
             "used_fallback_llm": used_fallback_llm,
             **llm_metadata,
+            # This function persists nothing itself: the router lifts the
+            # payload out into metadata.endpoint.
+            **({"endpoint": endpoint_metadata} if endpoint_metadata else {}),
         }
 
         return (
@@ -671,6 +738,7 @@ async def generate_answer_agentic(
         )
 
     except Exception as exc:
+        _record_endpoint_failure(endpoint_metadata, exc)
         await error_logger.log_error(
             error=exc,
             component=Component.LLM,
@@ -717,6 +785,7 @@ async def generate_answer_agentic_stream_helper(
     total_start = time.perf_counter()
     accumulated: List[str] = []
     used_fallback_llm = False
+    endpoint_metadata: Optional[Dict[str, Any]] = None
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
@@ -745,6 +814,7 @@ async def generate_answer_agentic_stream_helper(
         llm, llm_prompts = await _resolve_agentic_llm_client(
             request, user_id=user_id
         )
+        endpoint_metadata = llm_prompts.pop("endpoint", None)
 
         graph = _build_react_graph(
             request.llm_type,
@@ -754,6 +824,7 @@ async def generate_answer_agentic_stream_helper(
             history=history,
             summary=summary,
             llm=llm,
+            llm_run_timeout=endpoint_timeout((endpoint_metadata or {}).get("answered")),
         )
 
         config = {
@@ -819,7 +890,7 @@ async def generate_answer_agentic_stream_helper(
             if tokens_yielded == 0:
                 elapsed = time.perf_counter() - gen_start
                 if elapsed > AGENTIC_TIMEOUT:
-                    raise TimeoutError(
+                    raise _AgenticBudgetTimeout(
                         "No final-answer token received within AGENTIC_TIMEOUT"
                     )
                 first_token_latency = time.perf_counter() - total_start
@@ -993,6 +1064,11 @@ async def generate_answer_agentic_stream_helper(
                 error_type=type(graph_exc).__name__,
             )
 
+        if in_graph_fallback_used:
+            endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
+            # The footer prefers agentic_llm_resolved when a fallback ran; it
+            # must name the model that answered, not the one that died.
+            llm_prompts["agentic_llm_resolved"] = LLMType.Fallback.value
         await persist_message_state(
             message_id,
             output=answer,
@@ -1006,6 +1082,7 @@ async def generate_answer_agentic_stream_helper(
                 "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
                 **llm_prompts,
             },
+            endpoint=endpoint_metadata,
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
         )
@@ -1032,6 +1109,7 @@ async def generate_answer_agentic_stream_helper(
 
     except TimeoutError as exc:
         logger.warning("Agentic generation timed out: %s", exc)
+        _record_endpoint_failure(endpoint_metadata, exc)
         await error_logger.log_error(
             error=exc,
             component=Component.LLM,
@@ -1063,6 +1141,7 @@ async def generate_answer_agentic_stream_helper(
 
     except Exception as exc:
         logger.error("Agentic streaming error: %s", exc)
+        _record_endpoint_failure(endpoint_metadata, exc)
         await error_logger.log_error(
             error=exc,
             component=Component.LLM,

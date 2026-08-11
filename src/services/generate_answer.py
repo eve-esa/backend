@@ -18,7 +18,6 @@ from src.config import (
     FALLBACK_MODEL_NAME,
     IS_PROD,
     MAIN_MODEL_NAME,
-    MODEL_TIMEOUT,
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_QDRANT_API_KEY,
     SATCOM_QDRANT_URL,
@@ -32,7 +31,13 @@ from src.constants import (
     POLICY_PROMPT,
     SCRAPING_DOG_ALL_URLS,
 )
-from src.core.llm_manager import LLMManager, LLMType
+from src.core.llm_health import is_endpoint_failure
+from src.core.llm_manager import (
+    LLMManager,
+    LLMType,
+    canonical_llm_type,
+    endpoint_timeout,
+)
 from src.core.vector_store_manager import VectorStoreManager
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
@@ -194,6 +199,56 @@ def build_empty_answer_payload() -> Dict[str, Any]:
     }
 
 
+def build_endpoint_metadata(
+    *,
+    requested: Optional[str],
+    chain: List[str],
+    answered: Optional[str],
+    attempts: Optional[List[Dict[str, str]]] = None,
+    circuit_open: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Shape Message.metadata.endpoint: which endpoint answered, and at what cost.
+
+    ``requested`` is stored canonicalised, so a legacy "runpod" reads as "main"
+    and ``substituted`` stays a plain comparison. ``substituted`` is only true
+    when the request named an endpoint and a different one answered: an
+    unnamed request has nothing to be substituted for. Contract:
+    docs/api/generation-errors.md.
+    """
+    canonical_requested = canonical_llm_type(requested)
+    return {
+        "requested": canonical_requested,
+        "chain": list(chain),
+        "answered": answered,
+        "attempts": attempts or [],
+        "circuit_open": circuit_open or [],
+        "substituted": bool(
+            canonical_requested and answered and answered != canonical_requested
+        ),
+    }
+
+
+def endpoint_answered_by(
+    endpoint: Optional[Dict[str, Any]], answered: str
+) -> Optional[Dict[str, Any]]:
+    """Re-point an endpoint payload at the endpoint that actually answered."""
+    if not endpoint:
+        return endpoint
+    return build_endpoint_metadata(
+        requested=endpoint.get("requested"),
+        chain=endpoint.get("chain") or [],
+        answered=answered,
+        attempts=endpoint.get("attempts"),
+        circuit_open=endpoint.get("circuit_open"),
+    )
+
+
+def resolve_generated_model_name(endpoint: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Model name of the endpoint that answered, for metadata.generated_model_name."""
+    answered = (endpoint or {}).get("answered")
+    return _resolve_model_name_for_llm_type(answered) if answered else None
+
+
 async def persist_message_state(
     message_id: str,
     *,
@@ -208,10 +263,11 @@ async def persist_message_state(
     error: Optional[Dict[str, Any]] = None,
     trace: Optional[List[Dict[str, Any]]] = None,
     artifact_ids: Optional[List[str]] = None,
+    endpoint: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
-    - Merges metadata fields (latencies, prompts, retrieved_docs, generated_model_name, error) without clobbering others.
+    - Merges metadata fields (latencies, prompts, retrieved_docs, generated_model_name, endpoint, error) without clobbering others.
     - Updates output/documents/use_rag if provided.
     - Sets Message.stopped if provided.
     - Filters out null values from error dictionaries before saving.
@@ -243,6 +299,8 @@ async def persist_message_state(
             existing_metadata["retrieved_docs"] = retrieved_docs
         if generated_model_name is not None:
             existing_metadata["generated_model_name"] = generated_model_name
+        if endpoint is not None:
+            existing_metadata["endpoint"] = endpoint
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:
@@ -1154,6 +1212,13 @@ async def generate_answer(
                 }
                 retrieved_docs = []
 
+        # Endpoint chain for this turn. This path has no in-request failover:
+        # the head answers, and the pre-existing fallback branch below is the
+        # only second chance.
+        chain = llm_manager.resolve_chain(request.llm_type)
+        candidate = chain[0]
+        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
 
@@ -1212,7 +1277,7 @@ async def generate_answer(
                         "max_tokens": request.max_new_tokens,
                         "conversation_summary": conversation_summary,
                         "is_streaming": False,
-                        "llm_type": request.llm_type,
+                        "llm_type": candidate,
                     }
                     with langfuse_context(
                         user_id=user_id,
@@ -1270,6 +1335,19 @@ async def generate_answer(
             "is_rag_prompt": rag_decision_prompt,
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
+            # Travels inside prompts because this function's return arity is
+            # part of the router contract; callers that persist attribution
+            # lift it out into metadata.endpoint.
+            "endpoint": build_endpoint_metadata(
+                requested=request.llm_type,
+                chain=chain,
+                answered=(
+                    LLMType.Fallback.value
+                    if fallback_gen_latency is not None
+                    else candidate
+                ),
+                circuit_open=circuit_open,
+            ),
         }
         return (
             rewrite_catalog_image_urls(final_answer),
@@ -1433,6 +1511,10 @@ async def generate_answer_stream_generator_helper(
             conversation_history, conversation_summary
         )
         rag_decision_start = time.perf_counter()
+        # is_main_LLM_fail is a misnomer kept for compatibility: should_use_rag
+        # pins Mistral for the RAG decision whatever the request asked for, so
+        # the flag means "Mistral failed", and it is not a signal about the
+        # endpoint chain below.
         try:
             (
                 rag_decision_result,
@@ -1569,139 +1651,194 @@ async def generate_answer_stream_generator_helper(
         used_stream = False
         tokens_yielded = 0
 
+        # Endpoint chain for this turn. The trailing candidate is always the
+        # fallback model, which the Mistral branch below already serves, so the
+        # loop walks everything before it.
+        chain = llm_manager.resolve_chain(request.llm_type)
+        # Strip ONLY a trailing fallback, and only when something precedes it:
+        # with the fallback model unconfigured the chain has no such tail, and
+        # an explicit fallback pick must still stream through the graph (its
+        # turns belong in the conversation thread like any other model's).
+        walkable = (
+            chain[:-1]
+            if len(chain) > 1 and chain[-1] == LLMType.Fallback.value
+            else chain
+        )
+        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+        endpoint_attempts: List[Dict[str, str]] = []
+        answered_by: Optional[str] = None
+        stream_error: Optional[BaseException] = None
+
+        def note_failed_candidate(candidate: str, exc: BaseException) -> None:
+            endpoint_attempts.append(
+                {"llm_type": candidate, "outcome": build_error_payload(exc)["code"]}
+            )
+            if is_endpoint_failure(exc):
+                llm_manager.health.record_failure(candidate, exc)
+
         # Try optimized LangGraph streaming first
         if _langgraph_available and conversation_id and not is_main_LLM_fail:
-            try:
-                gen_start = time.perf_counter()
-                graph, mode = await _get_or_create_compiled_graph()
-                if graph is not None:
-                    logger.info(
-                        f"Using optimized LangGraph streaming with mode: {mode}"
-                    )
-                    config = {
-                        "configurable": {"thread_id": conversation_id},
-                        "callbacks": get_callbacks(),
-                    }
-
-                    state = {
-                        "messages": add_messages(
-                            [], [_make_message("user", user_content)]
-                        ),
-                        "temperature": request.temperature,
-                        "max_tokens": request.max_new_tokens,
-                        "conversation_summary": conversation_summary,
-                        "is_streaming": True,
-                        "llm_type": request.llm_type,
-                    }
-
-                    logger.info("Using LangGraph astream for streaming")
-                    llm_instruct_timeout = MODEL_TIMEOUT
-                    _lf_exit = contextlib.ExitStack()
-                    _lf_exit.enter_context(
-                        langfuse_context(
-                            user_id=user_id,
-                            session_id=conversation_id,
-                            tags=["classic", "stream", request.llm_type or "default"],
-                            trace_name="generation_stream",
-                        )
-                    )
-                    try:
-                        # Create the async generator once so we can pull the first token with a timeout
-                        astream = graph.astream(
-                            state, config=config, stream_mode="messages"
-                        )
-
-                        # Enforce timeout only for the first token
-                        async with asyncio.timeout(llm_instruct_timeout):
-                            first_chunk, first_metadata = await astream.__anext__()
-                            tokens_yielded += 1
-                            if tokens_yielded == 1:
-                                first_token_latency = time.perf_counter() - total_start
-
-                        first_text = getattr(first_chunk, "content", None)
-                        if first_text:
-                            if output_format == "json":
-                                yield f"data: {json.dumps({'type': 'token', 'content': first_text})}\n\n"
-                            else:
-                                yield f"data: {first_text}\n\n"
-                            accumulated.append(first_text)
-
-                        # Continue streaming remaining tokens without a timeout
-                        async for chunk, metadata in astream:
-                            if cancelled():
-                                with contextlib.suppress(Exception):
-                                    await astream.aclose()
-                                logger.info("LangGraph streaming cancelled")
-                                await persist_message_state(
-                                    message_id,
-                                    stopped=True,
-                                    output="".join(accumulated),
-                                    documents=results,
-                                    use_rag=rag_decision_result.use_rag,
-                                    latencies={
-                                        "rag_decision_latency": rag_decision_latency,
-                                        **(latencies or {}),
-                                        "first_token_latency": first_token_latency,
-                                        "total_latency": time.perf_counter()
-                                        - total_start,
-                                    },
-                                    prompts={
-                                        "is_rag_prompt": rag_decision_prompt,
-                                        "rag_decision_result": rag_decision_result,
-                                        "generation_prompt": user_content,
-                                    },
-                                    retrieved_docs=retrieved_docs,
-                                )
-                                yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
-                                return
-                            text = getattr(chunk, "content", None)
-                            if not text:
-                                continue
-                            if output_format == "json":
-                                yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
-                            else:
-                                yield f"data: {text}\n\n"
-                            accumulated.append(text)
-                            tokens_yielded += 1
-
-                        base_gen_latency = time.perf_counter() - gen_start
-                        langfuse_flush()
+            for candidate in walkable:
+                try:
+                    gen_start = time.perf_counter()
+                    graph, mode = await _get_or_create_compiled_graph()
+                    if graph is not None:
                         logger.info(
-                            f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
+                            f"Using optimized LangGraph streaming with mode: {mode}"
                         )
-                        used_stream = True
-                    except TimeoutError as e:
+                        config = {
+                            "configurable": {"thread_id": conversation_id},
+                            "callbacks": get_callbacks(),
+                        }
+
+                        state = {
+                            "messages": add_messages(
+                                [], [_make_message("user", user_content)]
+                            ),
+                            "temperature": request.temperature,
+                            "max_tokens": request.max_new_tokens,
+                            "conversation_summary": conversation_summary,
+                            "is_streaming": True,
+                            "llm_type": candidate,
+                        }
+
+                        logger.info(
+                            "Using LangGraph astream for streaming on endpoint %s",
+                            candidate,
+                        )
+                        llm_instruct_timeout = endpoint_timeout(candidate)
+                        _lf_exit = contextlib.ExitStack()
+                        _lf_exit.enter_context(
+                            langfuse_context(
+                                user_id=user_id,
+                                session_id=conversation_id,
+                                tags=["classic", "stream", candidate],
+                                trace_name="generation_stream",
+                            )
+                        )
+                        try:
+                            # Create the async generator once so we can pull the first token with a timeout
+                            astream = graph.astream(
+                                state, config=config, stream_mode="messages"
+                            )
+
+                            # Enforce timeout only for the first token
+                            async with asyncio.timeout(llm_instruct_timeout):
+                                first_chunk, first_metadata = await astream.__anext__()
+                                tokens_yielded += 1
+                                if tokens_yielded == 1:
+                                    first_token_latency = (
+                                        time.perf_counter() - total_start
+                                    )
+
+                            first_text = getattr(first_chunk, "content", None)
+                            if first_text:
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type': 'token', 'content': first_text})}\n\n"
+                                else:
+                                    yield f"data: {first_text}\n\n"
+                                accumulated.append(first_text)
+
+                            # Continue streaming remaining tokens without a timeout
+                            async for chunk, metadata in astream:
+                                if cancelled():
+                                    with contextlib.suppress(Exception):
+                                        await astream.aclose()
+                                    logger.info("LangGraph streaming cancelled")
+                                    await persist_message_state(
+                                        message_id,
+                                        stopped=True,
+                                        output="".join(accumulated),
+                                        documents=results,
+                                        use_rag=rag_decision_result.use_rag,
+                                        latencies={
+                                            "rag_decision_latency": rag_decision_latency,
+                                            **(latencies or {}),
+                                            "first_token_latency": first_token_latency,
+                                            "total_latency": time.perf_counter()
+                                            - total_start,
+                                        },
+                                        prompts={
+                                            "is_rag_prompt": rag_decision_prompt,
+                                            "rag_decision_result": rag_decision_result,
+                                            "generation_prompt": user_content,
+                                        },
+                                        retrieved_docs=retrieved_docs,
+                                    )
+                                    yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                                    return
+                                text = getattr(chunk, "content", None)
+                                if not text:
+                                    continue
+                                if output_format == "json":
+                                    yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
+                                else:
+                                    yield f"data: {text}\n\n"
+                                accumulated.append(text)
+                                tokens_yielded += 1
+
+                            base_gen_latency = time.perf_counter() - gen_start
+                            langfuse_flush()
+                            logger.info(
+                                f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
+                            )
+                            used_stream = True
+                            answered_by = candidate
+                            llm_manager.health.record_success(candidate)
+                        except TimeoutError as e:
+                            logger.warning(
+                                "LangGraph streaming on endpoint %s timed out",
+                                candidate,
+                            )
+                            await error_logger.log_error(
+                                error=e,
+                                component=Component.LLM,
+                                pipeline_stage=PipelineStage.GENERATION,
+                                description="LangGraph streaming timed out",
+                                error_type=type(e).__name__,
+                            )
+                            used_stream = False
+                            note_failed_candidate(candidate, e)
+                            # accumulated, not tokens_yielded: the first delta
+                            # is often role-only with empty content, and only
+                            # text actually sent to the client forbids trying
+                            # the next candidate.
+                            if accumulated:
+                                stream_error = e
+                        finally:
+                            # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
+                            _lf_exit.close()
+                            with contextlib.suppress(Exception):
+                                await graph.aclose()
+                    else:
                         logger.warning(
-                            "LangGraph streaming timed out, falling back to fallback model streaming"
+                            "LangGraph graph is None, falling back to fallback model streaming"
                         )
-                        await error_logger.log_error(
-                            error=e,
-                            component=Component.LLM,
-                            pipeline_stage=PipelineStage.GENERATION,
-                            description="LangGraph streaming timed out",
-                            error_type=type(e).__name__,
-                        )
-                        used_stream = False
-                    finally:
-                        # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
-                        _lf_exit.close()
-                        with contextlib.suppress(Exception):
-                            await graph.aclose()
-                else:
+                        # No graph means no candidate can run, not that this one failed.
+                        break
+                except Exception as e:
                     logger.warning(
-                        "LangGraph graph is None, falling back to fallback model streaming"
+                        f"Optimized LangGraph streaming failed on endpoint {candidate}: {e}"
                     )
-            except Exception as e:
-                logger.warning(
-                    f"Optimized LangGraph streaming failed, falling back to fallback model streaming: {e}"
-                )
-                await error_logger.log_error(
-                    error=e,
-                    component=Component.LLM,
-                    pipeline_stage=PipelineStage.GENERATION,
-                    description="Optimized LangGraph streaming failed",
-                    error_type=type(e).__name__,
-                )
+                    await error_logger.log_error(
+                        error=e,
+                        component=Component.LLM,
+                        pipeline_stage=PipelineStage.GENERATION,
+                        description="Optimized LangGraph streaming failed",
+                        error_type=type(e).__name__,
+                    )
+                    note_failed_candidate(candidate, e)
+                    if accumulated:
+                        stream_error = e
+
+                if used_stream:
+                    break
+                if stream_error is not None:
+                    # Text is already on the wire: another candidate would
+                    # append a second answer to the same message, so this turn
+                    # ends here with the partial the client already has. The
+                    # handler below persists it alongside metadata.error.
+                    raise stream_error
         # Fallback to fallback model streaming if LangGraph didn't work or yielded no tokens
         fallback_token_yielded = 0
         fallback_first_token_latency: Optional[float] = None
@@ -1775,13 +1912,21 @@ async def generate_answer_stream_generator_helper(
             "rag_decision_result": rag_decision_result,
             "generation_prompt": user_content,
         }
-        selected_llm_type = llm_manager.get_selected_llm_type()
         if fallback_gen_latency is not None:
-            generated_model_name = FALLBACK_MODEL_NAME
-        elif isinstance(selected_llm_type, str) and selected_llm_type:
-            generated_model_name = _resolve_model_name_for_llm_type(selected_llm_type)
-        else:
-            generated_model_name = FALLBACK_MODEL_NAME if IS_PROD else MAIN_MODEL_NAME
+            answered_by = LLMType.Fallback.value
+        # Attribution follows the candidate that answered, never
+        # get_selected_llm_type(): that one is process-global and is clobbered
+        # mid-request by should_use_rag and check_policy, which both pin Mistral.
+        generated_model_name = (
+            _resolve_model_name_for_llm_type(answered_by) if answered_by else None
+        )
+        endpoint_metadata = build_endpoint_metadata(
+            requested=request.llm_type,
+            chain=chain,
+            answered=answered_by,
+            attempts=endpoint_attempts,
+            circuit_open=circuit_open,
+        )
         await persist_message_state(
             message_id,
             output=answer,
@@ -1791,6 +1936,7 @@ async def generate_answer_stream_generator_helper(
             prompts=prompts,
             retrieved_docs=retrieved_docs,
             generated_model_name=generated_model_name,
+            endpoint=endpoint_metadata,
         )
 
         if background_tasks:
@@ -1842,6 +1988,22 @@ async def generate_answer_stream_generator_helper(
             "code": error_info["code"],
             "message": error_info["message"],
         }
+        # The mid-stream commit-to-partial raise lands here: the walk state is
+        # in scope, and the partial is exactly the message the endpoint
+        # attribution exists to explain.
+        failed_chain = locals().get("chain")
+        endpoint_info = (
+            build_endpoint_metadata(
+                requested=request.llm_type,
+                chain=failed_chain,
+                answered=locals().get("answered_by"),
+                attempts=locals().get("endpoint_attempts"),
+                circuit_open=locals().get("circuit_open"),
+            )
+            if failed_chain
+            else None
+        )
+        answered = locals().get("answered_by")
         await persist_message_state(
             message_id,
             output=("".join(locals().get("accumulated") or [])),
@@ -1853,7 +2015,10 @@ async def generate_answer_stream_generator_helper(
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
-            generated_model_name=locals().get("generated_model_name"),
+            generated_model_name=(
+                _resolve_model_name_for_llm_type(answered) if answered else None
+            ),
+            endpoint=endpoint_info,
             error=error_info,
         )
 

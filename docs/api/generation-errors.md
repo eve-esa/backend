@@ -33,6 +33,41 @@ only, never from `message` or `type`.
 The set is extensible and additive; codes are never renamed. Clients MUST
 treat unknown codes as `upstream_error`.
 
+## `metadata.endpoint`
+
+A streaming turn walks an ordered chain of model endpoints
+(`EVE_ENDPOINT_ORDER`) and skips the ones whose circuit a recent failure has
+opened; non-streaming turns take the head of the chain only (no in-request
+walk, and their failures do not feed the circuit). `metadata.endpoint` records
+what happened, additively; no error code is involved when a turn that fell
+through to the next endpoint succeeded. A mid-stream failure persists the
+payload with `answered: null` and the failed attempt listed:
+
+```json
+{"requested": "eve_jsc",
+ "chain": ["eve_jsc", "main", "fallback"],
+ "answered": "main",
+ "attempts": [{"llm_type": "eve_jsc", "outcome": "timeout"}],
+ "circuit_open": ["eve_jsc"],
+ "substituted": true}
+```
+
+- `requested` is the canonical llm_type the request asked for (legacy `runpod`
+  and `mistral` read as `main` and `fallback`), or `null` when it asked for
+  none.
+- `chain` is the resolved candidate order: unconfigured endpoints are already
+  dropped and open circuits already sunk to the back.
+- `answered` is the endpoint that produced the output, and
+  `generated_model_name` is its model.
+- `attempts[].outcome` reuses the codes above.
+- `circuit_open` lists candidates that were still cooling down when the turn
+  started.
+- `substituted` is true only when the request named an endpoint and a different
+  one answered; a request that named none is never a substitution.
+
+An explicit request is never promoted to another endpoint: asking for
+`eve_jsc` can only be answered by `eve_jsc` or the fallback model.
+
 Cancellation is NOT an error code: a user stop is carried by the SSE
 `stopped` event and the `Message.stopped` field.
 

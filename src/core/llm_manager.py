@@ -10,12 +10,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from src.config import (
+    EVE_ENDPOINT_COOLDOWN_S,
+    EVE_ENDPOINT_ORDER,
+    EVE_JSC_TIMEOUT,
     FALLBACK_MODEL_API_KEY,
     FALLBACK_MODEL_NAME,
     FALLBACK_MODEL_URL,
-    IS_PROD,
     MAIN_MODEL_API_KEY,
     MAIN_MODEL_NAME,
+    MAIN_MODEL_TIMEOUT,
     MAIN_MODEL_URL,
     MODEL_TIMEOUT,
     SATCOM_LARGE_BASE_URL,
@@ -29,6 +32,7 @@ from src.config import (
     EVE_JSC_API_KEY,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
+from src.core.llm_health import EndpointHealth, is_endpoint_failure
 from src.services.image_catalog import append_image_context
 from src.utils.helpers import (
     str_token_counter,
@@ -52,6 +56,34 @@ class LLMType(Enum):
     Mistral = "fallback"
 
 
+# Enum aliases collapse onto their canonical member, so LLMType("runpod") raises
+# and the legacy names need their own mapping.
+_LEGACY_LLM_TYPES = {"runpod": LLMType.Main.value, "mistral": LLMType.Fallback.value}
+_KNOWN_LLM_TYPES = {member.value for member in LLMType}
+
+
+def canonical_llm_type(llm_type: Optional[str]) -> Optional[str]:
+    """Map a requested llm_type, legacy spelling included, onto its canonical name."""
+    if not llm_type:
+        return None
+    return _LEGACY_LLM_TYPES.get(llm_type, llm_type)
+
+
+def endpoint_timeout(llm_type: Optional[str]) -> int:
+    """First-token budget for one endpoint.
+
+    RunPod is serverless and cold-starts for minutes; JSC is a warm vLLM. A
+    single MODEL_TIMEOUT either kills warm requests or waits out every cold
+    start, so the two endpoints carry their own budgets.
+    """
+    canonical = canonical_llm_type(llm_type)
+    if canonical == LLMType.Main.value:
+        return MAIN_MODEL_TIMEOUT
+    if canonical == LLMType.Eve_Jsc.value:
+        return EVE_JSC_TIMEOUT
+    return MODEL_TIMEOUT
+
+
 class LLMManager:
     """Manages interactions with different language models."""
 
@@ -61,6 +93,7 @@ class LLMManager:
         self._setup_api_keys()
         self._init_langchain_clients()
         self._selected_llm_type = None
+        self._health = EndpointHealth(EVE_ENDPOINT_COOLDOWN_S)
         # Load system prompt once
         try:
             self._system_prompt: Optional[str] = get_template(
@@ -178,7 +211,9 @@ class LLMManager:
                 base_url=self._main_base_url,
                 model=self._main_model_name,
                 temperature=0.3,
-                timeout=MODEL_TIMEOUT,
+                timeout=MAIN_MODEL_TIMEOUT,
+                # SDK-level retries would burn the caller's first-token budget
+                # and hide the 5xx that must open this endpoint's circuit.
                 max_retries=0,
             )
         return self._main_chat_openai
@@ -248,7 +283,7 @@ class LLMManager:
                 base_url=self._eve_jsc_base_url,
                 model=self._eve_jsc_model_name,
                 temperature=0.3,
-                timeout=MODEL_TIMEOUT,
+                timeout=EVE_JSC_TIMEOUT,
                 max_retries=0,
             )
         return self._eve_jsc_chat_openai
@@ -266,52 +301,130 @@ class LLMManager:
             max_retries=0,
         )
 
+    def _is_configured(self, llm_type: str) -> bool:
+        """True when this endpoint has both a base URL and a key.
+
+        Answers without building a client, so chain resolution stays free of
+        network configuration side effects.
+        """
+        if llm_type == LLMType.Main.value:
+            return bool(self._main_base_url and MAIN_MODEL_API_KEY)
+        if llm_type == LLMType.Fallback.value:
+            return bool(self._fallback_base_url and FALLBACK_MODEL_API_KEY)
+        if llm_type == LLMType.Eve_Jsc.value:
+            return bool(self._eve_jsc_base_url and EVE_JSC_API_KEY)
+        if llm_type == LLMType.Satcom_Small.value:
+            return bool(self._satcom_small_base_url and SATCOM_RUNPOD_API_KEY)
+        if llm_type == LLMType.Satcom_Large.value:
+            return bool(self._satcom_large_base_url and SATCOM_RUNPOD_API_KEY)
+        return False
+
+    def resolve_chain(self, llm_type: Optional[str] = None) -> list[str]:
+        """Return the ordered endpoint candidates for a request.
+
+        An explicit request is honoured as asked and never promoted to another
+        endpoint; only ``None`` expands to EVE_ENDPOINT_ORDER. Unconfigured
+        entries drop out, the fallback model is always the last resort, and
+        endpoints whose circuit is open sink to the back rather than out, so a
+        chain with nothing but open circuits still answers.
+        """
+        requested = canonical_llm_type(llm_type)
+        names = (
+            [name.strip() for name in EVE_ENDPOINT_ORDER.split(",")]
+            if requested is None
+            else [requested]
+        )
+
+        candidates: list[str] = []
+        for name in names:
+            # Legacy spellings are valid in the env var too, not only in
+            # stored requests.
+            name = canonical_llm_type(name) or ""
+            if not name or name in candidates:
+                continue
+            if name not in _KNOWN_LLM_TYPES:
+                logger.warning(
+                    "Unknown llm_type %r in the endpoint chain, dropping it", name
+                )
+                continue
+            if not self._is_configured(name):
+                logger.info(
+                    "Endpoint %s is not configured, dropping it from the chain", name
+                )
+                continue
+            candidates.append(name)
+
+        chain = [name for name in candidates if name != LLMType.Fallback.value]
+        # Stable sort: closed circuits keep their configured order and open ones
+        # sink to the back. When every candidate is open they all compare equal
+        # and come back untouched, so a chain entirely in cooldown still answers.
+        chain.sort(key=self._health.is_open)
+        if self._is_configured(LLMType.Fallback.value):
+            # The last resort is last by definition, whatever its own circuit
+            # says: callers treat the tail of the chain as the final attempt.
+            chain.append(LLMType.Fallback.value)
+        if not chain:
+            raise RuntimeError(f"No endpoint is configured for llm_type={llm_type!r}")
+        return chain
+
+    def client_for_candidate(self, llm_type: str) -> ChatOpenAI:
+        """Return the client for one chain candidate, without substituting.
+
+        ``get_client_for_model`` answers with the fallback client when anything
+        goes wrong, which is the right last resort for a single-shot caller but
+        would hide a dead endpoint from a caller that has a chain left to walk.
+        """
+        canonical = canonical_llm_type(llm_type)
+        if canonical == LLMType.Fallback.value:
+            client = self._get_fallback_llm()
+        elif canonical == LLMType.Main.value:
+            client = self._get_main_llm()
+        elif canonical == LLMType.Eve_Jsc.value:
+            client = self._get_eve_jsc_llm()
+        elif canonical == LLMType.Satcom_Small.value:
+            client = self._get_satcom_small_llm()
+        elif canonical == LLMType.Satcom_Large.value:
+            client = self._get_satcom_large_llm()
+        else:
+            raise RuntimeError(f"Invalid model selection: {llm_type}")
+        self._selected_llm_type = canonical
+        return client
+
     def get_client_for_model(self, llm_type: Optional[str] = None):
         """Return an LLM client instance based on the requested model/provider.
 
-        Defaults depend on environment: Main on staging, Fallback on prod.
-        Transparent fallback to Fallback if Main selection fails.
+        A request without an llm_type takes the head of the configured chain.
+        Anything that fails to resolve falls back to the Fallback model, which
+        is the last resort for callers that have no chain of their own.
         Supports legacy 'runpod' and 'mistral' values for backward compatibility.
         """
         try:
-            # Handle legacy values
-            if llm_type == "runpod":
-                llm_type = "main"
-            elif llm_type == "mistral":
-                llm_type = "fallback"
-
-            if llm_type == LLMType.Fallback.value or llm_type == LLMType.Mistral.value:
-                self._selected_llm_type = LLMType.Fallback.value
-                return self._get_fallback_llm()
-            elif llm_type == LLMType.Main.value or llm_type == LLMType.Runpod.value:
-                self._selected_llm_type = LLMType.Main.value
-                return self._get_main_llm()
-            elif llm_type == LLMType.Satcom_Small.value:
-                self._selected_llm_type = LLMType.Satcom_Small.value
-                return self._get_satcom_small_llm()
-            elif llm_type == LLMType.Satcom_Large.value:
-                self._selected_llm_type = LLMType.Satcom_Large.value
-                return self._get_satcom_large_llm()
-            elif llm_type == LLMType.Eve_Jsc.value:
-                self._selected_llm_type = LLMType.Eve_Jsc.value
-                return self._get_eve_jsc_llm()
-            else:
-                if llm_type is None and IS_PROD:
-                    self._selected_llm_type = LLMType.Fallback.value
-                    return self._get_fallback_llm()
-                elif llm_type is None and not IS_PROD:
-                    self._selected_llm_type = LLMType.Main.value
-                    return self._get_main_llm()
-                else:
-                    raise RuntimeError(f"Invalid model selection: {llm_type}")
+            if llm_type is None:
+                llm_type = self.resolve_chain(None)[0]
+            return self.client_for_candidate(llm_type)
         except Exception as e:
-            logger.error(f"Failed to get client for model: {e}")
+            logger.error(f"Failed to get client for model {llm_type!r}: {e}")
+            # The substitution stays silent to the caller, so the breaker is the
+            # only place this failure can still be seen; callers that must know
+            # they were substituted resolve their own chain instead.
+            canonical = canonical_llm_type(llm_type)
+            if canonical and is_endpoint_failure(e):
+                self._health.record_failure(canonical, e)
             self._selected_llm_type = LLMType.Fallback.value
             return self._get_fallback_llm()
 
     def get_selected_llm_type(self) -> str:
         """Return the selected LLM type."""
         return self._selected_llm_type
+
+    @property
+    def health(self) -> EndpointHealth:
+        """Circuit breaker shared by every caller of this manager."""
+        return self._health
+
+    def health_snapshot(self) -> dict:
+        """Per-endpoint circuit state, for operational readouts."""
+        return self._health.snapshot()
 
     def get_model(self) -> ChatOpenAI:
         """Public accessor for the primary ChatOpenAI client with fallback to Fallback."""

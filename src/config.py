@@ -70,6 +70,16 @@ EVE_JSC_MODEL_NAME = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip()
 # confusing 401 from the upstream. Blank means unusable, and says so.
 EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
 
+# Ordered EVE endpoint chain, comma-separated llm_type names. Unconfigured
+# entries are dropped at resolution time and "fallback" is always appended
+# last, so a chain can never end without a last resort.
+EVE_ENDPOINT_ORDER = os.getenv("EVE_ENDPOINT_ORDER", "eve_jsc,main,fallback").strip()
+EVE_ENDPOINT_COOLDOWN_S = float(os.getenv("EVE_ENDPOINT_COOLDOWN_S", "120"))
+# Per-endpoint first-token budgets. RunPod is serverless with 1-3 min cold
+# starts; JSC is a warm vLLM. One MODEL_TIMEOUT cannot serve both.
+EVE_JSC_TIMEOUT = int(os.getenv("EVE_JSC_TIMEOUT", MODEL_TIMEOUT))
+MAIN_MODEL_TIMEOUT = int(os.getenv("MAIN_MODEL_TIMEOUT", "120"))
+
 # Feature flags. A flag names the feature, never the environment it runs in.
 # Off means the feature is not published: /signup answers 404, as if it had never
 # been built, rather than 403, which would confirm it exists and is merely shut.
