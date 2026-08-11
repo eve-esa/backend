@@ -1222,9 +1222,21 @@ async def run_agentic_generation_to_bus(
     user_id: str,
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    subscriber_ready: Optional[asyncio.Event] = None,
 ):
-    """Run agentic generation in background, publishing chunks to stream bus."""
+    """Run agentic generation in background, publishing chunks to stream bus.
+
+    Neither bus implementation buffers: anything published before a subscriber
+    attaches is dropped. ``subscriber_ready`` lets the route hold generation
+    until its consumer is listening, so the events emitted at t=0 survive. The
+    timeout is a guard against a response that is never consumed (client gone
+    between request and response start): after it, generation runs anyway,
+    because persistence must happen regardless of the SSE channel.
+    """
     bus = get_stream_bus()
+    if subscriber_ready is not None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(subscriber_ready.wait(), timeout=5.0)
     try:
         async for chunk in generate_answer_agentic_json_stream(
             request=request,
