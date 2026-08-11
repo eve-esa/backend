@@ -157,6 +157,43 @@ def _filter_null_values(data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+_TIMEOUT_ERROR_NAMES = {
+    "NodeTimeoutError",
+    "TimeoutError",
+    "APITimeoutError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "TimeoutException",
+}
+
+
+def build_error_payload(exc: BaseException) -> Dict[str, Any]:
+    """Shape an exception for Message.metadata.error and the SSE error event.
+
+    ``code`` is what the frontend keys its copy on: "timeout" almost always
+    means a serverless cold start (retry succeeds once the endpoint is warm),
+    "empty_answer" a generation that finished with nothing, anything else a
+    generic upstream failure. ``message`` is developer-facing diagnostics; user
+    copy derives from ``code`` only. Contract: docs/api/generation-errors.md.
+    """
+    mro_names = {c.__name__ for c in type(exc).__mro__}
+    code = (
+        "timeout"
+        if isinstance(exc, TimeoutError) or (mro_names & _TIMEOUT_ERROR_NAMES)
+        else "upstream_error"
+    )
+    return {"code": code, "type": type(exc).__name__, "message": str(exc)[:500]}
+
+
+def build_empty_answer_payload() -> Dict[str, Any]:
+    """Marker for a generation that completed without producing an answer."""
+    return {
+        "code": "empty_answer",
+        "type": "EmptyAnswer",
+        "message": "The model returned an empty answer",
+    }
+
+
 async def persist_message_state(
     message_id: str,
     *,
@@ -209,8 +246,11 @@ async def persist_message_state(
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:
-                existing_error = existing_metadata.get("error", {}) or {}
-                existing_metadata["error"] = {**existing_error, **filtered_error}
+                # Replace, never merge: build_error_payload always emits the
+                # full shape, merging would keep stale keys from earlier
+                # failures, and legacy documents store a plain string here
+                # that a dict merge would crash on.
+                existing_metadata["error"] = filtered_error
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -1776,7 +1816,10 @@ async def generate_answer_stream_generator_helper(
             message_id,
             output="".join(locals().get("accumulated") or []),
             documents=locals().get("results") or [],
-            use_rag=locals().get("rag_decision_result").use_rag,
+            # A failure before the RAG decision leaves rag_decision_result
+            # unbound; a raw attribute access here would crash the handler
+            # before anything is persisted.
+            use_rag=getattr(locals().get("rag_decision_result"), "use_rag", None),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
@@ -1793,16 +1836,25 @@ async def generate_answer_stream_generator_helper(
             description="Error during streaming generation",
             error_type=type(e).__name__,
         )
-        err_payload = {"type": "error", "message": str(e)}
+        error_info = build_error_payload(e)
+        err_payload = {
+            "type": "error",
+            "code": error_info["code"],
+            "message": error_info["message"],
+        }
         await persist_message_state(
             message_id,
             output=("".join(locals().get("accumulated") or [])),
             documents=locals().get("results") or [],
-            use_rag=(locals().get("rag_decision_result").use_rag),
+            # Same guard as the cancellation handler: the whole point of this
+            # branch is to persist the failure, so it must not crash on state
+            # that a pre-RAG failure never bound.
+            use_rag=getattr(locals().get("rag_decision_result"), "use_rag", None),
             latencies=locals().get("latencies") or {},
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
             generated_model_name=locals().get("generated_model_name"),
+            error=error_info,
         )
 
         yield f"data: {json.dumps(err_payload)}\n\n"
@@ -1887,9 +1939,14 @@ async def run_generation_to_bus(
         # Task was cancelled (via stop endpoint). Do not publish error; just exit.
         pass
     except Exception as e:
+        # Outer safety net: it fires exactly when the inner handlers did not,
+        # so it must persist the marker itself or the turn stays a blank shell.
+        error_info = build_error_payload(e)
+        with contextlib.suppress(Exception):
+            await persist_message_state(message_id, error=error_info)
         await bus.publish(
             message_id,
-            f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n",
+            f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n",
         )
     finally:
         if user_id:

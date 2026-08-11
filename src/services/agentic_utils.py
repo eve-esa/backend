@@ -36,7 +36,15 @@ def is_agentic_generation_request(
     """Return True when the stored request should use the agentic pipeline."""
     if request.custom_model_id or request.agent or request.public_mcp_servers:
         return True
-    return message is not None and bool(getattr(message, "trace", None))
+    if message is None:
+        return False
+    # The shell is stamped at creation. The trace check alone misroutes retries
+    # of failed agentic turns: a generation that dies before its first token
+    # never persists a trace, and the retry would silently switch pipelines.
+    metadata = getattr(message, "metadata", None) or {}
+    if metadata.get("pipeline") == "agentic":
+        return True
+    return bool(getattr(message, "trace", None))
 
 
 # ─── Text-format tool-call parsing (EVE-Instruct / Mistral) ───────────────────
