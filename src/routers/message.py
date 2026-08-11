@@ -63,6 +63,7 @@ from src.utils.helpers import (
     normalize_public_collections_selection,
     pluralize,
 )
+from src.utils.sse_keepalive import with_sse_keepalive
 
 logger = logging.getLogger(__name__)
 
@@ -634,6 +635,8 @@ async def retry(
                 message.request_input, requesting_user
             )
             request.mcp_proxy_bearer_token = bearer_token
+            request.mcp_user_id = str(requesting_user.id)
+            set_message_context(message.id)
             (
                 answer,
                 tool_results,
@@ -641,6 +644,7 @@ async def retry(
                 latencies,
                 prompts,
                 trace_entries,
+                artifact_ids,
             ) = await generate_answer_agentic(
                 request,
                 user_id=requesting_user.id,
@@ -651,6 +655,7 @@ async def retry(
             message.documents = tool_results
             message.use_rag = use_rag
             message.trace = trace_entries if trace_entries else None
+            message.artifact_ids = artifact_ids if artifact_ids else None
             existing_metadata = dict(getattr(message, "metadata", {}) or {})
             existing_metadata.update({"latencies": latencies, "prompts": prompts})
             message.metadata = existing_metadata
@@ -932,7 +937,9 @@ async def create_message_stream(
             async for data in bus.subscribe(message.id, ready=stream_ready):
                 yield data
 
-        response = StreamingResponse(_gen(), media_type="text/event-stream")
+        response = StreamingResponse(
+            with_sse_keepalive(_gen()), media_type="text/event-stream"
+        )
         # Set SSE-friendly headers to prevent proxy/client reconnect loops
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Connection"] = "keep-alive"
@@ -1491,7 +1498,9 @@ async def stream_hallucination(
                 pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-    response = StreamingResponse(_generator(), media_type="text/event-stream")
+    response = StreamingResponse(
+        with_sse_keepalive(_generator()), media_type="text/event-stream"
+    )
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
     response.headers["X-Accel-Buffering"] = "no"
@@ -2043,7 +2052,9 @@ async def create_agentic_message_stream(
             async for data in bus.subscribe(message.id):
                 yield data
 
-        response = StreamingResponse(_gen(), media_type="text/event-stream")
+        response = StreamingResponse(
+            with_sse_keepalive(_gen()), media_type="text/event-stream"
+        )
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Connection"] = "keep-alive"
         response.headers["X-Accel-Buffering"] = "no"
