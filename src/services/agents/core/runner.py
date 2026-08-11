@@ -352,15 +352,22 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
 )
 
 
-def _build_initial_messages(request: GenerationRequest, tools: List[Any]) -> List[Any]:
+def _build_initial_messages(
+    request: GenerationRequest, tools: List[Any], history: Optional[List[Any]] = None
+) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
     Prepends :data:`_ARTIFACT_MARKDOWN_INSTRUCTION` as a ``SystemMessage``
     when MCP tools are in play, since only then can a tool result carry an
     artifact stub worth guarding against being rewritten.
+
+    First turn only: the checkpointed thread state keeps the turn-one copy
+    visible on later turns, and injecting another one mid-conversation puts a
+    ``system`` message after an ``assistant`` one, which strict chat templates
+    refuse (Blablador: 400 "Unexpected role 'system' after role 'assistant'").
     """
     messages: List[Any] = []
-    if tools and SystemMessage:
+    if tools and SystemMessage and not history:
         messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
     messages.append(HumanMessage(content=request.query))
     return messages
@@ -560,7 +567,7 @@ async def generate_answer_agentic(
             ):
                 try:
                     async for update in g.astream(
-                        {"messages": _build_initial_messages(request, tools)},
+                        {"messages": _build_initial_messages(request, tools, history)},
                         config=config,
                         stream_mode="updates",
                     ):
@@ -839,7 +846,7 @@ async def generate_answer_agentic_stream_helper(
                 trace_name="agentic_generation_stream",
             ):
                 async for mode, payload in graph.astream(
-                    {"messages": _build_initial_messages(request, tools)},
+                    {"messages": _build_initial_messages(request, tools, history)},
                     config=config,
                     stream_mode=["messages", "updates"],
                 ):
