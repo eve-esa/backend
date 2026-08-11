@@ -1528,15 +1528,17 @@ async def stream_hallucination(
         except Exception as e:
             # Persist error and stream error event. Namespaced key: a failed
             # hallucination check on a good answer must not plant a generation
-            # error that a later retry would clear.
+            # error that a later retry would clear. Same projection on both
+            # channels, per docs/api/generation-errors.md.
+            error_info = build_error_payload(e)
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
-                existing_metadata["hallucination_error"] = build_error_payload(e)
+                existing_metadata["hallucination_error"] = error_info
                 message.metadata = existing_metadata
                 await message.save()
             except Exception:
                 pass
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     response = StreamingResponse(
         with_sse_keepalive(_generator()), media_type="text/event-stream"
