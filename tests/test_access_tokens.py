@@ -76,7 +76,7 @@ async def test_create_api_key_requires_auth(async_client):
         "/users/api-keys",
         json={"name": "test"},
     )
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

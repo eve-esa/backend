@@ -24,7 +24,7 @@ def _mcp_server(*, user_id: Optional[str], name: str = "test-server") -> MCPServ
 @pytest.mark.asyncio
 async def test_list_mcp_servers_requires_auth(async_client):
     response = await async_client.get("/mcp-servers")
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ async def test_get_mcp_server_requires_auth(mock_load_tools, async_client):
     await server.save()
     try:
         response = await async_client.get(f"/mcp-servers/{server.id}")
-        assert response.status_code == 403
+        assert response.status_code == 401
         mock_load_tools.assert_not_called()
     finally:
         await cleanup_models([server])
