@@ -7,6 +7,8 @@ Covers:
 - generate_answer_agentic: records in-graph fallback via agent_fallback node
 - generate_answer_agentic_stream_helper: no UnboundLocalError on early setup failure
 - generate_answer_agentic_stream_helper: pre-answer status event
+- node budget semantics: endpoint budget is the idle cap, not the wall clock
+- error paths: attribution survives a failed turn, and never contradict a final
 """
 
 import asyncio
@@ -17,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from src.config import AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMManager
 from src.services.agents.core.runner import (
     _build_react_graph,
@@ -262,6 +265,29 @@ class TestBuildReactGraph:
             _build_react_graph("main", [], None, agent=agent, llm_run_timeout=120)
 
         assert agent.compile.call_args.kwargs["llm_run_timeout"] == 120
+
+    def test_llm_idle_timeout_forwarded_to_compile(self):
+        agent = self._make_agent()
+        fake_mgr = MagicMock()
+        fake_mgr.get_client_for_model.return_value = MagicMock()
+
+        with patch(f"{_RUNNER}.get_shared_llm_manager", return_value=fake_mgr):
+            _build_react_graph("main", [], None, agent=agent, llm_idle_timeout=15)
+
+        assert agent.compile.call_args.kwargs["llm_idle_timeout"] == 15
+
+    def test_default_budgets_keep_the_wall_clock_above_the_stall_cap(self):
+        """A first-token budget as the wall clock would cap answer *length*."""
+        agent = self._make_agent()
+        fake_mgr = MagicMock()
+        fake_mgr.get_client_for_model.return_value = MagicMock()
+
+        with patch(f"{_RUNNER}.get_shared_llm_manager", return_value=fake_mgr):
+            _build_react_graph("main", [], None, agent=agent)
+
+        kwargs = agent.compile.call_args.kwargs
+        assert kwargs["llm_run_timeout"] == AGENTIC_TIMEOUT
+        assert kwargs["llm_idle_timeout"] == MODEL_TIMEOUT
 
     def test_custom_llm_still_wires_platform_fallback(self):
         agent = self._make_agent()
@@ -757,3 +783,180 @@ class TestStructuredToolEvents:
             "tool_call": "Calling dummy search…",
             "tool_result": "result",
         }
+
+
+class TestNodeBudgetSemantics:
+    """The endpoint budget is a first-token/stall cap, so it belongs on the
+    node's idle timeout (whose clock resets on every streamed chunk). Used as
+    the run timeout it is a hard wall clock that caps how long an answer may
+    be, which is what killed long turns mid-stream.
+    """
+
+    def _builder(self):
+        return MagicMock(
+            return_value=_FakeStreamGraph(
+                messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})]
+            )
+        )
+
+    # A sentinel, not the configured value: MAIN_MODEL_TIMEOUT happens to equal
+    # AGENTIC_TIMEOUT in some environments, which would make the assertions pass
+    # whichever budget the runner put where.
+    _ENDPOINT_BUDGET = 7
+
+    async def test_stream_path_splits_the_two_budgets(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        builder = self._builder()
+        budget = MagicMock(return_value=self._ENDPOINT_BUDGET)
+
+        with _patched_runner(
+            _build_react_graph=builder,
+            endpoint_timeout=budget,
+            get_shared_llm_manager=MagicMock(return_value=_chain_manager()),
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        budget.assert_called_once_with("main")
+        kwargs = builder.call_args.kwargs
+        assert kwargs["llm_idle_timeout"] == self._ENDPOINT_BUDGET
+        assert kwargs["llm_run_timeout"] == AGENTIC_TIMEOUT
+
+    async def test_sync_path_splits_the_two_budgets(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        builder = MagicMock(
+            return_value=_FakeUpdatesGraph(
+                [{"agent": {"messages": [AIMessage(content="answer")]}}]
+            )
+        )
+        budget = MagicMock(return_value=self._ENDPOINT_BUDGET)
+
+        with _patched_runner(
+            _build_react_graph=builder,
+            endpoint_timeout=budget,
+            get_shared_llm_manager=MagicMock(return_value=_chain_manager()),
+        ):
+            await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        budget.assert_called_once_with("main")
+        kwargs = builder.call_args.kwargs
+        assert kwargs["llm_idle_timeout"] == self._ENDPOINT_BUDGET
+        assert kwargs["llm_run_timeout"] == AGENTIC_TIMEOUT
+
+    def test_the_endpoint_budget_is_not_the_wall_clock(self):
+        """Guard the category error itself: the two budgets are never the same
+        quantity, so the endpoint's first-token cap must never land on run.
+        """
+        agent = MagicMock()
+        agent.compile.return_value = MagicMock(name="graph")
+        fake_mgr = MagicMock()
+        fake_mgr.get_client_for_model.return_value = MagicMock()
+
+        with patch(f"{_RUNNER}.get_shared_llm_manager", return_value=fake_mgr):
+            _build_react_graph(
+                "main", [], None, agent=agent, llm_idle_timeout=self._ENDPOINT_BUDGET
+            )
+
+        kwargs = agent.compile.call_args.kwargs
+        assert kwargs["llm_idle_timeout"] == self._ENDPOINT_BUDGET
+        assert kwargs["llm_run_timeout"] == AGENTIC_TIMEOUT
+
+
+class TestErrorPathAttribution:
+    async def test_failed_turn_still_persists_endpoint_and_attribution(self):
+        """A turn that dies must still say which endpoint answered it: the
+        incident doc had endpoint null and agentic_llm_resolved null, so the
+        silent substitution behind it was invisible in the database.
+        """
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(raise_exc=RuntimeError("boom"))
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+            get_shared_llm_manager=MagicMock(return_value=_chain_manager()),
+            resolve_generated_model_name=MagicMock(return_value="model-x"),
+        ), patch(f"{_RUNNER}.logger"):
+            events = [
+                _event_payload(event)
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert events[-1]["type"] == "error"
+        kwargs = persist.await_args.kwargs
+        assert kwargs["error"]["code"]
+        assert kwargs["endpoint"]["answered"] == "main"
+        assert kwargs["prompts"]["agentic_llm_resolved"] == "main"
+        assert kwargs["generated_model_name"] == "model-x"
+
+    async def test_a_streamed_answer_ends_with_final_not_error(self):
+        """The incident client got 28999 characters of answer and then a
+        timeout error on top of it. Whatever failed afterwards belongs in
+        metadata.error, not in a second, contradictory terminal event.
+        """
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            messages=[
+                (AIMessage(content="a long answer"), {"langgraph_node": "agent"}),
+            ],
+            raise_exc=TimeoutError("Node 'agent_fallback' exceeded its run timeout"),
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+            get_shared_llm_manager=MagicMock(return_value=_chain_manager()),
+        ), patch(f"{_RUNNER}.logger"):
+            events = [
+                _event_payload(event)
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        types = [e["type"] for e in events]
+        assert "error" not in types
+        assert types[-1] == "final"
+        assert events[-1]["answer"] == "a long answer"
+        # The failure is not swallowed: it is still on the persisted document.
+        kwargs = persist.await_args.kwargs
+        assert kwargs["error"]["code"]
+        assert kwargs["output"] == "a long answer"
+        assert kwargs["endpoint"]["answered"] == "main"
+
+    async def test_a_turn_with_nothing_streamed_still_ends_with_error(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(raise_exc=TimeoutError("no first token"))
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            get_shared_llm_manager=MagicMock(return_value=_chain_manager()),
+        ), patch(f"{_RUNNER}.logger"):
+            events = [
+                _event_payload(event)
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert events[-1]["type"] == "error"

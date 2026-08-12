@@ -34,6 +34,7 @@ from src.services.generate_answer import (
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
+    resolve_generated_model_name,
 )
 from src.services.agents.core.registry import get_agent_graph
 from src.services.mcp.artifact_context import (
@@ -485,6 +486,7 @@ def _build_react_graph(
     fallback_llm: Any = None,
     llm: Any = None,
     llm_run_timeout: Optional[int] = None,
+    llm_idle_timeout: Optional[int] = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -493,8 +495,14 @@ def _build_react_graph(
     ``agent.compile()`` for in-graph node-level fallback.
     ``llm`` is the primary graph model (platform or user custom).  When
     ``fallback_llm`` is not passed, the platform fallback model is wired
-    automatically.  ``llm_run_timeout`` is the resolved endpoint's own node
-    budget; without one the generic MODEL_TIMEOUT applies.
+    automatically.
+
+    The two node budgets measure different things and must not be confused.
+    ``llm_idle_timeout`` is the no-progress cap: its clock resets on every
+    streamed chunk, so it is where an endpoint's first-token budget belongs.
+    ``llm_run_timeout`` is a hard wall-clock cap on one node attempt that never
+    resets, so it has to cover a whole long answer — a first-token budget used
+    here caps the *length* of every answer instead of catching a stalled one.
     """
     if llm is None:
         effective_type = _resolve_agentic_llm_type(llm_type, override=llm_type_override)
@@ -511,7 +519,10 @@ def _build_react_graph(
         summary=summary,
         fallback_llm=fallback_llm,
         llm_run_timeout=(
-            llm_run_timeout if llm_run_timeout is not None else MODEL_TIMEOUT
+            llm_run_timeout if llm_run_timeout is not None else AGENTIC_TIMEOUT
+        ),
+        llm_idle_timeout=(
+            llm_idle_timeout if llm_idle_timeout is not None else MODEL_TIMEOUT
         ),
     )
 
@@ -593,7 +604,10 @@ async def generate_answer_agentic(
             history=history,
             summary=summary,
             llm=llm,
-            llm_run_timeout=endpoint_timeout((endpoint_metadata or {}).get("answered")),
+            llm_idle_timeout=endpoint_timeout(
+                (endpoint_metadata or {}).get("answered")
+            ),
+            llm_run_timeout=AGENTIC_TIMEOUT,
         )
 
         config = {
@@ -779,6 +793,13 @@ async def generate_answer_agentic_stream_helper(
     `content` on the tool events stays the ready-made display string the
     structured fields are derived from, so older clients render unchanged.
 
+    Terminal-event rule: a turn that has already put answer text on the wire
+    ends with `final`, never `error`. A late failure (a node timing out after
+    the answer streamed, say) is still recorded in the persisted
+    `metadata.error`, but the client is not handed an error banner on top of an
+    answer it has already rendered. Only a turn with nothing streamed ends with
+    `error`.
+
     """
     if not _langgraph_available:
         error_info = build_error_payload(RuntimeError("LangGraph not available"))
@@ -792,6 +813,10 @@ async def generate_answer_agentic_stream_helper(
     accumulated: List[str] = []
     used_fallback_llm = False
     endpoint_metadata: Optional[Dict[str, Any]] = None
+    # Bound before the try so the error handlers can still attribute a turn that
+    # died before, or during, LLM resolution.
+    llm_prompts: Dict[str, Any] = {}
+    final_emitted = False
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
@@ -801,6 +826,21 @@ async def generate_answer_agentic_stream_helper(
 
     def _collected_artifact_ids() -> Optional[List[str]]:
         return list(artifact_ctx.collected_artifact_ids) or None
+
+    def _final_events(answer: str, latencies: Dict[str, Any]) -> List[str]:
+        if output_format == "json":
+            return [
+                f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
+            ]
+        return ["data: [DONE]\n\n"]
+
+    def _attribution() -> Dict[str, Any]:
+        """Endpoint + model attribution to persist on every terminal path."""
+        return {
+            "endpoint": endpoint_metadata,
+            "prompts": llm_prompts or None,
+            "generated_model_name": resolve_generated_model_name(endpoint_metadata),
+        }
 
     try:
         if cancelled():
@@ -832,7 +872,10 @@ async def generate_answer_agentic_stream_helper(
             history=history,
             summary=summary,
             llm=llm,
-            llm_run_timeout=endpoint_timeout((endpoint_metadata or {}).get("answered")),
+            llm_idle_timeout=endpoint_timeout(
+                (endpoint_metadata or {}).get("answered")
+            ),
+            llm_run_timeout=AGENTIC_TIMEOUT,
         )
 
         config = {
@@ -1091,6 +1134,7 @@ async def generate_answer_agentic_stream_helper(
                 **llm_prompts,
             },
             endpoint=endpoint_metadata,
+            generated_model_name=resolve_generated_model_name(endpoint_metadata),
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
         )
@@ -1100,10 +1144,9 @@ async def generate_answer_agentic_stream_helper(
         else:
             asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
-        if output_format == "json":
-            yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
-        else:
-            yield "data: [DONE]\n\n"
+        final_emitted = True
+        for event in _final_events(answer, latencies):
+            yield event
 
     except asyncio.CancelledError:
         logger.info("Agentic generation cancelled")
@@ -1128,23 +1171,21 @@ async def generate_answer_agentic_stream_helper(
         answer = await append_missing_artifact_stubs(
             "".join(accumulated), _collected_artifact_ids()
         )
-        if answer:
+        error_info = build_error_payload(exc)
+        with contextlib.suppress(Exception):
             await persist_message_state(
-                message_id, output=answer, artifact_ids=_collected_artifact_ids()
+                message_id,
+                output=answer,
+                error=error_info,
+                artifact_ids=_collected_artifact_ids(),
+                **_attribution(),
             )
-            if output_format == "json":
-                yield f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': {}, 'artifact_ids': _collected_artifact_ids()})}\n\n"
-            else:
-                yield "data: [DONE]\n\n"
+        if final_emitted:
+            return
+        if answer:
+            for event in _final_events(answer, {}):
+                yield event
         else:
-            error_info = build_error_payload(exc)
-            with contextlib.suppress(Exception):
-                await persist_message_state(
-                    message_id,
-                    output="",
-                    error=error_info,
-                    artifact_ids=_collected_artifact_ids(),
-                )
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     except Exception as exc:
@@ -1158,14 +1199,22 @@ async def generate_answer_agentic_stream_helper(
             error_type=type(exc).__name__,
         )
         error_info = build_error_payload(exc)
+        answer = "".join(accumulated)
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
-                output="".join(accumulated),
+                output=answer,
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
+                **_attribution(),
             )
-        yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
+        if final_emitted:
+            return
+        if answer:
+            for event in _final_events(answer, {}):
+                yield event
+        else:
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
         reset_artifact_context(artifact_token)
