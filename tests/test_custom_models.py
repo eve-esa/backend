@@ -181,6 +181,14 @@ async def test_update_and_delete_custom_model(async_client):
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert list_resp.json()["custom"] == []
+
+            # The soft-deleted row must not keep the key material: no residual
+            # ciphertext or legacy secret pointer survives the delete.
+            row = await UserCustomModel.find_by_id(model_id)
+            assert row is not None
+            assert row.deleted_at is not None
+            assert row.encrypted_key is None
+            assert row.secret_arn is None
     finally:
         await UserCustomModel.delete_many({"user_id": user.id})
         await cleanup_models([user])
