@@ -14,7 +14,7 @@ langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Prefer pinning a tag/commit.
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@main
 langfuse>=2.60.0
-openai>=2.26.0,<3.0.0
+openai>=2.53.0,<3.0.0
 langgraph-checkpoint==4.2.0
 langgraph-checkpoint-mongodb==0.4.0
 pytest==9.1.1
