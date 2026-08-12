@@ -44,7 +44,12 @@ async def migrate_custom_model_secrets(*, dry_run: bool = False) -> dict[str, in
         await async_mongo_manager.connect()
 
     collection = UserCustomModel.get_collection()
-    cursor = collection.find({"secret_arn": {"$exists": True, "$nin": [None, ""]}})
+    # Only live rows: a soft-deleted row's key material is cleared on delete,
+    # so it has nothing to migrate (and its secret_arn may point at an already
+    # deleted secret, which would only log a spurious failure).
+    cursor = collection.find(
+        {"deleted_at": None, "secret_arn": {"$exists": True, "$nin": [None, ""]}}
+    )
 
     summary = {"migrated": 0, "failed": 0, "would_migrate": 0}
     async for doc in cursor:

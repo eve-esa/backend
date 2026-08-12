@@ -152,6 +152,11 @@ async def delete_custom_model(
             detail="Failed to delete custom model credentials",
         )
 
+    # Drop the key material from the soft-deleted row: the ciphertext (or a
+    # legacy secret pointer) must not outlive the delete. The row is kept only
+    # for its id/audit trail, never for its credentials.
+    model.encrypted_key = None
+    model.secret_arn = None
     model.deleted_at = datetime.now(timezone.utc)
     model.updated_at = datetime.now(timezone.utc)
     await model.save()
