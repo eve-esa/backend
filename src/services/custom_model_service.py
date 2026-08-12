@@ -79,7 +79,7 @@ def catalog_create_fields(entry: CatalogModelEntry) -> dict[str, str]:
 
 
 def ensure_custom_model_has_credentials(model: UserCustomModel) -> None:
-    if not model.secret_arn:
+    if not (model.encrypted_key or model.secret_arn):
         raise HTTPException(
             status_code=422,
             detail="Custom model has no stored credentials",
@@ -101,7 +101,7 @@ async def build_custom_model_llm(model: UserCustomModel) -> Any:
     entry = await catalog_entry_for_model(model)
     base_url = entry.provider.base_url
     model_name = entry.model.model_name
-    api_key = await get_custom_model_api_key(model.secret_arn)
+    api_key = await get_custom_model_api_key(model)
     from src.services.generate_answer import get_shared_llm_manager
 
     return get_shared_llm_manager().build_custom_client(
@@ -149,7 +149,7 @@ async def to_custom_model_public(model: UserCustomModel) -> CustomModelPublic:
         provider_display_name=provider_display_name,
         model_display_name=model_display_name,
         model_name=model_name,
-        has_api_key=bool(model.secret_arn),
+        has_api_key=bool(model.encrypted_key or model.secret_arn),
         created_at=model.created_at,
         updated_at=model.updated_at,
     )

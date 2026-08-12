@@ -6,10 +6,7 @@ from fastapi import HTTPException
 from src.database.models.user_custom_model import UserCustomModel
 from src.schemas.generation_request import GenerationRequest
 from src.services.agents.core.runner import _resolve_agentic_llm_client
-from src.services.custom_model_secrets import (
-    clear_secret_cache_for_tests,
-    update_custom_model_secret,
-)
+from src.services.custom_model_secrets import clear_secret_cache_for_tests
 from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import (
     custom_model_id_from_messages,
@@ -147,7 +144,7 @@ async def test_update_and_delete_custom_model(async_client):
             new=AsyncMock(return_value=secret_arn),
         ), patch(
             "src.routers.custom_model.update_custom_model_secret",
-            new=AsyncMock(),
+            new=AsyncMock(return_value="new-encrypted-blob"),
         ) as update_secret, patch(
             "src.routers.custom_model.delete_custom_model_secret",
             new=AsyncMock(),
@@ -173,7 +170,11 @@ async def test_update_and_delete_custom_model(async_client):
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert delete_resp.status_code == 204
-            delete_secret.assert_awaited_once_with(secret_arn)
+            # Deletion now takes the model row (it may need to read
+            # secret_arn/encrypted_key), not a bare secret ARN.
+            delete_secret.assert_awaited_once()
+            deleted_model = delete_secret.await_args.args[0]
+            assert deleted_model.id == model_id
 
             list_resp = await async_client.get(
                 "/models",
@@ -336,21 +337,6 @@ async def test_resolve_agentic_llm_client_rejects_other_users_model():
     finally:
         await UserCustomModel.delete_many({"user_id": owner.id})
         await cleanup_models([owner, other])
-
-
-@pytest.mark.asyncio
-async def test_update_custom_model_secret_calls_put_secret_value_with_secret_id():
-    secret_arn = "arn:aws:secretsmanager:eu-central-1:123:secret:test"
-    mock_client = MagicMock()
-    with patch(
-        "src.services.custom_model_secrets._client", return_value=mock_client
-    ):
-        await update_custom_model_secret(secret_arn=secret_arn, api_key="sk-new")
-
-    mock_client.put_secret_value.assert_called_once_with(
-        SecretId=secret_arn,
-        SecretString='{"api_key": "sk-new"}',
-    )
 
 
 def test_is_agentic_generation_request_detects_custom_model():

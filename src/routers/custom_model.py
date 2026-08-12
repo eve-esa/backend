@@ -64,7 +64,7 @@ async def create_custom_model(
     request: CreateCustomModelRequest,
     requesting_user: User = Depends(get_current_user),
 ) -> CustomModelPublic:
-    """Register a user-owned custom model. The API key is stored in AWS Secrets Manager."""
+    """Register a user-owned custom model. The API key is envelope-encrypted on the row."""
     await ensure_custom_model_quota(requesting_user.id)
     entry = await resolve_catalog_entry(request.provider_id, request.catalog_model_id)
 
@@ -72,33 +72,23 @@ async def create_custom_model(
         model = await UserCustomModel.create(
             user_id=requesting_user.id,
             display_name=request.display_name,
-            secret_arn="",
             **catalog_create_fields(entry),
         )
     except ValueError as exc:
         _raise_if_duplicate_display_name(exc)
 
-    secret_arn: str | None = None
     try:
-        secret_arn = await create_custom_model_secret(
+        model.encrypted_key = await create_custom_model_secret(
             user_id=requesting_user.id,
+            provider_id=entry.provider.id,
             model_id=model.id,
             api_key=request.api_key,
         )
-        model.secret_arn = secret_arn
         model.updated_at = datetime.now(timezone.utc)
         await model.save()
     except Exception:
-        logger.exception("Failed to create custom model secret for model_id=%s", model.id)
+        logger.exception("Failed to store custom model credentials for model_id=%s", model.id)
         await UserCustomModel.delete_many({"_id": ObjectId(model.id)})
-        if secret_arn:
-            try:
-                await delete_custom_model_secret(secret_arn)
-            except Exception:
-                logger.exception(
-                    "Failed to clean up secret after model create failure model_id=%s",
-                    model.id,
-                )
         raise HTTPException(
             status_code=500,
             detail="Failed to store custom model credentials",
@@ -124,8 +114,10 @@ async def update_custom_model(
     if request.api_key is not None:
         ensure_custom_model_has_credentials(model)
         try:
-            await update_custom_model_secret(
-                secret_arn=model.secret_arn,
+            model.encrypted_key = await update_custom_model_secret(
+                user_id=requesting_user.id,
+                provider_id=model.provider_id,
+                model_id=model.id,
                 api_key=request.api_key,
             )
         except Exception:
@@ -148,18 +140,17 @@ async def delete_custom_model(
     model_id: str,
     requesting_user: User = Depends(get_current_user),
 ) -> None:
-    """Soft-delete a custom model and remove its Secrets Manager entry."""
+    """Soft-delete a custom model, best-effort clearing any legacy Secrets Manager entry."""
     model = await get_owned_custom_model(model_id, requesting_user.id, action="delete")
 
-    if model.secret_arn:
-        try:
-            await delete_custom_model_secret(model.secret_arn)
-        except Exception:
-            logger.exception("Failed to delete custom model secret model_id=%s", model.id)
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to delete custom model credentials",
-            )
+    try:
+        await delete_custom_model_secret(model)
+    except Exception:
+        logger.exception("Failed to delete custom model secret model_id=%s", model.id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete custom model credentials",
+        )
 
     model.deleted_at = datetime.now(timezone.utc)
     model.updated_at = datetime.now(timezone.utc)
