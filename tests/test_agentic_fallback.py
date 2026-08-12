@@ -612,3 +612,148 @@ class TestStreamingStatusEvent:
 
         assert [_event_payload(event)["type"] for event in events] == ["stopped"]
         patched["_build_tools"].assert_not_awaited()
+
+
+async def _stream_events(graph) -> list:
+    request = GenerationRequest(query="hi", llm_type="main", agent="react")
+    with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+        return [
+            _event_payload(event)
+            async for event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            )
+        ]
+
+
+class TestStructuredToolEvents:
+    """The tool events carry machine-readable fields for clients that render
+    tool activity themselves. ``content`` keeps the ready-made display string,
+    so a client that only knows about it is unaffected.
+    """
+
+    async def test_ai_message_tool_call_carries_structured_fields(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "dummy_search",
+                                "args": {"query": "sea ice"},
+                                "id": "call-1",
+                            }
+                        ],
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+                (AIMessage(content="done"), {"langgraph_node": "agent"}),
+            ],
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e for e in events if e["type"] == "tool_call"] == [
+            {
+                "type": "tool_call",
+                "content": "Calling dummy search: sea ice",
+                "tool": "dummy_search",
+                "label": "Calling dummy search",
+                "query": "sea ice",
+            }
+        ]
+
+    async def test_tool_result_carries_tool_name_and_status(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    ToolMessage(
+                        content="x" * 300, name="dummy_search", tool_call_id="call-1"
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (AIMessage(content="done"), {"langgraph_node": "agent"}),
+            ],
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e for e in events if e["type"] == "tool_result"] == [
+            {
+                "type": "tool_result",
+                "content": "x" * 200,
+                "tool": "dummy_search",
+                "status": "ok",
+            }
+        ]
+
+    async def test_text_marker_tool_calls_carry_structured_fields(self):
+        """The `[TOOL_CALLS]` path flushes through _flush_turn_buffer_to_events,
+        and a call with no query argument reports ``query`` as null rather than
+        as an empty string.
+        """
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content=(
+                            '[TOOL_CALLS]dummy_search{"query": "sea ice"}'
+                            "[TOOL_CALLS]dummy_get_sample_report{}"
+                        )
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+            ],
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e for e in events if e["type"] == "tool_call"] == [
+            {
+                "type": "tool_call",
+                "content": "Calling dummy search: sea ice",
+                "tool": "dummy_search",
+                "label": "Calling dummy search",
+                "query": "sea ice",
+            },
+            {
+                "type": "tool_call",
+                "content": "Calling dummy get sample report…",
+                "tool": "dummy_get_sample_report",
+                "label": "Calling dummy get sample report",
+                "query": None,
+            },
+        ]
+
+    async def test_content_stays_the_display_string_for_older_clients(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "dummy_search", "args": {}, "id": "call-1"}
+                        ],
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+                (
+                    ToolMessage(
+                        content="result", name="dummy_search", tool_call_id="call-1"
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (AIMessage(content="done"), {"langgraph_node": "agent"}),
+            ],
+        )
+
+        events = await _stream_events(graph)
+
+        contents = {e["type"]: e["content"] for e in events if "tool" in e["type"]}
+        assert contents == {
+            "tool_call": "Calling dummy search…",
+            "tool_result": "result",
+        }
