@@ -9,8 +9,13 @@ from src.database.mongo_model import MongoModel
 class UserCustomModel(MongoModel):
     """User-owned custom model metadata.
 
-    API keys are stored in AWS Secrets Manager; only ``secret_arn`` is persisted here.
-    ``base_url`` and ``model_name`` are resolved from the provider catalog at runtime.
+    API keys are envelope-encrypted (AES-256-GCM; see
+    ``src.services.custom_model_cipher``) and stored as ``encrypted_key`` on this
+    row. ``secret_arn`` is legacy: rows created before envelope encryption keep
+    their API key in AWS Secrets Manager until
+    ``python -m src.commands.migrate_custom_model_secrets`` re-encrypts them and
+    clears the field. ``base_url`` and ``model_name`` are resolved from the
+    provider catalog at runtime.
     """
 
     user_id: str = Field(..., description="Owner user ID")
@@ -24,7 +29,14 @@ class UserCustomModel(MongoModel):
         default=None,
         description="Deprecated; ignored for catalog-backed models",
     )
-    secret_arn: str = Field(..., description="AWS Secrets Manager ARN for the API key")
+    encrypted_key: Optional[str] = Field(
+        default=None,
+        description="Envelope-encrypted API key blob (AES-256-GCM; see custom_model_cipher)",
+    )
+    secret_arn: Optional[str] = Field(
+        default=None,
+        description="Legacy AWS Secrets Manager ARN; set only on un-migrated rows",
+    )
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

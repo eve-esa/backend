@@ -204,11 +204,22 @@ MCP_TOOLS_CACHE_TTL = float(os.getenv("MCP_TOOLS_CACHE_TTL", "300"))
 OPENAI_PROXY_UPSTREAM_URL = os.getenv("OPENAI_PROXY_UPSTREAM_URL", "").strip()
 OPENAI_PROXY_API_KEY = os.getenv("OPENAI_PROXY_API_KEY", "").strip()
 
-# AWS Secrets Manager — user custom model API keys (BYOM)
+# User custom model API keys (BYOM). Stored as an AES-256-GCM envelope-encrypted
+# blob on the Mongo row (src/services/custom_model_cipher.py); AWS_REGION and
+# AWS_ENDPOINT_URL are also used for the KMS client. CUSTOM_MODEL_SECRET_PREFIX
+# is legacy: it only matters for rows that still carry a Secrets Manager
+# secret_arn and haven't been swept by migrate_custom_model_secrets yet.
 AWS_REGION = os.getenv("AWS_REGION", "eu-central-1").strip()
 AWS_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL", "").strip() or None
 CUSTOM_MODEL_SECRET_PREFIX = os.getenv("CUSTOM_MODEL_SECRET_PREFIX", "eve/dev").strip()
 CUSTOM_MODEL_MAX_PER_USER = int(os.getenv("CUSTOM_MODEL_MAX_PER_USER", "10"))
+# DEK-wrapping backend for the envelope cipher. KMS wins when both are set.
+#   CUSTOM_MODEL_KMS_KEY_ID: a KMS CMK id/ARN/alias (cloud) -- DEKs are wrapped
+#     with kms:Encrypt/Decrypt under this key.
+#   BYOK_LOCAL_KEK: a static 256-bit key, base64 or hex (local compose/CI, no
+#     AWS needed) -- DEKs are wrapped with AES-256-GCM under this key.
+CUSTOM_MODEL_KMS_KEY_ID = os.getenv("CUSTOM_MODEL_KMS_KEY_ID", "").strip() or None
+BYOK_LOCAL_KEK = os.getenv("BYOK_LOCAL_KEK", "").strip() or None
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:
