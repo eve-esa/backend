@@ -11,6 +11,26 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.0.9](https://github.com/eve-esa/backend/compare/v0.0.8...v0.0.9) (2026-08-12)
+
+
+### Added
+
+* EVE answers through an ordered endpoint chain with failover ([#162](https://github.com/eve-esa/backend/issues/162)) ([4ef24d3](https://github.com/eve-esa/backend/commit/4ef24d3821269941a4839c3163a12c689c9a85b8))
+* gate JSC platform model behind FEATURE_JSC_MODEL ([#159](https://github.com/eve-esa/backend/issues/159)) ([717afe7](https://github.com/eve-esa/backend/commit/717afe71b48a16a13f817adf85eed7cb15622454))
+* structured tool fields on the agentic stream events ([#165](https://github.com/eve-esa/backend/issues/165)) ([428d933](https://github.com/eve-esa/backend/commit/428d9330156a7df02753c5e4237c294106227ce8))
+
+
+### Fixed
+
+* **deps:** clear the audited dependency vulnerabilities and automate updates ([#167](https://github.com/eve-esa/backend/issues/167)) ([13aeeec](https://github.com/eve-esa/backend/commit/13aeeecf614c376b26e7ae40fc3b7d83ed97d288))
+* hold agentic generation until the stream subscriber attaches ([#164](https://github.com/eve-esa/backend/issues/164)) ([2d580e6](https://github.com/eve-esa/backend/commit/2d580e6fd6a232efc3686dabef04d72f4149c96a))
+* inject the artifact instruction only on the first agentic turn ([#160](https://github.com/eve-esa/backend/issues/160)) ([d813156](https://github.com/eve-esa/backend/commit/d81315679e780bf02bacc95eb00d15eecd83ec25))
+* open the agentic stream with a thinking notice ([#163](https://github.com/eve-esa/backend/issues/163)) ([e9fcbb2](https://github.com/eve-esa/backend/commit/e9fcbb2ed2e5f0c4681704daddd407126935264f))
+* persist endpoint failures and keep retries on their pipeline ([#161](https://github.com/eve-esa/backend/issues/161)) ([fd1254f](https://github.com/eve-esa/backend/commit/fd1254fd8dbb53490d8266fe1dd2bf3d441b9f86))
+* stop capping agentic answers with the endpoint probe budget ([#166](https://github.com/eve-esa/backend/issues/166)) ([dd0c7f6](https://github.com/eve-esa/backend/commit/dd0c7f69fcecfaffefe48177ee13644b51ece18b))
+* unpack artifact_ids in message retry and keep SSE streams alive ([#157](https://github.com/eve-esa/backend/issues/157)) ([2065905](https://github.com/eve-esa/backend/commit/20659053f7ccd91e1e83263ded50d4b4bb6c37ad))
+
 ## [0.0.8](https://github.com/eve-esa/backend/compare/v0.0.7...v0.0.8) (2026-08-09)
 
 ### Added
