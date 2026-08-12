@@ -109,7 +109,7 @@ async def test_get_collection_requires_auth(async_client, monkeypatch):
         ).json()["id"]
 
         resp = await async_client.get(f"/collections/{coll_id}")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
     finally:
         await cleanup_models([user])
 

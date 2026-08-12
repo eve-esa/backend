@@ -284,7 +284,7 @@ async def test_generate_llm_requires_auth(async_client):
         "/generate-llm",
         json={"query": "hello"},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

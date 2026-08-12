@@ -1,6 +1,83 @@
+# Dependabot configuration.
+# Note: the git-URL dependency (eve-esa-agents) is not updatable by Dependabot;
+# pin it to a tag/commit and bump it manually.
 version: 2
 updates:
+  # Python runtime and dev dependencies (requirements.txt).
+  # This repo is requirements.txt-based: use the pip ecosystem, not uv,
+  # until the project migrates to pyproject.toml + uv.lock.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 10
+    versioning-strategy: "increase"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    groups:
+      # Order matters: a dependency lands in the first group it matches.
+      langchain-ecosystem:
+        applies-to: "version-updates"
+        patterns:
+          - "langchain*"
+          - "langgraph*"
+        update-types: ["minor", "patch"]
+      docs-toolchain:
+        applies-to: "version-updates"
+        patterns:
+          - "mkdocs*"
+          - "mkdocstrings*"
+          - "pymdown-extensions"
+        update-types: ["minor", "patch"]
+      python-minor-patch:
+        applies-to: "version-updates"
+        update-types: ["minor", "patch"]
+      python-security:
+        applies-to: "security-updates"
+        patterns: ["*"]
+    ignore:
+      # Majors are handled manually with a human review.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Dockerfile base image (python:3.12-slim-bookworm).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+    groups:
+      docker-minor-patch:
+        applies-to: "version-updates"
+        update-types: ["minor", "patch"]
+      docker-security:
+        applies-to: "security-updates"
+        patterns: ["*"]
+
+  # GitHub Actions workflows.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Rome"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 2
+    groups:
+      actions-minor-patch:
+        applies-to: "version-updates"
+        update-types: ["minor", "patch"]
+      actions-security:
+        applies-to: "security-updates"
+        patterns: ["*"]

@@ -117,7 +117,7 @@ async def test_create_custom_model_requires_auth(async_client):
         "/users/custom-models",
         json=CREATE_PAYLOAD,
     )
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

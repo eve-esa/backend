@@ -97,7 +97,7 @@ async def test_log_error_without_authentication(async_client):
 
     response = await async_client.post("/log-error", json=payload)
 
-    assert response.status_code == 403
+    assert response.status_code == 401
     body = response.json()
     assert "detail" in body
 
