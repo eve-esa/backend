@@ -768,12 +768,16 @@ async def generate_answer_agentic_stream_helper(
     Event types emitted:
       status      — pre-answer progress notice (emitted immediately so the
                     stream starts promptly)
-      tool_call   — agent invoked a tool (query shown)
-      tool_result — tool returned (preview)
+      tool_call   — agent invoked a tool (query shown), plus `tool`, `label`
+                    and `query` for clients rendering tool activity themselves
+      tool_result — tool returned (preview), plus `tool` and `status`
       token       — LLM final-answer token
       final       — complete answer + latencies
       stopped     — cancelled by client
       error       — unhandled exception
+
+    `content` on the tool events stays the ready-made display string the
+    structured fields are derived from, so older clients render unchanged.
 
     """
     if not _langgraph_available:
@@ -881,7 +885,7 @@ async def generate_answer_agentic_stream_helper(
                     label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
                     msg = f"{label}: {query_used}" if query_used else f"{label}…"
                     events.append(
-                        f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                        f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
                     )
                 if not answer_text:
                     return events
@@ -964,7 +968,7 @@ async def generate_answer_agentic_stream_helper(
                         trace_entries.append(
                             _serialise_trace_entry(chunk, node=node, latency_s=step_s)
                         )
-                        yield f"data: {json.dumps({'type': 'tool_result', 'content': preview})}\n\n"
+                        yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok'})}\n\n"
                         continue
 
                     if AIMessage and isinstance(chunk, AIMessage):
@@ -991,7 +995,7 @@ async def generate_answer_agentic_stream_helper(
                             trace_entries.append(
                                 _serialise_trace_entry(chunk, node=node, latency_s=step_s)
                             )
-                            yield f"data: {json.dumps({'type': 'tool_call', 'content': msg})}\n\n"
+                            yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
                             continue
 
                         content = chunk.content
