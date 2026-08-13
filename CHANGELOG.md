@@ -11,6 +11,19 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.0.10](https://github.com/eve-esa/backend/compare/v0.0.9...v0.0.10) (2026-08-13)
+
+
+### Added
+
+* encrypt custom-model keys with envelope encryption instead of per-key secrets ([#177](https://github.com/eve-esa/backend/issues/177)) ([6ac2515](https://github.com/eve-esa/backend/commit/6ac2515b6f72ef0a5dbe214f824fbb3240733d2c))
+* the default EVE model answers via JSC where its picker entry is hidden ([#180](https://github.com/eve-esa/backend/issues/180)) ([8a3de20](https://github.com/eve-esa/backend/commit/8a3de20382551ccad1ba574d17798dd5d4bc483c))
+
+
+### Fixed
+
+* clear custom-model key material on delete ([#179](https://github.com/eve-esa/backend/issues/179)) ([d71f9cb](https://github.com/eve-esa/backend/commit/d71f9cb06df3ab2d2cd3cd2c9ff0082de0c654b2))
+
 ## [0.0.9](https://github.com/eve-esa/backend/compare/v0.0.8...v0.0.9) (2026-08-12)
 
 
