@@ -256,12 +256,30 @@ def _should_inject_jsc(catalog: LoadedCatalog) -> bool:
     )
 
 
+def _transparent_jsc_default() -> bool:
+    """Whether the default EVE model should transparently answer via JSC.
+
+    On environments where JSC is configured but its picker entry is hidden
+    (``FEATURE_JSC_MODEL`` off = staging/prod), the single "EVE-Instruct" pick
+    IS the JSC endpoint: it maps to ``eve_jsc``, whose chain leads with JSC and
+    fails over to RunPod/Mistral. The user sees one "EVE-Instruct" entry and
+    never RunPod's cold start. When the flag is on (dev) the picker instead
+    shows a separate "EVE-Instruct (JSC)" entry and the default stays ``main``.
+    """
+    return bool(EVE_JSC_BASE_URL and not FEATURE_JSC_MODEL)
+
+
 async def list_platform_models() -> List[PlatformModel]:
     catalog = await _load_catalog()
+    transparent_jsc = _transparent_jsc_default()
     models = [
         PlatformModel(
             id=model.id,
-            llm_type=model.llm_type,
+            llm_type=(
+                JSC_LLM_TYPE
+                if transparent_jsc and model.llm_type == "main"
+                else model.llm_type
+            ),
             display_name=model.display_name,
             description=model.description,
         )

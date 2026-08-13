@@ -34,7 +34,12 @@ async def _list_platform(async_client, token):
 
 
 @pytest.mark.asyncio
-async def test_flag_off_hides_the_jsc_model(async_client, monkeypatch):
+async def test_flag_off_hides_the_jsc_entry_but_routes_the_default_to_jsc(
+    async_client, monkeypatch
+):
+    # Flag off + JSC configured (staging/prod): no separate "(JSC)" entry, but
+    # the single "EVE-Instruct" default transparently maps to eve_jsc so the
+    # picker routes to the JSC-first chain instead of RunPod.
     monkeypatch.setattr("src.services.provider_catalog.FEATURE_JSC_MODEL", False)
     monkeypatch.setattr(
         "src.services.provider_catalog.EVE_JSC_BASE_URL", "https://jsc.example/v1"
@@ -43,6 +48,25 @@ async def test_flag_off_hides_the_jsc_model(async_client, monkeypatch):
     try:
         platform = await _list_platform(async_client, token)
         assert all(m["id"] != JSC_PLATFORM_MODEL_ID for m in platform)
+        default = next(m for m in platform if m["id"] == "eve-instruct")
+        assert default["llm_type"] == JSC_LLM_TYPE
+        assert default["display_name"] == "EVE-Instruct"  # stays transparent
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_flag_off_without_jsc_keeps_the_default_on_main(
+    async_client, monkeypatch
+):
+    # No JSC configured (prod today): the default stays main, no transparent map.
+    monkeypatch.setattr("src.services.provider_catalog.FEATURE_JSC_MODEL", False)
+    monkeypatch.setattr("src.services.provider_catalog.EVE_JSC_BASE_URL", "")
+    user, token = await create_test_user_and_token()
+    try:
+        platform = await _list_platform(async_client, token)
+        default = next(m for m in platform if m["id"] == "eve-instruct")
+        assert default["llm_type"] == "main"
         assert all(m["llm_type"] != JSC_LLM_TYPE for m in platform)
     finally:
         await cleanup_models([user])
