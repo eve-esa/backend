@@ -39,7 +39,7 @@ huggingface_hub
 replicate
 tiktoken
 trafilatura
-boto3>=1.35.0
+boto3>=1.43.67
 redis>=4.2.0
 qdrant-client>=1.15.1,<2.0
 mkdocs==1.6.1
