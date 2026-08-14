@@ -133,3 +133,6 @@ python3 scripts/test_generate_agentic.py \
   --max-new-tokens 2048 \
   "Use the eve_retrieval_retrieve tool to retrieve documents for: What is ESA?"
 ```
+
+
+REMEMBER THIS!!!!!!!! when setting up agentcore bearer token into mongo, remember it lasts only for one hour.
