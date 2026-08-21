@@ -69,6 +69,11 @@ STAGING_PUBLIC_COLLECTIONS = [
         "alias": "SATCOM Technical Knowledge Base",
         "description": "Curated collection of resources on Satellite Communications (SATCOM) sourced from peer-reviewed publishers and journals, including MDPI, Oxford University Press, Springer, IEEE, and other leading scientific platforms. The dataset covers a broad range of technical content such as research papers, review articles, standards, and technical documentation focused on communication systems, satellite payloads, link design, modulation, and emerging SATCOM technologies",
     },
+    {
+            "name": "esa-rag-scraped-qwen3-newpipeline",
+            "alias": "ESA EO Knowledge Base",
+            "description": "Curated collection of resources from ESA-related platforms and portals. It includes materials from ESA Earth Online, the Newcomers Earth Observation Guide, EO Portal, Sentiwiki, EO for Society publications, the CEOS ESA Catalogue, and the ESA Open Science Catalog. The dataset covers heterogeneous content such as web articles, technical documentation, instruments, datasets, and applications. Metadata has been systematically extracted and obtained, including URLs and titles. This collection contains around 100.000 documents.",
+    },
 ]
 
 SCRAPING_DOG_ALL_URLS = [
