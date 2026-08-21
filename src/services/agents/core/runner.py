@@ -7,6 +7,7 @@ cancellation, error logging, token consumption, and stream bus publishing.
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import time
@@ -211,6 +212,154 @@ def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
 
 
+def _tool_arg_names(tool: Any) -> set[str]:
+    """extraction of accepted argument names from langchain tools."""
+    names: set[str] = set()
+
+    args = getattr(tool, "args", None)
+    if isinstance(args, dict):
+        names.update(str(k) for k in args.keys())
+
+    schema = getattr(tool, "args_schema", None) or getattr(tool, "input_schema", None)
+    model_fields = getattr(schema, "model_fields", None) or getattr(
+        schema, "__fields__", None
+    )
+    if isinstance(model_fields, dict):
+        names.update(str(k) for k in model_fields.keys())
+
+    if isinstance(schema, dict):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            names.update(str(k) for k in properties.keys())
+
+    return names
+
+
+def _rag_mcp_tool_defaults(tool: Any, request: GenerationRequest) -> Dict[str, Any]:
+    """Map UI-selected RAG params onto the argument names a RAG MCP tool accepts."""
+    accepted = _tool_arg_names(tool)
+
+    def accepts(name: str) -> bool:
+        return not accepted or name in accepted
+
+    defaults: Dict[str, Any] = {}
+    if request.query and accepts("query"):
+        defaults["query"] = request.query
+    if request.llm_type is not None and accepts("llm_type"):
+        defaults["llm_type"] = request.llm_type
+    if request.embeddings_model and accepts("embeddings_model"):
+        defaults["embeddings_model"] = request.embeddings_model
+    for name in ("k", "top_k", "top_n", "limit", "n_results"):
+        if accepts(name):
+            defaults[name] = request.k
+    if accepts("temperature"):
+        defaults["temperature"] = request.temperature
+    for name in ("score_threshold", "threshold", "min_score"):
+        if accepts(name):
+            defaults[name] = request.score_threshold
+    if accepts("max_new_tokens"):
+        defaults["max_new_tokens"] = request.max_new_tokens
+    for name in ("collection_ids", "collections", "collection_names"):
+        if request.collection_ids and accepts(name):
+            defaults[name] = request.collection_ids
+    if accepts("public_collections"):
+        defaults["public_collections"] = request.public_collections
+    if request.private_collections and accepts("private_collections"):
+        defaults["private_collections"] = request.private_collections
+    if request.filters is not None and accepts("filters"):
+        defaults["filters"] = request.filters
+    if request.year is not None:
+        if accepts("year"):
+            defaults["year"] = request.year
+        if len(request.year) >= 1 and accepts("start_year"):
+            defaults["start_year"] = request.year[0]
+        if len(request.year) >= 2 and accepts("end_year"):
+            defaults["end_year"] = request.year[1]
+    return defaults
+
+
+def _is_rag_mcp_tool(tool: Any) -> bool:
+    """Return True for MCP tools that should inherit request-scoped RAG params."""
+    name = str(getattr(tool, "name", "") or "").lower()
+    return name == "eve_retrieval_retrieve" # TO-DO - if we split the mcp server name and tool name, we need to change here
+
+
+def _merge_tool_defaults(tool_input: Any, defaults: Dict[str, Any]) -> Any:
+    if not isinstance(tool_input, dict) or not defaults:
+        return tool_input
+    merged = dict(tool_input)
+    for key, value in defaults.items():
+        if value is not None and key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _merge_kwarg_defaults(kwargs: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(kwargs)
+    for key, value in defaults.items():
+        if value is not None and key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
+    """Return a per-request tool copy that injects UI RAG params into calls."""
+    if not _is_rag_mcp_tool(tool):
+        return tool
+
+    defaults = _rag_mcp_tool_defaults(tool, request)
+    if not defaults:
+        return tool
+
+    try:
+        bound_tool = copy.copy(tool)
+    except Exception:
+        logger.warning(
+            "Failed to copy MCP RAG tool %r; using original tool object",
+            getattr(tool, "name", "tool"),
+            exc_info=True,
+        )
+        bound_tool = tool
+
+    original_ainvoke = getattr(bound_tool, "ainvoke", None)
+    if callable(original_ainvoke):
+        async def ainvoke_with_defaults(
+            tool_input: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            return await original_ainvoke(
+                _merge_tool_defaults(tool_input, defaults), *args, **kwargs
+            )
+
+        object.__setattr__(bound_tool, "ainvoke", ainvoke_with_defaults)
+
+    original_invoke = getattr(bound_tool, "invoke", None)
+    if callable(original_invoke):
+        def invoke_with_defaults(tool_input: Any, *args: Any, **kwargs: Any) -> Any:
+            return original_invoke(
+                _merge_tool_defaults(tool_input, defaults), *args, **kwargs
+            )
+
+        object.__setattr__(bound_tool, "invoke", invoke_with_defaults)
+
+    original_coroutine = getattr(bound_tool, "coroutine", None)
+    if callable(original_coroutine):
+        async def coroutine_with_defaults(*args: Any, **kwargs: Any) -> Any:
+            return await original_coroutine(
+                *args, **_merge_kwarg_defaults(kwargs, defaults)
+            )
+
+        object.__setattr__(bound_tool, "coroutine", coroutine_with_defaults)
+
+    original_func = getattr(bound_tool, "func", None)
+    if callable(original_func):
+        def func_with_defaults(*args: Any, **kwargs: Any) -> Any:
+            return original_func(*args, **_merge_kwarg_defaults(kwargs, defaults))
+
+        object.__setattr__(bound_tool, "func", func_with_defaults)
+
+    return bound_tool
+
+
 async def _build_tools(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -228,13 +377,17 @@ async def _build_tools(
                 mcp_proxy_bearer_token=request.mcp_proxy_bearer_token,
                 mcp_user_id=request.mcp_user_id,
             )
+            mcp_client = getattr(mcp_tools, "_mcp_client", None)
+            mcp_tools = [
+                _with_request_rag_defaults(tool, request)
+                for tool in mcp_tools
+            ]
             tools.extend(mcp_tools)
             # `tools.extend(...)` above only copies the individual tool
             # references, not `mcp_tools`'s own `_mcp_client` attribute — carry
             # it over explicitly so the client stays alive for as long as the
             # caller holds onto this function's return value (see
             # _MCPToolsWithClient docstring in _load_mcp_tools_for_servers).
-            mcp_client = getattr(mcp_tools, "_mcp_client", None)
             if mcp_client is not None:
                 tools = _MCPToolsWithClient(tools, mcp_client)
         except Exception:
