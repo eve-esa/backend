@@ -6,6 +6,8 @@ getting embedding models based on model names, and making API requests
 to RunPod for embeddings generation.
 """
 
+import ast
+import json
 import logging
 import tempfile
 from enum import Enum
@@ -228,6 +230,130 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         "text": result_text,
         "metadata": result_metadata,
     }
+
+
+_RETRIEVAL_DOC_KEYS = ("retrieved_docs", "results", "documents", "items", "data")
+
+_CONTENT_BLOCK_KEYS = {"text", "type", "annotations", "meta", "_meta"}
+
+
+def _is_mcp_content_block(value: Any) -> bool:
+    """True for an MCP ``{"type": "text", "text": "..."}`` style content block.
+
+    A retrieval document also carries a ``text`` field, so the text key alone is
+    not enough: either the block declares itself with ``type`` or it carries
+    nothing beyond the envelope keys.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+        return False
+    if value.get("type") == "text":
+        return True
+    return set(value.keys()) <= _CONTENT_BLOCK_KEYS
+
+
+def _retrieval_payload_roots(
+    payload: Any, *, keep_text_fallback: bool = False
+) -> List[Any]:
+    """Unwrap content blocks and JSON strings into parsed root objects.
+
+    ``keep_text_fallback`` turns an undecodable string into a ``{"text": ...}``
+    record instead of dropping it (the legacy Wiley behaviour).
+    """
+    if payload is None:
+        return []
+    if isinstance(payload, str):
+        try:
+            return [json.loads(payload)]
+        except Exception:
+            pass
+        # The agent graph stores tool output as ``str(result)``, so a list of
+        # MCP content blocks arrives as its Python repr rather than as JSON.
+        # literal_eval only accepts literals, so this is safe on tool output.
+        try:
+            literal = ast.literal_eval(payload)
+        except Exception:
+            literal = None
+        if isinstance(literal, (list, dict)):
+            return _retrieval_payload_roots(
+                literal, keep_text_fallback=keep_text_fallback
+            )
+        return [{"text": payload}] if keep_text_fallback else []
+    if _is_mcp_content_block(payload):
+        return _retrieval_payload_roots(
+            payload["text"], keep_text_fallback=keep_text_fallback
+        )
+    if isinstance(payload, list):
+        roots: List[Any] = []
+        for item in payload:
+            if isinstance(item, str) or _is_mcp_content_block(item):
+                roots.extend(
+                    _retrieval_payload_roots(
+                        item, keep_text_fallback=keep_text_fallback
+                    )
+                )
+            else:
+                roots.append(item)
+        return roots
+    return [payload]
+
+
+def _root_documents(root: Any) -> Optional[List[Any]]:
+    """Documents carried by one root object, or None when it carries no list."""
+    if isinstance(root, list):
+        return list(root)
+    if not isinstance(root, dict):
+        return None
+    for key in _RETRIEVAL_DOC_KEYS:
+        value = root.get(key)
+        if isinstance(value, list):
+            return list(value)
+    return None
+
+
+def is_retrieval_error_payload(payload: Any) -> bool:
+    """True when a retrieval tool answered with an error instead of documents."""
+    for root in _retrieval_payload_roots(payload):
+        if (
+            isinstance(root, dict)
+            and "error" in root
+            and _root_documents(root) is None
+        ):
+            return True
+    return False
+
+
+def extract_documents_from_retrieval_payload(
+    payload: Any,
+    *,
+    normalize: bool = True,
+    keep_text_fallback: bool = False,
+) -> List[Any]:
+    """Return the documents carried by a retrieval tool payload.
+
+    Accepts what MCP retrieval tools actually hand back: a JSON string, an
+    already-parsed dict, a list of MCP content blocks, or a bare list of
+    documents. Error payloads and undecodable content yield an empty list.
+
+    With ``normalize`` (the default) every dict item goes through
+    ``extract_document_data`` so callers get Document-shaped records and
+    non-dict items are dropped; with ``normalize=False`` the raw items are
+    returned untouched.
+    """
+    documents: List[Any] = []
+    for root in _retrieval_payload_roots(
+        payload, keep_text_fallback=keep_text_fallback
+    ):
+        found = _root_documents(root)
+        if found is not None:
+            documents.extend(found)
+            continue
+        if not isinstance(root, dict) or "error" in root:
+            continue
+        documents.append(root)
+
+    if not normalize:
+        return documents
+    return [extract_document_data(d) for d in documents if isinstance(d, dict)]
 
 
 def str_token_counter(text: str) -> int:
