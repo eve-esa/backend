@@ -65,6 +65,7 @@ from src.utils.helpers import (
     build_context,
     build_conversation_context,
     extract_document_data,
+    extract_documents_from_retrieval_payload,
     get_mongodb_uri,
     tiktoken_counter,
 )
@@ -860,36 +861,11 @@ async def get_mcp_context(
         )
         return [], {}
 
-    def _ensure_list(obj: Any) -> List[Any]:
-        if obj is None:
-            return []
-        if isinstance(obj, list):
-            return obj
-        return [obj]
-
-    # Extract result items from various possible shapes
-    extracted: List[Dict[str, Any]] = []
-    for item in content_items:
-        data = item
-        if isinstance(item, dict) and "text" in item:
-            data = item["text"]
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except Exception:
-                # treat as plain text record
-                data = {"text": data}
-
-        # common wrappers
-        if isinstance(data, dict):
-            for key in ("results", "documents", "items", "data"):
-                if isinstance(data.get(key), list):
-                    extracted.extend(_ensure_list(data[key]))
-                    break
-            else:
-                extracted.extend(_ensure_list(data))
-        elif isinstance(data, list):
-            extracted.extend(data)
+    # Extract result items from various possible shapes. The raw items are kept
+    # as-is here: they are normalised once, further down the classic pipeline.
+    extracted: List[Any] = extract_documents_from_retrieval_payload(
+        content_items, normalize=False, keep_text_fallback=True
+    )
 
     for it in extracted:
         if isinstance(it, dict):

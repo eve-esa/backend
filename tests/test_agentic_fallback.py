@@ -960,3 +960,352 @@ class TestErrorPathAttribution:
             ]
 
         assert events[-1]["type"] == "error"
+
+
+# ─── retrieval documents reaching the UI ──────────────────────────────────────
+
+
+class _FakeRetrievalTool:
+    """Stand-in for the MCP retrieval tool as exposed to the graph."""
+
+    def __init__(self, name="eve_retrieval_retrieve", arg_names=("query", "public_collections")):
+        self.name = name
+        self.args = {arg: {} for arg in arg_names}
+
+
+def _retrieval_payload(*doc_ids: str) -> str:
+    return json.dumps(
+        {
+            "retrieved_docs": [
+                {
+                    "id": doc_id,
+                    "score": 0.5,
+                    "collection_name": "ESA Earth Observation",
+                    "payload": {"title": doc_id},
+                    "text": f"text of {doc_id}",
+                    "metadata": {},
+                }
+                for doc_id in doc_ids
+            ],
+            "latencies": {"retrieval_latency": 0.1},
+            "original_query": "q",
+            "requery": None,
+        }
+    )
+
+
+def _tool_call_message(tool_name: str, call_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": tool_name, "args": {"query": "q"}, "id": call_id}],
+    )
+
+
+class TestAgenticRetrievalDocuments:
+    async def test_retrieval_tool_output_returned_as_documents(self):
+        """The retrieval ToolMessage must come back Document-shaped, not raw."""
+        updates = [
+            {
+                "agent": {
+                    "messages": [
+                        _tool_call_message("eve_retrieval_retrieve", "call-1")
+                    ]
+                }
+            },
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=_retrieval_payload("doc-1", "doc-2"),
+                            name="eve_retrieval_retrieve",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="grounded answer")]}},
+        ]
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=_FakeUpdatesGraph(updates)),
+        ):
+            (
+                answer,
+                documents,
+                use_rag,
+                _latencies,
+                _prompts,
+                trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert answer == "grounded answer"
+        assert use_rag is True
+        assert [d["id"] for d in documents] == ["doc-1", "doc-2"]
+        assert documents[0]["collection_name"] == "ESA Earth Observation"
+        assert documents[0]["text"] == "text of doc-1"
+        assert "tool" not in documents[0]
+        # The raw ToolMessage is still on the trace.
+        assert any(entry.get("role") == "tool" for entry in trace)
+
+    async def test_non_retrieval_tool_is_not_a_source(self):
+        """A geocode call must not flip use_rag or invent documents."""
+        updates = [
+            {"agent": {"messages": [_tool_call_message("geocode_place", "call-1")]}},
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps({"lat": 1.0, "lon": 2.0}),
+                            name="geocode_place",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="it is over there")]}},
+        ]
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_tools=AsyncMock(
+                return_value=[
+                    _FakeRetrievalTool(),
+                    _FakeRetrievalTool(name="geocode_place", arg_names=("place",)),
+                ]
+            ),
+            _build_react_graph=MagicMock(return_value=_FakeUpdatesGraph(updates)),
+        ):
+            (
+                _answer,
+                documents,
+                use_rag,
+                _latencies,
+                _prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert documents == []
+        assert use_rag is False
+
+    async def test_retrieval_error_payload_yields_no_documents(self):
+        """An erroring retrieval tool must not be reported as a source."""
+        updates = [
+            {
+                "agent": {
+                    "messages": [
+                        _tool_call_message("eve_retrieval_retrieve", "call-1")
+                    ]
+                }
+            },
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps(
+                                {"error": "qdrant down", "detail": "timeout"}
+                            ),
+                            name="eve_retrieval_retrieve",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="sorry")]}},
+        ]
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=_FakeUpdatesGraph(updates)),
+        ):
+            (
+                _answer,
+                documents,
+                use_rag,
+                _latencies,
+                _prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert documents == []
+        assert use_rag is False
+
+    async def test_empty_retrieval_still_counts_as_rag(self):
+        """A retrieval that found nothing is still a retrieval: use_rag stays True."""
+        updates = [
+            {
+                "agent": {
+                    "messages": [
+                        _tool_call_message("eve_retrieval_retrieve", "call-1")
+                    ]
+                }
+            },
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=_retrieval_payload(),
+                            name="eve_retrieval_retrieve",
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="nothing found")]}},
+        ]
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=_FakeUpdatesGraph(updates)),
+        ):
+            (
+                _answer,
+                documents,
+                use_rag,
+                _latencies,
+                _prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert documents == []
+        assert use_rag is True
+
+    async def test_tool_message_without_name_falls_back_to_call_id(self):
+        """A provider that drops ToolMessage.name must not lose the documents."""
+        updates = [
+            {
+                "agent": {
+                    "messages": [
+                        _tool_call_message("eve_retrieval_retrieve", "call-1")
+                    ]
+                }
+            },
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content=_retrieval_payload("doc-1"),
+                            tool_call_id="call-1",
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="grounded answer")]}},
+        ]
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=_FakeUpdatesGraph(updates)),
+        ):
+            (
+                _answer,
+                documents,
+                use_rag,
+                _latencies,
+                _prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert [d["id"] for d in documents] == ["doc-1"]
+        assert use_rag is True
+
+    async def test_streaming_persists_documents(self):
+        """The streamed pipeline is the production default: it must persist sources."""
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    _tool_call_message("eve_retrieval_retrieve", "call-1"),
+                    {"langgraph_node": "agent"},
+                ),
+                (
+                    ToolMessage(
+                        content=_retrieval_payload("doc-1", "doc-2"),
+                        name="eve_retrieval_retrieve",
+                        tool_call_id="call-1",
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (AIMessage(content="grounded answer"), {"langgraph_node": "agent"}),
+            ],
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            events = [
+                _event_payload(event)
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert events[-1]["type"] == "final"
+        persist.assert_awaited_once()
+        kwargs = persist.await_args.kwargs
+        assert kwargs["use_rag"] is True
+        assert [d["id"] for d in kwargs["documents"]] == ["doc-1", "doc-2"]
+        assert kwargs["documents"][0]["text"] == "text of doc-1"
+
+    async def test_streaming_non_retrieval_tool_persists_no_documents(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    _tool_call_message("geocode_place", "call-1"),
+                    {"langgraph_node": "agent"},
+                ),
+                (
+                    ToolMessage(
+                        content=json.dumps({"lat": 1.0}),
+                        name="geocode_place",
+                        tool_call_id="call-1",
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (AIMessage(content="over there"), {"langgraph_node": "agent"}),
+            ],
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_tools=AsyncMock(return_value=[_FakeRetrievalTool()]),
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        kwargs = persist.await_args.kwargs
+        assert kwargs["documents"] == []
+        assert kwargs["use_rag"] is False
