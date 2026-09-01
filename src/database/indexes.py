@@ -47,6 +47,8 @@ async def ensure_indexes() -> None:
     user_custom_models = get_collection("user_custom_models")
     catalog_platform_models = get_collection("catalog_platform_models")
     catalog_providers = get_collection("catalog_providers")
+    users = get_collection("users")
+    external_identities = get_collection("external_identities")
 
     await _create_index(
         mcp_servers,
@@ -164,6 +166,33 @@ async def ensure_indexes() -> None:
         name="catalog_providers_enabled_sort",
     )
 
+    # Identity provider accounts. The unique compound index is not an
+    # optimisation: it is what decides the winner when two requests for the same
+    # brand-new user arrive at two workers at once, so neither ends up creating a
+    # second EVE account for the same person.
+    await _create_index(
+        external_identities,
+        [("issuer", 1), ("subject", 1)],
+        name="external_identities_issuer_subject",
+        unique=True,
+    )
+    await _create_index(
+        external_identities,
+        [("user_id", 1)],
+        name="external_identities_user_id",
+    )
+
+    # Deliberately NOT unique. Legacy rows may already hold duplicate addresses,
+    # and a unique build against a collection that has them fails outright, on
+    # production, at startup. src/commands/report_duplicate_emails.py reports
+    # what is there; the index tightens once that report comes back clean.
+    await _create_index(
+        users,
+        [("email", 1)],
+        name="users_email",
+    )
+
     logger.info(
-        "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, and custom models"
+        "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, "
+        "custom models, and external identities"
     )
