@@ -20,6 +20,7 @@ from src.routers import (
     error_log_router,
     health_check_router,
     mcp_server_router,
+    migration_router,
     message_router,
     user_router,
 )
@@ -57,6 +58,10 @@ def register_routers(app: FastAPI):
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
+
+    # TEMPORARY: serves the Cognito Migrate-user Lambda during the cutover.
+    # Removed with src/routers/migration.py in the cleanup PR.
+    app.include_router(migration_router, tags=["Migration"])
 
 
 def create_app(debug=False, **kwargs):

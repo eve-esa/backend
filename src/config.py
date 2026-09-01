@@ -128,6 +128,10 @@ AUTH_ALLOW_INSECURE_HTTP = getenv_or("AUTH_ALLOW_INSECURE_HTTP").lower() == "tru
 AUTH_LINK_BY_VERIFIED_EMAIL = getenv_or(
     "AUTH_LINK_BY_VERIFIED_EMAIL", "true"
 ).lower() == "true"
+# TEMPORARY, deleted with src/routers/migration.py once the production migration
+# window closes. Unset means the endpoint answers 503 rather than existing
+# quietly: it reads legacy password hashes, so absent configuration is closed.
+MIGRATION_SHARED_SECRET = getenv_or("MIGRATION_SHARED_SECRET")
 # ──────────────────────────────────────────────────────────────────────────────
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()

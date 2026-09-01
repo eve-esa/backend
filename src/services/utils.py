@@ -7,7 +7,6 @@ to RunPod for embeddings generation.
 """
 
 import asyncio
-import hashlib
 import logging
 import tempfile
 from enum import Enum
@@ -137,6 +136,3 @@ async def runpod_api_request(
         logger.error(f"RunPod API error: {str(e)}")
         raise RuntimeError(f"RunPod API request failed: {str(e)}") from e
 
-
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
