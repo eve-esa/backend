@@ -191,6 +191,49 @@ async def test_token_use_other_than_access_is_rejected(provider):
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
+async def test_keycloak_id_token_is_rejected(provider):
+    """The one an audience check alone cannot catch.
+
+    A Keycloak id token carries the client in aud exactly like its access token,
+    and Keycloak stamps no token_use to tell them apart. The browser is holding
+    one of these, so "it verifies" is not good enough: what separates them is
+    scope, which every Keycloak access token has and no id token does.
+    """
+    with pytest.raises(PermissionError):
+        await verify_access_token(
+            keycloak_token(omit_claims=("token_use",), extra_claims={"typ": "ID"})
+        )
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_keycloak_access_token_without_token_use_is_accepted(provider):
+    """The real shape: no token_use anywhere, scope always present."""
+    claims = await verify_access_token(
+        keycloak_token(
+            omit_claims=("token_use",),
+            extra_claims={"scope": "openid profile email"},
+        )
+    )
+    assert claims["sub"] == "kc-subject"
+    assert "token_use" not in claims
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_audience", [42, {"aud": "eve"}, 3.5, True])
+async def test_malformed_audience_is_a_permission_error(provider, bad_audience):
+    """A string or an array of strings, per RFC 7519, and nothing else.
+
+    Coercing the value instead of checking it raises TypeError, which none of
+    the dispatchers handle: it would leave as a 500 carrying the raw text.
+    """
+    with pytest.raises(PermissionError):
+        await verify_access_token(keycloak_token(audience=bad_audience))
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
 async def test_missing_subject_is_rejected(provider):
     with pytest.raises(PermissionError):
         await verify_access_token(keycloak_token(omit_claims=("sub",)))

@@ -259,7 +259,16 @@ def _assert_audience(claims: dict[str, Any]) -> None:
 
     audience = claims.get("aud")
     if audience is not None:
-        values = [audience] if isinstance(audience, str) else list(audience)
+        # RFC 7519 allows a string or an array of strings and nothing else. The
+        # shape is checked rather than coerced: list() on an int raises
+        # TypeError, which is not one of the two exceptions the dispatchers
+        # handle, so it would escape as a 500 with the raw text in the body.
+        if isinstance(audience, str):
+            values = [audience]
+        elif isinstance(audience, list):
+            values = audience
+        else:
+            raise PermissionError("Token audience is malformed")
         if expected not in values:
             raise PermissionError("Token audience mismatch")
         return
@@ -302,8 +311,19 @@ async def verify_access_token(token: str) -> dict[str, Any]:
     except PyJWTError as exc:
         raise PermissionError("Invalid token") from exc
 
+    # Refuse anything that is not an access token, with two rules because the
+    # providers give two different signals.
+    #
+    # Cognito stamps token_use, so its id tokens are caught by name. Keycloak
+    # stamps nothing of the sort, and its id token carries the client in aud
+    # exactly like its access token does: on the audience check alone an id
+    # token passes, and the browser holds one. What separates them is scope,
+    # which Keycloak puts on every access token and on no id token.
     token_use = claims.get("token_use")
-    if token_use is not None and token_use != "access":
+    if token_use is not None:
+        if token_use != "access":
+            raise PermissionError("Token is not an access token")
+    elif "scope" not in claims:
         raise PermissionError("Token is not an access token")
 
     _assert_audience(claims)

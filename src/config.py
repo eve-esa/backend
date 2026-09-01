@@ -148,10 +148,6 @@ CORS_ALLOWED_ORIGINS = [
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 ]
 
-FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
-    os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
-)
-
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 
 # Which build is running. The two halves are set at different moments and neither is ever

@@ -76,6 +76,15 @@ services:
       # able to write back over it. --import-realm SKIPS an existing realm, so
       # edits here need `docker compose rm -sf keycloak && up -d`, not a restart.
       - ./infra/identity/keycloak/realm:/opt/keycloak/data/import:ro
+    healthcheck:
+      # The image ships bash but no curl or wget, so this is a /dev/tcp probe.
+      # --import-realm runs before the listener binds, so an open port means the
+      # realm is in. Kept identical to the stack-root compose on purpose.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
     networks:
       - app-network
 
