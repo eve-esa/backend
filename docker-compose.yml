@@ -34,6 +34,16 @@ services:
       - S3_REGION=eu-central-1
       - S3_ACCESS_KEY_ID=minioadmin
       - S3_SECRET_ACCESS_KEY=minioadmin
+      # Identity provider. The issuer is the address the BROWSER uses, because
+      # that is the value that ends up in the token; the discovery URL is how
+      # this container reaches the same realm from inside the network. Keycloak
+      # reconciles the two via KC_HOSTNAME_BACKCHANNEL_DYNAMIC.
+      # NOTE: backend/.env is loaded with override=True, so a stale AUTH_* there
+      # silently wins over these.
+      - AUTH_ISSUER=http://localhost:${KEYCLOAK_PORT:-8080}/realms/eve
+      - AUTH_DISCOVERY_URL=http://keycloak:8080/realms/eve/.well-known/openid-configuration
+      - AUTH_CLIENT_ID=eve-frontend
+      - AUTH_ALLOW_INSECURE_HTTP=true
     volumes:
       - .:/code
     depends_on:
@@ -42,6 +52,30 @@ services:
       - langfuse-web
       - minio-images
       - dummy-mcp
+      - keycloak
+    networks:
+      - app-network
+
+  # Local stand-in for Cognito. The application cannot tell the two apart: it
+  # knows an issuer, an audience and a JWT.
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_TAG:-26.7}
+    command: ["start-dev", "--import-realm"]
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USER:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # One issuer, two routes to it: the browser reaches localhost, the backend
+      # reaches keycloak:8080. Pinning the hostname keeps `iss` stable for both
+      # and BACKCHANNEL_DYNAMIC lets the backend fetch on the address it can use.
+      - KC_HOSTNAME=http://localhost:${KEYCLOAK_PORT:-8080}
+      - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
+    volumes:
+      # Read-only: this is the source of truth, and the container must never be
+      # able to write back over it. --import-realm SKIPS an existing realm, so
+      # edits here need `docker compose rm -sf keycloak && up -d`, not a restart.
+      - ./infra/identity/keycloak/realm:/opt/keycloak/data/import:ro
     networks:
       - app-network
 
@@ -64,6 +98,10 @@ services:
       # Must be reachable from the browser, not just the compose network.
       - VITE_API_URL=http://localhost:8000
       - VITE_ENABLE_STREAMING=true
+      # Same-machine Keycloak: the issuer must be the browser-visible host.
+      - VITE_AUTH_ISSUER=http://localhost:${KEYCLOAK_PORT:-8080}/realms/eve
+      - VITE_AUTH_CLIENT_ID=eve-frontend
+      - VITE_AUTH_SCOPE=openid profile email
     volumes:
       - ../frontend:/app
       - /app/node_modules

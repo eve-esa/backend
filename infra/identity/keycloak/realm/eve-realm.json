@@ -1,0 +1,118 @@
+{
+  "realm": "eve",
+  "displayName": "EVE (local)",
+  "enabled": true,
+
+  "sslRequired": "none",
+
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "verifyEmail": true,
+  "editUsernameAllowed": false,
+  "rememberMe": true,
+
+  "accessTokenLifespan": 3600,
+  "accessTokenLifespanForImplicitFlow": 3600,
+  "ssoSessionIdleTimeout": 7200,
+  "ssoSessionMaxLifespan": 36000,
+
+  "smtpServer": {
+    "host": "mailcatcher",
+    "port": "1025",
+    "from": "noreply@eve.local",
+    "fromDisplayName": "EVE (local)",
+    "auth": "false",
+    "ssl": "false",
+    "starttls": "false"
+  },
+
+  "clients": [
+    {
+      "clientId": "eve-frontend",
+      "name": "EVE frontend",
+      "description": "Browser client. Public, PKCE only, no secret to leak into a bundle.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-eve-frontend",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "eve-frontend",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "dev@eve.example.com",
+      "email": "dev@eve.example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "EVE",
+      "lastName": "Developer",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "eve-dev-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e2e-a@eve-e2e.dev",
+      "email": "e2e-a@eve-e2e.dev",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "E2E",
+      "lastName": "Alpha",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "E2ePass-2026a",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "e2e-b@eve-e2e.dev",
+      "email": "e2e-b@eve-e2e.dev",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "E2E",
+      "lastName": "Bravo",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "E2ePass-2026b",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}
