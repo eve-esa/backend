@@ -11,6 +11,20 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.0.11](https://github.com/eve-esa/backend/compare/v0.0.10...v0.0.11) (2026-09-01)
+
+
+### Added
+
+* add rewrite for better rag responses ([#192](https://github.com/eve-esa/backend/issues/192)) ([8e7473a](https://github.com/eve-esa/backend/commit/8e7473aaa2fb0b1e12bea7868876e79f30de83c7))
+* pass ui params to retrieve tool call ([#185](https://github.com/eve-esa/backend/issues/185)) ([9aa8868](https://github.com/eve-esa/backend/commit/9aa8868bb8febd129a7398ab2218b7945e45460b))
+
+
+### Fixed
+
+* **agentic:** make UI RAG params authoritative on retrieve tool calls ([#191](https://github.com/eve-esa/backend/issues/191)) ([22c1a7e](https://github.com/eve-esa/backend/commit/22c1a7e31c0256e35228c66e8e33241d89034d6d))
+* hardcoded collections for staging ([#181](https://github.com/eve-esa/backend/issues/181)) ([7df23d9](https://github.com/eve-esa/backend/commit/7df23d901b223fd1d3c8b35868d8d4a60d742543))
+
 ## [0.0.10](https://github.com/eve-esa/backend/compare/v0.0.9...v0.0.10) (2026-08-13)
 
 
