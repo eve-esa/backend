@@ -39,6 +39,7 @@ from src.config import (
     OPENAI_PROXY_UPSTREAM_URL,
 )
 from src.middlewares.auth import extract_bearer_token, resolve_principal_from_bearer_token
+from src.services.oidc import IdentityProviderUnavailable
 from src.services.openai_usage import track_usage
 
 logger = logging.getLogger(__name__)
@@ -277,6 +278,12 @@ class OpenAIProxyDispatcher:
                     await self._proxy(scope, receive, send)
                 except PermissionError as exc:
                     await self._send_error(send, 401, str(exc))
+                except IdentityProviderUnavailable as exc:
+                    # An unreachable IdP is neither a bad credential nor a bad
+                    # upstream: without this branch it fell to the catch-all and
+                    # answered 502 with a stack trace in the body.
+                    logger.warning("Identity provider unavailable: %s", exc)
+                    await self._send_error(send, 503, "Identity provider unavailable")
                 except ValueError as exc:
                     await self._send_error(send, 400, str(exc))
                 except Exception as exc:

@@ -27,6 +27,7 @@ from src.middlewares.auth import (
 )
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
+from src.services.oidc import IdentityProviderUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,14 @@ class MCPProxyDispatcher:
                         )
                     except PermissionError as exc:
                         await self._send_error(send, 401, str(exc))
+                        return
+                    except IdentityProviderUnavailable as exc:
+                        # 503 like the catch-all below, but without the stack
+                        # trace: a provider outage is expected weather, not a bug.
+                        logger.warning("Identity provider unavailable: %s", exc)
+                        await self._send_error(
+                            send, 503, "Identity provider unavailable"
+                        )
                         return
                     except LookupError as exc:
                         await self._send_error(send, 404, str(exc))
