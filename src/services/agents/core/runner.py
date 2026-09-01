@@ -36,6 +36,7 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
     resolve_generated_model_name,
+    should_use_rag,
 )
 from src.services.agents.core.registry import get_agent_graph
 from src.services.mcp.artifact_context import (
@@ -52,7 +53,11 @@ from src.services.token_rate_limiter import (
     count_tokens_for_texts,
 )
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
-from src.utils.helpers import get_mongodb_uri
+from src.utils.helpers import (
+    extract_documents_from_retrieval_payload,
+    get_mongodb_uri,
+    is_retrieval_error_payload,
+)
 from src.utils.langfuse_helper import get_callbacks, langfuse_context
 
 logger = logging.getLogger(__name__)
@@ -212,40 +217,94 @@ def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) 
 # ─── Tool factory ─────────────────────────────────────────────────────────────
 
 
+def _tool_name(tool: Any) -> str:
+    """Lowercased tool name, empty when the attribute is missing or raises."""
+    try:
+        return str(getattr(tool, "name", "") or "").lower()
+    except Exception:
+        return ""
+
+
 def _tool_arg_names(tool: Any) -> set[str]:
-    """extraction of accepted argument names from langchain tools."""
+    """extraction of accepted argument names from langchain tools.
+
+    ``tool.args`` is a property that builds the JSON schema on the fly and can
+    raise for a malformed MCP tool, so introspection failures degrade to "no
+    known argument": one bad tool must never break tool loading for the run.
+    """
     names: set[str] = set()
 
-    args = getattr(tool, "args", None)
-    if isinstance(args, dict):
-        names.update(str(k) for k in args.keys())
+    try:
+        args = getattr(tool, "args", None)
+        if isinstance(args, dict):
+            names.update(str(k) for k in args.keys())
 
-    schema = getattr(tool, "args_schema", None) or getattr(tool, "input_schema", None)
-    model_fields = getattr(schema, "model_fields", None) or getattr(
-        schema, "__fields__", None
-    )
-    if isinstance(model_fields, dict):
-        names.update(str(k) for k in model_fields.keys())
+        schema = getattr(tool, "args_schema", None) or getattr(
+            tool, "input_schema", None
+        )
+        model_fields = getattr(schema, "model_fields", None) or getattr(
+            schema, "__fields__", None
+        )
+        if isinstance(model_fields, dict):
+            names.update(str(k) for k in model_fields.keys())
 
-    if isinstance(schema, dict):
-        properties = schema.get("properties")
-        if isinstance(properties, dict):
-            names.update(str(k) for k in properties.keys())
+        if isinstance(schema, dict):
+            properties = schema.get("properties")
+            if isinstance(properties, dict):
+                names.update(str(k) for k in properties.keys())
+    except Exception:
+        logger.warning(
+            "Failed to introspect arguments of tool %r",
+            _tool_name(tool) or type(tool).__name__,
+            exc_info=True,
+        )
+        return set()
 
     return names
 
 
-def _rag_mcp_tool_defaults(tool: Any, request: GenerationRequest) -> Dict[str, Any]:
-    """Map UI-selected RAG params onto the argument names a RAG MCP tool accepts."""
+# UI-owned RAG keys are authoritative: whatever the model puts in the tool call
+# for these is replaced by the value the user selected in the UI. Only the keys
+# listed in _RAG_FILL_ONLY_KEYS are filled in when the model omits them.
+_RAG_FILL_ONLY_KEYS = frozenset({"query"})
+
+_MISSING = object()
+
+
+def _rag_mcp_tool_defaults(
+    tool: Any,
+    request: GenerationRequest,
+    *,
+    retrieval_query: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Map UI-selected RAG params onto the argument names a RAG MCP tool accepts.
+
+    Only argument names the tool schema actually declares are returned: when the
+    schema cannot be introspected nothing is injected, because guessing would
+    push every alias (k, top_k, top_n, ...) into a single call.
+
+    ``filters``, ``llm_type`` and ``year`` are mapped even when the request
+    leaves them unset: "the user selected no filter" is itself a UI decision and
+    must overwrite whatever the model invented. The retrieve tool declares them
+    as optional (``filters: dict | None``, ``llm_type: str | None``,
+    ``year: list[int] | None``), so sending ``None`` is valid.
+    ``start_year``/``end_year`` stay absent: the backend ``POST /retrieve``
+    recomputes the year range from ``filters``/``year``.
+
+    ``retrieval_query`` is the classic-RAG rewrite of the user query; when
+    present it becomes the fill-only default for ``query`` (the model's own
+    query still wins, query is the one argument the model owns).
+    """
     accepted = _tool_arg_names(tool)
 
     def accepts(name: str) -> bool:
-        return not accepted or name in accepted
+        return name in accepted
 
     defaults: Dict[str, Any] = {}
-    if request.query and accepts("query"):
-        defaults["query"] = request.query
-    if request.llm_type is not None and accepts("llm_type"):
+    query = retrieval_query or request.query
+    if query and accepts("query"):
+        defaults["query"] = query
+    if accepts("llm_type"):
         defaults["llm_type"] = request.llm_type
     if request.embeddings_model and accepts("embeddings_model"):
         defaults["embeddings_model"] = request.embeddings_model
@@ -263,60 +322,218 @@ def _rag_mcp_tool_defaults(tool: Any, request: GenerationRequest) -> Dict[str, A
         if request.collection_ids and accepts(name):
             defaults[name] = request.collection_ids
     if accepts("public_collections"):
-        defaults["public_collections"] = request.public_collections
-    if request.private_collections and accepts("private_collections"):
-        defaults["private_collections"] = request.private_collections
-    if request.filters is not None and accepts("filters"):
+        defaults["public_collections"] = list(request.public_collections or [])
+    if accepts("private_collections"):
+        defaults["private_collections"] = list(request.private_collections or [])
+    if accepts("filters"):
         defaults["filters"] = request.filters
-    if request.year is not None:
-        if accepts("year"):
-            defaults["year"] = request.year
-        if len(request.year) >= 1 and accepts("start_year"):
-            defaults["start_year"] = request.year[0]
-        if len(request.year) >= 2 and accepts("end_year"):
-            defaults["end_year"] = request.year[1]
+    if accepts("year"):
+        defaults["year"] = request.year
     return defaults
 
 
 def _is_rag_mcp_tool(tool: Any) -> bool:
-    """Return True for MCP tools that should inherit request-scoped RAG params."""
-    name = str(getattr(tool, "name", "") or "").lower()
-    return name == "eve_retrieval_retrieve" # TO-DO - if we split the mcp server name and tool name, we need to change here
+    """Return True for MCP tools that should inherit request-scoped RAG params.
+
+    Tools are exposed as ``f"{server_name}_{tool_name}"``, and the server name
+    itself may contain underscores, so the unprefixed name is matched as a
+    suffix. The ``public_collections`` argument is required for the suffix
+    match so that unrelated search tools (esa_moocs ``search_moocs(query,
+    top_k)``) are never captured.
+    """
+    name = _tool_name(tool)
+    if not name:
+        return False
+    if name == "eve_retrieval_retrieve":
+        return True
+    if name == "retrieve" or name.endswith("_retrieve"):
+        return "public_collections" in _tool_arg_names(tool)
+    return False
 
 
-def _merge_tool_defaults(tool_input: Any, defaults: Dict[str, Any]) -> Any:
+def _rag_tool_names(tools: Any) -> set[str]:
+    """Lowercased names of the tools whose output carries retrieval documents."""
+    names: set[str] = set()
+    for tool in tools or []:
+        try:
+            if not _is_rag_mcp_tool(tool):
+                continue
+        except Exception:
+            continue
+        name = _tool_name(tool)
+        if name:
+            names.add(name)
+    return names
+
+
+def _collect_retrieval_documents(
+    all_messages: Any, rag_tool_names: set[str]
+) -> tuple[List[Dict[str, Any]], int, int]:
+    """Documents produced by the retrieval tool during an agentic run.
+
+    Returns ``(documents, retrieval_calls, retrieval_errors)``. Only ToolMessages
+    coming from a RAG tool are read: a geocode or image tool must not mark the
+    answer as source-backed. A retrieval call that returned nothing still counts
+    as a call (the UI then says "no sources found", not "answered without
+    sources"); a call that returned an error payload counts as an error instead.
+    """
+    if not rag_tool_names or ToolMessage is None:
+        return [], 0, 0
+
+    # ToolMessage.name is set by the tool node, but a provider that drops it
+    # leaves the tool_call id as the only link back to the tool that ran.
+    names_by_call_id: Dict[str, str] = {}
+    for msg in all_messages:
+        if AIMessage is None or not isinstance(msg, AIMessage):
+            continue
+        for call in getattr(msg, "tool_calls", None) or []:
+            if isinstance(call, dict):
+                call_id, call_name = call.get("id"), call.get("name")
+            else:
+                call_id, call_name = (
+                    getattr(call, "id", None),
+                    getattr(call, "name", None),
+                )
+            if call_id and call_name:
+                names_by_call_id[str(call_id)] = str(call_name).lower()
+
+    documents: List[Dict[str, Any]] = []
+    retrieval_calls = 0
+    retrieval_errors = 0
+    for msg in all_messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        name = str(getattr(msg, "name", "") or "").lower()
+        if not name:
+            name = names_by_call_id.get(
+                str(getattr(msg, "tool_call_id", "") or ""), ""
+            )
+        if name not in rag_tool_names:
+            continue
+        content = getattr(msg, "content", None)
+        if is_retrieval_error_payload(content):
+            retrieval_errors += 1
+            continue
+        retrieval_calls += 1
+        documents.extend(extract_documents_from_retrieval_payload(content))
+    return documents, retrieval_calls, retrieval_errors
+
+
+def _apply_rag_defaults(
+    merged: Dict[str, Any],
+    defaults: Dict[str, Any],
+    *,
+    tool_name: str,
+) -> None:
+    """Overwrite UI-owned keys in ``merged`` in place, filling only ``query``.
+
+    A ``None`` in ``defaults`` is a value like any other for UI-owned keys: the
+    user cleared that filter, so the model's own guess has to go. Only the
+    fill-only keys treat ``None`` as "nothing to contribute".
+    """
+    forced: Dict[str, Any] = {}
+    replaced: List[str] = []
+    changed = False
+
+    for key, value in defaults.items():
+        if key in _RAG_FILL_ONLY_KEYS:
+            if value is None:
+                continue
+            current = merged.get(key, _MISSING)
+            if current is _MISSING or current in (None, ""):
+                merged[key] = value
+                changed = True
+            continue
+        previous = merged.get(key, _MISSING)
+        merged[key] = value
+        forced[key] = value
+        if previous is _MISSING:
+            changed = True
+        elif previous != value:
+            changed = True
+            replaced.append(f"{key}: {previous!r} -> {value!r}")
+
+    # Checked before the "nothing changed" shortcut below: an empty selection is
+    # worth flagging on every call, including the one where the model already
+    # sent exactly the (empty) selection the request carries.
+    if "public_collections" in defaults and not merged.get("public_collections"):
+        logger.warning(
+            "RAG tool %s called with no public collection selected", tool_name
+        )
+
+    if not changed:
+        # The second patched layer (coroutine after ainvoke) re-merges the very
+        # same values; logging it again would only duplicate the first line.
+        logger.debug("RAG tool %s already carries the UI params", tool_name)
+        return
+
+    logger.info("RAG tool %s forced UI params: %s", tool_name, forced)
+    if replaced:
+        logger.info(
+            "RAG tool %s replaced model-supplied values: %s",
+            tool_name,
+            "; ".join(replaced),
+        )
+
+
+def _merge_tool_defaults(
+    tool_input: Any,
+    defaults: Dict[str, Any],
+    *,
+    tool_name: str = "tool",
+) -> Any:
     if not isinstance(tool_input, dict) or not defaults:
         return tool_input
     merged = dict(tool_input)
-    for key, value in defaults.items():
-        if value is not None and key not in merged:
-            merged[key] = value
+    _apply_rag_defaults(merged, defaults, tool_name=tool_name)
     return merged
 
 
-def _merge_kwarg_defaults(kwargs: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_kwarg_defaults(
+    kwargs: Dict[str, Any],
+    defaults: Dict[str, Any],
+    *,
+    tool_name: str = "tool",
+) -> Dict[str, Any]:
     merged = dict(kwargs)
-    for key, value in defaults.items():
-        if value is not None and key not in merged:
-            merged[key] = value
+    _apply_rag_defaults(merged, defaults, tool_name=tool_name)
     return merged
 
 
-def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
+def _with_request_rag_defaults(
+    tool: Any,
+    request: GenerationRequest,
+    *,
+    retrieval_query: Optional[str] = None,
+) -> Any:
     """Return a per-request tool copy that injects UI RAG params into calls."""
-    if not _is_rag_mcp_tool(tool):
+    try:
+        if not _is_rag_mcp_tool(tool):
+            return tool
+        defaults = _rag_mcp_tool_defaults(
+            tool,
+            request,
+            retrieval_query=retrieval_query,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to inspect tool %r for RAG params; using it untouched",
+            _tool_name(tool) or type(tool).__name__,
+            exc_info=True,
+        )
         return tool
 
-    defaults = _rag_mcp_tool_defaults(tool, request)
     if not defaults:
         return tool
+
+    tool_name = _tool_name(tool) or "tool"
 
     try:
         bound_tool = copy.copy(tool)
     except Exception:
         logger.warning(
             "Failed to copy MCP RAG tool %r; using original tool object",
-            getattr(tool, "name", "tool"),
+            tool_name,
             exc_info=True,
         )
         bound_tool = tool
@@ -327,7 +544,9 @@ def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
             tool_input: Any, *args: Any, **kwargs: Any
         ) -> Any:
             return await original_ainvoke(
-                _merge_tool_defaults(tool_input, defaults), *args, **kwargs
+                _merge_tool_defaults(tool_input, defaults, tool_name=tool_name),
+                *args,
+                **kwargs,
             )
 
         object.__setattr__(bound_tool, "ainvoke", ainvoke_with_defaults)
@@ -336,7 +555,9 @@ def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
     if callable(original_invoke):
         def invoke_with_defaults(tool_input: Any, *args: Any, **kwargs: Any) -> Any:
             return original_invoke(
-                _merge_tool_defaults(tool_input, defaults), *args, **kwargs
+                _merge_tool_defaults(tool_input, defaults, tool_name=tool_name),
+                *args,
+                **kwargs,
             )
 
         object.__setattr__(bound_tool, "invoke", invoke_with_defaults)
@@ -345,7 +566,8 @@ def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
     if callable(original_coroutine):
         async def coroutine_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return await original_coroutine(
-                *args, **_merge_kwarg_defaults(kwargs, defaults)
+                *args,
+                **_merge_kwarg_defaults(kwargs, defaults, tool_name=tool_name),
             )
 
         object.__setattr__(bound_tool, "coroutine", coroutine_with_defaults)
@@ -353,11 +575,38 @@ def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
     original_func = getattr(bound_tool, "func", None)
     if callable(original_func):
         def func_with_defaults(*args: Any, **kwargs: Any) -> Any:
-            return original_func(*args, **_merge_kwarg_defaults(kwargs, defaults))
+            return original_func(
+                *args,
+                **_merge_kwarg_defaults(kwargs, defaults, tool_name=tool_name),
+            )
 
         object.__setattr__(bound_tool, "func", func_with_defaults)
 
     return bound_tool
+
+
+async def _resolve_agentic_retrieval_query(request: GenerationRequest) -> Optional[str]:
+    """Reuse the classic RAG rewrite for agentic retrieval tool defaults."""
+    try:
+        llm_manager = get_shared_llm_manager()
+        decision, _prompt, _used_fallback = await should_use_rag(
+            llm_manager,
+            request.query,
+            conversation="",
+            llm_type=request.llm_type,
+        )
+        if (
+            decision
+            and getattr(decision, "use_rag", False)
+            and getattr(decision, "requery", None)
+        ):
+            return decision.requery
+    except Exception:
+        logger.warning(
+            "Agentic retrieval query rewrite failed; using original query",
+            exc_info=True,
+        )
+    return None
 
 
 async def _build_tools(
@@ -378,8 +627,17 @@ async def _build_tools(
                 mcp_user_id=request.mcp_user_id,
             )
             mcp_client = getattr(mcp_tools, "_mcp_client", None)
+            retrieval_query = (
+                await _resolve_agentic_retrieval_query(request)
+                if any(_is_rag_mcp_tool(tool) for tool in mcp_tools)
+                else None
+            )
             mcp_tools = [
-                _with_request_rag_defaults(tool, request)
+                _with_request_rag_defaults(
+                    tool,
+                    request,
+                    retrieval_query=retrieval_query,
+                )
                 for tool in mcp_tools
             ]
             tools.extend(mcp_tools)
@@ -719,7 +977,10 @@ async def generate_answer_agentic(
 ]:
     """Run the full agentic generation pipeline without streaming.
 
-    Returns (answer, tool_results, use_rag, latencies, prompts, trace, artifact_ids).
+    Returns (answer, documents, use_rag, latencies, prompts, trace, artifact_ids).
+
+    ``documents`` holds the retrieval-tool output normalised to the Document
+    shape the API returns, so the UI can render sources for an agentic answer.
     ``artifact_ids`` lists any Artifacts the MCP artifact interceptor persisted
     from tool output during this run (see ``src.services.mcp.artifact_ingestion``).
     """
@@ -863,14 +1124,12 @@ async def generate_answer_agentic(
             final_answer, list(artifact_ctx.collected_artifact_ids)
         )
 
-        tool_results: List[Dict[str, Any]] = []
-        use_rag = False
-        for msg in all_messages:
-            if isinstance(msg, ToolMessage):
-                use_rag = True
-                tool_results.append(
-                    {"tool": getattr(msg, "name", "tool"), "content": msg.content}
-                )
+        # Only retrieval output reaches the UI as documents. Every ToolMessage is
+        # still kept verbatim in the trace by _serialise_trace_entry above.
+        documents, retrieval_calls, _retrieval_errors = _collect_retrieval_documents(
+            all_messages, _rag_tool_names(tools)
+        )
+        use_rag = retrieval_calls > 0
 
         total_latency = time.perf_counter() - total_start
         latencies: Dict[str, Optional[float]] = {
@@ -896,7 +1155,7 @@ async def generate_answer_agentic(
 
         return (
             final_answer,
-            tool_results,
+            documents,
             use_rag,
             latencies,
             prompts,
@@ -970,6 +1229,9 @@ async def generate_answer_agentic_stream_helper(
     # died before, or during, LLM resolution.
     llm_prompts: Dict[str, Any] = {}
     final_emitted = False
+    # Filled in as the graph streams, read back by every persistence path below.
+    rag_tool_names: set[str] = set()
+    graph_messages: List[Any] = []
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
@@ -979,6 +1241,13 @@ async def generate_answer_agentic_stream_helper(
 
     def _collected_artifact_ids() -> Optional[List[str]]:
         return list(artifact_ctx.collected_artifact_ids) or None
+
+    def _retrieval_state() -> tuple[List[Dict[str, Any]], bool]:
+        """(documents, use_rag) from the retrieval ToolMessages seen so far."""
+        documents, retrieval_calls, _errors = _collect_retrieval_documents(
+            graph_messages, rag_tool_names
+        )
+        return documents, retrieval_calls > 0
 
     def _final_events(answer: str, latencies: Dict[str, Any]) -> List[str]:
         if output_format == "json":
@@ -1006,6 +1275,7 @@ async def generate_answer_agentic_stream_helper(
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
 
         tools = await _build_tools(request, cancel_event=cancel_event)
+        rag_tool_names.update(_rag_tool_names(tools))
         checkpointer = await _get_agentic_checkpointer()
         history, summary = await _fetch_conversation_context(conversation_id)
 
@@ -1039,7 +1309,6 @@ async def generate_answer_agentic_stream_helper(
         gen_start = time.perf_counter()
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
-        use_rag = False
         in_graph_fallback_used = False
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
@@ -1130,10 +1399,13 @@ async def generate_answer_agentic_stream_helper(
                     stream_mode=["messages", "updates"],
                 ):
                     if cancelled():
+                        cancel_documents, cancel_use_rag = _retrieval_state()
                         await persist_message_state(
                             message_id,
                             stopped=True,
                             output="".join(accumulated),
+                            documents=cancel_documents,
+                            use_rag=cancel_use_rag,
                             artifact_ids=_collected_artifact_ids(),
                         )
                         yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
@@ -1158,7 +1430,7 @@ async def generate_answer_agentic_stream_helper(
                         current_node = node
 
                     if ToolMessage and isinstance(chunk, ToolMessage):
-                        use_rag = True
+                        graph_messages.append(chunk)
                         preview = str(chunk.content)[:200]
                         step_s = time.perf_counter() - node_start_time
                         trace_entries.append(
@@ -1169,6 +1441,9 @@ async def generate_answer_agentic_stream_helper(
 
                     if AIMessage and isinstance(chunk, AIMessage):
                         if getattr(chunk, "tool_calls", None):
+                            # Kept only so a ToolMessage without a name can be
+                            # traced back to the tool it answered.
+                            graph_messages.append(chunk)
                             tc = chunk.tool_calls[0]
                             tname = (
                                 tc.get("name", "tool")
@@ -1273,9 +1548,11 @@ async def generate_answer_agentic_stream_helper(
             # The footer prefers agentic_llm_resolved when a fallback ran; it
             # must name the model that answered, not the one that died.
             llm_prompts["agentic_llm_resolved"] = LLMType.Fallback.value
+        documents, use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
             output=answer,
+            documents=documents,
             use_rag=use_rag,
             latencies=latencies,
             prompts={
@@ -1303,9 +1580,12 @@ async def generate_answer_agentic_stream_helper(
 
     except asyncio.CancelledError:
         logger.info("Agentic generation cancelled")
+        cancelled_documents, cancelled_use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
             output="".join(accumulated),
+            documents=cancelled_documents,
+            use_rag=cancelled_use_rag,
             stopped=True,
             artifact_ids=_collected_artifact_ids(),
         )
@@ -1325,10 +1605,13 @@ async def generate_answer_agentic_stream_helper(
             "".join(accumulated), _collected_artifact_ids()
         )
         error_info = build_error_payload(exc)
+        timeout_documents, timeout_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
                 output=answer,
+                documents=timeout_documents,
+                use_rag=timeout_use_rag,
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),
@@ -1353,10 +1636,13 @@ async def generate_answer_agentic_stream_helper(
         )
         error_info = build_error_payload(exc)
         answer = "".join(accumulated)
+        error_documents, error_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
                 output=answer,
+                documents=error_documents,
+                use_rag=error_use_rag,
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),

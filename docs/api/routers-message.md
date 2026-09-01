@@ -67,8 +67,8 @@ Runs retrieval + generation and stores the response in the conversation.
 ### Important params
 
 - `query`: User prompt sent to the model.
-- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
-- `k`: Number of retrieved documents from `0` to `10`.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0` (default `0.6`).
+- `k`: Number of retrieved documents from `0` to `10` (default `10`).
 - `filters`: Optional Qdrant-compatible filter object.
 - `public_collections`: Collection names from collection listing endpoints.
 - `temperature`: Generation temperature from `0.0` to `1.0`.
@@ -156,6 +156,79 @@ Re-runs generation using the stored request input of that message.
 ### Notes
 
 - Useful when model/provider transient failures occur.
+- An agentic message is retried through the agentic pipeline, with the same
+  authoritative UI params as the original call.
+
+## Agentic generation
+
+`POST /conversations/{conversation_id}/generate-agentic`
+
+`POST /conversations/{conversation_id}/stream-generate-agentic`
+
+::: routers.message.create_agentic_message
+    options:
+      show_root_heading: false
+      show_source: false
+
+::: routers.message.create_agentic_message_stream
+    options:
+      show_root_heading: false
+      show_source: false
+
+### Usage
+
+```python
+payload = {
+    "query": "How is TROPOMI used to support policy making?",
+    "public_collections": ["qwen-512-filtered", "wikipedia-512"],
+    "public_mcp_servers": ["eve_retrieval"],
+    "k": 10,
+    "score_threshold": 0.6,
+    "temperature": 0.0,
+    "llm_type": "main",
+    "filters": {"must": [], "should": None, "must_not": None, "min_should": None},
+}
+
+resp = requests.post(
+    f"{BASE_URL}/conversations/{CONVERSATION_ID}/generate-agentic",
+    json=payload,
+    headers=headers,
+    timeout=180,
+)
+resp.raise_for_status()
+message = resp.json()
+print(message["use_rag"], len(message["documents"]), message["answer"])
+```
+
+### Explanation
+
+The agent decides by itself whether to search the knowledge base, and searches
+by calling the `retrieve` tool of the `eve_retrieval` MCP server. Retrieval is a
+tool call here, not a fixed pipeline step, but the retrieval settings are not
+the model's to pick.
+
+### Notes
+
+- Retrieval params from the request body are authoritative on every `retrieve`
+  tool call: `k`, `score_threshold`, `public_collections`,
+  `private_collections`, `filters`, `year`, `temperature`, `llm_type`,
+  `embeddings_model` and `max_new_tokens` overwrite whatever the model put in
+  the call. Leaving one unset is a choice too: it clears the model's own value
+  rather than letting it stand.
+- The model only supplies `query`, the search string. It is the one argument the
+  request never overwrites, and the request `query` fills it in only when the
+  model leaves it empty.
+- Only argument names the tool schema declares are forced, so an MCP server
+  exposing a narrower `retrieve` signature receives exactly the params it
+  accepts and nothing else.
+- `documents` are the documents returned by the `retrieve` tool, in the same
+  shape as the classic generation path, so the sources UI reads them the same
+  way.
+- `use_rag` is `true` only when a `retrieve` call actually ran in that turn. A
+  turn answered from the model's own knowledge, or one where every retrieval
+  call came back as an error, returns `false`.
+- `public_mcp_servers` selects which MCP servers are attached as tools for the
+  request; only enabled servers present in the MCP server store are resolved.
 
 ## Update message feedback
 
@@ -395,8 +468,8 @@ Runs full retrieval + generation pipeline without storing a conversation message
 ### Important params
 
 - `query`: User prompt sent to the model.
-- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
-- `k`: Number of retrieved documents from `0` to `10`.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0` (default `0.6`).
+- `k`: Number of retrieved documents from `0` to `10` (default `10`).
 - `filters`: Optional Qdrant-compatible filter object.
 - `public_collections`: Public collection names from collection listing endpoint - /collections/public.
 - `private_collections`: Private Collection ids from collection listing endpoint - /collections
@@ -450,8 +523,8 @@ Runs only retrieval and returns matched documents/metadata.
 ### Important params
 
 - `query`: User query string.
-- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0`.
-- `k`: Number of retrieved documents from `0` to `10`.
+- `score_threshold`: Retrieval similarity threshold from `0.0` to `1.0` (default `0.6`).
+- `k`: Number of retrieved documents from `0` to `10` (default `10`).
 - `filters`: Optional Qdrant-compatible filter object.
 - `public_collections`: Collection names from collection listing endpoints.
 

@@ -659,7 +659,7 @@ async def retry(
             set_message_context(message.id)
             (
                 answer,
-                tool_results,
+                documents,
                 use_rag,
                 latencies,
                 prompts,
@@ -672,7 +672,7 @@ async def retry(
             )
 
             message.output = answer
-            message.documents = tool_results
+            message.documents = documents
             message.use_rag = use_rag
             message.stopped = False
             message.trace = trace_entries if trace_entries else None
@@ -708,7 +708,7 @@ async def retry(
                 "id": message.id,
                 "query": message.input,
                 "answer": answer,
-                "documents": tool_results,
+                "documents": documents,
                 "use_rag": use_rag,
                 "conversation_id": conversation_id,
                 "collection_ids": request.collection_ids,
@@ -1810,9 +1810,26 @@ async def _prepare_agentic_request(
         is_prod=IS_PROD,
     )
     request.collection_ids = request.collection_ids + request.public_collections
-    request.collection_ids = [
-        c for c in request.collection_ids if c != "Wiley AI Gateway"
-    ]
+
+    # Only the private collections the user actually selected in the UI, like
+    # the classic endpoints do. Appending every collection the user owns would
+    # make the retrieval tool search collections nobody asked for.
+    await apply_private_collections_to_request(request, requesting_user.id)
+
+    # The retry path re-prepares an already prepared request, so the same ids
+    # would pile up on every attempt without this.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for collection_id in request.collection_ids:
+        if collection_id in seen:
+            continue
+        seen.add(collection_id)
+        deduped.append(collection_id)
+    request.collection_ids = deduped
+
+    logger.info(
+        "Agentic effective public collections: %s", request.public_collections
+    )
 
     try:
         request.year = extract_year_range_from_filters(request.filters)
@@ -1909,15 +1926,6 @@ async def create_agentic_message(
                 detail="You are not allowed to use collections from other users",
             )
 
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if user_collections:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
-
         request = await _prepare_agentic_request(request, requesting_user)
         request.mcp_proxy_bearer_token = bearer_token
         request.mcp_user_id = str(requesting_user.id)
@@ -1941,7 +1949,7 @@ async def create_agentic_message(
 
         (
             answer,
-            tool_results,
+            documents,
             use_rag,
             latencies,
             prompts,
@@ -1952,7 +1960,7 @@ async def create_agentic_message(
         )
 
         message.output = answer
-        message.documents = tool_results
+        message.documents = documents
         message.use_rag = use_rag
         message.trace = trace_entries if trace_entries else None
         message.artifact_ids = artifact_ids if artifact_ids else None
@@ -1978,7 +1986,7 @@ async def create_agentic_message(
             "id": message.id,
             "query": request.query,
             "answer": answer,
-            "documents": tool_results,
+            "documents": documents,
             "use_rag": use_rag,
             "conversation_id": conversation_id,
             "collection_ids": request.collection_ids,
@@ -2072,15 +2080,6 @@ async def create_agentic_message_stream(
                 status_code=403,
                 detail="You are not allowed to use collections from other users",
             )
-
-        user_collections = await CollectionModel.find_all(
-            filter_dict={"user_id": requesting_user.id}
-        )
-        request.private_collections_map = {c.id: c.name for c in user_collections}
-        if user_collections:
-            request.collection_ids = request.collection_ids + [
-                c.id for c in user_collections
-            ]
 
         request = await _prepare_agentic_request(request, requesting_user)
         request.mcp_proxy_bearer_token = bearer_token
