@@ -36,6 +36,7 @@ from src.services.generate_answer import (
     maybe_rollup_and_trim_history,
     persist_message_state,
     resolve_generated_model_name,
+    should_use_rag,
 )
 from src.services.agents.core.registry import get_agent_graph
 from src.services.mcp.artifact_context import (
@@ -235,7 +236,12 @@ def _tool_arg_names(tool: Any) -> set[str]:
     return names
 
 
-def _rag_mcp_tool_defaults(tool: Any, request: GenerationRequest) -> Dict[str, Any]:
+def _rag_mcp_tool_defaults(
+    tool: Any,
+    request: GenerationRequest,
+    *,
+    retrieval_query: Optional[str] = None,
+) -> Dict[str, Any]:
     """Map UI-selected RAG params onto the argument names a RAG MCP tool accepts."""
     accepted = _tool_arg_names(tool)
 
@@ -243,8 +249,9 @@ def _rag_mcp_tool_defaults(tool: Any, request: GenerationRequest) -> Dict[str, A
         return not accepted or name in accepted
 
     defaults: Dict[str, Any] = {}
-    if request.query and accepts("query"):
-        defaults["query"] = request.query
+    query = retrieval_query or request.query
+    if query and accepts("query"):
+        defaults["query"] = query
     if request.llm_type is not None and accepts("llm_type"):
         defaults["llm_type"] = request.llm_type
     if request.embeddings_model and accepts("embeddings_model"):
@@ -302,12 +309,21 @@ def _merge_kwarg_defaults(kwargs: Dict[str, Any], defaults: Dict[str, Any]) -> D
     return merged
 
 
-def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
+def _with_request_rag_defaults(
+    tool: Any,
+    request: GenerationRequest,
+    *,
+    retrieval_query: Optional[str] = None,
+) -> Any:
     """Return a per-request tool copy that injects UI RAG params into calls."""
     if not _is_rag_mcp_tool(tool):
         return tool
 
-    defaults = _rag_mcp_tool_defaults(tool, request)
+    defaults = _rag_mcp_tool_defaults(
+        tool,
+        request,
+        retrieval_query=retrieval_query,
+    )
     if not defaults:
         return tool
 
@@ -360,6 +376,30 @@ def _with_request_rag_defaults(tool: Any, request: GenerationRequest) -> Any:
     return bound_tool
 
 
+async def _resolve_agentic_retrieval_query(request: GenerationRequest) -> Optional[str]:
+    """Reuse the classic RAG rewrite for agentic retrieval tool defaults."""
+    try:
+        llm_manager = get_shared_llm_manager()
+        decision, _prompt, _used_fallback = await should_use_rag(
+            llm_manager,
+            request.query,
+            conversation="",
+            llm_type=request.llm_type,
+        )
+        if (
+            decision
+            and getattr(decision, "use_rag", False)
+            and getattr(decision, "requery", None)
+        ):
+            return decision.requery
+    except Exception:
+        logger.warning(
+            "Agentic retrieval query rewrite failed; using original query",
+            exc_info=True,
+        )
+    return None
+
+
 async def _build_tools(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -378,8 +418,17 @@ async def _build_tools(
                 mcp_user_id=request.mcp_user_id,
             )
             mcp_client = getattr(mcp_tools, "_mcp_client", None)
+            retrieval_query = (
+                await _resolve_agentic_retrieval_query(request)
+                if any(_is_rag_mcp_tool(tool) for tool in mcp_tools)
+                else None
+            )
             mcp_tools = [
-                _with_request_rag_defaults(tool, request)
+                _with_request_rag_defaults(
+                    tool,
+                    request,
+                    retrieval_query=retrieval_query,
+                )
                 for tool in mcp_tools
             ]
             tools.extend(mcp_tools)
