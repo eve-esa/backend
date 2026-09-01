@@ -103,6 +103,35 @@ JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7
 JWT_AUDIENCE_ACCESS = os.getenv("JWT_AUDIENCE_ACCESS", "access").strip()
 JWT_AUDIENCE_REFRESH = os.getenv("JWT_AUDIENCE_REFRESH", "refresh").strip()
 
+# ─── Identity provider (OIDC) ─────────────────────────────────────────────────
+# The application knows an issuer, an audience and a JWT. Which product answers
+# at that issuer (Keycloak locally, Cognito in the cloud) is not its business.
+#
+#   AUTH_ISSUER   exact value of the ``iss`` claim, and the value the discovery
+#                 document must declare as its own ``issuer`` before its
+#                 ``jwks_uri`` is trusted.
+#   AUTH_CLIENT_ID  the public client the browser signs in with. Used as the
+#                 expected audience: present in ``aud`` (Keycloak, via the realm
+#                 audience mapper) or equal to the ``client_id`` claim (Cognito
+#                 access tokens carry no ``aud`` at all).
+AUTH_ISSUER = getenv_or("AUTH_ISSUER")
+AUTH_CLIENT_ID = getenv_or("AUTH_CLIENT_ID")
+# Override only when the API audience differs from the browser client id.
+AUTH_AUDIENCE = getenv_or("AUTH_AUDIENCE") or AUTH_CLIENT_ID
+# Set when the container must reach the provider on an address the issuer does
+# not use: local compose fetches from http://keycloak:8080 while the issuer
+# stays http://localhost:8080 so browser and backend agree on one ``iss``.
+AUTH_DISCOVERY_URL = getenv_or("AUTH_DISCOVERY_URL")
+AUTH_JWKS_CACHE_TTL_SECONDS = int(getenv_or("AUTH_JWKS_CACHE_TTL_SECONDS", "3600"))
+# Local compose only. Every deployed environment talks https to its provider.
+AUTH_ALLOW_INSECURE_HTTP = getenv_or("AUTH_ALLOW_INSECURE_HTTP").lower() == "true"
+# Attach a first OIDC identity to the pre-existing EVE account with the same
+# verified email. Off means every first sign-in provisions a new account.
+AUTH_LINK_BY_VERIFIED_EMAIL = getenv_or(
+    "AUTH_LINK_BY_VERIFIED_EMAIL", "true"
+).lower() == "true"
+# ──────────────────────────────────────────────────────────────────────────────
+
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
