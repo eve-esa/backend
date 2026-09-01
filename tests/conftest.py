@@ -30,10 +30,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.database.mongo import async_mongo_manager
 from src.database.indexes import ensure_indexes
+from src.database.models.external_identity import ExternalIdentity
+from src.services.identity import clear_identity_cache
+from src.services.oidc import clear_oidc_caches
 from src.services.provider_catalog import (
     clear_provider_catalog_cache_for_tests,
     ensure_provider_catalog_seeded,
 )
+from tests.utils.utils import TEST_SUBJECT_PREFIX
 
 
 def _resolve_test_mongo_uri() -> str:
@@ -91,6 +95,32 @@ async def _db_connection(request):
     finally:
         await async_mongo_manager.close()
         async_mongo_manager.database = None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_identity_state(request, _db_connection):
+    """Start every test with cold identity caches, and leave no rows behind.
+
+    Both caches are in-process and keyed on values tests reuse: a resolution
+    cached by one test would otherwise answer for a user another test has since
+    deleted, and a JWKS installed with a deliberately wrong key would leak into
+    the next test as an unexplained 401.
+
+    Declaring ``_db_connection`` makes the ordering explicit: this fixture is set
+    up after the connection and torn down before it closes, so the delete below
+    still has a database to talk to.
+    """
+    clear_identity_cache()
+    clear_oidc_caches()
+    try:
+        yield
+    finally:
+        clear_identity_cache()
+        clear_oidc_caches()
+        if not request.node.get_closest_marker("no_db"):
+            await ExternalIdentity.delete_many(
+                {"subject": {"$regex": f"^{TEST_SUBJECT_PREFIX}"}}
+            )
 
 
 @pytest_asyncio.fixture
