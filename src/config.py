@@ -90,6 +90,18 @@ MAIN_MODEL_TIMEOUT = int(os.getenv("MAIN_MODEL_TIMEOUT", "120"))
 # endpoint that is not configured must not be offered, whatever the flag says.
 FEATURE_JSC_MODEL = getenv_or("FEATURE_JSC_MODEL").lower() == "true"
 
+# Off: POST /mcp-servers and PATCH /mcp-servers/{id} answer 404, as if the routes
+# did not exist. Reading and deleting stay open, so a user can still see and drop
+# what is already registered. Default on, because local compose and dev register
+# servers; the environments that only ever serve the managed EVE retrieve server
+# set it to "false". Treat only "false"/"0" (case-insensitively) as off.
+FEATURE_MCP_SERVER_REGISTRATION = getenv_or(
+    "FEATURE_MCP_SERVER_REGISTRATION", "true"
+).lower() not in (
+    "false",
+    "0",
+)
+
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
@@ -255,10 +267,17 @@ def redis_client_kwargs() -> Dict[str, Any]:
 
     socket_timeout must be None so listen/get_message can wait for the next
     chunk during long RAG/setup phases (default timeouts break SSE streaming).
+
+    health_check_interval is the counterpart of that None: both pub/sub consumers
+    (cancel_manager, stream_bus) block on get_message(timeout=None), so a peer
+    that dies without sending a FIN would hang the read until TCP keepalive
+    noticed. A ping every 30 s of idle surfaces the dead connection and lets
+    redis-py reconnect instead of leaving the SSE stream and Stop wedged.
     """
     return {
         "socket_timeout": None,
         "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT", "10")),
+        "health_check_interval": 30,
     }
 
 
