@@ -131,3 +131,58 @@ async def test_get_mcp_server_surfaces_discovery_failure(mock_load_tools, async_
         assert "421" in body["tools_error"]
     finally:
         await cleanup_models([server, owner])
+
+
+# ─── FEATURE_MCP_SERVER_REGISTRATION (config.py, _require_registration_enabled) ──
+
+_CREATE_PAYLOAD = {
+    "name": "created-via-api",
+    "config": {"url": "https://example.com/mcp", "transport": "streamable_http"},
+}
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_server_returns_404_when_registration_disabled(
+    async_client, monkeypatch
+):
+    """404, not 403: with the flag off the write route must look unmounted."""
+    monkeypatch.setattr(
+        "src.routers.mcp_server.config.FEATURE_MCP_SERVER_REGISTRATION", False
+    )
+    owner, token = await create_test_user_and_token()
+    try:
+        response = await async_client.post(
+            "/mcp-servers",
+            json=_CREATE_PAYLOAD,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 404
+    finally:
+        await cleanup_models([owner])
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_server_succeeds_when_registration_enabled(
+    async_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.routers.mcp_server.config.FEATURE_MCP_SERVER_REGISTRATION", True
+    )
+    owner, token = await create_test_user_and_token()
+    created = None
+    try:
+        response = await async_client.post(
+            "/mcp-servers",
+            json=_CREATE_PAYLOAD,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "created-via-api"
+        created = await MCPServer.find_by_id(body["id"])
+        assert created is not None
+    finally:
+        models = [owner]
+        if created is not None:
+            models.insert(0, created)
+        await cleanup_models(models)
