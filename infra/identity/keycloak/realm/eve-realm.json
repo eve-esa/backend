@@ -23,7 +23,7 @@
     "host": "mailcatcher",
     "port": "1025",
     "from": "noreply@eve.local",
-    "fromDisplayName": "EVE (local)",
+    "fromDisplayName": "EVE",
     "auth": "false",
     "ssl": "false",
     "starttls": "false"
