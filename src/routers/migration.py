@@ -53,7 +53,16 @@ def hash_password(password: str) -> str:
     passwords. It lives here rather than in src/services/utils.py so that the
     last caller and the last implementation are deleted in the same commit, and
     so that nothing new can import it by accident.
+
+    The algorithm cannot be changed. This function does not protect a password,
+    it reproduces a digest that is already stored, so that a user signing in for
+    the first time after the cutover is recognised. A stronger hash here would
+    simply never match, and the migration would silently fail for everybody.
     """
+    # Expected finding, see the paragraph above: this reproduces a stored digest
+    # rather than protecting a new one, and it goes away with this module.
+    # The marker below must stay on the line directly above the call it covers.
+    # codeql[py/weak-sensitive-data-hashing] legacy-hash verification only, temporary migration bridge
     return hashlib.sha256(password.encode()).hexdigest()
 
 
