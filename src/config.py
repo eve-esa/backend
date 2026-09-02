@@ -90,6 +90,18 @@ MAIN_MODEL_TIMEOUT = int(os.getenv("MAIN_MODEL_TIMEOUT", "120"))
 # endpoint that is not configured must not be offered, whatever the flag says.
 FEATURE_JSC_MODEL = getenv_or("FEATURE_JSC_MODEL").lower() == "true"
 
+# Off: POST /mcp-servers and PATCH /mcp-servers/{id} answer 404, as if the routes
+# did not exist. Reading and deleting stay open, so a user can still see and drop
+# what is already registered. Default on, because local compose and dev register
+# servers; the environments that only ever serve the managed EVE retrieve server
+# set it to "false". Treat only "false"/"0" (case-insensitively) as off.
+FEATURE_MCP_SERVER_REGISTRATION = getenv_or(
+    "FEATURE_MCP_SERVER_REGISTRATION", "true"
+).lower() not in (
+    "false",
+    "0",
+)
+
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
