@@ -267,10 +267,17 @@ def redis_client_kwargs() -> Dict[str, Any]:
 
     socket_timeout must be None so listen/get_message can wait for the next
     chunk during long RAG/setup phases (default timeouts break SSE streaming).
+
+    health_check_interval is the counterpart of that None: both pub/sub consumers
+    (cancel_manager, stream_bus) block on get_message(timeout=None), so a peer
+    that dies without sending a FIN would hang the read until TCP keepalive
+    noticed. A ping every 30 s of idle surfaces the dead connection and lets
+    redis-py reconnect instead of leaving the SSE stream and Stop wedged.
     """
     return {
         "socket_timeout": None,
         "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT", "10")),
+        "health_check_interval": 30,
     }
 
 
