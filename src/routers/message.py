@@ -1913,6 +1913,7 @@ async def create_agentic_message(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         other_users_collections = await CollectionModel.find_all(
             filter_dict={
@@ -2068,6 +2069,7 @@ async def create_agentic_message_stream(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         other_users_collections = await CollectionModel.find_all(
             filter_dict={
