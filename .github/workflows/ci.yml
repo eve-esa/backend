@@ -51,16 +51,27 @@ jobs:
       TEST_MONGO_URI: mongodb://localhost:27017/eve_backend_test
       REDIS_URL: redis://localhost:6379/0
 
-      # src/config.py reads these five with os.getenv(NAME).strip() and no default,
+      # src/config.py reads these six with os.getenv(NAME).strip() and no default,
       # so an unset one is an AttributeError at import time and every test errors on
-      # collection. They are deliberately empty: the suite must not reach a real
-      # vector store or a real model, and a blank value is what getenv_or treats as
-      # unconfigured. JWT_SECRET_KEY needs a value because tokens get signed.
+      # collection. The four vector-store ones are deliberately empty: the suite must
+      # not reach a real vector store or a real model, and a blank value is what
+      # getenv_or treats as unconfigured.
       QDRANT_URL: ""
       QDRANT_API_KEY: ""
       SATCOM_QDRANT_URL: ""
       SATCOM_QDRANT_API_KEY: ""
-      JWT_SECRET_KEY: ci-only-not-a-real-secret
+
+      # Identity provider. AUTH_ISSUER is the exact value the test token factory
+      # mints as `iss` and inserts in the external_identities row, and AUTH_CLIENT_ID
+      # the `aud` it mints, so the suite's own tokens verify against these two and
+      # nothing else does. The issuer is https, so no AUTH_ALLOW_INSECURE_HTTP is
+      # needed. .invalid is reserved by RFC 2606 and can never resolve.
+      AUTH_ISSUER: https://test-issuer.invalid
+      AUTH_CLIENT_ID: eve-test-client
+      # Unroutable on purpose, same trick as MAIN_MODEL_URL below: no test may reach
+      # a real discovery document, and a test that tries fails in milliseconds
+      # instead of hanging on a DNS lookup.
+      AUTH_DISCOVERY_URL: http://127.0.0.1:1/
 
       # Unroutable on purpose. Several tests patch the LLM client but still go
       # through llm_manager, which refuses to build one without a base URL and

@@ -13,15 +13,14 @@ from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
     artifact_router,
-    auth_router,
     collection_router,
     conversation_router,
     custom_model_router,
     document_router,
     error_log_router,
-    forgot_password_router,
     health_check_router,
     mcp_server_router,
+    migration_router,
     message_router,
     user_router,
 )
@@ -34,14 +33,9 @@ def register_routers(app: FastAPI):
     # Health
     app.include_router(health_check_router, tags=["Health"])
 
-    # Auth
-    app.include_router(auth_router, tags=["Auth"])
-
-    # User
+    # User. Sign-in, registration, verification and password reset live at the
+    # identity provider now; this application issues no credentials of its own.
     app.include_router(user_router, tags=["User"])
-
-    # Forgot Password
-    app.include_router(forgot_password_router, tags=["Forgot Password"])
 
     # Conversations
     app.include_router(conversation_router, tags=["Conversations"])
@@ -64,6 +58,10 @@ def register_routers(app: FastAPI):
 
     # Error Logs
     app.include_router(error_log_router, tags=["Error Logs"])
+
+    # TEMPORARY: serves the Cognito Migrate-user Lambda during the cutover.
+    # Removed with src/routers/migration.py in the cleanup PR.
+    app.include_router(migration_router, tags=["Migration"])
 
 
 def create_app(debug=False, **kwargs):

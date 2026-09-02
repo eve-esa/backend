@@ -81,9 +81,10 @@ EVE_JSC_TIMEOUT = int(os.getenv("EVE_JSC_TIMEOUT", MODEL_TIMEOUT))
 MAIN_MODEL_TIMEOUT = int(os.getenv("MAIN_MODEL_TIMEOUT", "120"))
 
 # Feature flags. A flag names the feature, never the environment it runs in.
-# Off means the feature is not published: /signup answers 404, as if it had never
-# been built, rather than 403, which would confirm it exists and is merely shut.
-FEATURE_SELF_SIGNUP = getenv_or("FEATURE_SELF_SIGNUP").lower() == "true"
+# Self-registration is no longer one of them: whether strangers may create an
+# account is now a realm / app-client setting at the identity provider, which is
+# the only place that can actually open or close registration.
+#
 # On: GET /models lists the JSC-hosted EVE model first, and the frontend takes the
 # first entry as its default. A blank EVE_JSC_BASE_URL wins over the flag: an
 # endpoint that is not configured must not be offered, whatever the flag says.
@@ -96,12 +97,42 @@ MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "").strip()
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "").strip()
 MONGO_PARAMS = os.getenv("MONGO_PARAMS", "?authSource=admin").strip()
 
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY").strip()
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256").strip()
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 15))
-JWT_REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", 7))
-JWT_AUDIENCE_ACCESS = os.getenv("JWT_AUDIENCE_ACCESS", "access").strip()
-JWT_AUDIENCE_REFRESH = os.getenv("JWT_AUDIENCE_REFRESH", "refresh").strip()
+# ─── Identity provider (OIDC) ─────────────────────────────────────────────────
+# The application knows an issuer, an audience and a JWT. Which product answers
+# at that issuer (Keycloak locally, Cognito in the cloud) is not its business.
+#
+#   AUTH_ISSUER   exact value of the ``iss`` claim, and the value the discovery
+#                 document must declare as its own ``issuer`` before its
+#                 ``jwks_uri`` is trusted.
+#   AUTH_CLIENT_ID  the public client the browser signs in with. Used as the
+#                 expected audience: present in ``aud`` (Keycloak, via the realm
+#                 audience mapper) or equal to the ``client_id`` claim (Cognito
+#                 access tokens carry no ``aud`` at all).
+#
+# Both are required, the way JWT_SECRET_KEY used to be: an application that
+# cannot name its issuer and its audience cannot verify a token, and failing at
+# import is louder than accepting everything at runtime.
+AUTH_ISSUER = os.getenv("AUTH_ISSUER").strip()
+AUTH_CLIENT_ID = os.getenv("AUTH_CLIENT_ID").strip()
+# Override only when the API audience differs from the browser client id.
+AUTH_AUDIENCE = getenv_or("AUTH_AUDIENCE") or AUTH_CLIENT_ID
+# Set when the container must reach the provider on an address the issuer does
+# not use: local compose fetches from http://keycloak:8080 while the issuer
+# stays http://localhost:8080 so browser and backend agree on one ``iss``.
+AUTH_DISCOVERY_URL = getenv_or("AUTH_DISCOVERY_URL")
+AUTH_JWKS_CACHE_TTL_SECONDS = int(getenv_or("AUTH_JWKS_CACHE_TTL_SECONDS", "3600"))
+# Local compose only. Every deployed environment talks https to its provider.
+AUTH_ALLOW_INSECURE_HTTP = getenv_or("AUTH_ALLOW_INSECURE_HTTP").lower() == "true"
+# Attach a first OIDC identity to the pre-existing EVE account with the same
+# verified email. Off means every first sign-in provisions a new account.
+AUTH_LINK_BY_VERIFIED_EMAIL = getenv_or(
+    "AUTH_LINK_BY_VERIFIED_EMAIL", "true"
+).lower() == "true"
+# TEMPORARY, deleted with src/routers/migration.py once the production migration
+# window closes. Unset means the endpoint answers 503 rather than existing
+# quietly: it reads legacy password hashes, so absent configuration is closed.
+MIGRATION_SHARED_SECRET = getenv_or("MIGRATION_SHARED_SECRET")
+# ──────────────────────────────────────────────────────────────────────────────
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -116,10 +147,6 @@ CORS_ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 ]
-
-FORGOT_PASSWORD_CODE_EXPIRE_MINUTES = int(
-    os.getenv("FORGOT_PASSWORD_CODE_EXPIRE_MINUTES", 10)
-)
 
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 
