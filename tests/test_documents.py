@@ -16,15 +16,19 @@ def _stub_vector_and_service(monkeypatch):
 
     # VectorStoreManager stubs (no-op)
     monkeypatch.setattr(
-        "src.routers.collection.VectorStoreManager.create_collection",
-        lambda self, name: None,
+        "src.routers.collection.VectorStoreManager.ensure_private_collection",
+        lambda self: None,
     )
     monkeypatch.setattr(
-        "src.routers.collection.VectorStoreManager.delete_collection",
-        lambda self, name: None,
+        "src.routers.collection.VectorStoreManager.delete_points_for_collection",
+        lambda self, user_id, collection_id: 0,
     )
     monkeypatch.setattr(
-        "src.routers.document.VectorStoreManager.delete_docs_by_metadata_filter",
+        "src.routers.collection.VectorStoreManager.count_points_for_collection",
+        lambda self, user_id, collection_id: 0,
+    )
+    monkeypatch.setattr(
+        "src.routers.document.VectorStoreManager.delete_private_docs",
         lambda *args, **kwargs: None,
     )
 
@@ -232,6 +236,66 @@ async def test_upload_two_files(async_client, monkeypatch):
 
         docs = await Document.find_all(filter_dict={"collection_id": coll_id})
         assert len(docs) == 2
+
+        await async_client.delete(
+            f"/collections/{coll_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_rolls_back_files_that_were_not_ingested(async_client, monkeypatch):
+    """Mongo rows and quota for files that produced no vectors are released."""
+
+    _stub_vector_and_service(monkeypatch)
+
+    async def fake_add_documents(*args, **kwargs):
+        document_ids = kwargs.get("document_ids") or []
+        return DocumentResult(
+            success=True,
+            message="partial",
+            data={
+                "file_count": 1,
+                "ingested_document_ids": document_ids[:1],
+            },
+        )
+
+    monkeypatch.setattr(
+        "src.routers.document.document_service.add_documents", fake_add_documents
+    )
+
+    user, token = await create_test_user_and_token()
+    try:
+        coll_id = (
+            await async_client.post(
+                "/collections",
+                json={"name": "Partial Ingest Coll"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        multipart_files = [
+            ("files", ("one.txt", io.BytesIO(b"hello"), "text/plain")),
+            ("files", ("two.txt", io.BytesIO(b"world"), "text/plain")),
+            ("metadata_names", (None, "one.txt")),
+            ("metadata_names", (None, "two.txt")),
+        ]
+        resp = await async_client.post(
+            f"/collections/{coll_id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=multipart_files,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["file_count"] == 1
+        assert "ingested_document_ids" not in resp.json()
+
+        docs = await Document.find_all(filter_dict={"collection_id": coll_id})
+        assert len(docs) == 1
+        assert docs[0].filename == "one.txt"
+
+        refreshed_user = await User.find_by_id(user.id)
+        assert refreshed_user.private_document_count == 1
 
         await async_client.delete(
             f"/collections/{coll_id}", headers={"Authorization": f"Bearer {token}"}

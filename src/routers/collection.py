@@ -1,13 +1,12 @@
 import asyncio
 import logging
+from typing import List
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.config import IS_PROD
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
-    STAGING_PUBLIC_COLLECTIONS,
     WILEY_PUBLIC_COLLECTIONS,
 )
 from src.core.vector_store_manager import VectorStoreManager
@@ -26,30 +25,19 @@ vector_store = VectorStoreManager()
 router = APIRouter()
 
 
-async def _count_points_for_collection(collection_name: str) -> int:
-    """Count Qdrant points for a collection name in a worker thread."""
+async def _count_points_for_collection(user_id: str, collection_id: str) -> int:
+    """Count Qdrant points for a private collection in a worker thread."""
 
     def _count() -> int:
-        try:
-            result = vector_store.client.count(
-                collection_name=collection_name,
-                count_filter=None,
-                exact=True,
-            )
-            return int(getattr(result, "count", 0) or 0)
-        except Exception as e:
-            logger.warning(
-                f"Failed to count Qdrant points for collection {collection_name}: {e}"
-            )
-            return 0
+        return vector_store.count_points_for_collection(user_id, collection_id)
 
     return await anyio.to_thread.run_sync(_count)
 
 
-async def _get_counts_for_id(collection_id: str):
+async def _get_counts_for_id(user_id: str, collection_id: str):
     """Return (documents_count, points_count) for a single collection id."""
     documents_count_coro = Document.count_documents({"collection_id": collection_id})
-    points_count_coro = _count_points_for_collection(collection_id)
+    points_count_coro = _count_points_for_collection(user_id, collection_id)
     documents_count, points_count = await asyncio.gather(
         documents_count_coro, points_count_coro
     )
@@ -71,16 +59,21 @@ async def list_public_collections(
     Returns:
         Paginated list of public collections.
     """
-    public_collections, total_count = await vector_store.list_public_collections(
-        page=pagination.page, limit=pagination.limit
-    )
+    public_collections, _qdrant_total = await vector_store.list_public_collections()
 
-    if IS_PROD:
-        public_collections = WILEY_PUBLIC_COLLECTIONS + public_collections
-    else:
-        public_collections = WILEY_PUBLIC_COLLECTIONS + STAGING_PUBLIC_COLLECTIONS
-    total_count = len(public_collections)
-    # Pagination must be done manually since Qdrant doesn't support collection pagination
+    combined: List[dict] = list(WILEY_PUBLIC_COLLECTIONS)
+    seen = {item["name"] for item in WILEY_PUBLIC_COLLECTIONS if item.get("name")}
+    for collection in public_collections:
+        name = collection.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        combined.append(collection)
+
+    start = (pagination.page - 1) * pagination.limit
+    end = start + pagination.limit
+    page_items = combined[start:end]
+    total_count = len(combined)
     return PaginatedResponse(
         data=[
             Collection(
@@ -90,7 +83,7 @@ async def list_public_collections(
                 user_id=None,
                 embeddings_model=DEFAULT_EMBEDDING_MODEL,
             )
-            for collection in public_collections
+            for collection in page_items
         ],
         meta=get_pagination_metadata(total_count, pagination.page, pagination.limit),
     )
@@ -147,7 +140,9 @@ async def get_collection(
             detail="You are not allowed to access this collection",
         )
 
-    documents_count, points_count = await _get_counts_for_id(collection_id)
+    documents_count, points_count = await _get_counts_for_id(
+        requesting_user.id, collection_id
+    )
 
     return {
         **collection.model_dump(),
@@ -162,9 +157,11 @@ async def create_collection(
     requesting_user: User = Depends(get_current_user),
 ) -> Collection:
     """
-    Create a private collection and provision its backing vector index (Qdrant).
+    Create a private collection. Vector points live in the shared Qdrant
+    collection ``private-collections``, partitioned by user_id and collection_id.
 
-    The new collection is private to its creator. The MongoDB collection ID is used as the Qdrant collection name.
+    The new collection is private to its creator. MongoDB remains the source of
+    truth for collection metadata; Qdrant is only ensured to exist.
 
     Args:
         request (CollectionRequest): New collection parameters.
@@ -185,14 +182,14 @@ async def create_collection(
     await collection.save()
 
     try:
-        VectorStoreManager(embeddings_model=request.embeddings_model).create_collection(
-            collection.id
-        )
+        VectorStoreManager(
+            embeddings_model=request.embeddings_model
+        ).ensure_private_collection()
     except HTTPException as e:
         raise e
     except Exception as e:
         logger.warning(
-            f"Warning: failed to create Qdrant collection {collection.id}: {e}"
+            f"Warning: failed to ensure Qdrant private collection for {collection.id}: {e}"
         )
         await collection.delete()
         raise HTTPException(
@@ -252,7 +249,8 @@ async def delete_collection(
     """
     Delete a collection and its related resources.
 
-    Deletes documents in the collection, attempts to remove the vector index, and finally deletes the collection record.
+    Deletes documents in the collection, removes matching points from the shared
+    private Qdrant collection, and finally deletes the collection record.
 
     Args:
         collection_id (str): Collection identifier.
@@ -274,19 +272,27 @@ async def delete_collection(
                 detail="You are not allowed to delete this collection",
             )
 
+        try:
+            await anyio.to_thread.run_sync(
+                vector_store.delete_points_for_collection,
+                requesting_user.id,
+                collection_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to delete Qdrant points for collection %s: %s",
+                collection_id,
+                e,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete vector points: {str(e)}",
+            )
+
         documents_deleted = await Document.delete_many({"collection_id": collection_id})
         if documents_deleted:
             await release_private_document_slots(
                 requesting_user.id, documents_deleted
-            )
-
-        try:
-            await anyio.to_thread.run_sync(
-                vector_store.delete_collection, collection_id
-            )
-        except Exception as e:
-            logger.warning(
-                f"Warning: failed to delete Qdrant collection {collection_id}: {e}"
             )
 
         await collection.delete()

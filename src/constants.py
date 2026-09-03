@@ -25,6 +25,10 @@ MAX_PRIVATE_DOCUMENTS = 150
 EVE_PUBLIC_COLLECTION_NAME_PROD = "qwen-512-filtered"
 EVE_PUBLIC_COLLECTION_NAME_STAGING = "EVE open access"
 
+PRIVATE_COLLECTION_NAME = "private-collections"
+PUBLIC_ENV_PROD = "prod"
+PUBLIC_ENV_STAGING = "staging"
+
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 

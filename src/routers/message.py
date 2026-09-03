@@ -214,6 +214,7 @@ async def apply_private_collections_to_request(
         )
 
     request.private_collections_map = {c.id: c.name for c in user_collections}
+    request.user_id = user_id
     if user_collections:
         request.collection_ids = request.collection_ids + [
             c.id for c in user_collections
@@ -718,6 +719,9 @@ async def retry(
                     "prompts": prompts,
                 },
             }
+
+        if message.request_input is not None:
+            message.request_input.user_id = requesting_user.id
 
         (
             answer,
@@ -1433,6 +1437,7 @@ async def stream_hallucination(
                 )
             except Exception:
                 pass
+            rewritten_request.user_id = requesting_user.id
 
             context = ""
             retrieved_docs = []

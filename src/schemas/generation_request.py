@@ -73,6 +73,7 @@ class GenerationRequest(BaseModel):
     _mcp_proxy_bearer_token: Optional[str] = PrivateAttr(default=None)
     _resolved_custom_model: Any = PrivateAttr(default=None)
     _mcp_user_id: Optional[str] = PrivateAttr(default=None)
+    _user_id: Optional[str] = PrivateAttr(default=None)
 
     @property
     def collection_ids(self) -> List[str]:
@@ -124,3 +125,12 @@ class GenerationRequest(BaseModel):
     @mcp_user_id.setter
     def mcp_user_id(self, value: Optional[str]) -> None:
         self._mcp_user_id = value
+
+    @property
+    def user_id(self) -> Optional[str]:
+        """Authenticated owner used for private-collection tenant filters."""
+        return self._user_id
+
+    @user_id.setter
+    def user_id(self, value: Optional[str]) -> None:
+        self._user_id = value
