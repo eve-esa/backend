@@ -109,6 +109,45 @@ class TestLoadMcpToolsForServers:
         )
 
     @pytest.mark.asyncio
+    async def test_direct_path_forwards_user_token_as_x_eve_token(self):
+        """When the proxy is not configured, the agentic runner connects to
+        the MCP server directly with a Cognito M2M token. The caller's EVE
+        credential must still reach the server as ``X-EVE-Token`` so
+        user-scoped retrieval (private collections) runs as the user rather
+        than the server's shared ``EVE_API_KEY``.
+        """
+        captured_connections: dict = {}
+
+        def make_client(connections, **kwargs):
+            captured_connections.update(connections)
+            mock_client = MagicMock()
+            mock_client.get_tools = AsyncMock(return_value=[])
+            return mock_client
+
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient", side_effect=make_client
+        ), patch(
+            f"{_LOADER}.backend_mcp_proxy_url", return_value=None
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.ErrorLoggingInterceptor", return_value=MagicMock()), patch(
+            f"{_LOADER}.logger"
+        ):
+            await _load_mcp_tools_for_servers(
+                [_mcp_server("eve_retrieval", "https://agentcore.example/mcp")],
+                mcp_proxy_bearer_token="user-jwt",
+            )
+
+        # Direct path: the upstream URL is the server's own URL (not the proxy).
+        assert captured_connections["eve_retrieval"]["url"] == (
+            "https://agentcore.example/mcp"
+        )
+        assert (
+            captured_connections["eve_retrieval"]["headers"]["X-EVE-Token"]
+            == "user-jwt"
+        )
+
+    @pytest.mark.asyncio
     async def test_client_survives_gc_after_load_returns(self):
         """Live-repro bug: ArtifactInterceptor.bind_client() only keeps a
         weakref to the MultiServerMCPClient (see artifact_ingestion.py). The
