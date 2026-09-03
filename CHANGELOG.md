@@ -11,6 +11,18 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.1.1](https://github.com/eve-esa/backend/compare/v0.1.0...v0.1.1) (2026-09-03)
+
+
+### Added
+
+* **retrieval:** Qdrant multinenancy ([#199](https://github.com/eve-esa/backend/issues/199)) ([783e98b](https://github.com/eve-esa/backend/commit/783e98b9fc6a2301ef354b74ce51758f271601e5))
+
+
+### Fixed
+
+* **retrieval:** forward caller bearer as X-EVE-Token on MCP proxy egress ([#201](https://github.com/eve-esa/backend/issues/201)) ([6d32f97](https://github.com/eve-esa/backend/commit/6d32f9738cdeda5ff146dd807ecf107e85f9c656))
+
 ## [0.1.0](https://github.com/eve-esa/backend/compare/v0.0.11...v0.1.0) (2026-09-02)
 
 
