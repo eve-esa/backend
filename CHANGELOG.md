@@ -11,6 +11,25 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.1.0](https://github.com/eve-esa/backend/compare/v0.0.11...v0.1.0) (2026-09-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* the custom auth endpoints are gone; clients authenticate through the OIDC provider and send its access token as the bearer.
+
+### Added
+
+* add rewrite for better rag responses ([#192](https://github.com/eve-esa/backend/issues/192)) ([8e7473a](https://github.com/eve-esa/backend/commit/8e7473aaa2fb0b1e12bea7868876e79f30de83c7))
+* authenticate users through the identity provider ([#196](https://github.com/eve-esa/backend/issues/196)) ([ea6fffc](https://github.com/eve-esa/backend/commit/ea6fffc31967df1e407403e0d07642f940b98b59))
+* enforce the token budget on the agentic routes, and harden MCP server resolution ([#197](https://github.com/eve-esa/backend/issues/197)) ([cd4353f](https://github.com/eve-esa/backend/commit/cd4353f91920f23d2bf47e3226e40c84948af272))
+* pass ui params to retrieve tool call ([#185](https://github.com/eve-esa/backend/issues/185)) ([9aa8868](https://github.com/eve-esa/backend/commit/9aa8868bb8febd129a7398ab2218b7945e45460b))
+
+
+### Fixed
+
+* **agentic:** make UI RAG params authoritative on retrieve tool calls ([#191](https://github.com/eve-esa/backend/issues/191)) ([22c1a7e](https://github.com/eve-esa/backend/commit/22c1a7e31c0256e35228c66e8e33241d89034d6d))
+
 ## [0.0.11](https://github.com/eve-esa/backend/compare/v0.0.10...v0.0.11) (2026-09-01)
 
 

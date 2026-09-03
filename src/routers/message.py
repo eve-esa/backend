@@ -1836,12 +1836,17 @@ async def _prepare_agentic_request(
     except Exception:
         request.year = None
 
-    # Resolve MCP servers by name from MongoDB.
+    # Resolve MCP servers by name from MongoDB. The ownership clause is the same
+    # one the MCP proxy already applies (routers/mcp_proxy.py): without it any
+    # authenticated user could name another user's enabled server and have it
+    # attached to their own run. user_id None means a globally managed server and
+    # stays available to everybody.
     if request.public_mcp_servers:
         mcp_docs = await MCPServer.find_all(
             filter_dict={
                 "name": {"$in": request.public_mcp_servers},
                 "enabled": True,
+                "$or": [{"user_id": requesting_user.id}, {"user_id": None}],
             }
         )
         found_names = {s.name for s in mcp_docs}
@@ -1913,6 +1918,7 @@ async def create_agentic_message(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         other_users_collections = await CollectionModel.find_all(
             filter_dict={
@@ -2068,6 +2074,7 @@ async def create_agentic_message_stream(
                 status_code=403,
                 detail="You are not allowed to add a message to this conversation",
             )
+        await enforce_token_budget_or_raise(requesting_user)
 
         other_users_collections = await CollectionModel.find_all(
             filter_dict={

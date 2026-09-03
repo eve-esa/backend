@@ -130,6 +130,25 @@ def _token_usage_dict(
 
 
 def count_tokens_for_texts(*texts: str) -> int:
+    """Count the tokens the budget charges for one exchange.
+
+    Scope of the cap, decided for the 0.1.0 opening and deliberately narrow:
+
+    * Only what callers pass here is counted, and every call site passes exactly
+      the user query and the final answer text. Retrieved context, the system
+      prompt and the conversation history sent to the model are NOT counted, so
+      the number is always smaller than what the provider actually processes.
+      The cap bounds how much answer text a user can make the service produce,
+      it is not a proxy for model cost or for infrastructure load.
+    * There is one window and one cap per group: ``max_tokens`` over
+      ``period_months`` months (minimum one month, see ``_ensure_active_window``).
+      A monthly ceiling has no burst control, so the whole budget can be spent in
+      a single day.
+    * A daily or burst cap would need a second window key on the policy plus a
+      second check in ``_ensure_active_window`` and ``enforce_token_budget_or_raise``,
+      i.e. a schema change. That is out of scope for this sprint. The only lever
+      that exists today is a smaller ``max_tokens``.
+    """
     return sum(str_token_counter(text or "") for text in texts if text is not None)
 
 

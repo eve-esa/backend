@@ -4,6 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from src import config
 from src.database.models.mcp_server import (
     MCPServer,
     ToolConfig,
@@ -63,6 +64,16 @@ def _build_tool_config_from_request(request: MCPServerRequest) -> ToolConfig:
         args=request.config.args,
         env=request.config.env,
     )
+
+
+def _require_registration_enabled() -> None:
+    """Refuse the write routes when server registration is turned off.
+
+    404 rather than 403: with the flag off the environment behaves as if the
+    routes were never mounted, so a probe learns nothing about the feature.
+    """
+    if not config.FEATURE_MCP_SERVER_REGISTRATION:
+        raise HTTPException(status_code=404, detail="Not Found")
 
 
 async def _get_owned_mcp_server(
@@ -126,8 +137,10 @@ async def create_mcp_server(
     :rtype: MCPServerPublic\n
     :raises HTTPException:\n
         - 400: Invalid request data.
+        - 404: MCP server registration is disabled in this environment.
         - 500: Server error.
     """
+    _require_registration_enabled()
     try:
         mcp_server = MCPServer(
             user_id=requesting_user.id,
@@ -224,9 +237,10 @@ async def update_mcp_server(
     :return: Updated MCP server (sanitized).\n
     :rtype: MCPServerPublic\n
     :raises HTTPException:\n
-        - 404: MCP server not found.
+        - 404: MCP server not found, or registration is disabled in this environment.
         - 403: Not allowed to update this MCP server.
     """
+    _require_registration_enabled()
     mcp_server = await _get_owned_mcp_server(
         server_id, requesting_user, action="update"
     )

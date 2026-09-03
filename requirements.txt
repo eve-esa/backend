@@ -11,7 +11,11 @@ langchain-mistralai==1.1.4
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.7
 langgraph==1.2.4
-# Standalone agent graphs (import package ``agents``). Prefer pinning a tag/commit.
+# Standalone agent graphs (import package ``agents``). Pinned to a commit, not to
+# @main: the release workflow rebuilds the image from the release commit, so an
+# unpinned branch would resolve whatever agents HEAD is at build time and ship a
+# different version than the one dev was tested with. This SHA is the commit
+# inside esa-eve-dev-app-backend:sha-ea6fffc.
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@0d798fa731cc775224fbb69d5332fe401d512449
 langfuse>=2.60.10
 openai>=2.53.0,<3.0.0
@@ -40,7 +44,11 @@ replicate
 tiktoken
 trafilatura
 boto3>=1.43.67
-redis>=4.6.0
+# Pinned, not >=: the rediss:// TLS setup relies on redis-py 8.x defaults
+# (ssl_cert_reqs "required", ssl_check_hostname True, socket_keepalive True), and
+# cancel_manager.py calls aclose(), which does not exist before 5.0.1. 8.1.0 is
+# the version inside the tested dev image.
+redis==8.1.0
 qdrant-client>=1.19.0,<2.0
 mkdocs==1.6.1
 mkdocs-material==9.7.0
