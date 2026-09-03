@@ -16,7 +16,7 @@ langgraph==1.2.4
 # unpinned branch would resolve whatever agents HEAD is at build time and ship a
 # different version than the one dev was tested with. This SHA is the commit
 # inside esa-eve-dev-app-backend:sha-ea6fffc.
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@e4db6b00cd1bcac111a822c929ae9acae8ca4725
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@0d798fa731cc775224fbb69d5332fe401d512449
 langfuse>=2.60.10
 openai>=2.53.0,<3.0.0
 langgraph-checkpoint==4.2.0
