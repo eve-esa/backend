@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List, Optional
 import time
 import logging
 from .generator import generate_answer
@@ -25,7 +25,13 @@ class Pipeline:
         self.hallucination = hallucination
         self.per_span_reprompting = per_span_reprompting
 
-    async def run(self, question: str, collection_ids: List[str]) -> dict:
+    async def run(
+        self,
+        question: str,
+        collection_ids: List[str],
+        user_id: Optional[str] = None,
+        private_collections_map: Optional[Dict[str, str]] = None,
+    ) -> dict:
         """
         Run the QA pipeline for a single question.
 
@@ -38,7 +44,12 @@ class Pipeline:
         overall_start = time.perf_counter()
 
         # Initial retrieval
-        docs = await vector_db_retrieve_context(question, collection_ids=collection_ids)
+        docs = await vector_db_retrieve_context(
+            question,
+            collection_ids=collection_ids,
+            user_id=user_id,
+            private_collections_map=private_collections_map,
+        )
 
         # Generation step
         print("Generating answer...")
@@ -128,7 +139,10 @@ class Pipeline:
                 # Retrieve again using vector DB instead of rag.query
                 print("Retrieving more documents via vector DB...")
                 new_docs = await vector_db_retrieve_context(
-                    rewritten_response.rewritten_question, collection_ids=collection_ids
+                    rewritten_response.rewritten_question,
+                    collection_ids=collection_ids,
+                    user_id=user_id,
+                    private_collections_map=private_collections_map,
                 )
                 docs = filter_docs(docs, new_docs)
             span_reprompting_latency = time.perf_counter() - span_loop_start
@@ -141,7 +155,10 @@ class Pipeline:
             # Retrieve using combined rewritten query via vector DB
             print("Retrieving more documents via vector DB...")
             new_docs = await vector_db_retrieve_context(
-                rewritten_response.rewritten_question, collection_ids=collection_ids
+                rewritten_response.rewritten_question,
+                collection_ids=collection_ids,
+                user_id=user_id,
+                private_collections_map=private_collections_map,
             )
             docs = filter_docs(docs, new_docs)
             query_rewriting_latency = time.perf_counter() - rewrite_start

@@ -9,12 +9,16 @@ def _stub_vector_methods(monkeypatch):
     """Patch VectorStoreManager methods used by the collection router to no-op."""
 
     monkeypatch.setattr(
-        "src.routers.collection.VectorStoreManager.create_collection",
-        lambda self, name: None,
+        "src.routers.collection.VectorStoreManager.ensure_private_collection",
+        lambda self: None,
     )
     monkeypatch.setattr(
-        "src.routers.collection.VectorStoreManager.delete_collection",
-        lambda self, name: None,
+        "src.routers.collection.VectorStoreManager.delete_points_for_collection",
+        lambda self, user_id, collection_id: 0,
+    )
+    monkeypatch.setattr(
+        "src.routers.collection.VectorStoreManager.count_points_for_collection",
+        lambda self, user_id, collection_id: 0,
     )
 
 

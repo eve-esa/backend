@@ -94,21 +94,25 @@ class DocumentService:
 
     async def add_documents(
         self,
-        collection_name: str,
+        collection_id: str,
+        user_id: str,
         files: List[UploadFile],
         request: AddDocumentRequest,
         metadata_urls: Optional[List[str] | str] = None,
         metadata_names: Optional[List[str] | str] = None,
+        document_ids: Optional[List[str]] = None,
     ) -> DocumentResult:
         """
         Add documents to a collection.
 
         Args:
-            collection_name: Name of the collection
+            collection_id: Logical Mongo collection ID
+            user_id: Owner user ID
             files: List of uploaded files
             request: Add document request with configuration
             metadata_urls: Optional metadata URLs
             metadata_names: Optional metadata names
+            document_ids: Optional Mongo document IDs aligned with ``files``
 
         Returns:
             DocumentResult: Result of the operation
@@ -118,7 +122,7 @@ class DocumentService:
 
         try:
             logger.info(
-                f"Processing {len(files)} files for collection '{collection_name}'"
+                f"Processing {len(files)} files for collection '{collection_id}'"
             )
 
             # Process metadata
@@ -132,8 +136,15 @@ class DocumentService:
             )
 
             all_documents = []
+            ingested_document_ids: List[str] = []
+            ingested_file_count = 0
+            aligned_ids = list(document_ids or [])
+            if len(aligned_ids) < len(files):
+                aligned_ids.extend([None] * (len(files) - len(aligned_ids)))
 
-            for file, url, name in zip(files, processed_urls, processed_names):
+            for file, url, name, document_id in zip(
+                files, processed_urls, processed_names, aligned_ids
+            ):
                 if not name.strip():
                     logger.warning(f"Skipping {file.filename} - no valid source_name")
                     continue
@@ -158,8 +169,16 @@ class DocumentService:
                         "file_type": extension.lstrip("."),
                         "upload_time": datetime.now().isoformat(),
                     }
+                    if document_id:
+                        doc.metadata["document_id"] = document_id
                 split_docs = text_splitter.split_documents(documents)
+                if not split_docs:
+                    logger.warning(f"No chunks produced from {file.filename}")
+                    continue
                 all_documents.extend(split_docs)
+                ingested_file_count += 1
+                if document_id:
+                    ingested_document_ids.append(document_id)
                 logger.info(f"Processed {len(split_docs)} chunks from {file.filename}")
 
             # Handle results
@@ -167,7 +186,7 @@ class DocumentService:
                 return DocumentResult(
                     success=False,
                     message="No documents processed",
-                    data={"collection": collection_name},
+                    data={"collection": collection_id},
                 )
 
             valid_documents = [
@@ -181,22 +200,30 @@ class DocumentService:
                 )
 
             if valid_documents:
-                await vector_store.add_document_list(collection_name, valid_documents)
+                await vector_store.add_document_list(
+                    valid_documents,
+                    user_id=user_id,
+                    collection_id=collection_id,
+                )
 
                 return DocumentResult(
                     success=True,
-                    message=f"Successfully processed {len(valid_documents)} chunks from {len(files)} files",
+                    message=(
+                        f"Successfully processed {len(valid_documents)} chunks "
+                        f"from {ingested_file_count} files"
+                    ),
                     data={
-                        "collection": collection_name,
+                        "collection": collection_id,
                         "chunk_count": len(valid_documents),
-                        "file_count": len(files),
+                        "file_count": ingested_file_count,
+                        "ingested_document_ids": ingested_document_ids,
                     },
                 )
 
             return DocumentResult(
                 success=False,
                 message="No valid documents with source_name",
-                data={"collection": collection_name},
+                data={"collection": collection_id},
             )
 
         except Exception as e:
@@ -205,7 +232,7 @@ class DocumentService:
                 success=False,
                 message="Error processing documents",
                 error=str(e),
-                data={"collection": collection_name},
+                data={"collection": collection_id},
             )
         finally:
             # Clean up temp files
@@ -231,7 +258,7 @@ class DocumentService:
         """
         try:
             vector_store = self._get_vector_store_manager(request.embeddings_model)
-            results, _ = await vector_store.retrieve_documents_from_query(
+            results = await vector_store.retrieve_documents_from_query(
                 collection_names=[collection_name],
                 query=request.query,
                 k=request.k,
@@ -266,7 +293,7 @@ class DocumentService:
             )
 
     async def delete_documents(
-        self, collection_name: str, request: DeleteRequest
+        self, collection_name: str, request: DeleteRequest, user_id: str
     ) -> DocumentResult:
         """
         Delete documents from a collection.
@@ -285,9 +312,10 @@ class DocumentService:
 
             for source in request.document_list:
                 try:
-                    result = vector_store.delete_docs_by_metadata_filter(
-                        collection_name=collection_name,
-                        metadata={"source_name": source},
+                    result = vector_store.delete_private_docs(
+                        user_id=user_id,
+                        collection_id=collection_name,
+                        metadata={"metadata.source_name": source},
                     )
                     # Get the actual number of documents deleted
                     deleted_count = getattr(result, "deleted", 0)

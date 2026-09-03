@@ -4,6 +4,7 @@ import os
 import logging
 from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Path
+from bson import ObjectId
 
 from src.schemas.documents import AddDocumentRequest
 from src.services.document import DocumentService
@@ -44,6 +45,37 @@ async def get_collection_and_validate_ownership(
         )
 
     return collection
+
+
+async def _rollback_uploaded_docs(
+    user_id: str, collection_id: str, created_docs: List[DocumentModel]
+) -> None:
+    """Remove Mongo rows and any Qdrant points written for a failed upload."""
+    if not created_docs:
+        return
+    vector_store = VectorStoreManager()
+    for doc in created_docs:
+        try:
+            vector_store.delete_private_docs(
+                user_id=user_id,
+                collection_id=collection_id,
+                metadata={"metadata.document_id": doc.id},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to roll back Qdrant points for document %s",
+                doc.id,
+                exc_info=True,
+            )
+    try:
+        await DocumentModel.delete_many(
+            {"_id": {"$in": [ObjectId(doc.id) for doc in created_docs]}}
+        )
+    except Exception:
+        logger.warning(
+            "Failed to roll back Mongo documents after upload error",
+            exc_info=True,
+        )
 
 
 @router.get(
@@ -158,6 +190,7 @@ async def upload_documents(
 
     file_count = len(files)
     slots_reserved = False
+    created_docs: List[DocumentModel] = []
     try:
         await reserve_private_document_slots(requesting_user.id, file_count)
         slots_reserved = True
@@ -178,9 +211,12 @@ async def upload_documents(
             for i, file in enumerate(files)
         ]
 
+        created_docs = await DocumentModel.bulk_create(docs_data)
+
         effective_model = collection.embeddings_model or embeddings_model
         result = await document_service.add_documents(
-            collection_name=collection_id,
+            collection_id=collection_id,
+            user_id=requesting_user.id,
             files=files,
             request=AddDocumentRequest(
                 embeddings_model=effective_model,
@@ -191,14 +227,39 @@ async def upload_documents(
             ),
             metadata_urls=metadata_urls,
             metadata_names=metadata_names,
+            document_ids=[doc.id for doc in created_docs],
         )
 
         if not result.success:
+            await _rollback_uploaded_docs(
+                requesting_user.id, collection_id, created_docs
+            )
+            created_docs = []
             raise HTTPException(status_code=500, detail=result.error)
 
-        await DocumentModel.bulk_create(docs_data)
-        return result.data
+        result_data = dict(result.data or {})
+        ingested_ids = result_data.pop("ingested_document_ids", None)
+        if ingested_ids is not None:
+            ingested_set = set(ingested_ids)
+            skipped_docs = [doc for doc in created_docs if doc.id not in ingested_set]
+            if skipped_docs:
+                await _rollback_uploaded_docs(
+                    requesting_user.id, collection_id, skipped_docs
+                )
+                await release_private_document_slots(
+                    requesting_user.id, len(skipped_docs)
+                )
+                created_docs = [
+                    doc for doc in created_docs if doc.id in ingested_set
+                ]
+
+        return result_data
     except Exception as e:
+        if created_docs:
+            await _rollback_uploaded_docs(
+                requesting_user.id, collection_id, created_docs
+            )
+            created_docs = []
         if slots_reserved:
             await release_private_document_slots(requesting_user.id, file_count)
         if isinstance(e, HTTPException):
@@ -249,9 +310,10 @@ async def delete_document(
 
     vector_store = VectorStoreManager()
     try:
-        vector_store.delete_docs_by_metadata_filter(
-            collection_name=collection_id,
-            metadata={"document_id": document_id},
+        vector_store.delete_private_docs(
+            user_id=requesting_user.id,
+            collection_id=collection_id,
+            metadata={"metadata.document_id": document_id},
         )
     except HTTPException as e:
         raise e

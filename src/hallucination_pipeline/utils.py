@@ -1,7 +1,7 @@
 import re
 import json
 import string
-from typing import List
+from typing import Dict, List, Optional
 
 
 def safe_prompt_format(prompt: str, variables: dict) -> str:
@@ -136,7 +136,12 @@ async def call_model(model, prompt: str) -> str:
 
 
 async def vector_db_retrieve_context(
-    query: str, collection_ids: List[str], k: int = 5, score_threshold: float = 0.7
+    query: str,
+    collection_ids: List[str],
+    k: int = 5,
+    score_threshold: float = 0.7,
+    user_id: Optional[str] = None,
+    private_collections_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """Retrieve similar documents from the vector DB and render as a docs string.
 
@@ -149,11 +154,13 @@ async def vector_db_retrieve_context(
     manager = VectorStoreManager()
 
     try:
-        results, _lat, _vec_err = await manager.retrieve_documents_with_latencies(
+        results, _lat = await manager.retrieve_documents_with_latencies(
             collection_names=collection_ids,
             query=query,
             k=k,
             score_threshold=score_threshold,
+            user_id=user_id,
+            private_collections_map=private_collections_map,
         )
 
         blocks = []

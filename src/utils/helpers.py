@@ -50,6 +50,46 @@ class EmbeddingModelType(Enum):
     QWEN_3_4B_INFERENCE = "qwen/qwen3-embedding-4b"
 
 
+def iter_public_catalog(*, is_prod: bool) -> list[dict]:
+    """Named public collections visible in this environment, deduped by ``name``.
+
+    Prod sees only ``PUBLIC_COLLECTIONS``. Staging sees prod + staging catalogs.
+    """
+    source = list(PUBLIC_COLLECTIONS)
+    if not is_prod:
+        source = source + list(STAGING_PUBLIC_COLLECTIONS)
+    seen: set[str] = set()
+    out: list[dict] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(item)
+    return out
+
+
+def all_known_public_collection_labels() -> set[str]:
+    """All public catalog names and aliases across prod, staging, and Wiley."""
+    labels: set[str] = set()
+    for item in (
+        list(PUBLIC_COLLECTIONS)
+        + list(STAGING_PUBLIC_COLLECTIONS)
+        + list(WILEY_PUBLIC_COLLECTIONS)
+    ):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        alias = item.get("alias")
+        if name:
+            labels.add(name)
+        if alias:
+            labels.add(alias)
+    return labels
+
+
 def normalize_public_collections_selection(
     requested: Optional[List[str]],
     *,
@@ -61,8 +101,7 @@ def normalize_public_collections_selection(
     """
     try:
         labels = list(requested or [])
-        allowed_source = PUBLIC_COLLECTIONS if is_prod else STAGING_PUBLIC_COLLECTIONS
-        combined = allowed_source + WILEY_PUBLIC_COLLECTIONS
+        combined = iter_public_catalog(is_prod=is_prod) + WILEY_PUBLIC_COLLECTIONS
         allowed_labels: set[str] = set()
         label_to_canonical: dict[str, str] = {}
         for item in combined:

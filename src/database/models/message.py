@@ -70,6 +70,15 @@ class Message(MongoModel):
                 request_input_dict["collection_ids"] = (
                     list(collection_ids) if collection_ids else []
                 )
+                private_map = getattr(
+                    self.request_input, "private_collections_map", {}
+                )
+                request_input_dict["private_collections_map"] = (
+                    dict(private_map) if private_map else {}
+                )
+                user_id = getattr(self.request_input, "user_id", None)
+                if user_id:
+                    request_input_dict["user_id"] = user_id
                 doc["request_input"] = request_input_dict
         except Exception as e:
             logger.error(f"Error serializing request_input: {e}")
@@ -92,6 +101,15 @@ class Message(MongoModel):
                 ):
                     try:
                         instance.request_input.collection_ids = list(collection_ids)
+                        private_map = (
+                            request_input_dict.get("private_collections_map") or {}
+                        )
+                        instance.request_input.private_collections_map = dict(
+                            private_map
+                        )
+                        stored_user_id = request_input_dict.get("user_id")
+                        if stored_user_id:
+                            instance.request_input.user_id = stored_user_id
                     except Exception as e:
                         logger.error(f"Error deserializing request_input: {e}")
                         pass

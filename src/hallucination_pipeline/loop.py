@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List, Optional
 import time
 import logging
 from .hallucination import detect_hallucination
@@ -14,6 +14,8 @@ async def run_hallucination_loop(
     docs: str,
     generation_response: generation_schema,
     collection_ids: List[str],
+    user_id: Optional[str] = None,
+    private_collections_map: Optional[Dict[str, str]] = None,
     per_span_reprompting: bool = True,
     prob_threshold: float = 0.5,
 ):
@@ -61,7 +63,10 @@ async def run_hallucination_loop(
             response_copy.soft_labels = [soft]
             rewritten_response = await rewrite_query(model, response_copy)
             new_docs = await vector_db_retrieve_context(
-                rewritten_response.rewritten_question, collection_ids
+                rewritten_response.rewritten_question,
+                collection_ids,
+                user_id=user_id,
+                private_collections_map=private_collections_map,
             )
             docs = filter_docs(docs, new_docs)
         span_reprompting_latency = time.perf_counter() - span_loop_start
@@ -69,7 +74,10 @@ async def run_hallucination_loop(
         rewrite_start = time.perf_counter()
         rewritten_response = await rewrite_query(model, hallucination_response)
         new_docs = await vector_db_retrieve_context(
-            rewritten_response.rewritten_question, collection_ids
+            rewritten_response.rewritten_question,
+            collection_ids,
+            user_id=user_id,
+            private_collections_map=private_collections_map,
         )
         docs = filter_docs(docs, new_docs)
         query_rewriting_latency = time.perf_counter() - rewrite_start

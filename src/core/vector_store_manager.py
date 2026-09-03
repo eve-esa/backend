@@ -8,6 +8,7 @@ document storage, and similarity search operations.
 
 import asyncio
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -16,11 +17,15 @@ from langchain_core.documents import Document
 from openai import OpenAI
 from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import (
     Distance,
     FieldCondition,
     Filter,
+    IsEmptyCondition,
+    MatchAny,
     MatchValue,
+    PayloadField,
     VectorParams,
 )
 
@@ -38,16 +43,188 @@ from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
     EVE_PUBLIC_COLLECTION_NAME_PROD,
     EVE_PUBLIC_COLLECTION_NAME_STAGING,
-    PUBLIC_COLLECTIONS,
+    PRIVATE_COLLECTION_NAME,
+    PUBLIC_ENV_PROD,
+    PUBLIC_ENV_STAGING,
+    WILEY_PUBLIC_COLLECTIONS,
 )
-from src.database.models.collection import Collection
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
+from src.utils.helpers import all_known_public_collection_labels, iter_public_catalog
 
 # Setup logging
 logger = logging.getLogger(__name__)
 
 # Initialize configuration
 config = Config()
+
+_OBJECT_ID_RE = re.compile(r"^[a-fA-F0-9]{24}$")
+
+
+def looks_like_mongo_id(value: str) -> bool:
+    """Return True if ``value`` looks like a Mongo ObjectId hex string."""
+    return bool(value) and bool(_OBJECT_ID_RE.fullmatch(value))
+
+
+def eve_public_collection_names() -> set[str]:
+    """Catalog names and aliases that receive EVE client ``filters``."""
+    return {
+        EVE_PUBLIC_COLLECTION_NAME_PROD,
+        EVE_PUBLIC_COLLECTION_NAME_STAGING,
+        "EVE open-access",
+    }
+
+
+def is_eve_public_collection(name: str) -> bool:
+    """True when ``name`` is the EVE open-access collection (any catalog label)."""
+    return bool(name) and name in eve_public_collection_names()
+
+
+def wiley_public_collection_names() -> set[str]:
+    """Catalog names and aliases for Wiley public collections."""
+    names: set[str] = set()
+    for item in WILEY_PUBLIC_COLLECTIONS:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        alias = item.get("alias")
+        if name:
+            names.add(name)
+        if alias:
+            names.add(alias)
+    return names
+
+
+def is_wiley_public_collection(name: str) -> bool:
+    """True when ``name`` is a Wiley catalog collection (never env-filtered)."""
+    return bool(name) and name in wiley_public_collection_names()
+
+
+def build_public_env_condition(is_prod: bool) -> FieldCondition:
+    """Payload condition for public-collection ``env`` filtering."""
+    if is_prod:
+        return FieldCondition(
+            key="env",
+            match=MatchValue(value=PUBLIC_ENV_PROD),
+        )
+    return FieldCondition(
+        key="env",
+        match=MatchAny(any=[PUBLIC_ENV_PROD, PUBLIC_ENV_STAGING]),
+    )
+
+
+def build_public_env_filter(is_prod: bool) -> Filter:
+    """Require an allowed ``env`` value, or an untagged point (missing ``env``).
+
+    Untagged points stay searchable until backfill. ``env=staging`` points do
+    not match prod. Nested as ``must`` so client ``should`` clauses stay intact.
+
+    See https://qdrant.tech/documentation/concepts/filtering/#is-empty
+    """
+    return Filter(
+        should=[
+            build_public_env_condition(is_prod),
+            IsEmptyCondition(is_empty=PayloadField(key="env")),
+        ]
+    )
+
+
+def build_private_tenant_filter(
+    user_id: str, collection_ids: List[str]
+) -> Filter:
+    """Mandatory tenant filter for the shared private Qdrant collection."""
+    must: List[FieldCondition] = [
+        FieldCondition(key="user_id", match=MatchValue(value=user_id)),
+    ]
+    if len(collection_ids) == 1:
+        must.append(
+            FieldCondition(
+                key="collection_id",
+                match=MatchValue(value=collection_ids[0]),
+            )
+        )
+    elif collection_ids:
+        must.append(
+            FieldCondition(
+                key="collection_id",
+                match=MatchAny(any=list(collection_ids)),
+            )
+        )
+    return Filter(must=must)
+
+
+def merge_must_filters(
+    base: Optional[Filter], extra_must: List[Any]
+) -> Optional[Filter]:
+    """Attach extra ``must`` conditions onto an existing Qdrant filter."""
+    if not extra_must and base is None:
+        return None
+    must: List[Any] = list(extra_must)
+    should = None
+    must_not = None
+    min_should = None
+    if base is not None:
+        if getattr(base, "must", None):
+            must.extend(list(base.must))
+        should = getattr(base, "should", None)
+        must_not = getattr(base, "must_not", None)
+        min_should = getattr(base, "min_should", None)
+    return Filter(
+        must=must or None,
+        should=should,
+        must_not=must_not,
+        min_should=min_should,
+    )
+
+
+def _is_already_exists_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "already exists" in msg or "already exist" in msg
+
+
+def _is_missing_collection_error(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 404:
+        return True
+    if isinstance(exc, UnexpectedResponse) and getattr(exc, "status_code", None) == 404:
+        return True
+    text = str(exc).lower()
+    return "not found" in text and "collection" in text
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return True
+    return "timeout" in str(exc).lower()
+
+
+def split_public_and_private_collections(
+    collection_names: List[str],
+    private_collections_map: Optional[Dict[str, str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Split request collection IDs into public Qdrant names vs private Mongo IDs."""
+    public_labels = all_known_public_collection_labels()
+    private_ids = set((private_collections_map or {}).keys())
+    public_names: List[str] = []
+    private_mongo_ids: List[str] = []
+    seen_public: set[str] = set()
+    seen_private: set[str] = set()
+
+    for name in collection_names or []:
+        if not name or name == PRIVATE_COLLECTION_NAME:
+            continue
+        if name in private_ids or (
+            name not in public_labels and looks_like_mongo_id(name)
+        ):
+            if name not in seen_private:
+                seen_private.add(name)
+                private_mongo_ids.append(name)
+            continue
+        if name not in seen_public:
+            seen_public.add(name)
+            public_names.append(name)
+
+    return public_names, private_mongo_ids
 
 
 class VectorStoreManager:
@@ -83,11 +260,105 @@ class VectorStoreManager:
         )
         self.embeddings_model = embeddings_model
         self.embeddings_size = 2560
+        self._env_payload_cache: Dict[str, bool] = {}
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
+
+    def ensure_private_collection(self) -> None:
+        """Create the shared private collection and tenant indexes if missing.
+
+        Never recreates the collection — that would wipe all tenants' data.
+        """
+        try:
+            if not self.client.collection_exists(PRIVATE_COLLECTION_NAME):
+                created = self.client.create_collection(
+                    collection_name=PRIVATE_COLLECTION_NAME,
+                    vectors_config=VectorParams(
+                        size=self.embeddings_size,
+                        distance=Distance.COSINE,
+                    ),
+                    hnsw_config=models.HnswConfigDiff(payload_m=16, m=0),
+                )
+                if created is False:
+                    raise RuntimeError(
+                        f"Failed to create collection: {PRIVATE_COLLECTION_NAME}"
+                    )
+                logger.info(
+                    "Collection '%s' created successfully", PRIVATE_COLLECTION_NAME
+                )
+        except Exception as e:
+            if not self.client.collection_exists(PRIVATE_COLLECTION_NAME):
+                logger.error(
+                    "Failed to create collection '%s': %s",
+                    PRIVATE_COLLECTION_NAME,
+                    e,
+                )
+                raise RuntimeError(
+                    f"Failed to create collection: {PRIVATE_COLLECTION_NAME}"
+                ) from e
+            logger.info(
+                "Collection '%s' already exists", PRIVATE_COLLECTION_NAME
+            )
+            try:
+                self.client.update_collection(
+                    collection_name=PRIVATE_COLLECTION_NAME,
+                    hnsw_config=models.HnswConfigDiff(payload_m=16, m=0),
+                )
+            except Exception as update_err:
+                logger.warning(
+                    "Could not update HNSW on '%s': %s",
+                    PRIVATE_COLLECTION_NAME,
+                    update_err,
+                )
+
+        self._ensure_private_payload_indexes()
+
+    def _ensure_private_payload_indexes(self) -> None:
+        """Idempotently create tenant and collection_id payload indexes."""
+        index_specs = (
+            (
+                "user_id",
+                models.KeywordIndexParams(
+                    type=models.KeywordIndexType.KEYWORD,
+                    is_tenant=True,
+                ),
+            ),
+            (
+                "collection_id",
+                models.PayloadSchemaType.KEYWORD,
+            ),
+        )
+        for field_name, field_schema in index_specs:
+            try:
+                self.client.create_payload_index(
+                    collection_name=PRIVATE_COLLECTION_NAME,
+                    field_name=field_name,
+                    field_schema=field_schema,
+                )
+            except Exception as e:
+                if _is_already_exists_error(e):
+                    logger.debug(
+                        "Payload index '%s' on '%s' already exists",
+                        field_name,
+                        PRIVATE_COLLECTION_NAME,
+                    )
+                    continue
+                logger.error(
+                    "Failed to create payload index '%s' on '%s': %s",
+                    field_name,
+                    PRIVATE_COLLECTION_NAME,
+                    e,
+                )
+                raise RuntimeError(
+                    f"Failed to create payload index '{field_name}' on "
+                    f"'{PRIVATE_COLLECTION_NAME}'"
+                ) from e
 
     def create_collection(self, collection_name: str) -> bool:
         """
         Create a new collection in the vector store.
+
+        Private user collections no longer get their own Qdrant collection.
+        Use ``ensure_private_collection`` instead.
 
         Args:
             collection_name: Name of the collection to create
@@ -98,17 +369,25 @@ class VectorStoreManager:
         Raises:
             RuntimeError: If the collection creation fails
         """
+        if collection_name == PRIVATE_COLLECTION_NAME:
+            self.ensure_private_collection()
+            return True
+
         vectors_config = VectorParams(
             size=self.embeddings_size,
             distance=Distance.COSINE,
         )
 
         try:
-            success = self.client.recreate_collection(
+            if self.client.collection_exists(collection_name):
+                logger.info("Collection '%s' already exists", collection_name)
+                return True
+
+            success = self.client.create_collection(
                 collection_name=collection_name, vectors_config=vectors_config
             )
 
-            if not success:
+            if success is False:
                 raise RuntimeError(f"Failed to create collection: {collection_name}")
 
             logger.info(f"Collection '{collection_name}' created successfully")
@@ -128,64 +407,46 @@ class VectorStoreManager:
         return self.client.get_collections()
 
     async def list_public_collections(
-        self, page: int = 1, limit: int = 10
+        self, page: int = 1, limit: Optional[int] = None
     ) -> Tuple[List[Dict[str, str]], int]:
         """
-        Get all public collections from the vector store.
+        Get public collections for the current environment.
 
-        Returns:
-            Dict[str, str]: Dictionary of collection names and descriptions
-            int: Total number of public collections for pagination
+        Staging includes prod-named collections as well as staging-only ones.
+        The shared private collection is never listed.
         """
-        existing_user_collections = await Collection.find_all(
-            filter_dict={"user_id": {"$ne": None}}
-        )
-
-        collections = self.client.get_collections()
-        # Build a map of collection_name -> alias_name from Qdrant aliases response
-        aliases_response = self.client.get_aliases()
         alias_map: Dict[str, str] = {}
-        alias_items = getattr(aliases_response, "aliases", aliases_response)
-        for item in alias_items or []:
-            alias_name = getattr(item, "alias_name", None)
-            collection_name = getattr(item, "collection_name", None)
-            if collection_name and alias_name:
-                # Prefer first seen alias per collection
-                alias_map.setdefault(collection_name, alias_name)
+        try:
+            aliases_response = self.client.get_aliases()
+            alias_items = getattr(aliases_response, "aliases", aliases_response)
+            for item in alias_items or []:
+                alias_name = getattr(item, "alias_name", None)
+                collection_name = getattr(item, "collection_name", None)
+                if collection_name and alias_name:
+                    alias_map.setdefault(collection_name, alias_name)
+        except Exception as e:
+            logger.warning("Failed to load Qdrant aliases for public collections: %s", e)
 
+        public_collections = []
+        for item in iter_public_catalog(is_prod=IS_PROD):
+            name = item.get("name")
+            if not name or name == PRIVATE_COLLECTION_NAME:
+                continue
+            public_collections.append(
+                {
+                    "name": name,
+                    "alias": item.get("alias") or alias_map.get(name) or None,
+                    "description": item.get("description")
+                    or "Public Collection from ESA",
+                }
+            )
+
+        total = len(public_collections)
+        if limit is None:
+            return public_collections, total
         start = (page - 1) * limit
         end = start + limit
-
-        # Build a map of collection name -> description from PUBLIC_COLLECTIONS constant
-        desc_map: Dict[str, Optional[str]] = {}
-        try:
-            if isinstance(PUBLIC_COLLECTIONS, dict):
-                desc_map = PUBLIC_COLLECTIONS
-            elif isinstance(PUBLIC_COLLECTIONS, list):
-                for item in PUBLIC_COLLECTIONS:
-                    if isinstance(item, dict) and item.get("name"):
-                        desc_map[item["name"]] = item.get("description")
-        except Exception:
-            desc_map = {}
-
-        public_collections = [
-            {
-                "name": collection.name,
-                "alias": alias_map.get(collection.name) or None,
-                # Qdrant does not provide a description for its collections so we use a placeholder "Public Collection from ESA"
-                # if collection.name is known in config, use that description
-                "description": desc_map.get(collection.name)
-                or collection.model_dump().get(
-                    "description", "Public Collection from ESA"
-                ),
-            }
-            for collection in collections.collections
-            if collection.name in desc_map
-            and collection.name
-            not in [collection.id for collection in existing_user_collections]
-        ]
-
-        return public_collections[start:end], len(public_collections)
+        return public_collections[start:end], total
 
     def list_collections_names(self) -> List[str]:
         """
@@ -234,6 +495,12 @@ class VectorStoreManager:
             ValueError: If the collection doesn't exist
             RuntimeError: If deletion fails for other reasons
         """
+        if collection_name == PRIVATE_COLLECTION_NAME:
+            raise RuntimeError(
+                "Refusing to delete the shared private collection "
+                f"'{PRIVATE_COLLECTION_NAME}'"
+            )
+
         if collection_name not in self.list_collections_names():
             logger.warning(
                 f"Attempted to delete non-existent collection '{collection_name}'"
@@ -249,62 +516,144 @@ class VectorStoreManager:
             logger.error(f"Failed to delete collection '{collection_name}': {e}")
             raise RuntimeError(f"Failed to delete collection: {str(e)}") from e
 
+    def count_points_for_collection(self, user_id: str, collection_id: str) -> int:
+        """Count points in the shared private collection for one logical collection."""
+        try:
+            result = self.client.count(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                count_filter=build_private_tenant_filter(user_id, [collection_id]),
+                exact=True,
+            )
+            return int(getattr(result, "count", 0) or 0)
+        except Exception as e:
+            logger.warning(
+                "Failed to count Qdrant points for collection %s: %s",
+                collection_id,
+                e,
+            )
+            return 0
+
+    def delete_points_for_collection(self, user_id: str, collection_id: str) -> int:
+        """Delete all private points for a user collection. Does not drop the Qdrant collection."""
+        result = self.delete_private_docs(
+            user_id=user_id,
+            collection_id=collection_id,
+            metadata=None,
+        )
+        return int(getattr(result, "deleted", 0) or 0)
+
+    def delete_private_docs(
+        self,
+        user_id: str,
+        collection_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Delete private points matching tenant keys plus optional metadata."""
+        extra = self._qdrant_filter_from_dict(metadata)
+        extra_must = list(getattr(extra, "must", None) or []) if extra else []
+        filter_obj = merge_must_filters(
+            build_private_tenant_filter(user_id, [collection_id]),
+            extra_must,
+        )
+        try:
+            count_result = self.client.count(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                count_filter=filter_obj,
+                exact=True,
+            )
+            count_before = count_result.count
+
+            self.client.delete(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                points_selector=filter_obj,
+            )
+
+            count_result_after = self.client.count(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                count_filter=filter_obj,
+                exact=True,
+            )
+            deleted_count = count_before - count_result_after.count
+            logger.info(
+                "Deleted %s documents from '%s' (user_id=%s collection_id=%s)",
+                deleted_count,
+                PRIVATE_COLLECTION_NAME,
+                user_id,
+                collection_id,
+            )
+
+            class DeleteResult:
+                def __init__(self, deleted_count):
+                    self.deleted = deleted_count
+
+            return DeleteResult(deleted_count)
+        except Exception as e:
+            logger.error(f"Failed to delete documents: {e}")
+            raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
+
     async def add_document_list(
-        self, collection_name: str, document_list: List[Document]
+        self,
+        document_list: List[Document],
+        *,
+        user_id: str,
+        collection_id: str,
     ) -> List[str]:
         """
-        Add a list of documents to a collection.
+        Add a list of documents to the shared private collection.
 
         Args:
-            collection_name: Name of the collection
             document_list: List of documents to add
+            user_id: Owner user ID written on every point
+            collection_id: Logical Mongo collection ID written on every point
 
         Returns:
             List[str]: List of UUIDs for the added documents
-
-        Raises:
-            ValueError: If there's a model mismatch or configuration issue
-            RuntimeError: For other unexpected errors
         """
         if not document_list:
             logger.warning("Empty document list provided, nothing to add")
             return []
+        if not user_id or not collection_id:
+            raise ValueError("user_id and collection_id are required to upsert private points")
 
+        self.ensure_private_collection()
         uuids = [str(uuid4()) for _ in range(len(document_list))]
 
         try:
-            # Use batch writing to prevent timeout issues
-            # Batch size 32 matches RunPod Infinity Embedding BATCH_SIZES=32 configuration
             await self._add_documents_in_batches(
-                collection_name, document_list, uuids, batch_size=32
+                document_list,
+                uuids,
+                user_id=user_id,
+                collection_id=collection_id,
+                batch_size=32,
             )
-            logger.info(f"Added {len(document_list)} documents to '{collection_name}'")
+            logger.info(
+                "Added %s documents to '%s' (collection_id=%s)",
+                len(document_list),
+                PRIVATE_COLLECTION_NAME,
+                collection_id,
+            )
             return uuids
 
         except Exception as e:
-            logger.error(f"Error adding documents to '{collection_name}': {e}")
+            logger.error(
+                "Error adding documents to '%s': %s", PRIVATE_COLLECTION_NAME, e
+            )
             raise RuntimeError(
-                f"Failed to add documents to '{collection_name}': {str(e)}"
+                f"Failed to add documents to '{PRIVATE_COLLECTION_NAME}': {str(e)}"
             ) from e
 
     async def _add_documents_in_batches(
         self,
-        collection_name: str,
         documents: List[Document],
         uuids: List[str],
+        *,
+        user_id: str,
+        collection_id: str,
         batch_size: int = 32,
     ) -> None:
         """
         Add documents to Qdrant in batches to prevent timeout issues.
-
-        Args:
-            vector_store: The Qdrant vector store instance
-            documents: List of documents to add
-            uuids: List of UUIDs for the documents
-            batch_size: Number of documents to process in each batch
         """
-        import time
-
         total_documents = len(documents)
         logger.info(f"Adding {total_documents} documents in batches of {batch_size}")
 
@@ -321,15 +670,16 @@ class VectorStoreManager:
             )
 
             try:
-                # Use direct Qdrant client operations instead of LangChain wrapper
                 await self._add_documents_directly(
-                    batch_documents, batch_uuids, collection_name
+                    batch_documents,
+                    batch_uuids,
+                    user_id=user_id,
+                    collection_id=collection_id,
                 )
                 logger.info(f"Successfully added batch {batch_num}/{total_batches}")
 
-                # Add a small delay between batches to prevent overwhelming Qdrant
                 if batch_num < total_batches:
-                    time.sleep(0.5)
+                    await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(
@@ -338,38 +688,45 @@ class VectorStoreManager:
                 raise RuntimeError(f"Failed to add batch {batch_num}: {str(e)}") from e
 
     async def _add_documents_directly(
-        self, documents: List[Document], uuids: List[str], collection_name: str
+        self,
+        documents: List[Document],
+        uuids: List[str],
+        *,
+        user_id: str,
+        collection_id: str,
     ) -> None:
-        """
-        Add documents directly to Qdrant using the client API to avoid LangChain wrapper issues.
-
-        Args:
-            documents: List of documents to add
-            uuids: List of UUIDs for the documents
-            collection_name: Name of the collection
-        """
+        """Upsert chunk points into the shared private collection."""
         from qdrant_client.models import PointStruct
 
-        # Extract texts and metadata
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
 
-        # Generate embeddings for this batch
         embeddings, _ = await self.generate_batch_embeddings(
             texts, self.embeddings_model
         )
-        # Create points for Qdrant
         points = []
-        for i, (text, metadata, embedding, uuid) in enumerate(
-            zip(texts, metadatas, embeddings, uuids)
+        for text, metadata, embedding, uuid in zip(
+            texts, metadatas, embeddings, uuids
         ):
+            payload_metadata = dict(metadata or {})
             point = PointStruct(
-                id=uuid, vector=embedding, payload={"text": text, "metadata": metadata}
+                id=uuid,
+                vector=embedding,
+                payload={
+                    "text": text,
+                    "metadata": payload_metadata,
+                    "user_id": user_id,
+                    "collection_id": collection_id,
+                },
             )
             points.append(point)
 
-        # Upsert points to Qdrant
-        self.client.upsert(collection_name=collection_name, points=points, wait=True)
+        await asyncio.to_thread(
+            self.client.upsert,
+            collection_name=PRIVATE_COLLECTION_NAME,
+            points=points,
+            wait=True,
+        )
 
     def _qdrant_filter_from_dict(
         self, filter_dict: Optional[Dict[str, Any]]
@@ -431,6 +788,35 @@ class VectorStoreManager:
         except Exception:
             return None
 
+    def _collection_has_env_payload(self, collection_name: str) -> bool:
+        """True when Qdrant lists an ``env`` payload field on the collection.
+
+        Uses ``CollectionInfo.payload_schema``, which reports indexed payload
+        fields. Collections without an ``env`` index are left unfiltered.
+        See https://qdrant.tech/documentation/concepts/collections/
+        """
+        cache = getattr(self, "_env_payload_cache", None)
+        if cache is None:
+            cache = {}
+            self._env_payload_cache = cache
+        cached = cache.get(collection_name)
+        if cached is not None:
+            return cached
+        has_env = False
+        try:
+            info = self.client.get_collection(collection_name)
+            schema = getattr(info, "payload_schema", None) or {}
+            has_env = "env" in schema
+        except Exception as e:
+            logger.warning(
+                "Could not inspect payload schema for '%s'; skipping env filter: %s",
+                collection_name,
+                e,
+            )
+            has_env = False
+        cache[collection_name] = has_env
+        return has_env
+
     def _search_across_collections(
         self,
         collection_names: List[str],
@@ -439,39 +825,44 @@ class VectorStoreManager:
         query_filter: Optional[Filter],
         limit_per_collection: int,
         private_collections_map: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Any]:
         """
-        Perform a search against multiple collections and aggregate results.
+        Search public named collections and the shared private collection.
 
-        Args:
-            collection_names: Names of collections to query
-            query_vector: Embedded query vector
-            score_threshold: Minimum similarity score
-            query_filter: Optional Qdrant filter to apply
-            limit_per_collection: Max results to fetch per collection
-
-        Returns:
-            Aggregated list of search results from all collections
+        Public ``env`` filtering is skipped for Wiley and for collections that
+        do not advertise an ``env`` payload field in Qdrant.
         """
-        logger.info(f"private_collections_map: {private_collections_map}")
-        aliases_response = self.client.get_aliases()
+        logger.debug("private_collections_map: %s", private_collections_map)
         alias_map: Dict[str, str] = {}
-        alias_items = getattr(aliases_response, "aliases", aliases_response)
-        for item in alias_items or []:
-            alias_name = getattr(item, "alias_name", None)
-            collection_name = getattr(item, "collection_name", None)
-            if collection_name and alias_name:
-                alias_map.setdefault(collection_name, alias_name)
+        try:
+            aliases_response = self.client.get_aliases()
+            alias_items = getattr(aliases_response, "aliases", aliases_response)
+            for item in alias_items or []:
+                alias_name = getattr(item, "alias_name", None)
+                collection_name = getattr(item, "collection_name", None)
+                if collection_name and alias_name:
+                    alias_map.setdefault(collection_name, alias_name)
+        except Exception as e:
+            logger.warning("Failed to load Qdrant aliases during search: %s", e)
 
+        public_names, private_ids = split_public_and_private_collections(
+            collection_names, private_collections_map
+        )
         aggregated_results: List[Any] = []
-        for collection_name in collection_names:
-            eve_public_collection_name = EVE_PUBLIC_COLLECTION_NAME_PROD if IS_PROD else EVE_PUBLIC_COLLECTION_NAME_STAGING
-            if collection_name == eve_public_collection_name:
-                collection_query_filter = query_filter
-            else:
-                collection_query_filter = None
+
+        for collection_name in public_names:
+            client_filter = (
+                query_filter if is_eve_public_collection(collection_name) else None
+            )
+            extra_must: List[Any] = []
+            if (
+                not is_wiley_public_collection(collection_name)
+                and self._collection_has_env_payload(collection_name)
+            ):
+                extra_must.append(build_public_env_filter(IS_PROD))
+            collection_query_filter = merge_must_filters(client_filter, extra_must)
             try:
-                # Use query_points API exclusively
                 qp_response = self.client.query_points(
                     collection_name=collection_name,
                     query=query_vector,
@@ -488,24 +879,90 @@ class VectorStoreManager:
                     timeout=120,
                 )
                 results = getattr(qp_response, "points", []) or []
-                # Convert to generic objects and attach collection_name without mutating ScoredPoint
-                converted_results: List[Any] = []
-                for r in results or []:
-                    alias_name = alias_map.get(collection_name, collection_name)
-                    collection_name = private_collections_map.get(
-                        alias_name, alias_name
-                    )
-                    conv = self._to_generic_result(r, collection_name)
+                display_name = alias_map.get(collection_name, collection_name)
+                for scored in results:
+                    conv = self._to_generic_result(scored, display_name)
                     if conv is not None:
-                        converted_results.append(conv)
-
-                aggregated_results.extend(converted_results)
+                        aggregated_results.append(conv)
             except Exception as e:
+                if _is_missing_collection_error(e) or _is_timeout_error(e):
+                    raise RuntimeError(
+                        f"Failed to search collection '{collection_name}': {e}"
+                    ) from e
                 logger.warning(f"Failed to search collection '{collection_name}': {e}")
                 continue
 
+        if private_ids:
+            if not user_id:
+                logger.warning(
+                    "Skipping private collection search: user_id is required for tenant filter"
+                )
+            else:
+                try:
+                    self.ensure_private_collection()
+                except Exception as e:
+                    logger.error(
+                        "Skipping private collection search; could not ensure '%s': %s",
+                        PRIVATE_COLLECTION_NAME,
+                        e,
+                    )
+                else:
+                    name_map = private_collections_map or {}
+                    for collection_id in private_ids:
+                        try:
+                            private_filter = build_private_tenant_filter(
+                                user_id, [collection_id]
+                            )
+                            qp_response = self.client.query_points(
+                                collection_name=PRIVATE_COLLECTION_NAME,
+                                query=query_vector,
+                                limit=limit_per_collection,
+                                score_threshold=score_threshold,
+                                query_filter=private_filter,
+                                search_params=models.SearchParams(
+                                    quantization=models.QuantizationSearchParams(
+                                        ignore=False,
+                                        rescore=True,
+                                        oversampling=2.0,
+                                    )
+                                ),
+                                timeout=120,
+                            )
+                            results = getattr(qp_response, "points", []) or []
+                            for scored in results:
+                                payload = getattr(scored, "payload", None) or {}
+                                logical_id = (
+                                    payload.get("collection_id")
+                                    if isinstance(payload, dict)
+                                    else None
+                                )
+                                display_name = name_map.get(
+                                    logical_id, logical_id or PRIVATE_COLLECTION_NAME
+                                )
+                                conv = self._to_generic_result(scored, display_name)
+                                if conv is not None:
+                                    aggregated_results.append(conv)
+                        except Exception as e:
+                            if _is_timeout_error(e):
+                                raise RuntimeError(
+                                    f"Failed to search private collection "
+                                    f"'{PRIVATE_COLLECTION_NAME}' "
+                                    f"(collection_id={collection_id}): {e}"
+                                ) from e
+                            logger.warning(
+                                "Failed to search private collection '%s' "
+                                "(collection_id=%s): %s",
+                                PRIVATE_COLLECTION_NAME,
+                                collection_id,
+                                e,
+                            )
+                            continue
+
         logger.info(
-            f"Retrieved {len(aggregated_results)} total documents from {len(collection_names)} collections"
+            "Retrieved %s total documents from %s public collections and %s private collections",
+            len(aggregated_results),
+            len(public_names),
+            len(private_ids),
         )
         return aggregated_results
 
@@ -575,9 +1032,14 @@ class VectorStoreManager:
         Returns:
             Dict[str, Any]: Result of the deletion operation with deleted count
 
-        Raises:
+            Raises:
             RuntimeError: If deletion fails
         """
+        if collection_name == PRIVATE_COLLECTION_NAME:
+            raise RuntimeError(
+                "Refusing unscoped metadata delete on "
+                f"'{PRIVATE_COLLECTION_NAME}'; use delete_private_docs"
+            )
         try:
             # Get the count of documents before deletion using the count method
             filter_obj = self._qdrant_filter_from_dict(metadata)
@@ -709,6 +1171,8 @@ class VectorStoreManager:
         score_threshold: float = 0.7,
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
+        private_collections_map: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Any]:
         """
         Retrieve relevant documents for a given query from multiple collections.
@@ -737,12 +1201,15 @@ class VectorStoreManager:
             query_filter = Filter(**filters) if filters else None
 
             # Retrieve k per collection (caller may further rerank/filter)
-            all_results = self._search_across_collections(
-                collection_names=collection_names,
-                query_vector=query_vector,
-                score_threshold=score_threshold,
-                query_filter=query_filter,
-                limit_per_collection=k,
+            all_results = await asyncio.to_thread(
+                self._search_across_collections,
+                collection_names,
+                query_vector,
+                score_threshold,
+                query_filter,
+                k,
+                private_collections_map,
+                user_id,
             )
 
             logger.info(
@@ -766,6 +1233,7 @@ class VectorStoreManager:
         embeddings_model: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
@@ -790,13 +1258,15 @@ class VectorStoreManager:
 
             # Search across collections
             t1 = time.perf_counter()
-            all_results = self._search_across_collections(
-                collection_names=collection_names,
-                query_vector=query_vector,
-                score_threshold=score_threshold,
-                query_filter=query_filter,
-                limit_per_collection=k,
-                private_collections_map=private_collections_map,
+            all_results = await asyncio.to_thread(
+                self._search_across_collections,
+                collection_names,
+                query_vector,
+                score_threshold,
+                query_filter,
+                k,
+                private_collections_map,
+                user_id,
             )
             retrieval_latency = time.perf_counter() - t1
 
@@ -830,7 +1300,7 @@ class VectorStoreManager:
         """
         return asyncio.run(
             self.retrieve_documents_from_query(
-                collection_name=collection_name,
+                collection_names=[collection_name],
                 query=query,
                 k=k,
                 score_threshold=score_threshold,
