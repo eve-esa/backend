@@ -86,6 +86,16 @@ def _build_mcp_connections(
         else:
             if cognito_auth_header and "Authorization" not in headers:
                 headers["Authorization"] = cognito_auth_header
+            # Forward the caller's EVE credential so the MCP server
+            # impersonates the user on its downstream EVE API call
+            # (``X-EVE-Token`` → the server's ``_resolve_eve_token``).
+            # Without it the server falls back to its shared ``EVE_API_KEY``
+            # and user-scoped private collections are dropped by the
+            # backend's ownership check. The connection is cached for
+            # ``MCP_TOOLS_CACHE_TTL`` (300 s), well inside the EVE JWT
+            # lifetime, so the baked token stays valid for the cache window.
+            if mcp_proxy_bearer_token:
+                headers["X-EVE-Token"] = mcp_proxy_bearer_token
             url = srv.config.url
 
         connections[srv.name] = {

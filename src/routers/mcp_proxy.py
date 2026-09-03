@@ -10,6 +10,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -34,6 +35,16 @@ logger = logging.getLogger(__name__)
 _proxy_apps: dict[str, Any] = {}
 _proxy_lifespan_stacks: dict[str, AsyncExitStack] = {}
 _proxy_build_lock = asyncio.Lock()
+
+# Per-request bearer token of the authenticated caller (an EVE access token or
+# ``eve_`` API key). Set by ``MCPProxyDispatcher`` around each proxied call and
+# read by ``_DynamicBearerAuth`` so the upstream MCP server can impersonate the
+# user on downstream EVE API calls (e.g. ``eve_retrieval`` → ``POST /retrieve``).
+# Without it the MCP server falls back to its shared ``EVE_API_KEY`` and
+# user-scoped private collections are dropped by the backend's ownership check.
+_user_eve_token_var: ContextVar[str | None] = ContextVar(
+    "mcp_proxy_user_eve_token", default=None
+)
 
 # Cache of (server_name, user_id) → (agentcore_url, expiry_monotonic).
 # Avoids a MongoDB round-trip on every proxy request when the result is stable.
@@ -77,6 +88,16 @@ class _DynamicBearerAuth(httpx.Auth):
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
         token = await self._provider.get_token()
         request.headers["Authorization"] = f"Bearer {token}"
+
+        # Forward the caller's EVE credential so the MCP server impersonates
+        # the user on its downstream EVE API call (``X-EVE-Token`` → the
+        # server's ``_resolve_eve_token``). The Cognito ``Authorization`` above
+        # authenticates the proxy to AgentCore; this authenticates the user to
+        # EVE. Without it the MCP server uses its shared ``EVE_API_KEY`` and
+        # user-scoped private collections are silently dropped.
+        user_eve_token = _user_eve_token_var.get()
+        if user_eve_token:
+            request.headers["X-EVE-Token"] = user_eve_token
 
         # Yield the request; httpx sends it and feeds the response back via send().
         response = yield request
@@ -311,7 +332,7 @@ class MCPProxyDispatcher:
                     tail = "/".join(parts[3:]) if len(parts) > 3 else ""
                     remaining = f"{mcp_path}/{tail}".rstrip("/") if tail else mcp_path
                     try:
-                        proxy_app, principal = await self._resolve_proxy(
+                        proxy_app, principal, user_token = await self._resolve_proxy(
                             scope, server_name
                         )
                     except PermissionError as exc:
@@ -335,14 +356,16 @@ class MCPProxyDispatcher:
 
                     scope = {**scope, "path": remaining, "raw_path": remaining.encode()}
                     await self._dispatch_and_track(
-                        scope, receive, send, proxy_app, principal, server_name
+                        scope, receive, send, proxy_app, principal, server_name,
+                        user_token,
                     )
                     return
 
         await self.main_app(scope, receive, send)
 
     async def _dispatch_and_track(
-        self, scope, receive, send, proxy_app, principal: Principal, server_name: str
+        self, scope, receive, send, proxy_app, principal: Principal,
+        server_name: str, user_token: str | None = None,
     ):
         """Forward to the proxy sub-app and record one usage event per tool call.
 
@@ -350,80 +373,92 @@ class MCPProxyDispatcher:
         logged), wraps ``send`` to capture the upstream status and response body,
         and writes the usage event after the response has been delivered so the
         client is never blocked by the DB write.
+
+        ``user_token`` is the caller's EVE credential, published to the
+        per-request ``_user_eve_token_var`` contextvar so ``_DynamicBearerAuth``
+        can forward it as ``X-EVE-Token`` to the upstream MCP server (see the
+        docstring there for why user-scoped retrieval depends on it).
         """
-        # Buffer the request body once so we can both inspect it and replay it
-        # downstream (ASGI bodies are single-consumption streams).
-        body = b""
-        while True:
-            event = await receive()
-            body += event.get("body", b"")
-            if not event.get("more_body", False):
-                break
-
-        tool_call = _extract_tool_call(body)
-        downstream_receive = _replay_receive(body, receive)
-
-        if tool_call is None:
-            # Housekeeping hop (initialize/tools_list/notification/SSE) — forward
-            # without recording a usage event.
-            await proxy_app(scope, downstream_receive, send)
-            return
-
-        tool_name, arguments = tool_call
-        caller_type = principal.caller_type()
-
-        status_holder: dict[str, int] = {}
-        resp_chunks: list[bytes] = []
-
-        async def wrapped_send(message):
-            if message["type"] == "http.response.start":
-                status_holder["status"] = message["status"]
-            elif message["type"] == "http.response.body":
-                chunk = message.get("body") or b""
-                if chunk:
-                    resp_chunks.append(chunk)
-            await send(message)
-
-        started = time.monotonic()
+        # Publish the caller's token for the lifetime of this proxied call only:
+        # the proxy app is shared across users, so the contextvar must not leak
+        # past this request.
+        token_reset = _user_eve_token_var.set(user_token)
         try:
-            await proxy_app(scope, downstream_receive, wrapped_send)
-        finally:
-            latency_ms = (time.monotonic() - started) * 1000
-            status_code = status_holder.get("status")
-            raw_response = b"".join(resp_chunks)
+            # Buffer the request body once so we can both inspect it and replay it
+            # downstream (ASGI bodies are single-consumption streams).
+            body = b""
+            while True:
+                event = await receive()
+                body += event.get("body", b"")
+                if not event.get("more_body", False):
+                    break
 
-            # Decode the SSE/JSON-RPC body into structured objects so the stored
-            # payload is queryable for deeper stats; fall back to the raw string
-            # if it can't be parsed (so nothing is ever lost).
-            messages = _parse_mcp_messages(raw_response)
-            if messages is None:
-                response_payload = (
-                    raw_response.decode(errors="replace") if raw_response else None
+            tool_call = _extract_tool_call(body)
+            downstream_receive = _replay_receive(body, receive)
+
+            if tool_call is None:
+                # Housekeeping hop (initialize/tools_list/notification/SSE) — forward
+                # without recording a usage event.
+                await proxy_app(scope, downstream_receive, send)
+                return
+
+            tool_name, arguments = tool_call
+            caller_type = principal.caller_type()
+
+            status_holder: dict[str, int] = {}
+            resp_chunks: list[bytes] = []
+
+            async def wrapped_send(message):
+                if message["type"] == "http.response.start":
+                    status_holder["status"] = message["status"]
+                elif message["type"] == "http.response.body":
+                    chunk = message.get("body") or b""
+                    if chunk:
+                        resp_chunks.append(chunk)
+                await send(message)
+
+            started = time.monotonic()
+            try:
+                await proxy_app(scope, downstream_receive, wrapped_send)
+            finally:
+                latency_ms = (time.monotonic() - started) * 1000
+                status_code = status_holder.get("status")
+                raw_response = b"".join(resp_chunks)
+
+                # Decode the SSE/JSON-RPC body into structured objects so the stored
+                # payload is queryable for deeper stats; fall back to the raw string
+                # if it can't be parsed (so nothing is ever lost).
+                messages = _parse_mcp_messages(raw_response)
+                if messages is None:
+                    response_payload = (
+                        raw_response.decode(errors="replace") if raw_response else None
+                    )
+                elif len(messages) == 1:
+                    response_payload = messages[0]
+                else:
+                    response_payload = messages
+
+                # A tools/call can fail at the MCP level (result.isError / JSON-RPC
+                # error) while still returning HTTP 200, so combine both signals.
+                is_error = _is_error_message(messages)
+                http_failed = status_code is None or status_code >= 400
+                outcome = _tool_call_outcome(http_failed=http_failed, is_error=is_error)
+                await track_usage(
+                    user_id=principal.user_id,
+                    caller_type=caller_type,
+                    api_key_id=principal.api_key_id,
+                    server_name=server_name,
+                    operation="tools/call",
+                    tool_name=tool_name,
+                    status_code=status_code,
+                    is_error=is_error,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                    request_payload=arguments,
+                    response_payload=response_payload,
                 )
-            elif len(messages) == 1:
-                response_payload = messages[0]
-            else:
-                response_payload = messages
-
-            # A tools/call can fail at the MCP level (result.isError / JSON-RPC
-            # error) while still returning HTTP 200, so combine both signals.
-            is_error = _is_error_message(messages)
-            http_failed = status_code is None or status_code >= 400
-            outcome = _tool_call_outcome(http_failed=http_failed, is_error=is_error)
-            await track_usage(
-                user_id=principal.user_id,
-                caller_type=caller_type,
-                api_key_id=principal.api_key_id,
-                server_name=server_name,
-                operation="tools/call",
-                tool_name=tool_name,
-                status_code=status_code,
-                is_error=is_error,
-                outcome=outcome,
-                latency_ms=latency_ms,
-                request_payload=arguments,
-                response_payload=response_payload,
-            )
+        finally:
+            _user_eve_token_var.reset(token_reset)
 
     async def _resolve_proxy(self, scope, server_name: str):
         headers = dict(scope.get("headers", []))
@@ -483,7 +518,7 @@ class MCPProxyDispatcher:
             raise RuntimeError("AgentCore authentication is not configured")
 
         proxy_app = await build_proxy_app(agentcore_url, provider)
-        return proxy_app, principal
+        return proxy_app, principal, token
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
