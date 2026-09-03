@@ -54,20 +54,29 @@ def iter_public_catalog(*, is_prod: bool) -> list[dict]:
     """Named public collections visible in this environment, deduped by ``name``.
 
     Prod sees only ``PUBLIC_COLLECTIONS``. Staging sees prod + staging catalogs.
+    When staging repeats a prod ``name``, its ``alias`` and ``description`` fill
+    in fields the prod row left empty so UI labels still resolve.
     """
     source = list(PUBLIC_COLLECTIONS)
     if not is_prod:
         source = source + list(STAGING_PUBLIC_COLLECTIONS)
-    seen: set[str] = set()
+    by_name: dict[str, dict] = {}
     out: list[dict] = []
     for item in source:
         if not isinstance(item, dict):
             continue
         name = item.get("name")
-        if not name or name in seen:
+        if not name:
             continue
-        seen.add(name)
-        out.append(item)
+        if name not in by_name:
+            copied = dict(item)
+            by_name[name] = copied
+            out.append(copied)
+            continue
+        existing = by_name[name]
+        for key in ("alias", "description"):
+            if not existing.get(key) and item.get(key):
+                existing[key] = item[key]
     return out
 
 

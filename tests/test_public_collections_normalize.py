@@ -57,3 +57,20 @@ def test_prod_rejects_staging_only_collection_name():
         is_prod=True,
     )
     assert out == ["qwen-512-filtered"]
+
+
+def test_staging_keeps_alias_when_prod_already_listed_the_name():
+    """Staging wikipedia/ESA rows add aliases onto prod names; do not drop them."""
+    out = normalize_public_collections_selection(
+        ["Wikipedia EO", "ESA EO Knowledge Base"],
+        is_prod=False,
+    )
+    assert out == ["wikipedia-512", "esa-rag-scraped-qwen3-newpipeline"]
+
+
+def test_prod_does_not_resolve_staging_wikipedia_alias():
+    out = normalize_public_collections_selection(
+        ["Wikipedia EO", "wikipedia-512"],
+        is_prod=True,
+    )
+    assert out == ["wikipedia-512"]
