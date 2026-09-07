@@ -1,0 +1,27 @@
+{#
+  The frame every transactional message shares, and a deliberate copy of the
+  Cognito hosted-UI templates: a person who gets an invite from the identity
+  provider and an approval mail from this application must not see two different
+  products. Tables, inline styles and no CSS classes, because that is the only
+  layout that survives Outlook and Gmail.
+
+  Blocks: ``title`` (the heading), ``body`` (one or more paragraphs), ``cta``
+  (an optional button row, omitted when there is nothing to click).
+#}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#e8e8e4;margin:0;padding:24px 0;font-family:Helvetica,Arial,sans-serif;">
+  <tr><td align="center">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;border-collapse:collapse;">
+      <tr><td style="background-color:#003247;padding:20px 28px;">
+        <img src="{{ logo_url }}" width="200" alt="ESA Phi-lab" style="display:block;border:0;width:200px;height:auto;color:#ffffff;font-size:16px;font-weight:bold;" />
+      </td></tr>
+      <tr><td style="background-color:#ffffff;padding:28px;color:#12181a;font-size:15px;line-height:22px;">
+        <p style="margin:0 0 16px 0;font-size:19px;font-weight:bold;color:#003247;">{% block title %}{% endblock %}</p>
+        {% block body %}{% endblock %}
+        {% block cta %}{% endblock %}
+      </td></tr>
+      <tr><td style="background-color:#ffffff;border-top:1px solid #d2dadc;padding:16px 28px;color:#335e6f;font-size:12px;line-height:18px;">
+        EVE - Earth Virtual Expert - European Space Agency. <a href="{{ app_url }}" style="color:#003247;">{{ app_url }}</a>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>

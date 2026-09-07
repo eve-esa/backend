@@ -26,6 +26,7 @@ from src.middlewares.auth import (
     extract_bearer_token,
     resolve_principal_from_bearer_token,
 )
+from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 from src.services.oidc import IdentityProviderUnavailable
@@ -338,6 +339,13 @@ class MCPProxyDispatcher:
                     except PermissionError as exc:
                         await self._send_error(send, 401, str(exc))
                         return
+                    except ApprovalPending:
+                        # Same body the REST routes answer with, so a client can
+                        # branch on the code whichever door it came through.
+                        await self._send_json(
+                            send, 403, {"detail": PENDING_APPROVAL_DETAIL}
+                        )
+                        return
                     except IdentityProviderUnavailable as exc:
                         # 503 like the catch-all below, but without the stack
                         # trace: a provider outage is expected weather, not a bug.
@@ -522,7 +530,11 @@ class MCPProxyDispatcher:
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):
-        body = json.dumps({"detail": detail}).encode()
+        await MCPProxyDispatcher._send_json(send, status, {"detail": detail})
+
+    @staticmethod
+    async def _send_json(send, status: int, payload: dict):
+        body = json.dumps(payload).encode()
         await send(
             {
                 "type": "http.response.start",

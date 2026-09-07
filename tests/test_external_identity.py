@@ -17,7 +17,7 @@ from bson import ObjectId
 
 from src.database.models.external_identity import ExternalIdentity
 from src.database.models.user import User
-from src.services import identity
+from src.services import approval, identity
 from src.services.identity import (
     normalize_email,
     normalize_email_verified,
@@ -352,3 +352,81 @@ async def test_the_same_subject_from_another_issuer_is_a_different_identity(monk
 async def test_claims_without_a_subject_are_refused():
     with pytest.raises(PermissionError):
         await resolve_user_id({"iss": ISSUER}, "token")
+
+
+# ── sign-up approval gate ─────────────────────────────────────────────────────
+# The gate lives at the provisioning seam, so these tests pin what the seam
+# writes rather than what a request gets back; the 403 half is in
+# tests/test_approval_gate.py.
+
+
+async def stored_approval_status(user_id: str):
+    doc = await User.get_collection().find_one({"_id": ObjectId(user_id)})
+    return doc.get("approval_status") if doc else None
+
+
+@pytest.mark.asyncio
+async def test_provisioning_below_the_limit_takes_a_seat(monkeypatch):
+    monkeypatch.setattr(approval, "SIGNUP_AUTO_APPROVE_LIMIT", 5)
+    await User.delete_many({"approval_status": {"$ne": None}})
+
+    email = unique_email()
+    subject = f"seat-{uuid.uuid4().hex}"
+    stub_userinfo(monkeypatch, {"email": email, "email_verified": True})
+    created = None
+    try:
+        resolved = await resolve_user_id(claims_for(subject), "token")
+        assert await stored_approval_status(resolved) == "approved"
+        created = await User.find_by_id(resolved)
+    finally:
+        await drop_identities(subject)
+        await cleanup_models([created] if created else [])
+        await User.delete_many({"approval_status": {"$ne": None}})
+
+
+@pytest.mark.asyncio
+async def test_provisioning_at_a_zero_limit_still_takes_a_seat(monkeypatch):
+    """Unlimited does not mean unmarked.
+
+    Zero skips the count, but the row is still stamped "approved" so the seat
+    count stays meaningful if somebody sets a real limit later.
+    """
+    monkeypatch.setattr(approval, "SIGNUP_AUTO_APPROVE_LIMIT", 0)
+
+    email = unique_email()
+    subject = f"unlimited-{uuid.uuid4().hex}"
+    stub_userinfo(monkeypatch, {"email": email, "email_verified": True})
+    created = None
+    try:
+        resolved = await resolve_user_id(claims_for(subject), "token")
+        assert await stored_approval_status(resolved) == "approved"
+        created = await User.find_by_id(resolved)
+    finally:
+        await drop_identities(subject)
+        await cleanup_models([created] if created else [])
+        await User.delete_many({"approval_status": {"$ne": None}})
+
+
+@pytest.mark.asyncio
+async def test_linking_never_gates_the_adopted_account(monkeypatch):
+    """An account that predates the gate keeps its seat even with none left.
+
+    Linking adopts an existing row, it does not create one, so the field stays
+    unset and the person who already had an account is never locked out of it.
+    """
+    monkeypatch.setattr(approval, "SIGNUP_AUTO_APPROVE_LIMIT", 1)
+    await User.delete_many({"approval_status": {"$ne": None}})
+    occupant = await User.create(email=unique_email(), approval_status="approved")
+
+    email = unique_email()
+    legacy = await User.create(email=email)
+    subject = f"link-gated-{uuid.uuid4().hex}"
+    stub_userinfo(monkeypatch, {"email": email, "email_verified": True})
+    try:
+        resolved = await resolve_user_id(claims_for(subject), "token")
+        assert resolved == legacy.id
+        assert await stored_approval_status(resolved) is None
+    finally:
+        await drop_identities(subject)
+        await cleanup_models([legacy, occupant])
+        await User.delete_many({"approval_status": {"$ne": None}})

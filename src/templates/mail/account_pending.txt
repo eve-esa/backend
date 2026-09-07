@@ -1,0 +1,8 @@
+Thanks for joining EVE
+
+Your account {{ email }} has been created. We are opening EVE to new users gradually, so access is enabled in batches and your account is now in the queue for approval.
+
+There is nothing you need to do. We will email you again as soon as your account is enabled, and from that moment you can sign in and start using EVE.
+
+EVE - Earth Virtual Expert - European Space Agency.
+{{ app_url }}

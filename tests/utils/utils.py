@@ -125,6 +125,7 @@ async def create_test_user_and_token(
     email: Optional[str] = None,
     first_name: str = "Test",
     last_name: str = "User",
+    approval_status: Optional[str] = None,
 ) -> Tuple[User, str]:
     """Return a persisted user and an access token that resolves to them.
 
@@ -132,6 +133,9 @@ async def create_test_user_and_token(
     it through the regular data-access helpers (``User.find_by_id`` et al.), and
     an ``external_identities`` row binds the token's subject to it, which is what
     keeps the resolver on the cache/lookup path instead of first sign-in.
+
+    ``approval_status`` defaults to ``None``, which is what an account that
+    predates the sign-up gate looks like, so existing tests are unaffected.
     """
 
     email = email or f"{uuid.uuid4().hex[:8]}@example.com"
@@ -148,6 +152,7 @@ async def create_test_user_and_token(
         email=email,
         first_name=first_name,
         last_name=last_name,
+        approval_status=approval_status,
     )
 
     subject = f"{TEST_SUBJECT_PREFIX}{uuid.uuid4().hex}"

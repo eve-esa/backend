@@ -28,6 +28,8 @@ from bson import ObjectId
 from src.config import AUTH_LINK_BY_VERIFIED_EMAIL
 from src.database.models.external_identity import ExternalIdentity
 from src.database.models.user import User
+from src.services.account_notifications import notify_account_pending
+from src.services.approval import APPROVAL_PENDING, next_approval_status
 from src.services.oidc import fetch_userinfo
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,11 @@ IDENTITY_CACHE_MAX_ENTRIES = 10_000
 _identity_cache: dict[tuple[str, str], tuple[float, str]] = {}
 _identity_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _registry_lock = asyncio.Lock()
+
+# Strong references to the in-flight "you are in the queue" sends. asyncio only
+# holds a weak reference to a running task, so a task nobody keeps can be
+# collected mid-await and the mail silently never goes out.
+_pending_mail_tasks: set[asyncio.Task] = set()
 
 
 def clear_identity_cache() -> None:
@@ -151,16 +158,46 @@ async def _claim_identity(
     return user_id
 
 
-async def _insert_user(user_id: ObjectId, email: str, profile: dict[str, Any]) -> None:
+async def _insert_user(
+    user_id: ObjectId,
+    email: str,
+    profile: dict[str, Any],
+    approval_status: Optional[str] = None,
+) -> None:
     """Create the EVE row under an id the identity row already points at."""
     user = User(
         email=email,
         first_name=profile.get("given_name") or None,
         last_name=profile.get("family_name") or None,
+        approval_status=approval_status,
     )
     document = user.to_dict()
     document["_id"] = user_id
     await User.get_collection().insert_one(document)
+
+
+def _forget_pending_mail_task(task: "asyncio.Task") -> None:
+    """Drop the reference and make sure a failure is not swallowed silently."""
+    _pending_mail_tasks.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("signup_pending_mail_failed: %s", error)
+
+
+def _schedule_pending_mail(user_id: str, email: str) -> None:
+    """Send the "waiting for approval" mail without making sign-in wait for it.
+
+    Fire and forget on purpose. This runs inside the first authenticated
+    request of a brand-new account: a slow relay would turn the sign-in into a
+    timeout, and a broken one would turn it into a 500, for a person whose
+    account was in fact created correctly. Mail is a courtesy, the account is
+    the outcome, and the two must not share a failure mode.
+    """
+    task = asyncio.create_task(notify_account_pending(user_id, email))
+    _pending_mail_tasks.add(task)
+    task.add_done_callback(_forget_pending_mail_task)
 
 
 async def _link_or_provision(issuer: str, subject: str, token: str) -> str:
@@ -203,7 +240,13 @@ async def _link_or_provision(issuer: str, subject: str, token: str) -> str:
     )
     if winner != str(new_user_id):
         return winner
-    await _insert_user(new_user_id, email, profile)
+    # Only this branch consumes a seat. An account adopted by the link branch
+    # above predates the gate and keeps ``approval_status`` unset.
+    status = await next_approval_status()
+    await _insert_user(new_user_id, email, profile, approval_status=status)
+    if status == APPROVAL_PENDING:
+        logger.warning("signup_pending_approval user_id=%s issuer=%s", winner, issuer)
+        _schedule_pending_mail(winner, email)
     return winner
 
 
