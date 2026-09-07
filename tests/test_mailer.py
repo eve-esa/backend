@@ -47,7 +47,8 @@ async def test_off_sends_nothing_and_says_so(monkeypatch, caplog):
 
     message = "\n".join(record.getMessage() for record in caplog.records)
     assert "mail suppressed" in message
-    assert "example.com" in message
+    # Exact token, not a substring of some URL: the log names the domain only.
+    assert "recipient_domain=example.com" in message
     # The subject is safe to log, the address is not.
     assert "person@example.com" not in message
 
