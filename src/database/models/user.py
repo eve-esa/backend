@@ -47,6 +47,15 @@ class User(MongoModel):
         ge=0,
         description="Number of private documents owned by the user",
     )
+    # ``None`` = never gated (legacy rows, accounts adopted by linking, anything
+    # an operator created), "approved" = holds a seat, "pending" = blocked until
+    # somebody approves it in the back office. The default MUST stay None:
+    # MongoModel.save() is a full replace_one of model_dump(), so a default of
+    # "approved" would stamp every legacy row on its next save and eat seats.
+    approval_status: Optional[str] = Field(
+        default=None,
+        description='Sign-up approval state: None, "approved" or "pending"',
+    )
 
     collection_name: ClassVar[str] = "users"
 

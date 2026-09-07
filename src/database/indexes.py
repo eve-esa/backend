@@ -192,6 +192,14 @@ async def ensure_indexes() -> None:
         name="users_email",
     )
 
+    # Read on every provisioning to count the seats already taken, so it wants
+    # an index even though the collection is small today.
+    await _create_index(
+        users,
+        [("approval_status", 1)],
+        name="users_approval_status",
+    )
+
     logger.info(
         "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, "
         "custom models, and external identities"

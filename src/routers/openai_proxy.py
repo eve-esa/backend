@@ -38,7 +38,11 @@ from src.config import (
     OPENAI_PROXY_API_KEY,
     OPENAI_PROXY_UPSTREAM_URL,
 )
-from src.middlewares.auth import extract_bearer_token, resolve_principal_from_bearer_token
+from src.middlewares.auth import (
+    extract_bearer_token,
+    resolve_principal_from_bearer_token,
+)
+from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.oidc import IdentityProviderUnavailable
 from src.services.openai_usage import track_usage
 
@@ -278,6 +282,12 @@ class OpenAIProxyDispatcher:
                     await self._proxy(scope, receive, send)
                 except PermissionError as exc:
                     await self._send_error(send, 401, str(exc))
+                except ApprovalPending:
+                    # Same body the REST routes answer with, so a client can
+                    # branch on the code whichever door it came through.
+                    await self._send_json(
+                        send, 403, {"detail": PENDING_APPROVAL_DETAIL}
+                    )
                 except IdentityProviderUnavailable as exc:
                     # An unreachable IdP is neither a bad credential nor a bad
                     # upstream: without this branch it fell to the catch-all and

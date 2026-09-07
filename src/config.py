@@ -144,14 +144,44 @@ AUTH_LINK_BY_VERIFIED_EMAIL = getenv_or(
 # window closes. Unset means the endpoint answers 503 rather than existing
 # quietly: it reads legacy password hashes, so absent configuration is closed.
 MIGRATION_SHARED_SECRET = getenv_or("MIGRATION_SHARED_SECRET")
+# How many self-registered accounts may use the application without anyone
+# approving them. Blank, 0 or negative means unlimited, the same convention
+# max_tokens uses in token_rate_limiter. Not a FEATURE_ flag (see the flag
+# naming note above): self-registration itself is an identity provider setting,
+# this only caps how many of those accounts get a seat automatically.
+_signup_auto_approve_limit_raw = getenv_or("SIGNUP_AUTO_APPROVE_LIMIT", "0")
+try:
+    SIGNUP_AUTO_APPROVE_LIMIT = int(_signup_auto_approve_limit_raw)
+except ValueError:
+    logging.getLogger(__name__).warning(
+        "Ignoring invalid integer value for SIGNUP_AUTO_APPROVE_LIMIT: %r",
+        _signup_auto_approve_limit_raw,
+    )
+    SIGNUP_AUTO_APPROVE_LIMIT = 0
 # ──────────────────────────────────────────────────────────────────────────────
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-EMAIL_FROM_ADDRESS = os.getenv("EMAIL_FROM_ADDRESS", "noreply@eve-ai.com").strip()
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "EVE AI").strip()
+# Blank means unset, and src/services/mailer.py refuses to send rather than
+# guessing. The old default was noreply@eve-ai.com, a domain nobody here owns:
+# it made an unconfigured host look configured, and every message sent from it
+# would have been rejected by the receiving side anyway.
+EMAIL_FROM_ADDRESS = getenv_or("EMAIL_FROM_ADDRESS")
+EMAIL_FROM_NAME = getenv_or("EMAIL_FROM_NAME", "EVE")
+# Which transport actually delivers a message. "off" is the default so a host
+# that was never configured for mail stays silent instead of failing requests;
+# "smtp" uses the block above (local Mailpit on mailcatcher:1025, or a relay);
+# "ses" uses Amazon SES v2 with the task role's credentials.
+MAIL_TRANSPORT = getenv_or("MAIL_TRANSPORT", "off").lower()
+# Optional SES configuration set, which is how bounce and complaint events get
+# published. Blank means send without one.
+SES_CONFIGURATION_SET = getenv_or("SES_CONFIGURATION_SET")
+# Shared secret for /internal/notifications/*, presented by the back office
+# after it approves an account. Blank means unset, and those endpoints answer
+# 503: an unconfigured door must be closed, not open.
+INTERNAL_API_SECRET = getenv_or("INTERNAL_API_SECRET")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
 

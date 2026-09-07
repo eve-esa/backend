@@ -10,6 +10,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.database.models.api_key import ApiKey
 from src.database.models.user import User
+from src.services.approval import (
+    PENDING_APPROVAL_DETAIL,
+    ApprovalPending,
+    assert_approved_doc,
+    assert_user_approved,
+)
 from src.services.identity import resolve_user_id
 from src.services.oidc import IdentityProviderUnavailable, verify_access_token
 
@@ -89,6 +95,9 @@ async def _get_user_from_api_key(token: str) -> User:
     user = await User.find_by_id(user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Raised, not mapped here: get_current_user turns it into the one 403 body
+    # every entry point answers with, so the shape is written down once.
+    assert_approved_doc(user)
     return user
 
 
@@ -103,12 +112,14 @@ async def resolve_principal_from_bearer_token(token: str) -> Principal:
     """
     if token.startswith("eve_"):
         user_id, api_key_id = await _verify_api_key(token)
+        await assert_user_approved(user_id)
         return Principal(
             user_id=user_id, auth_type=AUTH_TYPE_API_KEY, api_key_id=api_key_id
         )
 
     claims = await verify_access_token(token)
     user_id = await resolve_user_id(claims, token)
+    await assert_user_approved(user_id)
     return Principal(user_id=user_id, auth_type=AUTH_TYPE_OIDC)
 
 
@@ -137,13 +148,20 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> User:
     token = credentials.credentials
-    if token.startswith("eve_"):
-        return await _get_user_from_api_key(token)
-
-    # The resolver raises PermissionError, which FastAPI has no handler for: left
-    # unhandled every rejected token would answer 500 instead of 401.
     try:
+        if token.startswith("eve_"):
+            return await _get_user_from_api_key(token)
+
+        # The resolver raises PermissionError, which FastAPI has no handler for: left
+        # unhandled every rejected token would answer 500 instead of 401.
         principal = await resolve_principal_from_bearer_token(token)
+    except ApprovalPending:
+        # Before the PermissionError branch on purpose: 401 would loop the
+        # browser through a sign-in that cannot fix anything.
+        raise HTTPException(
+            status_code=403,
+            detail=PENDING_APPROVAL_DETAIL,
+        )
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     except IdentityProviderUnavailable as exc:

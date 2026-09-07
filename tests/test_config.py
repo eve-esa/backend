@@ -201,3 +201,32 @@ def test_app_environment_wins_over_legacy_is_prod(monkeypatch):
         assert cfg.IS_PROD is False
     finally:
         _reload_config(monkeypatch)
+
+
+# ── Sign-up approval limit ────────────────────────────────────────────────────
+# Blank, 0 and negative all mean unlimited, the same convention max_tokens uses
+# in the token rate limiter. Read through a real module reload, because that is
+# the only thing that exercises the parsing.
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(" ", 0), ("0", 0), ("-1", -1), ("200", 200)],
+)
+def test_signup_auto_approve_limit_parsing(monkeypatch, raw, expected):
+    cfg = _reload_config(monkeypatch, SIGNUP_AUTO_APPROVE_LIMIT=raw)
+    try:
+        assert cfg.SIGNUP_AUTO_APPROVE_LIMIT == expected
+    finally:
+        monkeypatch.delenv("SIGNUP_AUTO_APPROVE_LIMIT", raising=False)
+        _reload_config(monkeypatch)
+
+
+def test_signup_auto_approve_limit_falls_back_to_unlimited_when_unparseable(monkeypatch):
+    """A typo must not silently close registration for everyone."""
+    cfg = _reload_config(monkeypatch, SIGNUP_AUTO_APPROVE_LIMIT="lots")
+    try:
+        assert cfg.SIGNUP_AUTO_APPROVE_LIMIT == 0
+    finally:
+        monkeypatch.delenv("SIGNUP_AUTO_APPROVE_LIMIT", raising=False)
+        _reload_config(monkeypatch)
