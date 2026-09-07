@@ -187,7 +187,7 @@ def _forget_pending_mail_task(task: "asyncio.Task") -> None:
 
 
 def _schedule_pending_mail(user_id: str, email: str) -> None:
-    """Send the "waiting for approval" mail without making sign-in wait for it.
+    """Send the "on hold" mail without making sign-in wait for it.
 
     Fire and forget on purpose. This runs inside the first authenticated
     request of a brand-new account: a slow relay would turn the sign-in into a

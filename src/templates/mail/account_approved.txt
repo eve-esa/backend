@@ -1,6 +1,6 @@
 Your account has been enabled
 
-Good news: your EVE account {{ email }} is now active. Sign in whenever you like and start exploring Earth observation knowledge with EVE.
+Good news: your EVE account {{ email }} is now active. Thanks for your patience. Sign in whenever you like and start exploring Earth observation knowledge with EVE.
 
 Sign in to EVE: {{ app_url }}
 

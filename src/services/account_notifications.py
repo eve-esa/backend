@@ -33,7 +33,7 @@ KIND_APPROVED = "approved"
 # and cannot be half-wired.
 _MESSAGES = {
     KIND_PENDING: (
-        "Your EVE account is waiting for approval",
+        "Your EVE account is on hold for now",
         "account_pending.html",
         "account_pending.txt",
     ),
