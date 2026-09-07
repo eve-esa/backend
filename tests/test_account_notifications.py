@@ -27,19 +27,19 @@ def _frontend_url(monkeypatch):
     monkeypatch.setattr(account_notifications, "FRONTEND_URL", FRONTEND)
 
 
-def test_pending_mail_says_the_account_is_queued():
+def test_pending_mail_says_the_account_is_on_hold():
     subject, html, text = render_account_mail(KIND_PENDING, "person@example.com")
 
-    assert subject == "Your EVE account is waiting for approval"
+    assert subject == "Your EVE account is on hold for now"
     assert "Thanks for joining EVE" in html
     assert "person@example.com" in html
-    assert "in the queue for approval" in html
+    assert "registered and on hold" in html
     assert f"{FRONTEND}/branding/eve-logo.png" in html
     assert FRONTEND in html
     assert "EVE - Earth Virtual Expert - European Space Agency." in html
 
     assert "person@example.com" in text
-    assert "in the queue for approval" in text
+    assert "registered and on hold" in text
     assert FRONTEND in text
     assert "<" not in text
 
@@ -74,7 +74,7 @@ def test_the_address_is_escaped_in_the_html(kind):
 @pytest.mark.parametrize(
     "notify,kind,subject",
     [
-        (notify_account_pending, "pending", "Your EVE account is waiting for approval"),
+        (notify_account_pending, "pending", "Your EVE account is on hold for now"),
         (notify_account_approved, "approved", "Your EVE account is ready"),
     ],
 )
