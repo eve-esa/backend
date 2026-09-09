@@ -16,11 +16,8 @@ from src.config import (
     DEEPINFRA_API_TOKEN,
     EVE_JSC_MODEL_NAME,
     FALLBACK_MODEL_NAME,
-    IS_PROD,
     MAIN_MODEL_NAME,
     SATCOM_LARGE_MODEL_NAME,
-    SATCOM_QDRANT_API_KEY,
-    SATCOM_QDRANT_URL,
     SATCOM_SMALL_MODEL_NAME,
     SCRAPING_DOG_API_KEY,
     SILICONFLOW_API_TOKEN,
@@ -1000,25 +997,6 @@ async def setup_rag_and_context(
         rag_lat: Dict[str, Optional[float]] = {}
         mcp_results: List[Any] = []
         mcp_lat: Dict[str, Optional[float]] = {}
-        satcom_results: List[Any] = []
-        satcom_lat: Dict[str, Optional[float]] = {}
-
-        # temporary for satcom collection
-        if not IS_PROD and "satcom-chunks-collection" in request.public_collections:
-            satcom_vector_store = VectorStoreManager(
-                embeddings_model=request.embeddings_model,
-                qdrant_url=SATCOM_QDRANT_URL,
-                qdrant_api_key=SATCOM_QDRANT_API_KEY,
-            )
-            collection_ids = request.collection_ids
-            request.collection_ids = ["satcom-chunks-collection"]
-            satcom_results, satcom_lat = await get_rag_context(
-                satcom_vector_store, request, cancel_event=cancel_event
-            )
-            request.collection_ids = [
-                cid for cid in collection_ids if cid != "satcom-chunks-collection"
-            ]
-            latencies.update(satcom_lat or {})
 
         # Run RAG and optional MCP in a TaskGroup to inherit cancellation
         if cancel_event is not None and cancel_event.is_set():
@@ -1040,7 +1018,7 @@ async def setup_rag_and_context(
             )
             mcp_results, mcp_lat = [], {}
 
-        merged_results = list(results) + list(mcp_results) + list(satcom_results)
+        merged_results = list(results) + list(mcp_results)
         # Build candidate texts with mapping to original indices
         candidate_texts: List[str] = []
         for res in merged_results:

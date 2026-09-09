@@ -13,8 +13,9 @@ from qdrant_client.http.models import (
     MinShould,
 )
 
+from src.config import PRIVATE_COLLECTION_NAME
 from src.constants import (
-    PRIVATE_COLLECTION_NAME,
+    ALL_PRIVATE_COLLECTION_NAMES,
     PUBLIC_ENV_PROD,
     PUBLIC_ENV_STAGING,
 )
@@ -24,6 +25,7 @@ from src.core.vector_store_manager import (
     build_public_env_condition,
     build_public_env_filter,
     is_eve_public_collection,
+    is_private_qdrant_collection,
     is_wiley_public_collection,
     looks_like_mongo_id,
     merge_must_filters,
@@ -34,7 +36,7 @@ pytestmark = pytest.mark.no_db
 
 
 PROD_PUBLIC = "qwen-512-filtered"
-STAGING_PUBLIC = "satcom-chunks-collection"
+WIKI_PUBLIC = "wikipedia-512"
 PRIVATE_ID = "64b64b64b64b64b64b64b64b"
 
 
@@ -70,13 +72,26 @@ def test_private_tenant_filter_match_any_for_multiple_collections():
 
 def test_split_keeps_public_names_and_private_mongo_ids():
     public_names, private_ids = split_public_and_private_collections(
-        [PROD_PUBLIC, PRIVATE_ID, STAGING_PUBLIC, PRIVATE_COLLECTION_NAME],
+        [PROD_PUBLIC, PRIVATE_ID, WIKI_PUBLIC, PRIVATE_COLLECTION_NAME],
         private_collections_map={PRIVATE_ID: "My Docs"},
     )
-    assert public_names == [PROD_PUBLIC, STAGING_PUBLIC]
+    assert public_names == [PROD_PUBLIC, WIKI_PUBLIC]
     assert private_ids == [PRIVATE_ID]
     assert PRIVATE_COLLECTION_NAME not in public_names
     assert PRIVATE_ID not in public_names
+
+
+def test_split_skips_all_private_qdrant_collection_names():
+    names = [PROD_PUBLIC, *sorted(ALL_PRIVATE_COLLECTION_NAMES), PRIVATE_ID]
+    public_names, private_ids = split_public_and_private_collections(
+        names,
+        private_collections_map={PRIVATE_ID: "My Docs"},
+    )
+    assert public_names == [PROD_PUBLIC]
+    assert private_ids == [PRIVATE_ID]
+    for reserved in ALL_PRIVATE_COLLECTION_NAMES:
+        assert reserved not in public_names
+        assert reserved not in private_ids
 
 
 def test_split_treats_map_keys_as_private_even_if_not_object_id():
@@ -225,7 +240,7 @@ def test_private_missing_collection_does_not_abort_public():
         collection_name = kwargs.get("collection_name")
         if collection_name == PRIVATE_COLLECTION_NAME:
             raise RuntimeError(
-                "Not found: Collection `private-collections` doesn't exist!"
+                f"Not found: Collection `{PRIVATE_COLLECTION_NAME}` doesn't exist!"
             )
         return SimpleNamespace(points=[])
 
@@ -265,11 +280,11 @@ def test_merge_must_filters_preserves_min_should():
     assert extra in merged.must
 
 
-def test_eve_client_filters_apply_to_prod_and_staging_names():
+def test_eve_client_filters_apply_to_eve_collection():
     manager = _manager_with_mock_client()
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     manager._search_across_collections(
-        collection_names=["qwen-512-filtered", "EVE open access", "wikipedia-512"],
+        collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
         query_filter=Filter(must=[year]),
@@ -283,15 +298,13 @@ def test_eve_client_filters_apply_to_prod_and_staging_names():
     }
     assert set(by_name) == {
         "qwen-512-filtered",
-        "EVE open access",
         "wikipedia-512",
     }
-    for name in ("qwen-512-filtered", "EVE open access"):
-        filt = by_name[name]
-        must_keys = [
-            getattr(cond, "key", None) for cond in (filt.must or [])
-        ]
-        assert "year" in must_keys
+    filt = by_name["qwen-512-filtered"]
+    must_keys = [
+        getattr(cond, "key", None) for cond in (filt.must or [])
+    ]
+    assert "year" in must_keys
     wiki_filter = by_name["wikipedia-512"]
     wiki_must_keys = [
         getattr(cond, "key", None)
@@ -319,17 +332,18 @@ def test_missing_public_collection_raises():
 
 def test_unscoped_delete_on_private_collection_refused():
     manager = _manager_with_mock_client()
-    with pytest.raises(RuntimeError, match="delete_private_docs"):
-        manager.delete_docs_by_metadata_filter(
-            PRIVATE_COLLECTION_NAME, {"metadata.document_id": "x"}
-        )
+    for reserved in sorted(ALL_PRIVATE_COLLECTION_NAMES):
+        with pytest.raises(RuntimeError, match="delete_private_docs"):
+            manager.delete_docs_by_metadata_filter(
+                reserved, {"metadata.document_id": "x"}
+            )
     manager.client.delete.assert_not_called()
 
 
 def test_eve_public_collection_name_helper():
     assert is_eve_public_collection("qwen-512-filtered")
-    assert is_eve_public_collection("EVE open access")
-    assert is_eve_public_collection("EVE open-access")
+    assert not is_eve_public_collection("EVE open access")
+    assert not is_eve_public_collection("EVE open-access")
     assert not is_eve_public_collection("wikipedia-512")
     assert not is_eve_public_collection("qwen-512-filtered-prod")
     assert is_wiley_public_collection("Wiley AI Gateway")
@@ -382,15 +396,24 @@ def test_create_collection_does_not_recreate_existing():
 
 def test_create_collection_routes_private_to_ensure():
     manager = _manager_with_mock_client()
-    manager.ensure_private_collection = MagicMock()
-    assert manager.create_collection(PRIVATE_COLLECTION_NAME) is True
-    manager.ensure_private_collection.assert_called_once()
+    for reserved in sorted(ALL_PRIVATE_COLLECTION_NAMES):
+        manager.ensure_private_collection = MagicMock()
+        assert manager.create_collection(reserved) is True
+        manager.ensure_private_collection.assert_called_once()
     manager.client.recreate_collection.assert_not_called()
     manager.client.create_collection.assert_not_called()
 
 
 def test_delete_collection_refuses_shared_private():
     manager = _manager_with_mock_client()
-    with pytest.raises(RuntimeError, match="Refusing to delete"):
-        manager.delete_collection(PRIVATE_COLLECTION_NAME)
+    for reserved in sorted(ALL_PRIVATE_COLLECTION_NAMES):
+        with pytest.raises(RuntimeError, match="Refusing to delete"):
+            manager.delete_collection(reserved)
     manager.client.delete_collection.assert_not_called()
+
+
+def test_is_private_qdrant_collection_helper():
+    for name in ALL_PRIVATE_COLLECTION_NAMES:
+        assert is_private_qdrant_collection(name)
+    assert not is_private_qdrant_collection(PROD_PUBLIC)
+    assert not is_private_qdrant_collection("")

@@ -51,7 +51,8 @@ async def list_public_collections(
     """
     List public collections with pagination.
 
-    Combines platform-curated public collections and environment-specific public collections, then paginates the combined list.
+    Combines Wiley and platform-curated public collections, then paginates
+    the combined list. The catalog is the same in every environment.
 
     Args:
         pagination (Pagination): Pagination parameters.
@@ -157,8 +158,10 @@ async def create_collection(
     requesting_user: User = Depends(get_current_user),
 ) -> Collection:
     """
-    Create a private collection. Vector points live in the shared Qdrant
-    collection ``private-collections``, partitioned by user_id and collection_id.
+    Create a private collection. Vector points live in the environment's
+    shared Qdrant collection (``private-collections`` in prod,
+    ``private-collections-staging`` / ``private-collections-dev`` otherwise),
+    partitioned by user_id and collection_id.
 
     The new collection is private to its creator. MongoDB remains the source of
     truth for collection metadata; Qdrant is only ensured to exist.

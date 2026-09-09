@@ -84,10 +84,10 @@ class TestPrivateCollections:
 
 class TestPublicCollections:
     @pytest.mark.asyncio
-    async def test_unknown_public_collection_is_dropped_and_alias_normalized(self):
+    async def test_unknown_public_collection_is_dropped(self):
         request = GenerationRequest(
             query="q",
-            public_collections=["Wikipedia EO", "Totally Unknown"],
+            public_collections=["wikipedia-512", "Totally Unknown"],
         )
 
         await _prepare(request)
@@ -99,7 +99,7 @@ class TestPublicCollections:
     async def test_wiley_gateway_is_kept_public_but_stripped_from_collection_ids(self):
         request = GenerationRequest(
             query="q",
-            public_collections=["Wikipedia EO", "Wiley AI Gateway"],
+            public_collections=["wikipedia-512", "Wiley AI Gateway"],
         )
 
         await _prepare(request)
@@ -114,7 +114,7 @@ class TestIdempotence:
         """The retry path re-prepares a request that was already prepared."""
         request = GenerationRequest(
             query="q",
-            public_collections=["Wikipedia EO"],
+            public_collections=["wikipedia-512"],
             private_collections=[_OWNED[0].id],
         )
 

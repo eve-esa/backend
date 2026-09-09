@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 import yaml
 from dotenv import load_dotenv
 
+from src.constants import private_collection_name_for
+
 load_dotenv(override=True)
 
 
@@ -225,6 +227,14 @@ if not APP_ENVIRONMENT:
     APP_ENVIRONMENT = "prod" if _legacy_is_prod else "non-prod"
 
 IS_PROD = APP_ENVIRONMENT == "prod"
+
+# Physical Qdrant collection for private user vectors. Derived from
+# APP_ENVIRONMENT so every env can share one cluster. Override with
+# PRIVATE_COLLECTION_NAME for tests or a controlled cutover.
+PRIVATE_COLLECTION_NAME = (
+    getenv_or("PRIVATE_COLLECTION_NAME")
+    or private_collection_name_for(APP_ENVIRONMENT)
+)
 
 SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 
