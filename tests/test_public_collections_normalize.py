@@ -20,6 +20,12 @@ SHARED_CATALOG = [
 def test_catalog_is_identical_in_every_env(is_prod):
     names = [item["name"] for item in iter_public_catalog(is_prod=is_prod)]
     assert names == SHARED_CATALOG
+    aliases = {item["name"]: item.get("alias") for item in iter_public_catalog(is_prod=is_prod)}
+    assert aliases == {
+        "esa-rag-scraped-qwen3-newpipeline": "ESA EO Knowledge Base",
+        "qwen-512-filtered": "EVE open access",
+        "wikipedia-512": "Wikipedia EO",
+    }
 
 
 @pytest.mark.parametrize("is_prod", [True, False])
@@ -45,15 +51,27 @@ def test_unknown_label_dropped(is_prod):
 
 
 @pytest.mark.parametrize("is_prod", [True, False])
-def test_legacy_staging_labels_are_dropped(is_prod):
+def test_display_aliases_canonicalize_to_qdrant_names(is_prod):
     out = normalize_public_collections_selection(
         [
-            "EVE open-access",
             "EVE open access",
             "Wikipedia EO",
             "ESA EO Knowledge Base",
             "qwen-512-filtered",
         ],
+        is_prod=is_prod,
+    )
+    assert out == [
+        "qwen-512-filtered",
+        "wikipedia-512",
+        "esa-rag-scraped-qwen3-newpipeline",
+    ]
+
+
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_unknown_hyphenated_eve_label_is_dropped(is_prod):
+    out = normalize_public_collections_selection(
+        ["EVE open-access", "qwen-512-filtered"],
         is_prod=is_prod,
     )
     assert out == ["qwen-512-filtered"]
