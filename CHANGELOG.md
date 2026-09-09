@@ -11,6 +11,13 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.1.4](https://github.com/eve-esa/backend/compare/v0.1.3...v0.1.4) (2026-09-09)
+
+
+### Added
+
+* **retrieval:** share public Qdrant collections across environments ([#207](https://github.com/eve-esa/backend/issues/207)) ([761b4c0](https://github.com/eve-esa/backend/commit/761b4c0f491f78af318c53bfec2d13edeb87ce21))
+
 ## [0.1.3](https://github.com/eve-esa/backend/compare/v0.1.2...v0.1.3) (2026-09-07)
 
 
