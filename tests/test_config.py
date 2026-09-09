@@ -3,6 +3,12 @@ import importlib
 import pytest
 
 from src.config import Config, getenv_or
+from src.constants import (
+    PRIVATE_COLLECTION_NAME_DEV,
+    PRIVATE_COLLECTION_NAME_PROD,
+    PRIVATE_COLLECTION_NAME_STAGING,
+    private_collection_name_for,
+)
 
 
 TOKEN_LIMIT_ENV_KEYS = (
@@ -155,7 +161,7 @@ def _reload_config(monkeypatch, **env):
     # wins over anything monkeypatch sets. Neutralise it for the reload, or these tests would
     # assert against whatever happens to be on the machine rather than against the code.
     monkeypatch.setattr("dotenv.load_dotenv", lambda *args, **kwargs: False)
-    for key in ("APP_ENVIRONMENT", "IS_PROD"):
+    for key in ("APP_ENVIRONMENT", "IS_PROD", "PRIVATE_COLLECTION_NAME"):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -229,4 +235,58 @@ def test_signup_auto_approve_limit_falls_back_to_unlimited_when_unparseable(monk
         assert cfg.SIGNUP_AUTO_APPROVE_LIMIT == 0
     finally:
         monkeypatch.delenv("SIGNUP_AUTO_APPROVE_LIMIT", raising=False)
+        _reload_config(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "environment,expected",
+    [
+        ("prod", PRIVATE_COLLECTION_NAME_PROD),
+        ("staging", PRIVATE_COLLECTION_NAME_STAGING),
+        ("dev", PRIVATE_COLLECTION_NAME_DEV),
+        ("non-prod", PRIVATE_COLLECTION_NAME_DEV),
+        ("Production", PRIVATE_COLLECTION_NAME_DEV),
+        ("", PRIVATE_COLLECTION_NAME_DEV),
+    ],
+)
+def test_private_collection_name_for(environment, expected):
+    assert private_collection_name_for(environment) == expected
+
+
+@pytest.mark.parametrize(
+    "environment,expected_name",
+    [
+        ("dev", PRIVATE_COLLECTION_NAME_DEV),
+        ("staging", PRIVATE_COLLECTION_NAME_STAGING),
+        ("prod", PRIVATE_COLLECTION_NAME_PROD),
+    ],
+)
+def test_private_collection_name_derived_from_app_environment(
+    monkeypatch, environment, expected_name
+):
+    cfg = _reload_config(monkeypatch, APP_ENVIRONMENT=environment)
+    try:
+        assert cfg.PRIVATE_COLLECTION_NAME == expected_name
+    finally:
+        _reload_config(monkeypatch)
+
+
+def test_private_collection_name_env_override(monkeypatch):
+    cfg = _reload_config(
+        monkeypatch,
+        APP_ENVIRONMENT="prod",
+        PRIVATE_COLLECTION_NAME=PRIVATE_COLLECTION_NAME_DEV,
+    )
+    try:
+        assert cfg.PRIVATE_COLLECTION_NAME == PRIVATE_COLLECTION_NAME_DEV
+    finally:
+        _reload_config(monkeypatch)
+
+
+def test_legacy_non_prod_uses_dev_private_collection(monkeypatch):
+    cfg = _reload_config(monkeypatch)
+    try:
+        assert cfg.APP_ENVIRONMENT == "non-prod"
+        assert cfg.PRIVATE_COLLECTION_NAME == PRIVATE_COLLECTION_NAME_DEV
+    finally:
         _reload_config(monkeypatch)

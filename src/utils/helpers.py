@@ -34,7 +34,6 @@ from src.config import (
 )
 from src.constants import (
     PUBLIC_COLLECTIONS,
-    STAGING_PUBLIC_COLLECTIONS,
     TOKEN_OVERFLOW_LIMIT,
     WILEY_PUBLIC_COLLECTIONS,
 )
@@ -51,18 +50,14 @@ class EmbeddingModelType(Enum):
 
 
 def iter_public_catalog(*, is_prod: bool) -> list[dict]:
-    """Named public collections visible in this environment, deduped by ``name``.
+    """Named public collections, identical in every environment, deduped by ``name``.
 
-    Prod sees only ``PUBLIC_COLLECTIONS``. Staging sees prod + staging catalogs.
-    When staging repeats a prod ``name``, its ``alias`` and ``description`` fill
-    in fields the prod row left empty so UI labels still resolve.
+    ``is_prod`` is unused; kept so existing call sites stay unchanged.
     """
-    source = list(PUBLIC_COLLECTIONS)
-    if not is_prod:
-        source = source + list(STAGING_PUBLIC_COLLECTIONS)
+    del is_prod
     by_name: dict[str, dict] = {}
     out: list[dict] = []
-    for item in source:
+    for item in PUBLIC_COLLECTIONS:
         if not isinstance(item, dict):
             continue
         name = item.get("name")
@@ -72,22 +67,13 @@ def iter_public_catalog(*, is_prod: bool) -> list[dict]:
             copied = dict(item)
             by_name[name] = copied
             out.append(copied)
-            continue
-        existing = by_name[name]
-        for key in ("alias", "description"):
-            if not existing.get(key) and item.get(key):
-                existing[key] = item[key]
     return out
 
 
 def all_known_public_collection_labels() -> set[str]:
-    """All public catalog names and aliases across prod, staging, and Wiley."""
+    """All public catalog names, aliases, and Wiley labels."""
     labels: set[str] = set()
-    for item in (
-        list(PUBLIC_COLLECTIONS)
-        + list(STAGING_PUBLIC_COLLECTIONS)
-        + list(WILEY_PUBLIC_COLLECTIONS)
-    ):
+    for item in list(PUBLIC_COLLECTIONS) + list(WILEY_PUBLIC_COLLECTIONS):
         if not isinstance(item, dict):
             continue
         name = item.get("name")

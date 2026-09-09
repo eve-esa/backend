@@ -35,15 +35,15 @@ from src.config import (
     EMBEDDING_FALLBACK_URL,
     EMBEDDING_URL,
     IS_PROD,
+    PRIVATE_COLLECTION_NAME,
     QDRANT_API_KEY,
     QDRANT_URL,
     Config,
 )
 from src.constants import (
+    ALL_PRIVATE_COLLECTION_NAMES,
     DEFAULT_EMBEDDING_MODEL,
     EVE_PUBLIC_COLLECTION_NAME_PROD,
-    EVE_PUBLIC_COLLECTION_NAME_STAGING,
-    PRIVATE_COLLECTION_NAME,
     PUBLIC_ENV_PROD,
     PUBLIC_ENV_STAGING,
     WILEY_PUBLIC_COLLECTIONS,
@@ -65,17 +65,18 @@ def looks_like_mongo_id(value: str) -> bool:
     return bool(value) and bool(_OBJECT_ID_RE.fullmatch(value))
 
 
+def is_private_qdrant_collection(name: str) -> bool:
+    """True when ``name`` is any env's physical private Qdrant collection."""
+    return bool(name) and name in ALL_PRIVATE_COLLECTION_NAMES
+
+
 def eve_public_collection_names() -> set[str]:
-    """Catalog names and aliases that receive EVE client ``filters``."""
-    return {
-        EVE_PUBLIC_COLLECTION_NAME_PROD,
-        EVE_PUBLIC_COLLECTION_NAME_STAGING,
-        "EVE open-access",
-    }
+    """Catalog names that receive EVE client ``filters``."""
+    return {EVE_PUBLIC_COLLECTION_NAME_PROD}
 
 
 def is_eve_public_collection(name: str) -> bool:
-    """True when ``name`` is the EVE open-access collection (any catalog label)."""
+    """True when ``name`` is the EVE open-access collection."""
     return bool(name) and name in eve_public_collection_names()
 
 
@@ -211,7 +212,7 @@ def split_public_and_private_collections(
     seen_private: set[str] = set()
 
     for name in collection_names or []:
-        if not name or name == PRIVATE_COLLECTION_NAME:
+        if not name or is_private_qdrant_collection(name):
             continue
         if name in private_ids or (
             name not in public_labels and looks_like_mongo_id(name)
@@ -369,7 +370,7 @@ class VectorStoreManager:
         Raises:
             RuntimeError: If the collection creation fails
         """
-        if collection_name == PRIVATE_COLLECTION_NAME:
+        if is_private_qdrant_collection(collection_name):
             self.ensure_private_collection()
             return True
 
@@ -410,10 +411,8 @@ class VectorStoreManager:
         self, page: int = 1, limit: Optional[int] = None
     ) -> Tuple[List[Dict[str, str]], int]:
         """
-        Get public collections for the current environment.
-
-        Staging includes prod-named collections as well as staging-only ones.
-        The shared private collection is never listed.
+        Get public collections. The catalog is the same in every environment.
+        Shared private Qdrant collections are never listed.
         """
         alias_map: Dict[str, str] = {}
         try:
@@ -430,7 +429,7 @@ class VectorStoreManager:
         public_collections = []
         for item in iter_public_catalog(is_prod=IS_PROD):
             name = item.get("name")
-            if not name or name == PRIVATE_COLLECTION_NAME:
+            if not name or is_private_qdrant_collection(name):
                 continue
             public_collections.append(
                 {
@@ -495,10 +494,10 @@ class VectorStoreManager:
             ValueError: If the collection doesn't exist
             RuntimeError: If deletion fails for other reasons
         """
-        if collection_name == PRIVATE_COLLECTION_NAME:
+        if is_private_qdrant_collection(collection_name):
             raise RuntimeError(
                 "Refusing to delete the shared private collection "
-                f"'{PRIVATE_COLLECTION_NAME}'"
+                f"'{collection_name}'"
             )
 
         if collection_name not in self.list_collections_names():
@@ -1035,10 +1034,10 @@ class VectorStoreManager:
             Raises:
             RuntimeError: If deletion fails
         """
-        if collection_name == PRIVATE_COLLECTION_NAME:
+        if is_private_qdrant_collection(collection_name):
             raise RuntimeError(
                 "Refusing unscoped metadata delete on "
-                f"'{PRIVATE_COLLECTION_NAME}'; use delete_private_docs"
+                f"'{collection_name}'; use delete_private_docs"
             )
         try:
             # Get the count of documents before deletion using the count method

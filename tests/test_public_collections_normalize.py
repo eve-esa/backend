@@ -2,75 +2,82 @@
 
 import pytest
 
-from src.utils.helpers import normalize_public_collections_selection
+from src.utils.helpers import (
+    iter_public_catalog,
+    normalize_public_collections_selection,
+)
 
 pytestmark = pytest.mark.no_db
 
+SHARED_CATALOG = [
+    "esa-rag-scraped-qwen3-newpipeline",
+    "qwen-512-filtered",
+    "wikipedia-512",
+]
 
-def test_staging_satcom_alias_and_name_deduped():
+
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_catalog_is_identical_in_every_env(is_prod):
+    names = [item["name"] for item in iter_public_catalog(is_prod=is_prod)]
+    assert names == SHARED_CATALOG
+    aliases = {item["name"]: item.get("alias") for item in iter_public_catalog(is_prod=is_prod)}
+    assert aliases == {
+        "esa-rag-scraped-qwen3-newpipeline": "ESA EO Knowledge Base",
+        "qwen-512-filtered": "EVE open access",
+        "wikipedia-512": "Wikipedia EO",
+    }
+
+
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_satcom_dropped_in_every_env(is_prod):
     out = normalize_public_collections_selection(
         [
             "SATCOM Technical Knowledge Base",
             "satcom-chunks-collection",
+            "qwen-512-filtered",
         ],
-        is_prod=False,
+        is_prod=is_prod,
     )
-    assert out == ["satcom-chunks-collection"]
+    assert out == ["qwen-512-filtered"]
 
 
-def test_unknown_label_dropped_staging():
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_unknown_label_dropped(is_prod):
     out = normalize_public_collections_selection(
         ["not-a-real-collection", "wikipedia-512"],
-        is_prod=False,
+        is_prod=is_prod,
     )
     assert out == ["wikipedia-512"]
 
 
-def test_prod_does_not_allow_staging_only_alias():
-    out = normalize_public_collections_selection(
-        ["EVE open-access", "qwen-512-filtered"],
-        is_prod=True,
-    )
-    assert "EVE open-access" not in out
-    assert out == ["qwen-512-filtered"]
-
-
-def test_staging_allows_prod_public_names():
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_display_aliases_canonicalize_to_qdrant_names(is_prod):
     out = normalize_public_collections_selection(
         [
-            "qwen-512-filtered",
-            "esa-rag-scraped-qwen3-newpipeline",
             "EVE open access",
+            "Wikipedia EO",
+            "ESA EO Knowledge Base",
+            "qwen-512-filtered",
         ],
-        is_prod=False,
+        is_prod=is_prod,
     )
     assert out == [
         "qwen-512-filtered",
+        "wikipedia-512",
         "esa-rag-scraped-qwen3-newpipeline",
-        "EVE open access",
     ]
 
 
-def test_prod_rejects_staging_only_collection_name():
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_unknown_hyphenated_eve_label_is_dropped(is_prod):
     out = normalize_public_collections_selection(
-        ["satcom-chunks-collection", "qwen-512-filtered"],
-        is_prod=True,
+        ["EVE open-access", "qwen-512-filtered"],
+        is_prod=is_prod,
     )
     assert out == ["qwen-512-filtered"]
 
 
-def test_staging_keeps_alias_when_prod_already_listed_the_name():
-    """Staging wikipedia/ESA rows add aliases onto prod names; do not drop them."""
-    out = normalize_public_collections_selection(
-        ["Wikipedia EO", "ESA EO Knowledge Base"],
-        is_prod=False,
-    )
-    assert out == ["wikipedia-512", "esa-rag-scraped-qwen3-newpipeline"]
-
-
-def test_prod_does_not_resolve_staging_wikipedia_alias():
-    out = normalize_public_collections_selection(
-        ["Wikipedia EO", "wikipedia-512"],
-        is_prod=True,
-    )
-    assert out == ["wikipedia-512"]
+@pytest.mark.parametrize("is_prod", [True, False])
+def test_shared_public_names_allowed(is_prod):
+    out = normalize_public_collections_selection(SHARED_CATALOG, is_prod=is_prod)
+    assert out == SHARED_CATALOG

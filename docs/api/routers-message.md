@@ -102,10 +102,8 @@ with requests.post(
         "llm_type": "main",
         "public_collections": [
             "Wiley AI Gateway",
-            "esa-data-qwen-1024",
-            "Wikipedia EO",
+            "esa-rag-scraped-qwen3-newpipeline",
             "wikipedia-512",
-            "satcom-chunks-collection",
             "qwen-512-filtered"
         ]
     },
@@ -447,10 +445,8 @@ resp = requests.post(
         "llm_type": "main",
         "public_collections": [
             "Wiley AI Gateway",
-            "esa-data-qwen-1024",
-            "Wikipedia EO",
+            "esa-rag-scraped-qwen3-newpipeline",
             "wikipedia-512",
-            "satcom-chunks-collection",
             "qwen-512-filtered"
         ]
     },
@@ -502,10 +498,8 @@ resp = requests.post(
         },
         "public_collections": [
             "Wiley AI Gateway",
-            "esa-data-qwen-1024",
-            "Wikipedia EO",
+            "esa-rag-scraped-qwen3-newpipeline",
             "wikipedia-512",
-            "satcom-chunks-collection",
             "qwen-512-filtered"
         ]
     },

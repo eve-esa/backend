@@ -35,7 +35,7 @@ print([c["name"] for c in public_collections])
 
 ### Explanation
 
-Returns selectable public collections. These names are required by generation endpoints.
+Returns selectable public collections. These names are required by generation endpoints. The catalog is the same in every environment.
 
 ### Notes
 
@@ -107,6 +107,7 @@ Creates a user-owned collection for document ingestion and private retrieval.
 ### Notes
 
 - `embeddings_model` is optional; default is server-defined.
+- Vector points live in an environment-specific shared Qdrant collection (`private-collections`, `private-collections-staging`, or `private-collections-dev`).
 
 ## Get one collection
 
