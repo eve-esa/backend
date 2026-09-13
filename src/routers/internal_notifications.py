@@ -74,7 +74,9 @@ async def account_approved(
         )
 
     try:
-        await notify_account_approved(user.id, user.email)
+        # Only an account that waited in the queue is approved from the back
+        # office, so the welcome thanks it for its patience.
+        await notify_account_approved(user.id, user.email, after_hold=True)
     except Exception:
         # Already logged with a stack trace one layer down. The caller only
         # needs to know it may retry, which 502 says and 500 does not.
