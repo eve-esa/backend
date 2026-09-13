@@ -1,8 +1,88 @@
-{% extends "base.html" %}
-{% block title %}Your account has been enabled{% endblock %}
-{% block body %}
-        <p style="margin:0 0 20px 0;">Good news: your EVE account {{ email }} is now active. Thanks for your patience. Sign in whenever you like and start exploring Earth observation knowledge with EVE.</p>
-{% endblock %}
-{% block cta %}
-        <p style="margin:0;"><a href="{{ app_url }}" style="color:#ffffff;background-color:#003247;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;">Sign in to EVE</a></p>
-{% endblock %}
+{#
+  The welcome message, deliberately NOT framed by base.html. It follows the pilot
+  welcome mail (eve-esa/automailer, email.html) so people who took part in the
+  pilot and people signing up now get the same message and the same look.
+
+  The "Important Notice" block is mandated by ESA and stays word for word. The
+  one exception is the pilot programme reference, now the Terms of Use of EVE
+  for the public opening. Tables and inline styles only, because that is the
+  only layout that survives Outlook and Gmail.
+
+  ``after_hold`` is true when the account waited in the approval queue first.
+#}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;color:#012B3C;">
+  <tr><td align="center" style="padding:40px 12px;">
+    <table role="presentation" width="700" cellpadding="0" cellspacing="0" style="width:100%;max-width:700px;border-collapse:separate;background-color:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+      <tr><td style="padding:0;line-height:0;">
+        <img src="https://cdn.prod.website-files.com/66755cab0b1a9a549e0126ee/68f9f32283a7fa25a4b68091_ESA%CE%A6-lab_DS_700px_width.png" width="700" alt="ESA Phi-lab logo" style="display:block;border:0;width:100%;max-width:700px;height:auto;" />
+      </td></tr>
+      <tr><td style="padding:30px;color:#012B3C;font-size:15px;line-height:22px;text-align:left;">
+        <h1 style="margin:0 0 24px 0;text-align:center;color:#012B3C;font-size:26px;line-height:1.3;">&#127757; Welcome to EVE! &#127757;</h1>
+        <p style="margin:0 0 20px 0;">Your EVE account <strong>{{ email }}</strong> is now active.{% if after_hold %} Thanks for your patience.{% endif %}<br>Here&rsquo;s everything you need to get started.</p>
+        <p style="margin:0;"><a href="{{ app_url }}" style="color:#ffffff;background-color:#012B3C;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;">Sign in to EVE</a></p>
+
+        <hr style="border:none;border-top:1px solid #cccccc;margin:30px 0;">
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #012B3C;border-radius:8px;margin:0 0 20px 0;">
+          <tr><td style="padding:20px;color:#012B3C;">
+            <h2 style="margin:0 0 12px 0;color:#012B3C;font-size:20px;">Getting Started</h2>
+            <ul style="margin:0;padding-left:20px;">
+              <li><strong>Onboarding Tour:</strong> Access the guided tour on first login or anytime at
+                <a href="https://eve.philab.esa.int/onboarding" style="color:#00B8C4;text-decoration:none;">https://eve.philab.esa.int/onboarding</a>
+                <em>(Provides an overview of the system.)</em>
+              </li>
+            </ul>
+          </td></tr>
+        </table>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #012B3C;border-radius:8px;margin:0 0 20px 0;">
+          <tr><td style="padding:20px;color:#012B3C;">
+            <h2 style="margin:0 0 12px 0;color:#012B3C;font-size:20px;">Providing Feedback</h2>
+            <ul style="margin:0;padding-left:20px;">
+              <li><strong>Thumbs Up/Down:</strong> Use this feature frequently within the platform.</li>
+              <li><strong>Detailed Feedback:</strong> Submit via our online form:
+                <a href="https://eve.philab.esa.int/feedback" style="color:#00B8C4;text-decoration:none;">https://eve.philab.esa.int/feedback</a>
+              </li>
+              <li><strong>Multiple Submissions:</strong> You can submit comments or drafts anytime.</li>
+            </ul>
+            <p style="margin:10px 0 0 0;">Your insights are invaluable in shaping <strong>EVE&rsquo;s development</strong>, thank you!</p>
+          </td></tr>
+        </table>
+
+        <p style="margin:0;"><strong>Kind regards,</strong><br><strong>The EVE Team</strong></p>
+
+        <hr style="border:none;border-top:1px solid #cccccc;margin:30px 0;">
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #012B3C;border-radius:8px;margin:0 0 20px 0;">
+          <tr><td style="padding:20px;color:#012B3C;">
+            <h2 style="margin:0 0 12px 0;color:#012B3C;font-size:20px;">Important Notice</h2>
+            <p style="margin:0 0 12px 0;">Before accessing the platform, please review and agree to the <strong>participation conditions</strong>.</p>
+            <p style="margin:0 0 12px 0;">By accessing the platform, you confirm that:</p>
+            <ul style="margin:0 0 12px 0;padding-left:20px;">
+              <li>You understand that your information is stored according to the <strong>Privacy Policy</strong>.</li>
+              <li>You agree to the <strong>Terms of Use</strong> of EVE.</li>
+              <li>You must not share or input any <strong>confidential or sensitive information</strong>.</li>
+            </ul>
+            <p style="margin:0 0 12px 0;">If you wish to <strong>unregister from the system</strong>, please use the contact form:<br>
+            &#128073; <a href="https://eve.philab.esa.int/contact" style="color:#00B8C4;text-decoration:none;">https://eve.philab.esa.int/contact</a></p>
+            <p style="margin:0;">We will retain your data privately for six months to improve the system, in full compliance with ESA PDP rules.</p>
+          </td></tr>
+        </table>
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #012B3C;border-radius:8px;">
+          <tr><td style="padding:20px;color:#012B3C;">
+            <h2 style="margin:0 0 12px 0;color:#012B3C;font-size:20px;">Terms of Use: Key Components</h2>
+            <h3 style="margin:16px 0 6px 0;color:#012B3C;font-size:16px;">1. Eligibility &amp; Account Management</h3>
+            <p style="margin:0;">You must be at least 13 years old (or meet higher local age requirements) with verified consent if a minor.</p>
+            <h3 style="margin:16px 0 6px 0;color:#012B3C;font-size:16px;">2. Content Ownership &amp; Licensing</h3>
+            <p style="margin:0;">You retain ownership of your Input and Output content.</p>
+            <h3 style="margin:16px 0 6px 0;color:#012B3C;font-size:16px;">3. Accuracy &amp; Liability</h3>
+            <p style="margin:0;">You acknowledge that AI outputs may contain inaccuracies.</p>
+            <h3 style="margin:16px 0 6px 0;color:#012B3C;font-size:16px;">4. Termination</h3>
+            <p style="margin:0;">We reserve the right to suspend or terminate access.</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </td></tr>
+</table>

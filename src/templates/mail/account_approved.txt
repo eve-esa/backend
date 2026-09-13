@@ -1,8 +1,52 @@
-Your account has been enabled
+Welcome to EVE!
 
-Good news: your EVE account {{ email }} is now active. Thanks for your patience. Sign in whenever you like and start exploring Earth observation knowledge with EVE.
+Your EVE account {{ email }} is now active.{% if after_hold %} Thanks for your patience.{% endif %} Here's everything you need to get started.
 
 Sign in to EVE: {{ app_url }}
 
-EVE - Earth Virtual Expert - European Space Agency.
-{{ app_url }}
+
+GETTING STARTED
+
+- Onboarding Tour: Access the guided tour on first login or anytime at https://eve.philab.esa.int/onboarding (Provides an overview of the system.)
+
+
+PROVIDING FEEDBACK
+
+- Thumbs Up/Down: Use this feature frequently within the platform.
+- Detailed Feedback: Submit via our online form: https://eve.philab.esa.int/feedback
+- Multiple Submissions: You can submit comments or drafts anytime.
+
+Your insights are invaluable in shaping EVE's development, thank you!
+
+Kind regards,
+The EVE Team
+
+
+IMPORTANT NOTICE
+
+Before accessing the platform, please review and agree to the participation conditions.
+
+By accessing the platform, you confirm that:
+- You understand that your information is stored according to the Privacy Policy.
+- You agree to the Terms of Use of EVE.
+- You must not share or input any confidential or sensitive information.
+
+If you wish to unregister from the system, please use the contact form:
+https://eve.philab.esa.int/contact
+
+We will retain your data privately for six months to improve the system, in full compliance with ESA PDP rules.
+
+
+TERMS OF USE: KEY COMPONENTS
+
+1. Eligibility & Account Management
+You must be at least 13 years old (or meet higher local age requirements) with verified consent if a minor.
+
+2. Content Ownership & Licensing
+You retain ownership of your Input and Output content.
+
+3. Accuracy & Liability
+You acknowledge that AI outputs may contain inaccuracies.
+
+4. Termination
+We reserve the right to suspend or terminate access.
