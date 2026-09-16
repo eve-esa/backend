@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from src.constants import private_collection_name_for
 
-load_dotenv(override=True)
+load_dotenv()
 
 
 def getenv_or(name: str, default: str = "") -> str:
@@ -46,16 +46,6 @@ FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-small-latest").s
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
 AGENTIC_TIMEOUT = int(os.getenv("AGENTIC_TIMEOUT", 120))
 
-EMBEDDING_URL = os.getenv(
-    "EMBEDDING_URL", "https://api.deepinfra.com/v1/openai"
-).strip()
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "").strip()
-
-EMBEDDING_FALLBACK_URL = os.getenv(
-    "EMBEDDING_FALLBACK_URL", "https://api.inference.net/v1"
-).strip()
-EMBEDDING_FALLBACK_API_KEY = os.getenv("EMBEDDING_FALLBACK_API_KEY", "").strip()
-
 SATCOM_SMALL_MODEL_NAME = os.getenv(
     "SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"
 ).strip()
@@ -71,6 +61,24 @@ EVE_JSC_MODEL_NAME = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip()
 # provider (Jülich), so inheriting it only turns a missing-config error into a
 # confusing 401 from the upstream. Blank means unusable, and says so.
 EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
+
+JSC_EMBEDDING_API_KEY = getenv_or("JSC_EMBEDDING_API_KEY") or EVE_JSC_API_KEY
+JSC_EMBEDDING_MODEL_NAME = getenv_or(
+    "JSC_EMBEDDING_MODEL_NAME", "alias-qwen3-4b-embeddings"
+)
+DEEPINFRA_EMBEDDING_URL = getenv_or(
+    "DEEPINFRA_EMBEDDING_URL",
+    getenv_or("EMBEDDING_URL", "https://api.deepinfra.com/v1/openai"),
+)
+DEEPINFRA_EMBEDDING_API_KEY = (
+    getenv_or("DEEPINFRA_EMBEDDING_API_KEY")
+    or getenv_or("EMBEDDING_API_KEY")
+    or DEEPINFRA_API_TOKEN
+)
+JSC_RERANKER_API_KEY = getenv_or("JSC_RERANKER_API_KEY") or EVE_JSC_API_KEY
+JSC_RERANKER_MODEL_NAME = getenv_or(
+    "JSC_RERANKER_MODEL_NAME", "alias-qwen3-4b-reranking"
+)
 
 # Ordered EVE endpoint chain, comma-separated llm_type names. Unconfigured
 # entries are dropped at resolution time and "fallback" is always appended
