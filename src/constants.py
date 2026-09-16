@@ -13,7 +13,9 @@ DEFAULT_SCORE_THRESHOLD = 0.6
 DEFAULT_MAX_NEW_TOKENS = 100_000
 DEFAULT_GET_UNIQUE_DOCS = True  # Fixed typo: was DEFAUL_GET_UNIQUE_DOCS
 
-DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+JSC_DEFAULT_EMBEDDING_MODEL = "alias-qwen3-4b-embeddings"
+DEEPINFRA_DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
+DEFAULT_EMBEDDING_MODEL = JSC_DEFAULT_EMBEDDING_MODEL
 NASA_MODEL = "nasa-impact/nasa-smd-ibm-v0.1"
 
 MODEL_CONTEXT_SIZE = 128_000
@@ -56,7 +58,9 @@ def private_collection_name_for(environment: str) -> str:
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 
-RERANKER_MODEL = "BAAI/bge-reranker-large"
+JSC_DEFAULT_RERANKER_MODEL = "alias-qwen3-4b-reranking"
+DEEPINFRA_DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
+RERANKER_MODEL = JSC_DEFAULT_RERANKER_MODEL
 
 WILEY_PUBLIC_COLLECTIONS = [
     {
