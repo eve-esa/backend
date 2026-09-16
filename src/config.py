@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from src.constants import private_collection_name_for
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def getenv_or(name: str, default: str = "") -> str:
