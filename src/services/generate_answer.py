@@ -630,6 +630,16 @@ def _deduplicate_results(items: List[Any]) -> List[Any]:
     return deduped
 
 
+def _select_top_k_unique_results(
+    formatted_results: List[Dict[str, Any]],
+    reranked: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    """Select up to ``top_k`` unique results while preserving reranker order."""
+    ranked_results = [formatted_results[item["index"]] for item in reranked]
+    return _deduplicate_results(ranked_results)[:top_k]
+
+
 async def _maybe_rerank_jsc(
     candidate_texts: List[str], query: str, timeout: int = 10
 ) -> List[Dict[str, Any]]:
@@ -1066,10 +1076,11 @@ async def setup_rag_and_context(
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         top_k = int(getattr(request, "k", 5) or 5)
-        selected_indices = [item["index"] for item in reranked[:top_k]]
-        # Build context and filter original results to the selected set
-        results = [formated_results[i] for i in selected_indices]
-        results = _deduplicate_results(results)
+        # Deduplicate before applying top-k so duplicate hits are backfilled by
+        # the next highest-ranked unique results.
+        results = _select_top_k_unique_results(
+            formated_results, reranked, top_k
+        )
         context = build_context(results)
 
         latencies.update(rag_lat or {})
