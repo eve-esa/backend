@@ -493,7 +493,9 @@ async def create_message(
 
         # Extract year range from filters for MCP usage
         try:
-            request.year = extract_year_range_from_filters(request.filters)
+            filter_year = extract_year_range_from_filters(request.filters)
+            if filter_year is not None:
+                request.year = filter_year
         except Exception:
             request.year = None
 
@@ -954,7 +956,9 @@ async def create_message_stream(
 
         # Extract year range from filters for MCP usage
         try:
-            request.year = extract_year_range_from_filters(request.filters)
+            filter_year = extract_year_range_from_filters(request.filters)
+            if filter_year is not None:
+                request.year = filter_year
         except Exception:
             request.year = None
 
@@ -1668,7 +1672,9 @@ async def generate(
 
         # Extract year range from filters for MCP usage
         try:
-            request.year = extract_year_range_from_filters(request.filters)
+            filter_year = extract_year_range_from_filters(request.filters)
+            if filter_year is not None:
+                request.year = filter_year
         except Exception:
             request.year = None
 
@@ -1749,7 +1755,9 @@ async def retrieve(
         await apply_private_collections_to_request(request, requesting_user.id)
 
         try:
-            request.year = extract_year_range_from_filters(request.filters)
+            filter_year = extract_year_range_from_filters(request.filters)
+            if filter_year is not None:
+                request.year = filter_year
         except Exception:
             request.year = None
 
@@ -1837,7 +1845,9 @@ async def _prepare_agentic_request(
     )
 
     try:
-        request.year = extract_year_range_from_filters(request.filters)
+        filter_year = extract_year_range_from_filters(request.filters)
+        if filter_year is not None:
+            request.year = filter_year
     except Exception:
         request.year = None
 
