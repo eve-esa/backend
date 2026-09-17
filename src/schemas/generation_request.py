@@ -1,6 +1,13 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    model_validator,
+)
 
 from src.constants import (
     DEFAULT_EMBEDDING_MODEL,
@@ -66,6 +73,52 @@ class GenerationRequest(BaseModel):
             "User-owned custom model ID. When set, overrides llm_type for agentic generation."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_year_ranges(self) -> "GenerationRequest":
+        if self.year is not None:
+            if len(self.year) != 2:
+                raise ValueError("year must contain exactly [start_year, end_year]")
+            if self.year[0] > self.year[1]:
+                raise ValueError("year range start must be less than or equal to end")
+
+        conditions = (
+            self.filters.get("must", []) if isinstance(self.filters, dict) else []
+        )
+        if isinstance(conditions, list):
+            for condition in conditions:
+                if not isinstance(condition, dict) or condition.get("key") != "year":
+                    continue
+                range_value = condition.get("range")
+                if not isinstance(range_value, dict):
+                    continue
+                start = range_value.get("gte")
+                end = range_value.get("lte")
+                if start is not None and not isinstance(start, int):
+                    raise ValueError("year range start must be an integer")
+                if end is not None and not isinstance(end, int):
+                    raise ValueError("year range end must be an integer")
+                if start is not None and end is not None and start > end:
+                    raise ValueError(
+                        "year range start must be less than or equal to end"
+                    )
+
+        has_year_filter = isinstance(conditions, list) and any(
+            isinstance(condition, dict) and condition.get("key") == "year"
+            for condition in conditions
+        )
+        if self.year is not None and not has_year_filter:
+            normalized_filters = dict(self.filters or {})
+            normalized_must = list(conditions) if isinstance(conditions, list) else []
+            normalized_must.append(
+                {
+                    "key": "year",
+                    "range": {"gte": self.year[0], "lte": self.year[1]},
+                }
+            )
+            normalized_filters["must"] = normalized_must
+            self.filters = normalized_filters
+        return self
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)

@@ -180,6 +180,19 @@ def merge_must_filters(
     )
 
 
+def must_conditions_for_key(
+    query_filter: Optional[Filter], key: str
+) -> List[Any]:
+    """Select mandatory payload conditions for one metadata key."""
+    if query_filter is None:
+        return []
+    return [
+        condition
+        for condition in (getattr(query_filter, "must", None) or [])
+        if getattr(condition, "key", None) == key
+    ]
+
+
 def _jsc_embedding_model_name(model: str) -> str:
     if model in {DEFAULT_EMBEDDING_MODEL, DEEPINFRA_DEFAULT_EMBEDDING_MODEL}:
         return JSC_EMBEDDING_MODEL_NAME
@@ -864,11 +877,12 @@ class VectorStoreManager:
             collection_names, private_collections_map
         )
         aggregated_results: List[Any] = []
+        year_conditions = must_conditions_for_key(query_filter, "year")
 
         for collection_name in public_names:
-            client_filter = (
-                query_filter if is_eve_public_collection(collection_name) else None
-            )
+            client_filter = query_filter if is_eve_public_collection(
+                collection_name
+            ) else (Filter(must=year_conditions) if year_conditions else None)
             extra_must: List[Any] = []
             if (
                 not is_wiley_public_collection(collection_name)
@@ -926,6 +940,9 @@ class VectorStoreManager:
                         try:
                             private_filter = build_private_tenant_filter(
                                 user_id, [collection_id]
+                            )
+                            private_filter = merge_must_filters(
+                                private_filter, year_conditions
                             )
                             qp_response = self.client.query_points(
                                 collection_name=PRIVATE_COLLECTION_NAME,

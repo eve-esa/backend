@@ -188,6 +188,30 @@ def _to_float(value: Any) -> Any:
         return None
 
 
+def extract_year_bounds_from_filters(
+    filters: Any,
+) -> tuple[Optional[int], Optional[int]]:
+    """Return inclusive year bounds from a Qdrant filter.
+    """
+    if not isinstance(filters, dict):
+        return None, None
+    conditions = filters.get("must") or []
+    if not isinstance(conditions, list):
+        return None, None
+    for cond in conditions:
+        if not isinstance(cond, dict) or cond.get("key") != "year":
+            continue
+        rng = cond.get("range") or {}
+        if not isinstance(rng, dict):
+            continue
+        start = _to_int(rng.get("gte"))
+        end = _to_int(rng.get("lte"))
+        if start is not None and end is not None and start > end:
+            raise ValueError("year range start must be less than or equal to end")
+        return start, end
+    return None, None
+
+
 def extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
     """Extract [start_year, end_year] from request.filters structure.
 
@@ -200,33 +224,10 @@ def extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
       }
     Returns None if not found or values are invalid.
     """
-    try:
-        if not isinstance(filters, dict):
-            return None
-        conditions = filters.get("must") or []
-        if not isinstance(conditions, list):
-            return None
-        for cond in conditions:
-            if not isinstance(cond, dict):
-                continue
-            if cond.get("key") != "year":
-                continue
-            rng = cond.get("range") or {}
-            if not isinstance(rng, dict):
-                continue
-            start = _to_int(rng.get("gte"))
-            end = _to_int(rng.get("lte"))
-            if start is None and end is None:
-                return None
-            if start is not None and end is not None:
-                return [start, end]
-            if start is not None:
-                return [start, start]
-            if end is not None:
-                return [end, end]
+    start, end = extract_year_bounds_from_filters(filters)
+    if start is None or end is None:
         return None
-    except Exception:
-        return None
+    return [start, end]
 
 
 def extract_document_data(result: Any) -> Dict[str, Any]:

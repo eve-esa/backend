@@ -65,6 +65,7 @@ from src.utils.helpers import (
     build_conversation_context,
     extract_document_data,
     extract_documents_from_retrieval_payload,
+    extract_year_bounds_from_filters,
     get_mongodb_uri,
     tiktoken_counter,
 )
@@ -746,9 +747,14 @@ async def get_mcp_context(
         "topN": min(MCP_MAX_TOP_N, request.k * 2),
         "threshold": request.score_threshold,
     }
-    if isinstance(request.year, list) and len(request.year) >= 2:
-        args["start_year"] = request.year[0]
-        args["end_year"] = request.year[1]
+    start_year, end_year = extract_year_bounds_from_filters(request.filters)
+    if start_year is None and end_year is None:
+        if isinstance(request.year, list) and len(request.year) >= 2:
+            start_year, end_year = request.year[0], request.year[1]
+    if start_year is not None:
+        args["start_year"] = start_year
+    if end_year is not None:
+        args["end_year"] = end_year
 
     # Call tool with latency measurement (with one retry on auth/session expiry)
     def _is_auth_error(raw_payload: Any) -> bool:
