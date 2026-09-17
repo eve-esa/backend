@@ -278,8 +278,19 @@ def _is_mcp_content_block(value: Any) -> bool:
     A retrieval document also carries a ``text`` field, so the text key alone is
     not enough: either the block declares itself with ``type`` or it carries
     nothing beyond the envelope keys.
+
+    ``text`` is normally a string, but our MCP client
+    (``_serialize_content_item`` in ``mcp_client_service.py``) parses a JSON
+    string content block into a dict before handing it to the extractor. A
+    content block whose ``text`` was so parsed must still be recognised and
+    unwrapped, otherwise the whole block (e.g. a Wiley ``semanticSearch``
+    envelope) is kept as a single bundled document and the chunk list inside
+    it is never split. So accept both string and dict ``text`` here.
     """
-    if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+    if not isinstance(value, dict):
+        return False
+    text = value.get("text")
+    if not isinstance(text, (str, dict)):
         return False
     if value.get("type") == "text":
         return True
