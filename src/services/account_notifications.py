@@ -1,7 +1,7 @@
 """The two messages the approval gate owes a person, and nothing else.
 
-An account that lands in the queue gets told so, and an account somebody
-approves gets told that too. Both are rendered here and handed to
+An account that lands in the queue gets told so, and an account that gets in,
+straight away or after the wait, gets the welcome message. Both are rendered here and handed to
 ``src/services/mailer.py``, which decides how they leave the process.
 
 Copy lives in ``src/templates/mail/`` rather than in this module so that
@@ -60,26 +60,32 @@ _environment = Environment(
 )
 
 
-def render_account_mail(kind: str, email: str) -> Tuple[str, str, str]:
+def render_account_mail(
+    kind: str, email: str, after_hold: bool = False
+) -> Tuple[str, str, str]:
     """Return ``(subject, html, text)`` for one of the two account messages.
 
     The logo and the link both derive from ``FRONTEND_URL``, so a message sent
     from dev points at dev and one sent from prod points at prod, with no
-    per-environment template.
+    per-environment template. ``after_hold`` only matters to the welcome
+    message, which thanks an account that waited in the queue.
     """
     subject, html_template, text_template = _MESSAGES[kind]
     context = {
         "email": email,
         "app_url": FRONTEND_URL,
         "logo_url": f"{FRONTEND_URL}/branding/eve-logo.png",
+        "after_hold": after_hold,
     }
     html = _environment.get_template(html_template).render(**context)
     text = _environment.get_template(text_template).render(**context)
     return subject, html, text
 
 
-async def _notify(kind: str, user_id: str, email: str) -> None:
-    subject, html, text = render_account_mail(kind, email)
+async def _notify(
+    kind: str, user_id: str, email: str, after_hold: bool = False
+) -> None:
+    subject, html, text = render_account_mail(kind, email, after_hold)
     try:
         await send_mail(to=email, subject=subject, html=html, text=text)
     except Exception:
@@ -97,6 +103,8 @@ async def notify_account_pending(user_id: str, email: str) -> None:
     await _notify(KIND_PENDING, user_id, email)
 
 
-async def notify_account_approved(user_id: str, email: str) -> None:
-    """Tell an account that somebody approved it and it can sign in."""
-    await _notify(KIND_APPROVED, user_id, email)
+async def notify_account_approved(
+    user_id: str, email: str, *, after_hold: bool = False
+) -> None:
+    """Welcome an account that can sign in, whether it waited first or not."""
+    await _notify(KIND_APPROVED, user_id, email, after_hold=after_hold)

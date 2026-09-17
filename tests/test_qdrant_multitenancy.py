@@ -280,14 +280,15 @@ def test_merge_must_filters_preserves_min_should():
     assert extra in merged.must
 
 
-def test_eve_client_filters_apply_to_eve_collection():
+def test_year_filter_applies_to_all_public_collections():
     manager = _manager_with_mock_client()
     year = FieldCondition(key="year", match=MatchValue(value=2020))
+    journal = FieldCondition(key="journal", match=MatchValue(value="Nature"))
     manager._search_across_collections(
         collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
-        query_filter=Filter(must=[year]),
+        query_filter=Filter(must=[year, journal]),
         limit_per_collection=3,
         private_collections_map={},
         user_id="user-1",
@@ -304,13 +305,13 @@ def test_eve_client_filters_apply_to_eve_collection():
     must_keys = [
         getattr(cond, "key", None) for cond in (filt.must or [])
     ]
-    assert "year" in must_keys
+    assert set(must_keys) == {"year", "journal"}
     wiki_filter = by_name["wikipedia-512"]
     wiki_must_keys = [
         getattr(cond, "key", None)
         for cond in ((wiki_filter.must if wiki_filter is not None else None) or [])
     ]
-    assert "year" not in wiki_must_keys
+    assert wiki_must_keys == ["year"]
 
 
 def test_missing_public_collection_raises():

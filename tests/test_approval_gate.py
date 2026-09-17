@@ -20,7 +20,7 @@ from server import app as _root_app
 from src.database.models.api_key import ApiKey
 from src.database.models.external_identity import ExternalIdentity
 from src.database.models.user import User
-from src.services import approval, identity
+from src.services import account_notifications, approval, identity
 from src.services.approval import (
     APPROVAL_APPROVED,
     APPROVAL_PENDING,
@@ -60,6 +60,16 @@ def set_limit(monkeypatch, limit: int) -> None:
 async def stored_status(user_id: str):
     doc = await User.get_collection().find_one({"_id": ObjectId(user_id)})
     return doc.get("approval_status") if doc else None
+
+
+@pytest.fixture(autouse=True)
+def _no_mail_leaves(monkeypatch):
+    """Every approved sign-up schedules a welcome; none may reach a relay."""
+
+    async def _swallow(**kwargs):
+        return None
+
+    monkeypatch.setattr(account_notifications, "send_mail", _swallow)
 
 
 @pytest.fixture(autouse=True)
@@ -317,17 +327,17 @@ async def test_api_key_of_a_pending_user_is_refused(async_client, monkeypatch):
         await cleanup_models([user])
 
 
-# ── The mail that goes with the wait ──────────────────────────────────────────
+# ── The mails that go with a sign-up ──────────────────────────────────────────
 # Sign-in must not depend on mail, so the notifier is scheduled rather than
 # awaited. That makes "was it scheduled" and "does a failure leak" the two
 # things worth pinning.
 
 
-async def drain_pending_mail() -> None:
+async def drain_account_mail() -> None:
     """Let the fire-and-forget sends finish before asserting on them."""
-    while identity._pending_mail_tasks:
+    while identity._account_mail_tasks:
         await asyncio.gather(
-            *list(identity._pending_mail_tasks), return_exceptions=True
+            *list(identity._account_mail_tasks), return_exceptions=True
         )
 
 
@@ -335,11 +345,16 @@ async def drain_pending_mail() -> None:
 async def test_a_pending_signup_is_told_it_is_waiting(monkeypatch):
     set_limit(monkeypatch, 1)
     notified: list[tuple[str, str]] = []
+    welcomed: list[tuple[str, str, bool]] = []
 
     async def _notify(user_id: str, email: str) -> None:
         notified.append((user_id, email))
 
+    async def _welcome(user_id: str, email: str, *, after_hold: bool) -> None:
+        welcomed.append((user_id, email, after_hold))
+
     monkeypatch.setattr(identity, "notify_account_pending", _notify)
+    monkeypatch.setattr(identity, "notify_account_approved", _welcome)
 
     subjects = [new_subject() for _ in range(2)]
     profiles = {
@@ -353,9 +368,11 @@ async def test_a_pending_signup_is_told_it_is_waiting(monkeypatch):
         user_ids = [
             await resolve_user_id(claims_for(subject), subject) for subject in subjects
         ]
-        await drain_pending_mail()
+        await drain_account_mail()
 
-        # The first sign-up took the only seat, so only the second is told to wait.
+        # The first sign-up took the only seat and is welcomed straight away,
+        # without thanks for a wait it never had. Only the second is told to wait.
+        assert welcomed == [(user_ids[0], profiles[subjects[0]]["email"], False)]
         assert notified == [(user_ids[1], profiles[subjects[1]]["email"])]
 
         for user_id in user_ids:
@@ -390,7 +407,7 @@ async def test_a_broken_mailer_never_breaks_a_sign_in(monkeypatch, caplog):
     try:
         with caplog.at_level("ERROR", logger=identity.logger.name):
             user_id = await resolve_user_id(claims_for(subject), subject)
-            await drain_pending_mail()
+            await drain_account_mail()
 
         assert await stored_status(user_id) == APPROVAL_PENDING
         created = await User.find_by_id(user_id)
@@ -401,3 +418,35 @@ async def test_a_broken_mailer_never_breaks_a_sign_in(monkeypatch, caplog):
     finally:
         await ExternalIdentity.delete_many({"subject": subject})
         await cleanup_models(([created] if created else []) + [seat_taker])
+
+
+@pytest.mark.asyncio
+async def test_a_broken_welcome_mailer_never_breaks_a_sign_in(monkeypatch, caplog):
+    set_limit(monkeypatch, 1)
+
+    async def _explode(user_id: str, email: str, *, after_hold: bool) -> None:
+        raise RuntimeError("relay refused the message")
+
+    monkeypatch.setattr(identity, "notify_account_approved", _explode)
+
+    subject = new_subject()
+    email = f"{uuid.uuid4().hex[:10]}@example.com"
+    stub_userinfo_by_token(
+        monkeypatch, {subject: {"email": email, "email_verified": True}}
+    )
+
+    created = None
+    try:
+        with caplog.at_level("ERROR", logger=identity.logger.name):
+            user_id = await resolve_user_id(claims_for(subject), subject)
+            await drain_account_mail()
+
+        assert await stored_status(user_id) == APPROVAL_APPROVED
+        created = await User.find_by_id(user_id)
+        assert created is not None
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "signup_welcome_mail_failed" in logged
+    finally:
+        await ExternalIdentity.delete_many({"subject": subject})
+        await cleanup_models([created] if created else [])

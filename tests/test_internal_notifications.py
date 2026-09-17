@@ -64,6 +64,8 @@ async def test_an_approved_user_is_mailed_once(async_client, sent):
         assert len(sent) == 1
         assert sent[0]["to"] == user.email
         assert sent[0]["subject"] == "Your EVE account is ready"
+        # The back office only approves accounts that waited in the queue.
+        assert "Thanks for your patience." in sent[0]["text"]
     finally:
         await cleanup_models([user])
 

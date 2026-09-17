@@ -44,19 +44,86 @@ def test_pending_mail_says_the_account_is_on_hold():
     assert "<" not in text
 
 
-def test_approved_mail_carries_the_sign_in_button():
+def test_approved_mail_is_the_welcome_message():
     subject, html, text = render_account_mail(KIND_APPROVED, "person@example.com")
 
     assert subject == "Your EVE account is ready"
-    assert "Your account has been enabled" in html
+    assert "Welcome to EVE!" in html
     assert "person@example.com" in html
     assert "Sign in to EVE" in html
     assert f'href="{FRONTEND}"' in html
-    assert "background-color:#003247" in html
-    assert f"{FRONTEND}/branding/eve-logo.png" in html
+    for url in (
+        "https://eve.philab.esa.int/onboarding",
+        "https://eve.philab.esa.int/feedback",
+        "https://eve.philab.esa.int/contact",
+    ):
+        assert url in html
+        assert url in text
 
+    assert "Welcome to EVE!" in text
     assert "Sign in to EVE" in text
     assert FRONTEND in text
+    assert "<" not in text
+
+
+# Mandated by ESA: every new account must receive these sentences word for word.
+IMPORTANT_NOTICE = (
+    "Before accessing the platform, please review and agree to the",
+    "By accessing the platform, you confirm that:",
+    "You understand that your information is stored according to the",
+    "You agree to the",
+    "Terms of Use",
+    "of EVE.",
+    "You must not share or input any",
+    "please use the contact form:",
+    "We will retain your data privately for six months to improve the system, "
+    "in full compliance with ESA PDP rules.",
+)
+
+
+def test_welcome_mail_keeps_the_important_notice():
+    _, html, text = render_account_mail(KIND_APPROVED, "person@example.com")
+
+    assert "Important Notice" in html
+    assert "IMPORTANT NOTICE" in text
+    for sentence in IMPORTANT_NOTICE:
+        assert sentence in html
+        assert sentence in text
+
+
+def test_welcome_mail_drops_what_only_the_pilot_needed():
+    _, html, text = render_account_mail(KIND_APPROVED, "person@example.com")
+
+    for gone in (
+        "Login Details",
+        "Pilot Details",
+        "PLACEHOLDER",
+        "Access Period",
+        "Permitted Usage",
+        "Pilot Programme",
+        "Conditions of Participation",
+    ):
+        assert gone not in html
+        assert gone not in text
+    # Terms of Use renumbered once "Permitted Usage" is gone.
+    assert "4. Termination" in html
+    assert "4. Termination" in text
+    assert "\u2014" not in html
+    assert "\u2014" not in text
+
+
+@pytest.mark.parametrize("after_hold", [True, False])
+def test_only_a_queued_account_is_thanked_for_its_patience(after_hold):
+    _, html, text = render_account_mail(
+        KIND_APPROVED, "person@example.com", after_hold=after_hold
+    )
+
+    thanks = " Thanks for your patience." if after_hold else ""
+    assert (
+        f"person@example.com is now active.{thanks} Here's everything you need"
+        in text
+    )
+    assert ("Thanks for your patience." in html) is after_hold
 
 
 @pytest.mark.parametrize("kind", [KIND_PENDING, KIND_APPROVED])
