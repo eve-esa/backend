@@ -3,6 +3,7 @@
 import pytest
 
 from src.commands.register_dummy_mcp import (
+    DUMMY_SERVER_DESCRIPTION,
     DUMMY_SERVER_NAME,
     DUMMY_SERVER_URL,
     register_dummy_mcp,
@@ -23,7 +24,7 @@ async def test_register_creates_new_server():
         server = await MCPServer.find_one({"name": DUMMY_SERVER_NAME})
         assert server is not None
         assert server.name == DUMMY_SERVER_NAME
-        assert server.description == "Local dummy MCP server (artifact e2e stand-in)"
+        assert server.description == DUMMY_SERVER_DESCRIPTION
         assert server.enabled is True
         assert server.config.url == DUMMY_SERVER_URL
         assert server.config.transport == ToolTransport.STREAMABLE_HTTP
