@@ -5,6 +5,9 @@ src/.DS_Store
 # Secrets / stray artifacts — never commit
 .jsc.env
 core
+# Local LLM fault-injection fixtures (not shipped)
+tests/e2e/dummy_llm_server/
+docker-compose.fault-test.yml
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
