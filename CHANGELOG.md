@@ -11,6 +11,22 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.1.5](https://github.com/eve-esa/backend/compare/v0.1.4...v0.1.5) (2026-09-17)
+
+
+### Added
+
+* **identity:** welcome email for every account that gets in ([#212](https://github.com/eve-esa/backend/issues/212)) ([3309f67](https://github.com/eve-esa/backend/commit/3309f67be651b81bf7e22a0bf4ec5f1a3474baf9))
+* jsc embedders ([#214](https://github.com/eve-esa/backend/issues/214)) ([8e4a2b6](https://github.com/eve-esa/backend/commit/8e4a2b6957d8b65a619e1a535dec9ecd1896c602))
+* **observability:** persist agentic failures to Mongo with a Langfuse overlay ([#217](https://github.com/eve-esa/backend/issues/217)) ([795695f](https://github.com/eve-esa/backend/commit/795695f1c78012490a068b89a944c3254f44efd8))
+
+
+### Fixed
+
+* **retrieval:** deduplicate before applying top-k ([#218](https://github.com/eve-esa/backend/issues/218)) ([a27e96e](https://github.com/eve-esa/backend/commit/a27e96e72e26836d5da3a4359715651d0b733a7a))
+* **retrieval:** split Wiley envelope when MCP client pre-parses text to dict ([#216](https://github.com/eve-esa/backend/issues/216)) ([8415ea4](https://github.com/eve-esa/backend/commit/8415ea40d8ac7a419d3ce14c872b7c7356d65fe6))
+* year based filtering for the documents during retrieval ([#215](https://github.com/eve-esa/backend/issues/215)) ([ee6992d](https://github.com/eve-esa/backend/commit/ee6992d75fbb2cfa8a7daaa7e08da491d5afe4e4))
+
 ## [0.1.4](https://github.com/eve-esa/backend/compare/v0.1.3...v0.1.4) (2026-09-09)
 
 
