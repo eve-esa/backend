@@ -33,6 +33,8 @@ from src.schemas.generation_request import GenerationRequest
 
 _RUNNER = "src.services.agents.core.runner"
 
+pytestmark = pytest.mark.no_db
+
 
 def _chain_manager(configured=("eve_jsc", "main", "fallback")) -> LLMManager:
     """A manager with a real chain resolver and no real endpoint behind it."""
@@ -84,9 +86,6 @@ def _fake_agent():
 @contextlib.contextmanager
 def _patched_runner(**overrides):
     """Patch the runner's external boundaries with sensible async defaults."""
-    error_logger = MagicMock()
-    error_logger.log_error = AsyncMock()
-
     defaults = {
         "_langgraph_available": True,
         "_build_tools": AsyncMock(return_value=[]),
@@ -95,7 +94,7 @@ def _patched_runner(**overrides):
         "_resolve_agent_graph_type": MagicMock(return_value="react"),
         "get_agent_graph": MagicMock(return_value=_fake_agent()),
         "get_callbacks": MagicMock(return_value=[]),
-        "get_error_logger": MagicMock(return_value=error_logger),
+        "persist_policy_event": AsyncMock(),
         "langfuse_context": lambda **kwargs: contextlib.nullcontext(),
         "persist_message_state": AsyncMock(),
         "maybe_rollup_and_trim_history": AsyncMock(),
@@ -106,7 +105,6 @@ def _patched_runner(**overrides):
         applied = {}
         for name, value in defaults.items():
             applied[name] = stack.enter_context(patch(f"{_RUNNER}.{name}", value))
-        applied["error_logger"] = error_logger
         yield applied
 
 
@@ -189,6 +187,7 @@ class TestBuildReactGraph:
         agent.compile.assert_called_once()
         compile_kwargs = agent.compile.call_args.kwargs
         assert compile_kwargs["llm"] is fake_llm
+        assert callable(compile_kwargs.get("on_policy"))
         assert graph is agent.compile.return_value
 
     def test_llm_type_override_takes_precedence(self):
@@ -452,7 +451,7 @@ class TestGenerateAnswerAgenticInGraphFallback:
 
         with _patched_runner(
             _build_react_graph=MagicMock(return_value=graph),
-        ):
+        ) as patched:
             (
                 final_answer,
                 _tool_results,
@@ -468,6 +467,11 @@ class TestGenerateAnswerAgenticInGraphFallback:
         assert final_answer == "fallback answer"
         assert prompts["used_fallback_llm"] is True
         assert trace
+        patched["persist_policy_event"].assert_awaited()
+        assert patched["persist_policy_event"].await_args.kwargs["policy"] == "run_timeout"
+        assert patched["persist_policy_event"].await_args.kwargs["description"] == (
+            "Primary agent node failed after agent_fallback produced an answer"
+        )
 
 
 # ─── generate_answer_agentic_stream_helper (streaming) ────────────────────────
@@ -513,7 +517,7 @@ class TestStreamingEarlyFailure:
         with _patched_runner(
             _build_react_graph=MagicMock(return_value=graph),
             persist_message_state=persist,
-        ):
+        ) as patched:
             events = []
             async for event in generate_answer_agentic_stream_helper(
                 request,
@@ -532,6 +536,8 @@ class TestStreamingEarlyFailure:
         assert kwargs["prompts"]["used_fallback_llm"] is True
         assert kwargs["trace"]
         assert kwargs["trace"][-1]["node"] == "agent_fallback"
+        patched["persist_policy_event"].assert_awaited()
+        assert patched["persist_policy_event"].await_args.kwargs["policy"] == "run_timeout"
 
     async def test_in_graph_fallback_reattributes_without_opening_the_circuit(self):
         """The graph swallows the primary's error, so it cannot be classified:

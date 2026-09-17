@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 DUMMY_SERVER_NAME = "dummy"
 DUMMY_SERVER_URL = "http://dummy-mcp:8000/mcp"
-DUMMY_SERVER_DESCRIPTION = "Local dummy MCP server (artifact e2e stand-in)"
+DUMMY_SERVER_DESCRIPTION = (
+    "Local dummy MCP server (artifact e2e + fail_auth_text / "
+    "fail_structured / fail_raise error fixtures)"
+)
 
 
 async def register_dummy_mcp(enabled: bool = True) -> None:

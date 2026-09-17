@@ -2155,8 +2155,8 @@ async def create_agentic_message_stream(
             error_logger = get_error_logger()
             await error_logger.log_error_sync(
                 error=http_exc,
-                component=Component.ROUTER,
-                pipeline_stage=PipelineStage.ROUTER,
+                source="router",
+                kind="error_handler",
                 description="HTTPException in create_agentic_message_stream",
                 error_type=type(http_exc).__name__,
             )
@@ -2166,8 +2166,8 @@ async def create_agentic_message_stream(
             error_logger = get_error_logger()
             await error_logger.log_error_sync(
                 error=e,
-                component=Component.ROUTER,
-                pipeline_stage=PipelineStage.ROUTER,
+                source="router",
+                kind="error_handler",
                 description="Exception in create_agentic_message_stream",
                 error_type=type(e).__name__,
             )

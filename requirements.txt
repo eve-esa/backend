@@ -14,8 +14,9 @@ langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Pinned to a commit, not to
 # @main: the release workflow rebuilds the image from the release commit, so an
 # unpinned branch would resolve whatever agents HEAD is at build time and ship a
-# different version than the one dev was tested with. This SHA is the commit
-# inside esa-eve-dev-app-backend:sha-ea6fffc.
+# different version than the one dev was tested with.
+# MUST be refreshed after pushing feat/agentic-error-logging on eve-esa-agents;
+# 0d798fa silently ignores on_policy / RetryPolicy / error_handler via **kwargs.
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@0d798fa731cc775224fbb69d5332fe401d512449
 langfuse>=2.60.10
 openai>=2.53.0,<3.0.0

@@ -12,6 +12,7 @@ from src.services.mcp.artifact_ingestion import ArtifactInterceptor
 from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp.tool_cache import get_or_load_mcp_tools
 from src.services.mcp_auth import get_cognito_token_provider
+from src.utils.error_logger import persist_policy_event
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,11 @@ def _build_mcp_connections(
     *,
     mcp_proxy_bearer_token: Optional[str],
     cognito_auth_header: Optional[str],
-) -> tuple[Dict[str, Any], bool]:
+) -> tuple[Dict[str, Any], bool, List[str]]:
     """Build MultiServerMCPClient connection configs from Mongo-backed servers."""
     connections: Dict[str, Any] = {}
     uses_proxy = False
+    skipped_missing_url: List[str] = []
 
     for srv in mcp_server_configs:
         transport = (
@@ -73,6 +75,7 @@ def _build_mcp_connections(
 
         if not srv.config.url:
             logger.warning("Skipping MCP server %r: missing URL in config", srv.name)
+            skipped_missing_url.append(srv.name)
             continue
 
         headers: Dict[str, str] = dict(srv.config.headers or {})
@@ -104,7 +107,7 @@ def _build_mcp_connections(
             "headers": headers,
         }
 
-    return connections, uses_proxy
+    return connections, uses_proxy, skipped_missing_url
 
 
 async def _discover_mcp_tools_uncached(
@@ -122,11 +125,18 @@ async def _discover_mcp_tools_uncached(
         except Exception as exc:
             logger.warning("Failed to obtain Cognito token for MCP auth: %s", exc)
 
-    connections, uses_proxy = _build_mcp_connections(
+    connections, uses_proxy, skipped_missing_url = _build_mcp_connections(
         mcp_server_configs,
         mcp_proxy_bearer_token=mcp_proxy_bearer_token,
         cognito_auth_header=cognito_auth_header,
     )
+    for server_name in skipped_missing_url:
+        await persist_policy_event(
+            policy="mcp_load",
+            description=f"Skipped MCP server {server_name!r}: missing URL",
+            source="mcp_load",
+            extra={"server": server_name},
+        )
     if not connections:
         return MultiServerMCPClient({}), [], uses_proxy
 
@@ -162,6 +172,13 @@ async def _discover_mcp_tools_uncached(
                 server_name,
                 exc,
                 exc_info=True,
+            )
+            await persist_policy_event(
+                policy="mcp_load",
+                description=f"Failed to load MCP tools from server {server_name!r}",
+                source="mcp_load",
+                error=exc,
+                extra={"server": server_name},
             )
             return server_name, None
 

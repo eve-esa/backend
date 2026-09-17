@@ -97,6 +97,17 @@ services:
     networks:
       - app-network
 
+  # OpenAI-compatible stub: crash (500) and hang (no first token). Unused unless
+  # docker-compose.fault-test.yml points MAIN_MODEL_URL / FALLBACK_MODEL_URL here.
+  dummy-llm:
+    build:
+      context: ./tests/e2e/dummy_llm_server
+      dockerfile: Dockerfile
+    ports:
+      - "8100:8000"
+    networks:
+      - app-network
+
   frontend:
     build:
       context: ../frontend

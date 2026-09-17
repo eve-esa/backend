@@ -15,17 +15,37 @@ Use ``langfuse_context(...)`` as a context manager around every LangGraph call.
 Use ``get_callbacks()`` to obtain the ``[CallbackHandler()]`` for config['callbacks'].
 
 All functions degrade gracefully when Langfuse is unavailable.
+
+``record_error_kind`` is an optional overlay on Mongo ``error_logs``. It
+attaches the same ``kind`` taxonomy as a Langfuse EVENT (and ``kind:<name>``
+tags) when ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set.
+Without keys it is a no-op. Hosted can enable later with URL + keys.
+See https://langfuse.com/docs/observability/sdk/instrumentation
 """
 
 import contextlib
 import logging
 import os
-from typing import Any, Dict, Generator, List, Optional
+from contextvars import ContextVar
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _langfuse_available = False
-_langfuse_client = None  # singleton, used only for flush()
+_langfuse_client = None  # kept for tests that patch this name; flush uses get_client()
+
+# Survives LangGraph hopping off the OTel current span, and leftover persist
+# after ``langfuse_context`` exits. Keyed by Langfuse session_id (= conversation).
+_trace_id_ctx: ContextVar[Optional[str]] = ContextVar("lf_trace_id", default=None)
+_observation_id_ctx: ContextVar[Optional[str]] = ContextVar(
+    "lf_observation_id", default=None
+)
+_root_span_ctx: ContextVar[Any] = ContextVar("lf_root_span", default=None)
+_callback_handler_ctx: ContextVar[Any] = ContextVar("lf_cb_handler", default=None)
+_session_id_ctx: ContextVar[Optional[str]] = ContextVar("lf_session_id", default=None)
+_trace_by_session: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+# Latest LangGraph node spans, kept after CallbackHandler pops them on_chain_end.
+_node_spans_by_session: Dict[str, Dict[str, List[Any]]] = {}
 
 try:
     from langfuse import Langfuse as _Langfuse, get_client as _get_langfuse_client
@@ -37,6 +57,19 @@ except Exception:
     _get_langfuse_client = None  # type: ignore
     _propagate_attributes = None  # type: ignore
     LangfuseCallbackHandler = None  # type: ignore
+
+
+if LangfuseCallbackHandler is not None:
+
+    class _NodeKindCallbackHandler(LangfuseCallbackHandler):
+        """Remember node spans before Langfuse pops them on_chain_end/error."""
+
+        def _attach_observation(self, run_id, observation):  # type: ignore[no-untyped-def]
+            super()._attach_observation(run_id, observation)
+            _remember_span(observation)
+
+else:  # pragma: no cover
+    _NodeKindCallbackHandler = None  # type: ignore
 
 
 def _ensure_langfuse_host() -> None:
@@ -63,16 +96,14 @@ def is_langfuse_enabled() -> bool:
 def flush() -> None:
     """Flush pending traces to Langfuse.
 
-    In SDK v3, flushing is managed on the global singleton client.
+    Uses ``get_client()`` — the same singleton ``create_event`` writes to.
+    A second ``Langfuse()`` instance would leave those events unexported.
     """
-    global _langfuse_client
-    if not is_langfuse_enabled():
+    if not is_langfuse_enabled() or _get_langfuse_client is None:
         return
     try:
         _ensure_langfuse_host()
-        if _langfuse_client is None:
-            _langfuse_client = _Langfuse()
-        _langfuse_client.flush()
+        _get_langfuse_client().flush()
     except Exception as exc:
         logger.debug("Langfuse flush error: %s", exc)
 
@@ -90,7 +121,13 @@ def get_callbacks() -> List[Any]:
         return []
     try:
         _ensure_langfuse_host()
-        return [LangfuseCallbackHandler()]
+        handler = (
+            _NodeKindCallbackHandler()
+            if _NodeKindCallbackHandler is not None
+            else LangfuseCallbackHandler()
+        )
+        _callback_handler_ctx.set(handler)
+        return [handler]
     except Exception as exc:
         logger.warning("Could not create Langfuse callback handler: %s", exc)
         return []
@@ -154,8 +191,278 @@ def langfuse_context(
     # Any exception raised inside the caller's with-block will propagate through
     # these context managers and out of this generator cleanly (no yield after throw).
     with lf.start_as_current_observation(name=trace_name, as_type="span") as span:
-        if prop_kwargs and _propagate_attributes is not None:
-            with _propagate_attributes(**prop_kwargs):
+        trace_id = getattr(span, "trace_id", None) or lf.get_current_trace_id()
+        observation_id = getattr(span, "id", None) or lf.get_current_observation_id()
+        token_t = _trace_id_ctx.set(trace_id)
+        token_o = _observation_id_ctx.set(observation_id)
+        token_s = _root_span_ctx.set(span)
+        token_sess = _session_id_ctx.set(session_id)
+        if session_id and trace_id:
+            _trace_by_session[session_id] = (trace_id, observation_id)
+            _node_spans_by_session[session_id] = {}
+        try:
+            if prop_kwargs and _propagate_attributes is not None:
+                with _propagate_attributes(**prop_kwargs):
+                    yield span
+            else:
                 yield span
+        finally:
+            with contextlib.suppress(Exception):
+                lf.flush()
+            _trace_id_ctx.reset(token_t)
+            _observation_id_ctx.reset(token_o)
+            _root_span_ctx.reset(token_s)
+            _session_id_ctx.reset(token_sess)
+
+
+_KIND_METADATA_KEYS = ("signal", "tool", "server", "attempt")
+
+
+def _kind_event_metadata(
+    kind: str,
+    *,
+    node: Optional[str] = None,
+    graph: Optional[str] = None,
+    source: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {"kind": kind}
+    if node:
+        metadata["node"] = node
+    if graph:
+        metadata["graph"] = graph
+    if source:
+        metadata["source"] = source
+    if extra:
+        for key in _KIND_METADATA_KEYS:
+            value = extra.get(key)
+            if value is not None:
+                metadata[key] = value
+    return metadata
+
+
+def _event_kwargs(
+    kind: str,
+    *,
+    node: Optional[str] = None,
+    graph: Optional[str] = None,
+    source: Optional[str] = None,
+    description: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata = _kind_event_metadata(
+        kind, node=node, graph=graph, source=source, extra=extra
+    )
+    tags = [f"kind:{kind}"]
+    if node:
+        tags.append(f"node:{node}")
+    metadata["tags"] = tags
+    kwargs: Dict[str, Any] = {
+        "name": kind,
+        "level": "WARNING" if kind == "retry" else "ERROR",
+        "metadata": metadata,
+    }
+    status = (description or "").strip()[:500] or None
+    if status:
+        kwargs["status_message"] = status
+    return kwargs
+
+
+def _emit_as_otel_child(lf: Any, event_kwargs: Dict[str, Any], ctx: Dict[str, str]) -> bool:
+    """Attach an event as a child span without Langfuse ``AS_ROOT``.
+
+    ``Langfuse.create_event(trace_context=...)`` sets ``AS_ROOT`` so the UI
+    lists timeout/retry as separate traces. Parent via OTel instead.
+    https://langfuse.com/docs/observability/features/trace-ids-and-distributed-tracing
+    """
+    try:
+        from opentelemetry import trace as otel_trace_api
+    except Exception:
+        return False
+    trace_id = ctx.get("trace_id") or ""
+    parent_span_id = ctx.get("parent_span_id") or ""
+    try:
+        int_trace_id = int(trace_id, 16)
+        int_parent = int(parent_span_id, 16) if parent_span_id else 0
+    except ValueError:
+        return False
+    if not int_parent:
+        return False
+    parent = otel_trace_api.NonRecordingSpan(
+        otel_trace_api.SpanContext(
+            trace_id=int_trace_id,
+            span_id=int_parent,
+            is_remote=False,
+            trace_flags=otel_trace_api.TraceFlags(0x01),
+        )
+    )
+    create_event = getattr(lf, "create_event", None)
+    if not callable(create_event):
+        return False
+    with otel_trace_api.use_span(parent):
+        create_event(**event_kwargs)
+    return True
+
+
+def _span_buckets() -> Dict[str, List[Any]]:
+    session = _session_id_ctx.get()
+    if not session:
+        try:
+            from src.utils.error_logger import get_conversation_context
+
+            session = get_conversation_context()
+        except Exception:
+            session = None
+    if not session:
+        session = "_default"
+    return _node_spans_by_session.setdefault(session, {})
+
+
+def _remember_span(span: Any) -> None:
+    name = _observation_name(span)
+    if not name or name.startswith("__error_handler__"):
+        return
+    if name in ("LangGraph", "agentic_generation_stream", "agentic_generation"):
+        return
+    bucket = _span_buckets().setdefault(name, [])
+    if not bucket or bucket[-1] is not span:
+        bucket.append(span)
+
+
+def _ingest_live_runs() -> None:
+    handler = _callback_handler_ctx.get()
+    runs = getattr(handler, "_runs", None) if handler is not None else None
+    if not isinstance(runs, dict):
+        return
+    for span in runs.values():
+        _remember_span(span)
+
+
+def _observation_name(span: Any) -> Optional[str]:
+    otel = getattr(span, "_otel_span", None)
+    if otel is not None:
+        name = getattr(otel, "name", None)
+        if name:
+            return str(name)
+    name = getattr(span, "name", None)
+    return str(name) if name else None
+
+
+def _node_observation_span(node: Optional[str], *, kind: Optional[str] = None) -> Any:
+    """Span to parent a kind event on.
+
+    Retry is emitted at the *start* of attempt N, after the new AGENT span
+    exists — that looks one-off (retry sits on the new attempt). Parent it
+    to the previous ``node`` span (the attempt that actually failed).
+
+    Timeout/fallback run from ``error_handler`` after CallbackHandler has
+    already popped the node span from ``_runs``. Use the cached last span.
+    """
+    _ingest_live_runs()
+    if not node:
+        return None
+    bucket = _span_buckets().get(node) or []
+    if not bucket:
+        return None
+    if kind == "retry" and len(bucket) >= 2:
+        span = bucket[-2]
+    else:
+        span = bucket[-1]
+    if callable(getattr(span, "create_event", None)):
+        return span
+    return None
+
+
+def record_error_kind(
+    kind: Optional[str],
+    *,
+    node: Optional[str] = None,
+    graph: Optional[str] = None,
+    source: Optional[str] = None,
+    description: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record ``kind`` as a child EVENT of the LangGraph **node** span.
+
+    CallbackHandler observations are not the OTel current span, so we look up
+    the latest ``_runs`` entry named ``node`` (``agent``, ``agent_fallback``,
+    …) and call its ``create_event``. Never pass ``trace_context`` (that sets
+    ``AS_ROOT`` and lists timeout as its own trace). Drop the event rather
+    than opening a new root. Never raises.
+    """
+    if not kind or not is_langfuse_enabled() or _get_langfuse_client is None:
+        return
+    try:
+        _ensure_langfuse_host()
+        lf = _get_langfuse_client()
+        kwargs = _event_kwargs(
+            kind,
+            node=node,
+            graph=graph,
+            source=source,
+            description=description,
+            extra=extra,
+        )
+        node_span = _node_observation_span(node, kind=kind)
+        if node_span is not None:
+            node_span.create_event(**kwargs)
         else:
-            yield span
+            current_obs = getattr(lf, "get_current_observation_id", None)
+            root_id = _observation_id_ctx.get()
+            create_event = getattr(lf, "create_event", None)
+            current_id = current_obs() if callable(current_obs) else None
+            if (
+                current_id
+                and str(current_id) != str(root_id or "")
+                and callable(create_event)
+            ):
+                create_event(**kwargs)
+            else:
+                root = _root_span_ctx.get()
+                create_on_root = (
+                    getattr(root, "create_event", None) if root is not None else None
+                )
+                if callable(create_on_root):
+                    create_on_root(**kwargs)
+                else:
+                    ctx = _resolve_trace_context(lf)
+                    if not ctx or not _emit_as_otel_child(lf, kwargs, ctx):
+                        logger.warning(
+                            "Langfuse kind event %s dropped; no parent generation trace",
+                            kind,
+                        )
+                        return
+        flush_fn = getattr(lf, "flush", None)
+        if callable(flush_fn):
+            flush_fn()
+    except Exception as exc:
+        logger.warning("Langfuse kind event failed: %s", exc)
+
+
+def _resolve_trace_context(lf: Any) -> Optional[Dict[str, str]]:
+    """Look up the generation trace after LangGraph dropped the OTel span."""
+    trace_id = _trace_id_ctx.get()
+    parent_span_id = _observation_id_ctx.get()
+    if not trace_id:
+        getter = getattr(lf, "get_current_trace_id", None)
+        obs_getter = getattr(lf, "get_current_observation_id", None)
+        if callable(getter):
+            trace_id = getter()
+        if callable(obs_getter):
+            parent_span_id = obs_getter()
+    if not trace_id:
+        try:
+            from src.utils.error_logger import get_conversation_context
+
+            session_id = get_conversation_context()
+        except Exception:
+            session_id = None
+        cached = _trace_by_session.get(session_id) if session_id else None
+        if cached:
+            trace_id, parent_span_id = cached
+    if not trace_id:
+        return None
+    ctx: Dict[str, str] = {"trace_id": str(trace_id)}
+    if parent_span_id:
+        ctx["parent_span_id"] = str(parent_span_id)
+    return ctx

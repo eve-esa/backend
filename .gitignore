@@ -2,6 +2,9 @@ rag_data.txt
 .DS_Store
 src/.DS_Store
 .vscode
+# Secrets / stray artifacts — never commit
+.jsc.env
+core
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
