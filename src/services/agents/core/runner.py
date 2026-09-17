@@ -8,6 +8,7 @@ cancellation, error logging, token consumption, and stream bus publishing.
 import asyncio
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import time
@@ -51,7 +52,7 @@ from src.services.token_rate_limiter import (
     consume_tokens_for_user,
     count_tokens_for_texts,
 )
-from src.utils.error_logger import Component, PipelineStage, get_error_logger
+from src.utils.error_logger import persist_policy_event
 from src.utils.helpers import (
     extract_documents_from_retrieval_payload,
     get_mongodb_uri,
@@ -714,12 +715,45 @@ class _AgenticBudgetTimeout(TimeoutError):
 def _record_endpoint_failure(
     endpoint: Optional[Dict[str, Any]], exc: BaseException
 ) -> None:
-    """Open the answering endpoint's circuit when *exc* means it is down."""
+    """Open the answering endpoint's circuit when *exc* means it is down.
+
+    Does not write ``error_logs``: the leftover timeout/error_handler row already
+    records the failure. Circuit state lives on ``EndpointHealth`` and on
+    ``metadata.endpoint.circuit_open``.
+    """
     if isinstance(exc, _AgenticBudgetTimeout):
         return
     answered = (endpoint or {}).get("answered")
     if answered and is_endpoint_failure(exc):
         get_shared_llm_manager().health.record_failure(answered, exc)
+
+
+def _is_node_timeout_error(exc: BaseException) -> bool:
+    """LangGraph ``NodeTimeoutError`` is not a stdlib ``TimeoutError``."""
+    if type(exc).__name__ == "NodeTimeoutError":
+        return True
+    try:
+        from langgraph.errors import NodeTimeoutError
+
+        return isinstance(exc, NodeTimeoutError)
+    except Exception:
+        return False
+
+
+def _node_from_exception(exc: BaseException) -> Optional[str]:
+    node = getattr(exc, "node", None)
+    return node if isinstance(node, str) and node else None
+
+
+def _policy_for_uncaught(exc: BaseException) -> str:
+    """Map a bubbled graph/run exception to the agentic policy name."""
+    if isinstance(exc, _AgenticBudgetTimeout):
+        return "run_timeout"
+    if _is_node_timeout_error(exc):
+        return "timeout"
+    if isinstance(exc, TimeoutError):
+        return "run_timeout"
+    return "error_handler"
 
 
 def _record_in_graph_fallback(
@@ -854,6 +888,7 @@ def _build_react_graph(
     llm: Any = None,
     llm_run_timeout: Optional[int] = None,
     llm_idle_timeout: Optional[int] = None,
+    on_policy: Any = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -878,6 +913,20 @@ def _build_react_graph(
         fallback_llm = get_shared_llm_manager().get_client_for_model(
             LLMType.Fallback.value
         )
+    graph_name = getattr(agent, "name", None)
+    timed_node = getattr(type(agent), "timed_node", None)
+    if inspect.isfunction(timed_node) or inspect.ismethod(timed_node):
+        try:
+            if "on_policy" not in inspect.signature(timed_node).parameters:
+                logger.warning(
+                    "Agent graph %s timed_node has no on_policy; "
+                    "eve-esa-agents pin is older than feat/agentic-error-logging. "
+                    "In-graph retry/timeout/fallback logs will not be written.",
+                    graph_name,
+                )
+        except (TypeError, ValueError):
+            pass
+    policy_cb = on_policy if on_policy is not None else _graph_on_policy(graph_name)
     return agent.compile(
         llm=llm,
         tools=tools,
@@ -891,7 +940,39 @@ def _build_react_graph(
         llm_idle_timeout=(
             llm_idle_timeout if llm_idle_timeout is not None else MODEL_TIMEOUT
         ),
+        on_policy=policy_cb,
     )
+
+
+def _graph_on_policy(graph_name: Optional[str]):
+    """Mongo writer for compile-time policy events (retry / timeout / fallback)."""
+
+    async def on_policy(
+        *,
+        node: Optional[str] = None,
+        policy: str,
+        attempt: Optional[int] = None,
+        error: Optional[BaseException] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        description: Optional[str] = None,
+        **_kwargs: Any,
+    ) -> None:
+        desc = description or (
+            f"Policy '{policy}' on node '{node}'" if node else f"Policy '{policy}'"
+        )
+        if attempt is not None:
+            desc = f"{desc} (attempt {attempt})"
+        await persist_policy_event(
+            policy=policy,
+            description=desc,
+            node=node,
+            graph=graph_name,
+            error=error,
+            attempt=attempt,
+            extra=extra,
+        )
+
+    return on_policy
 
 
 # ─── Conversation context ─────────────────────────────────────────────────────
@@ -943,7 +1024,6 @@ async def generate_answer_agentic(
     if not _langgraph_available:
         raise RuntimeError("LangGraph is not available — cannot run agentic generation")
 
-    error_logger = get_error_logger()
     total_start = time.perf_counter()
     # message_id is unset here: Message.create() in the router runs before this
     # call and there's no clean way to thread it through this signature; artifacts
@@ -953,6 +1033,7 @@ async def generate_answer_agentic(
         user_id=user_id, conversation_id=conversation_id
     )
     endpoint_metadata: Optional[Dict[str, Any]] = None
+    agent_graph_type: Optional[str] = None
 
     try:
         tools = await _build_tools(request)
@@ -992,8 +1073,7 @@ async def generate_answer_agentic(
 
             Returns ``(raw_messages, trace_entries, node_latencies, duration,
             in_graph_fallback)`` where *in_graph_fallback* is ``True`` when the
-            graph's node-level ``error_handler`` switched to the fallback model
-            mid-run (signalled via the ``use_fallback_llm`` state flag).
+            graph streamed an ``agent_fallback`` node update.
             """
             raw_msgs: List[Any] = []
             trace: List[Dict[str, Any]] = []
@@ -1053,6 +1133,16 @@ async def generate_answer_agentic(
                     "Agent graph raised after successful agent_fallback; "
                     "returning fallback answer: %s",
                     graph_exc,
+                )
+                await persist_policy_event(
+                    policy=_policy_for_uncaught(graph_exc),
+                    description=(
+                        "Primary agent node failed after agent_fallback produced an answer"
+                    ),
+                    node=_node_from_exception(graph_exc),
+                    source="runner",
+                    error=graph_exc,
+                    graph=agent_graph_type,
                 )
             return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
 
@@ -1121,12 +1211,13 @@ async def generate_answer_agentic(
 
     except Exception as exc:
         _record_endpoint_failure(endpoint_metadata, exc)
-        await error_logger.log_error(
-            error=exc,
-            component=Component.LLM,
-            pipeline_stage=PipelineStage.GENERATION,
+        await persist_policy_event(
+            policy=_policy_for_uncaught(exc),
             description="Agentic generation failed",
-            error_type=type(exc).__name__,
+            source="runner",
+            node=_node_from_exception(exc),
+            error=exc,
+            graph=agent_graph_type,
         )
         raise
     finally:
@@ -1176,7 +1267,6 @@ async def generate_answer_agentic_stream_helper(
         yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
         return
 
-    error_logger = get_error_logger()
     total_start = time.perf_counter()
     accumulated: List[str] = []
     used_fallback_llm = False
@@ -1188,6 +1278,7 @@ async def generate_answer_agentic_stream_helper(
     # Filled in as the graph streams, read back by every persistence path below.
     rag_tool_names: set[str] = set()
     graph_messages: List[Any] = []
+    agent_graph_type: Optional[str] = None
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
@@ -1489,14 +1580,15 @@ async def generate_answer_agentic_stream_helper(
             )
 
         if graph_exc is not None:
-            await error_logger.log_error(
-                error=graph_exc,
-                component=Component.LLM,
-                pipeline_stage=PipelineStage.GENERATION,
+            await persist_policy_event(
+                policy=_policy_for_uncaught(graph_exc),
                 description=(
                     "Primary agent node failed after agent_fallback produced an answer"
                 ),
-                error_type=type(graph_exc).__name__,
+                node=_node_from_exception(graph_exc),
+                source="runner",
+                error=graph_exc,
+                graph=agent_graph_type,
             )
 
         if in_graph_fallback_used:
@@ -1550,12 +1642,13 @@ async def generate_answer_agentic_stream_helper(
     except TimeoutError as exc:
         logger.warning("Agentic generation timed out: %s", exc)
         _record_endpoint_failure(endpoint_metadata, exc)
-        await error_logger.log_error(
-            error=exc,
-            component=Component.LLM,
-            pipeline_stage=PipelineStage.GENERATION,
+        await persist_policy_event(
+            policy=_policy_for_uncaught(exc),
             description="Agentic generation timed out",
-            error_type=type(exc).__name__,
+            source="runner",
+            node=_node_from_exception(exc),
+            error=exc,
+            graph=agent_graph_type,
         )
         answer = await append_missing_artifact_stubs(
             "".join(accumulated), _collected_artifact_ids()
@@ -1583,12 +1676,13 @@ async def generate_answer_agentic_stream_helper(
     except Exception as exc:
         logger.error("Agentic streaming error: %s", exc)
         _record_endpoint_failure(endpoint_metadata, exc)
-        await error_logger.log_error(
-            error=exc,
-            component=Component.LLM,
-            pipeline_stage=PipelineStage.GENERATION,
+        await persist_policy_event(
+            policy=_policy_for_uncaught(exc),
             description="Agentic streaming error",
-            error_type=type(exc).__name__,
+            source="runner",
+            node=_node_from_exception(exc),
+            error=exc,
+            graph=agent_graph_type,
         )
         error_info = build_error_payload(exc)
         answer = "".join(accumulated)

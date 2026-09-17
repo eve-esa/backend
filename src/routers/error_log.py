@@ -43,10 +43,10 @@ async def log_error(
             user_id=requesting_user.id,
             conversation_id=None,
             message_id=None,
-            logger_name="frontend",
             component=request.component or "FRONTEND",
+            source="frontend",
+            kind="frontend",
             error=error_dict,
-            error_type=request.error_type,
             pipeline_stage="CLIENT_ERROR",
             description=request.description or request.error_message,
         )

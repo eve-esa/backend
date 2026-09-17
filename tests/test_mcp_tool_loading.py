@@ -31,6 +31,12 @@ def _clear_mcp_tool_cache_fixture():
     clear_mcp_tool_cache()
 
 
+@pytest.fixture(autouse=True)
+def _policy_log():
+    with patch(f"{_LOADER}.persist_policy_event", new_callable=AsyncMock) as mocked:
+        yield mocked
+
+
 class TestLoadMcpToolsForServers:
     @pytest.mark.asyncio
     async def test_partial_failure_still_returns_other_server_tools(self):
@@ -60,6 +66,46 @@ class TestLoadMcpToolsForServers:
 
         assert tools == [good_tool]
         assert mock_client.get_tools.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_load_failure_logs_mcp_load_policy(self, _policy_log):
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(side_effect=RuntimeError("down"))
+
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient",
+            return_value=mock_client,
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.logger"):
+            tools = await _load_mcp_tools_for_servers(
+                [_mcp_server("effis", "https://effis.example/mcp")]
+            )
+
+        assert tools == []
+        _policy_log.assert_awaited()
+        kwargs = _policy_log.await_args.kwargs
+        assert kwargs["policy"] == "mcp_load"
+        assert kwargs["source"] == "mcp_load"
+        assert kwargs["extra"]["server"] == "effis"
+
+    @pytest.mark.asyncio
+    async def test_missing_url_logs_mcp_load_policy(self, _policy_log):
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient",
+            return_value=MagicMock(get_tools=AsyncMock(return_value=[])),
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.logger"):
+            tools = await _load_mcp_tools_for_servers(
+                [_mcp_server("orphan", "")]
+            )
+
+        assert tools == []
+        _policy_log.assert_awaited()
+        kwargs = _policy_log.await_args.kwargs
+        assert kwargs["policy"] == "mcp_load"
+        assert kwargs["extra"]["server"] == "orphan"
 
     @pytest.mark.asyncio
     async def test_all_servers_fail_returns_empty_list(self):

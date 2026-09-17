@@ -11,12 +11,10 @@ langchain-mistralai==1.1.4
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.7
 langgraph==1.2.4
-# Standalone agent graphs (import package ``agents``). Pinned to a commit, not to
-# @main: the release workflow rebuilds the image from the release commit, so an
-# unpinned branch would resolve whatever agents HEAD is at build time and ship a
-# different version than the one dev was tested with. This SHA is the commit
-# inside esa-eve-dev-app-backend:sha-ea6fffc.
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@6716674b566cc4cd1e7223dced4901b5256a8ead
+# Standalone agent graphs (import package ``agents``). Pinned to a commit, not
+# @main: the release image is built from this SHA. bbc2fad (0.5.3) emits
+# retry/timeout/error_handler/fallback via compile(..., on_policy=...).
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@bbc2fad57ea6ed693b9f97eec7549ed765c27bac
 langfuse>=2.60.10
 openai>=2.53.0,<3.0.0
 langgraph-checkpoint==4.2.0

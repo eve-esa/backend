@@ -57,6 +57,7 @@ docs/                 # Site content (this page, api references)
 - Documents (ingestion + examples): `[routers-document]`
 - Conversations (chat lifecycle + examples): `[routers-conversation]`
 - Messages (generation/streaming + examples): `[routers-message]`
+- Error logs (how / kinds / call sites): [error-logs](error-logs.md)
 
 Use `[swagger-api]` only when you need exhaustive field-level reference.
 

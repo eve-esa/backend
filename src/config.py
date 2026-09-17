@@ -10,7 +10,15 @@ from dotenv import load_dotenv
 
 from src.constants import private_collection_name_for
 
-load_dotenv(override=True)
+# Default True so a local `.env` still wins over leftover shell exports.
+# Docker Compose sets LOAD_DOTENV_OVERRIDE=false so fixture URLs (and AUTH_*)
+# injected as container env are not clobbered by the bind-mounted `.env`.
+_load_dotenv_override = os.getenv("LOAD_DOTENV_OVERRIDE", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+load_dotenv(override=_load_dotenv_override)
 
 
 def getenv_or(name: str, default: str = "") -> str:

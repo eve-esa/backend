@@ -30,9 +30,13 @@ async def test_log_error_success(async_client):
         error_log = await ErrorLog.find_by_id(body["id"])
         assert error_log is not None
         assert error_log.user_id == user.id
-        assert error_log.error_type == "TypeError"
-        assert error_log.error["message"] == "Test error message"
-        assert error_log.logger_name == "frontend"
+        assert error_log.error["type"] == "TypeError"
+        assert error_log.error_type is None
+        assert "message" not in error_log.error
+        assert error_log.description == "Test error message"
+        assert error_log.logger_name is None
+        assert error_log.source == "frontend"
+        assert error_log.kind == "frontend"
         assert error_log.component == "FRONTEND"
         assert error_log.pipeline_stage == "CLIENT_ERROR"
         assert error_log.conversation_id is None
@@ -73,7 +77,8 @@ async def test_log_error_with_all_fields(async_client):
         error_log = await ErrorLog.find_by_id(body["id"])
         assert error_log is not None
         assert error_log.user_id == user.id
-        assert error_log.error_type == "ReferenceError"
+        assert error_log.error["type"] == "ReferenceError"
+        assert error_log.error_type is None
         assert error_log.error["message"] == "Complete error test"
         assert error_log.error["stack"] == payload["error_stack"]
         assert error_log.error["url"] == payload["url"]
