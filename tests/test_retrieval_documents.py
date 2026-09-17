@@ -180,3 +180,96 @@ def test_python_repr_of_error_block_is_an_error():
     blocks = [{"type": "text", "text": json.dumps({"error": "EVE /retrieve returned 401"})}]
     assert extract_documents_from_retrieval_payload(str(blocks)) == []
     assert is_retrieval_error_payload(str(blocks))
+
+
+class TestParsedTextContentBlock:
+    """A content block whose ``text`` was parsed from JSON string into a dict.
+
+    Our MCP client (``_serialize_content_item`` in ``mcp_client_service.py``)
+    runs ``json.loads`` on a string ``text`` before the extractor sees it, so a
+    Wiley ``semanticSearch`` envelope arrives as
+    ``{"type": "text", "text": {"success": ..., "results": [chunks]}}``. The
+    extractor must still unwrap the block and split the chunk list, otherwise
+    the whole envelope is kept as one bundled document and the top-k cap never
+    applies to the individual Wiley chunks.
+    """
+
+    def _envelope(self, n: int = 20) -> dict:
+        return {
+            "success": True,
+            "query": "Sentinel-2 calibration",
+            "count": n,
+            "results": [
+                {
+                    "id": f"10.1002/x.{i:04d}",
+                    "text": f"chunk {i} body",
+                    "doi": "10.1002/x",
+                    "metadata": {"journal_code": "23782242"},
+                }
+                for i in range(n)
+            ],
+        }
+
+    def test_dict_text_content_block_is_split_into_chunks(self):
+        block = {"type": "text", "text": self._envelope(20)}
+
+        documents = extract_documents_from_retrieval_payload(
+            block, normalize=False, keep_text_fallback=True
+        )
+
+        assert len(documents) == 20
+        assert [d["id"] for d in documents] == [
+            f"10.1002/x.{i:04d}" for i in range(20)
+        ]
+
+    def test_dict_text_content_block_normalizes_to_documents(self):
+        block = {"type": "text", "text": self._envelope(3)}
+
+        documents = extract_documents_from_retrieval_payload(block)
+
+        assert len(documents) == 3
+        assert all("text" in d and "id" in d for d in documents)
+
+    def test_string_and_dict_text_yield_the_same_chunks(self):
+        envelope = self._envelope(5)
+
+        from_string = extract_documents_from_retrieval_payload(
+            {"type": "text", "text": json.dumps(envelope)},
+            normalize=False,
+            keep_text_fallback=True,
+        )
+        from_dict = extract_documents_from_retrieval_payload(
+            {"type": "text", "text": envelope},
+            normalize=False,
+            keep_text_fallback=True,
+        )
+
+        assert from_string == from_dict
+
+    def test_dict_text_without_results_is_kept_as_one_document(self):
+        # A parsed-dict text that carries no chunk list is not an envelope; keep
+        # it as a single document rather than dropping it.
+        block = {"type": "text", "text": {"title": "no chunks here", "body": "..."}}
+
+        documents = extract_documents_from_retrieval_payload(
+            block, normalize=False, keep_text_fallback=True
+        )
+
+        assert len(documents) == 1
+        assert documents[0] == {"title": "no chunks here", "body": "..."}
+
+    def test_real_retrieval_document_is_not_mistaken_for_content_block(self):
+        # A document carries extra keys (id, doi, metadata) beyond the content
+        # block envelope, so it must pass through untouched even with dict text.
+        doc = {
+            "id": "x",
+            "text": "body",
+            "doi": "10.1002/x",
+            "metadata": {"page": 4},
+        }
+
+        documents = extract_documents_from_retrieval_payload(
+            [doc], normalize=False, keep_text_fallback=True
+        )
+
+        assert documents == [doc]
