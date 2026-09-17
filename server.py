@@ -26,6 +26,7 @@ from src.routers import (
     user_router,
 )
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
+from src.utils.error_logger import get_error_logger
 
 configure_logging(level=logging.DEBUG)
 
@@ -87,6 +88,10 @@ def create_app(debug=False, **kwargs):
                 await shutdown_mcp_proxy_lifespans()
             except Exception:
                 logging.exception("MCP proxy sub-app shutdown failed")
+            try:
+                await get_error_logger().flush()
+            except Exception:
+                logging.exception("Error log flush failed")
             await async_mongo_manager.close()
             logging.info("Database connection closed")
 
