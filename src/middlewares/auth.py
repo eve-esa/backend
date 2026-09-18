@@ -87,18 +87,18 @@ async def _verify_api_key(token: str) -> tuple[str, str]:
     return str(doc["user_id"]), str(doc["_id"])
 
 
-async def _get_user_from_api_key(token: str) -> User:
+async def _get_user_from_api_key(token: str) -> tuple[User, str]:
     try:
-        user_id, _ = await _verify_api_key(token)
+        user_id, key_id = await _verify_api_key(token)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     user = await User.find_by_id(user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-    # Raised, not mapped here: get_current_user turns it into the one 403 body
+    # Raised, not mapped here: get_auth_context turns it into the one 403 body
     # every entry point answers with, so the shape is written down once.
     assert_approved_doc(user)
-    return user
+    return user, key_id
 
 
 async def resolve_principal_from_bearer_token(token: str) -> Principal:
@@ -144,13 +144,27 @@ async def get_bearer_token(
     return credentials.credentials
 
 
-async def get_current_user(
+@dataclass(frozen=True)
+class AuthContext:
+    """Who is calling, resolved once per request.
+
+    ``principal.api_key_id`` is ``None`` for an identity-provider session and
+    set for an ``eve_`` key: the API-key routes need it to attribute
+    provenance (who created a new key) and to mark ``is_current`` on a list.
+    """
+
+    user: User
+    principal: Principal
+
+
+async def get_auth_context(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-) -> User:
+) -> AuthContext:
     token = credentials.credentials
     try:
         if token.startswith("eve_"):
-            return await _get_user_from_api_key(token)
+            user, key_id = await _get_user_from_api_key(token)
+            return AuthContext(user, Principal(user.id, AUTH_TYPE_API_KEY, key_id))
 
         # The resolver raises PermissionError, which FastAPI has no handler for: left
         # unhandled every rejected token would answer 500 instead of 401.
@@ -173,4 +187,15 @@ async def get_current_user(
     user = await User.find_by_id(principal.user_id)
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
-    return user
+    return AuthContext(user, principal)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> User:
+    """Thin wrapper over :func:`get_auth_context` for routes that need only the user.
+
+    A route depends on one of the two, never both: calling both would stamp
+    ``last_used_at`` on the calling key twice.
+    """
+    return (await get_auth_context(credentials)).user
