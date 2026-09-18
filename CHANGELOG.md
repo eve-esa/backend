@@ -11,6 +11,24 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.2.0](https://github.com/eve-esa/backend/compare/v0.1.5...v0.2.0) (2026-09-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api-keys:** self-service key management with provenance, cascade revoke and a cap ([#220](https://github.com/eve-esa/backend/issues/220))
+* **openai-gateway:** allowlist forwarded paths and charge the token budget ([#221](https://github.com/eve-esa/backend/issues/221))
+
+### Added
+
+* **api-keys:** self-service key management with provenance, cascade revoke and a cap ([#220](https://github.com/eve-esa/backend/issues/220)) ([c1c309b](https://github.com/eve-esa/backend/commit/c1c309b4469f62297133f17b1f3d3ac17c6c5246))
+* **openai-gateway:** allowlist forwarded paths and charge the token budget ([#221](https://github.com/eve-esa/backend/issues/221)) ([b7aba48](https://github.com/eve-esa/backend/commit/b7aba4881ed93c469f2e8fb325469bc019d430f0))
+
+
+### Fixed
+
+* **openai-gateway:** resolve the route before reserving the token budget ([#223](https://github.com/eve-esa/backend/issues/223)) ([a5aa545](https://github.com/eve-esa/backend/commit/a5aa545a02f7fb8397e88487caec55a5d03bcffe))
+
 ## [0.1.5](https://github.com/eve-esa/backend/compare/v0.1.4...v0.1.5) (2026-09-17)
 
 
