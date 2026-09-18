@@ -18,11 +18,21 @@ async def test_create_api_key(async_client):
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 201
+        assert response.headers["Cache-Control"] == "no-store"
         body = response.json()
         assert body["id"]
         assert body["name"] == "EVA integration"
         assert body["token"].startswith("eve_")
-        assert body["expires_at"] is None
+        assert body["token_suffix"] == body["token"][-6:]
+        assert body["status"] == "active"
+        assert body["created_via"] == "oidc"
+        assert body["created_by_key_id"] is None
+        assert body["created_by"] is None
+        assert body["is_current"] is False
+        # Default expiry is now 90 days, not "never".
+        expires_at = datetime.fromisoformat(body["expires_at"])
+        expected = datetime.now(timezone.utc) + timedelta(days=90)
+        assert abs((expires_at - expected).total_seconds()) < 60
         assert body["created_at"]
     finally:
         await ApiKey.delete_many({"user_id": user.id})
@@ -32,11 +42,10 @@ async def test_create_api_key(async_client):
 @pytest.mark.asyncio
 async def test_create_api_key_with_expiry(async_client):
     user, token = await create_test_user_and_token()
-    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
     try:
         response = await async_client.post(
             "/users/api-keys",
-            json={"name": "Short-lived key", "expires_at": expires_at.isoformat()},
+            json={"name": "Short-lived key", "expires_in_days": 30},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 201
@@ -112,8 +121,14 @@ async def test_list_api_keys(async_client):
             headers={"Authorization": f"Bearer {token}"},
         )
         assert list_resp.status_code == 200
-        names = {k["name"] for k in list_resp.json()}
+        assert "X-API-Key-Limit" in list_resp.headers
+        items = list_resp.json()
+        names = {k["name"] for k in items}
         assert {"key-a", "key-b"}.issubset(names)
+        for item in items:
+            assert "token" not in item
+            assert "key_hash" not in item
+            assert item["status"] in ("active", "expired", "revoked")
     finally:
         await ApiKey.delete_many({"user_id": user.id})
         await cleanup_models([user])
@@ -179,6 +194,10 @@ async def test_expired_api_key_is_rejected(async_client):
 
 @pytest.mark.asyncio
 async def test_revoke_api_key_ownership(async_client):
+    """Revoking another user's key is a 404, the same body a missing id gets.
+
+    A 403 would be an existence oracle for somebody else's key id; 404 is not.
+    """
     user_a, token_a = await create_test_user_and_token()
     user_b, token_b = await create_test_user_and_token()
     try:
@@ -187,13 +206,21 @@ async def test_revoke_api_key_ownership(async_client):
             json={"name": "user-a key"},
             headers={"Authorization": f"Bearer {token_a}"},
         )
-        key_id = create_resp.json()["id"]
+        body = create_resp.json()
+        key_id = body["id"]
+        raw_token = body["token"]
 
         revoke_resp = await async_client.delete(
             f"/users/api-keys/{key_id}",
             headers={"Authorization": f"Bearer {token_b}"},
         )
-        assert revoke_resp.status_code == 403
+        assert revoke_resp.status_code == 404
+
+        me_resp = await async_client.get(
+            "/users/me",
+            headers={"Authorization": f"Bearer {raw_token}"},
+        )
+        assert me_resp.status_code == 200
     finally:
         await ApiKey.delete_many({"user_id": user_a.id})
         await cleanup_models([user_a, user_b])

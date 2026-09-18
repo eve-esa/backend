@@ -115,6 +115,19 @@ async def ensure_indexes() -> None:
         [("user_id", 1)],
         name="api_keys_user_id",
     )
+    # List sorted by recency, and the revoke cascade's own-keys load.
+    await _create_index(
+        api_keys,
+        [("user_id", 1), ("timestamp", -1)],
+        name="api_keys_user_time",
+    )
+    # The revoke cascade's BFS walks created_by_key_id; the throttle and list
+    # parent-resolution queries are filtered by user_id already covered above.
+    await _create_index(
+        api_keys,
+        [("user_id", 1), ("created_by_key_id", 1)],
+        name="api_keys_user_parent",
+    )
 
     # Artifacts: per-user listing sorted by recency, and the conversation_id filter
     # used by GET /artifacts.

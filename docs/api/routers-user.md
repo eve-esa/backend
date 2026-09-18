@@ -1,12 +1,13 @@
 # User API
 
-User routes manage the authenticated user's profile and usage metadata.
+User routes manage the authenticated user's profile, usage metadata, and self-service API
+keys.
 
 ## API call order
 
-1. Complete auth flow (`/signup`, `/verify`, `/login`).
-2. Use `access_token` in `Authorization` header.
-3. Call user routes (`/users/me`, `/users/me/token-usage`, `/users` patch).
+1. Complete auth flow (`/signup`, `/verify`, `/login`) or hold an `eve_` API key.
+2. Use `access_token` (or the API key) in the `Authorization` header.
+3. Call user routes (`/users/me`, `/users/me/token-usage`, `/users` patch, `/users/api-keys`).
 
 Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
 
@@ -97,6 +98,15 @@ Updates mutable profile fields for the authenticated user.
 ### Notes
 
 - Route updates only the current authenticated user.
+
+## API keys
+
+Create, list and revoke self-service `eve_` API keys. Full concepts, error table and a
+curl walkthrough live in [API keys](api-keys.md); this page only links the endpoints.
+
+- `POST /users/api-keys`: create a key. Body optional, every field optional.
+- `GET /users/api-keys[?include_revoked=true]`: list this user's keys.
+- `DELETE /users/api-keys/{id}`: revoke a key, cascading to its children.
 
 ## Full API reference
 

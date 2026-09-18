@@ -327,6 +327,30 @@ async def test_api_key_of_a_pending_user_is_refused(async_client, monkeypatch):
         await cleanup_models([user])
 
 
+@pytest.mark.asyncio
+async def test_pending_users_key_is_refused_on_every_api_key_route(async_client):
+    """The self-service key routes go through get_auth_context, not get_current_user.
+
+    Both dependencies share the same approval check, but only a route-level
+    test proves the wiring: POST, GET and DELETE all answer the one pending body.
+    """
+    user, _ = await create_test_user_and_token(approval_status=APPROVAL_PENDING)
+    try:
+        raw_key = await make_api_key(user.id)
+        headers = {"Authorization": f"Bearer {raw_key}"}
+
+        assert_pending_body(
+            await async_client.post("/users/api-keys", json={}, headers=headers)
+        )
+        assert_pending_body(await async_client.get("/users/api-keys", headers=headers))
+        assert_pending_body(
+            await async_client.delete("/users/api-keys/000000000000000000000000", headers=headers)
+        )
+    finally:
+        await ApiKey.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
 # ── The mails that go with a sign-up ──────────────────────────────────────────
 # Sign-in must not depend on mail, so the notifier is scheduled rather than
 # awaited. That makes "was it scheduled" and "does a failure leak" the two

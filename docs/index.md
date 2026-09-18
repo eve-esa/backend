@@ -36,8 +36,10 @@ docs/                 # Site content (this page, api references)
 ### Key workflows
 
 - **Authentication**
-    - Signup, email activation, login, refresh
-    - Endpoints in `routers.auth` and `routers.forgot_password`
+    - Sign in, sign up, verify mail and reset password at the identity provider (Keycloak
+      locally, Cognito per AWS environment), not at this API
+    - Machine callers use a self-service `eve_` API key instead: create, list, revoke via
+      `routers.user`
 - **Collections & Documents**
     - Create Qdrant collections, upload documents, delete documents
     - Ingestion triggers parsing, chunking, embedding, and vector upsert
@@ -52,7 +54,8 @@ docs/                 # Site content (this page, api references)
 
 ### API guides (usage-first)
 
-- Auth (working examples): `[routers-auth]`
+- Auth (identity provider, API keys): `[routers-auth]`
+- API keys (create/list/revoke, curl walkthrough): [api-keys](api/api-keys.md)
 - OpenAI-compatible gateway (`/v1/*`, budget, SDK example): [openai-gateway](api/openai-gateway.md)
 - Collections (public/private + examples): `[routers-collection]`
 - Documents (ingestion + examples): `[routers-document]`
@@ -81,9 +84,8 @@ headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 ### Recommended API call order
 
 1. **Auth first**
-    - `POST /signup`
-    - `POST /verify`
-    - `POST /login` -> get `access_token` / `refresh_token`
+    - Sign in at the identity provider, get `ACCESS_TOKEN` from its response
+    - Or create an `eve_` API key once with that token and use it from then on
 2. **Collection discovery**
     - `GET /collections/public` to get valid `public_collections` names for generation
 3. **Conversation lifecycle**
