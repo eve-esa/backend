@@ -107,6 +107,10 @@ def create_app(debug=False, **kwargs):
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Custom response headers are not exposed to browser JS by default:
+        # the API key list's cap and the create throttle's retry hint need to
+        # be, so the frontend can read them without a wildcard here too.
+        expose_headers=["X-API-Key-Limit", "Retry-After"],
     )
 
     @app.get(path="/")
