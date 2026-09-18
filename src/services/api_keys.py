@@ -91,6 +91,33 @@ async def _count_active(user_id: str) -> int:
     )
 
 
+async def _is_among_first_active(user_id: str, key_id: str, cap: int) -> bool:
+    """True if ``key_id`` is one of the first ``cap`` active keys for the
+    user, ordered by ``_id`` (insertion order). Every concurrent caller runs
+    this same query and reaches the same verdict, so the rows that survive a
+    burst of concurrent creates are always the earliest ``cap`` of them
+    instead of whichever request happened to run its recount last.
+    """
+    if cap <= 0:
+        return False
+    now = datetime.now(timezone.utc)
+    cursor = (
+        ApiKey.get_collection()
+        .find(
+            {
+                "user_id": user_id,
+                "revoked_at": None,
+                "$or": [{"expires_at": None}, {"expires_at": {"$gt": now}}],
+            },
+            {"_id": 1},
+        )
+        .sort("_id", 1)
+        .limit(cap)
+    )
+    survivor_ids = {str(doc["_id"]) async for doc in cursor}
+    return key_id in survivor_ids
+
+
 async def create_api_key(
     request: Optional[CreateApiKeyRequest], auth: AuthContext
 ) -> CreateApiKeyResponse:
@@ -154,14 +181,21 @@ async def create_api_key(
 
     # Verify again post-insert: a concurrent create or a concurrent revoke of
     # the parent may have invalidated this insert between the checks above and
-    # now. The last survivor's recount always includes every other survivor,
-    # so nobody ends up above the cap.
+    # now. A plain recount is not enough: every concurrent inserter would see
+    # itself as "one of the over-cap ones" and delete its own row, so a burst
+    # of concurrent creates could spuriously leave zero survivors even though
+    # the cap was never reached. Instead, rank the currently active keys by
+    # _id (insertion order) and keep only this row if it is among the first
+    # `cap` of them; everyone agrees on the same ranking, so exactly
+    # min(active count, cap) rows survive and the earliest inserts win.
     parent_still_active = True
     if parent is not None:
         fresh_parent = await ApiKey.find_by_id(parent.id)
         parent_still_active = fresh_parent is not None and fresh_parent.revoked_at is None
 
-    if not parent_still_active or await _count_active(user.id) > API_KEY_MAX_ACTIVE_PER_USER:
+    within_cap = await _is_among_first_active(user.id, api_key.id, API_KEY_MAX_ACTIVE_PER_USER)
+
+    if not parent_still_active or not within_cap:
         await ApiKey.get_collection().delete_one({"_id": ObjectId(api_key.id)})
         if not parent_still_active:
             _audit_create_refused(user.id, "parent_revoked", created_by_key_id=parent_key_id)

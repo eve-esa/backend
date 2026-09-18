@@ -417,10 +417,14 @@ async def test_concurrent_creates_never_exceed_the_cap(async_client, monkeypatch
         )
         statuses = [r.status_code for r in responses]
         assert set(statuses) <= {201, 409}
-        assert statuses.count(201) <= 3
+        # Lower bound: starting from 0 active keys, 6 concurrent creates
+        # against a cap of 3 must land exactly 3 survivors, not fewer. A
+        # check-then-act recount that lets every over-cap inserter delete
+        # its own row can spuriously drop all of them to zero.
+        assert statuses.count(201) == 3
 
         active = await ApiKey.count_documents({"user_id": user.id, "revoked_at": None})
-        assert active <= 3
+        assert active == 3
     finally:
         await ApiKey.delete_many({"user_id": user.id})
         await cleanup_models([user])
