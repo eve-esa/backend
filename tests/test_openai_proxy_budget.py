@@ -299,6 +299,29 @@ async def test_connect_error_no_charge_no_tracking(async_client, monkeypatch, pi
 
 
 @pytest.mark.asyncio
+async def test_unconfigured_provider_holds_no_budget(async_client, monkeypatch, pinned_budget):
+    """A provider that is not configured answers 400 before anything is reserved.
+
+    The route used to be resolved after the reservation, outside the block that
+    settles it, so each such request kept its estimate out of the budget for good.
+    """
+    user, token = await create_test_user_and_token()
+    try:
+        enable_proxy(monkeypatch, _proxy, jsc_url="")
+        for _ in range(3):
+            resp = await async_client.post(
+                "/v1/chat/completions",
+                json={"model": "jsc/alias-eve", "messages": [{"role": "user", "content": "Hello there"}]},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 400
+        refreshed = await User.find_by_id(user.id)
+        assert (refreshed.rate_limit_tokens_used or 0) == 0
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
 async def test_mid_stream_exception_charges_the_estimate(async_client, monkeypatch, pinned_budget):
     """A client that aborts, or an upstream that drops the connection mid-stream, still pays.
 

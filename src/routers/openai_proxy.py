@@ -521,6 +521,11 @@ class OpenAIProxyDispatcher:
         # a concurrent batch can overshoot the cap, not predict the exact
         # charge. See reserve_token_budget for why this replaces a plain
         # check-then-act read.
+        # Route first: an unconfigured provider raises ValueError (answered 400)
+        # outside the try/finally below that settles the reservation, so
+        # reserving before this would leave those tokens held for good.
+        upstream_base, upstream_api_key, upstream_model = resolve_proxy_route(model)
+
         req_texts, token_array_len = _request_texts_for_estimate(req_body)
         estimated_tokens = count_tokens_for_texts(*req_texts) + token_array_len
         exceeded, reserved_tokens = await reserve_token_budget(user, estimated_tokens)
@@ -529,7 +534,6 @@ class OpenAIProxyDispatcher:
             response_started["value"] = True
             return
 
-        upstream_base, upstream_api_key, upstream_model = resolve_proxy_route(model)
         url = f"{upstream_base}{upstream_path}" + (f"?{query}" if query else "")
 
         fwd_body = _build_forward_body(
