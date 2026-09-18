@@ -297,6 +297,41 @@ def _is_mcp_content_block(value: Any) -> bool:
     return set(value.keys()) <= _CONTENT_BLOCK_KEYS
 
 
+def stringify_message_content(content: Any) -> str:
+    """Render a LangChain message ``content`` value as a plain display string.
+
+    ``content`` is a plain string for a normal completion, but MCP tool
+    output (and some providers' multi-part assistant messages) arrives as a
+    list of content blocks, e.g. ``[{"type": "text", "text": "..."}]``.
+    ``str(content)`` on that list is the Python repr, which no client can
+    parse back as JSON, so this joins every text block's ``text`` with
+    ``"\\n"`` and turns any other block into a short placeholder such as
+    ``[image]`` or ``[tool_use block]``. A plain string is returned unchanged.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: List[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if _is_mcp_content_block(item):
+            text = item.get("text")
+            parts.append(text if isinstance(text, str) else json.dumps(text))
+            continue
+        block_type = item.get("type") if isinstance(item, dict) else None
+        if block_type == "image":
+            parts.append("[image]")
+        elif block_type:
+            parts.append(f"[{block_type} block]")
+        else:
+            parts.append(f"[{type(item).__name__} block]")
+    return "\n".join(parts)
+
+
 def _retrieval_payload_roots(
     payload: Any, *, keep_text_fallback: bool = False
 ) -> List[Any]:
