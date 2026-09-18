@@ -317,6 +317,32 @@ CUSTOM_MODEL_KMS_KEY_ID = os.getenv("CUSTOM_MODEL_KMS_KEY_ID", "").strip() or No
 BYOK_LOCAL_KEK = os.getenv("BYOK_LOCAL_KEK", "").strip() or None
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Self-service API keys (src/services/api_keys.py). Tolerant int parse, same
+# convention as SIGNUP_AUTO_APPROVE_LIMIT: an unparsable value is logged and
+# ignored rather than crashing startup.
+def _tolerant_int_env(name: str, default: int) -> int:
+    raw = getenv_or(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid integer value for %s: %r", name, raw
+        )
+        return default
+
+
+# <=0 disables creation entirely (every request answers 409).
+API_KEY_MAX_ACTIVE_PER_USER = _tolerant_int_env("API_KEY_MAX_ACTIVE_PER_USER", 10)
+# Expiry applied when a create request omits both expires_in_days and
+# expires_at. <=0 means "never" (matches the pre-B1 default).
+API_KEY_DEFAULT_EXPIRES_IN_DAYS = _tolerant_int_env("API_KEY_DEFAULT_EXPIRES_IN_DAYS", 90)
+# <=0 disables the per-user create throttle.
+API_KEY_CREATE_MAX_PER_HOUR = _tolerant_int_env("API_KEY_CREATE_MAX_PER_HOUR", 30)
+# Not env-configurable: the outer bound on expires_in_days/expires_at, whatever
+# the default above is.
+API_KEY_MAX_LIFETIME_DAYS = 3650
+# ──────────────────────────────────────────────────────────────────────────────
+
 def redis_client_kwargs() -> Dict[str, Any]:
     """
     Connection kwargs for Redis clients that use blocking pub/sub reads.
