@@ -1,8 +1,9 @@
 import importlib
+import logging
 
 import pytest
 
-from src.config import Config, getenv_or
+from src.config import Config, configure_logging, getenv_or
 from src.constants import (
     PRIVATE_COLLECTION_NAME_DEV,
     PRIVATE_COLLECTION_NAME_PROD,
@@ -290,3 +291,12 @@ def test_legacy_non_prod_uses_dev_private_collection(monkeypatch):
         assert cfg.PRIVATE_COLLECTION_NAME == PRIVATE_COLLECTION_NAME_DEV
     finally:
         _reload_config(monkeypatch)
+
+
+def test_configure_logging_keeps_pymongo_command_bodies_out_of_debug_logs():
+    # The app runs the root logger at DEBUG; pymongo's command monitoring would
+    # then log every command body, including the key_hash of each API key lookup.
+    configure_logging(level=logging.DEBUG)
+
+    assert not logging.getLogger("pymongo.command").isEnabledFor(logging.DEBUG)
+    assert logging.getLogger("pymongo.command").isEnabledFor(logging.WARNING)

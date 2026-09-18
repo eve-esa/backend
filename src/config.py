@@ -452,6 +452,11 @@ def configure_logging(level=logging.INFO):
         root_logger.setLevel(level)
         root_logger.addHandler(console_handler)
 
+    # server.py runs the root logger at DEBUG, where pymongo's command monitoring
+    # logs every command body: the key_hash filter of each API key lookup, whole
+    # user documents. Outside the handler guard so it holds however logging was set up.
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+
 
 class Config:
     def __init__(self, config_path: str = "config.yaml"):
