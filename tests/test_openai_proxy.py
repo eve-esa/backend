@@ -1,12 +1,17 @@
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from server import app as _root_app
 from src.routers.openai_proxy import parse_proxy_model, resolve_proxy_route
 from tests.utils.cleaner import cleanup_models
+from tests.utils.openai_proxy import FAKE_JSC_UPSTREAM as _FAKE_JSC_UPSTREAM
+from tests.utils.openai_proxy import FAKE_UPSTREAM as _FAKE_UPSTREAM
+from tests.utils.openai_proxy import enable_proxy as _enable_proxy_for
+from tests.utils.openai_proxy import minimal_completion_body as _minimal_completion_body
+from tests.utils.openai_proxy import mock_client as _mock_client
 from tests.utils.utils import create_test_user_and_token
 
 # App stack: MCPProxyDispatcher → OpenAIProxyDispatcher → FastAPI
@@ -21,49 +26,15 @@ def _reset_openai_proxy_http_client():
     yield
 
 
-_FAKE_UPSTREAM = "http://fake-upstream"
-_FAKE_JSC_UPSTREAM = "http://fake-jsc-upstream"
-
-
 def _enable_proxy(monkeypatch, *, runpod_url: str = _FAKE_UPSTREAM, jsc_url: str = ""):
-    monkeypatch.setattr(_proxy, "_proxy_enabled", True)
-    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_UPSTREAM_URL", runpod_url)
-    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_BASE_URL", jsc_url)
-    monkeypatch.setattr("src.routers.openai_proxy.OPENAI_PROXY_API_KEY", "fake-runpod-key")
-    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_API_KEY", "fake-jsc-key")
+    _enable_proxy_for(monkeypatch, _proxy, runpod_url=runpod_url, jsc_url=jsc_url)
 
 
-def _minimal_completion_body() -> bytes:
-    return json.dumps(
-        {
-            "id": "chatcmpl-abc",
-            "object": "chat.completion",
-            "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        }
-    ).encode()
-
-
-def _mock_client(status: int = 200, body: bytes = b"{}", content_type: str = "application/json"):
-    """Return a mock httpx.AsyncClient whose stream() acts as an async context manager."""
-    resp = MagicMock()
-    resp.status_code = status
-    resp.headers = {"content-type": content_type}
-
-    async def aiter_bytes():
-        yield body
-
-    resp.aiter_bytes = aiter_bytes
-
-    cm = MagicMock()
-    cm.__aenter__ = AsyncMock(return_value=resp)
-    cm.__aexit__ = AsyncMock(return_value=None)
-
-    client = MagicMock()
-    client.stream.return_value = cm
-    return client, client.stream
+def _disable_token_budget(monkeypatch) -> None:
+    """These tests are about routing and the allowlist, not the budget."""
+    monkeypatch.setattr(
+        "src.services.token_rate_limiter._rate_limit_settings", lambda: {"enabled": False}
+    )
 
 
 # ── Proxy disabled ─────────────────────────────────────────────────────────────
@@ -497,6 +468,108 @@ async def test_caller_credentials_are_not_forwarded_upstream(async_client, monke
         assert fwd["authorization"] == "Bearer fake-runpod-key"
         assert token not in json.dumps(dict(fwd))
         assert not any(k.lower() == "cookie" for k in fwd)
+    finally:
+        await cleanup_models([user])
+
+
+# ── Allowlist ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_unallowlisted_path_returns_404_without_upstream_call(async_client, monkeypatch):
+    """Only the three billable POST paths are forwarded; anything else is a flat 404."""
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch)
+        _disable_token_budget(monkeypatch)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await async_client.post(
+            "/v1/load_lora_adapter",
+            json={"foo": "bar"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "Not Found"}
+        stream_mock.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_non_canonical_path_via_dispatcher_returns_404_without_upstream_call(async_client, monkeypatch):
+    """A path with dot segments is not one of the three allowlisted paths.
+
+    The dispatcher is called directly with the raw scope path, as the server
+    hands it over, so no client-side normalisation hides the case.
+    """
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch)
+        _disable_token_budget(monkeypatch)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions/../../other",
+            "query_string": b"",
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+        }
+
+        await _proxy(scope, receive, send)
+
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert start["status"] == 404
+        stream_mock.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+# ── stream_options ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_options_null_does_not_crash(async_client, monkeypatch):
+    """A caller-supplied ``"stream_options": null`` used to crash ``setdefault`` (TypeError -> 502)."""
+    user, token = await create_test_user_and_token()
+    try:
+        _enable_proxy(monkeypatch)
+        _disable_token_budget(monkeypatch)
+        sse_body = (
+            b'data: {"id":"c","object":"chat.completion.chunk",'
+            b'"choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        client, stream_mock = _mock_client(body=sse_body, content_type="text/event-stream")
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+            resp = await async_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "stream": True,
+                    "stream_options": None,
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert resp.status_code == 200
+        sent_body = json.loads(stream_mock.call_args.kwargs["content"])
+        assert sent_body["stream_options"] == {"include_usage": True}
     finally:
         await cleanup_models([user])
 

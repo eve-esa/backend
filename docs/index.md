@@ -53,6 +53,7 @@ docs/                 # Site content (this page, api references)
 ### API guides (usage-first)
 
 - Auth (working examples): `[routers-auth]`
+- OpenAI-compatible gateway (`/v1/*`, budget, SDK example): [openai-gateway](api/openai-gateway.md)
 - Collections (public/private + examples): `[routers-collection]`
 - Documents (ingestion + examples): `[routers-document]`
 - Conversations (chat lifecycle + examples): `[routers-conversation]`

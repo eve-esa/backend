@@ -49,11 +49,19 @@ async def track_usage(
     status_code: Optional[int] = None,
     outcome: Optional[str] = None,
     latency_ms: Optional[float] = None,
+    billed_tokens: Optional[int] = None,
 ) -> None:
     """Persist one OpenAI proxy usage event without affecting request flow.
 
     The lean event goes to ``openai_usage``; ``request_body``/``response_body``
     are offloaded to ``openai_usage_payloads`` under the same ``_id``.
+
+    ``billed_tokens`` is what actually moved the caller's token budget
+    (``src.services.token_rate_limiter.consume_tokens_for_user``), which can
+    differ from ``total_tokens``: it falls back to an estimate when the
+    upstream response carried no usage block, and it is 0 on an upstream
+    error, where nothing is charged even though the call is still tracked
+    here.
     """
     try:
         collection = get_collection("openai_usage")
@@ -69,6 +77,7 @@ async def track_usage(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
+                "billed_tokens": billed_tokens,
                 "status_code": status_code,
                 "outcome": outcome,
                 "latency_ms": latency_ms,
