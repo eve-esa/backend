@@ -58,6 +58,7 @@ from src.utils.helpers import (
     get_mongodb_uri,
     is_retrieval_error_payload,
     stringify_message_content,
+    stringify_tool_content,
 )
 from src.utils.langfuse_helper import get_callbacks, langfuse_context
 
@@ -191,7 +192,7 @@ def _serialise_trace_entry(
     elif ToolMessage and isinstance(msg, ToolMessage):
         entry["role"] = "tool"
         entry["name"] = getattr(msg, "name", "tool")
-        entry["content"] = stringify_message_content(msg.content)
+        entry["content"] = stringify_tool_content(msg.content)
     elif HumanMessage and isinstance(msg, HumanMessage):
         entry["role"] = "user"
         entry["content"] = (
@@ -1550,6 +1551,38 @@ async def generate_answer_agentic_stream_helper(
                     if mode == "updates":
                         if "agent_fallback" in payload:
                             in_graph_fallback_used = True
+                        # An agent step is traced from its node update, not from
+                        # the streamed chunks: the first chunk carrying a tool
+                        # call has no arguments yet when the provider streams
+                        # them, and no chunk carries the model or usage.
+                        for update_node, node_output in payload.items():
+                            msgs = (
+                                node_output.get("messages", [])
+                                if isinstance(node_output, dict)
+                                else []
+                            )
+                            if not isinstance(msgs, list):
+                                msgs = [msgs]
+                            for msg in msgs:
+                                if not (
+                                    AIMessage
+                                    and isinstance(msg, AIMessage)
+                                    and getattr(msg, "tool_calls", None)
+                                ):
+                                    continue
+                                started_at_s, entry_latency_s = (
+                                    trace_timeline.agent_step(
+                                        msg.tool_calls, at=time.perf_counter()
+                                    )
+                                )
+                                trace_entries.append(
+                                    _serialise_trace_entry(
+                                        msg,
+                                        node=update_node,
+                                        latency_s=entry_latency_s,
+                                        started_at_s=started_at_s,
+                                    )
+                                )
                         continue
 
                     chunk, metadata = payload
@@ -1567,7 +1600,7 @@ async def generate_answer_agentic_stream_helper(
 
                     if ToolMessage and isinstance(chunk, ToolMessage):
                         graph_messages.append(chunk)
-                        preview = stringify_message_content(chunk.content)[:200]
+                        preview = stringify_tool_content(chunk.content)[:200]
                         started_at_s, entry_latency_s = trace_timeline.tool_step(
                             getattr(chunk, "tool_call_id", None),
                             at=time.perf_counter(),
@@ -1606,17 +1639,6 @@ async def generate_answer_agentic_stream_helper(
                                 else f"Calling {tname}"
                             )
                             msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                            started_at_s, entry_latency_s = trace_timeline.agent_step(
-                                chunk.tool_calls, at=time.perf_counter()
-                            )
-                            trace_entries.append(
-                                _serialise_trace_entry(
-                                    chunk,
-                                    node=node,
-                                    latency_s=entry_latency_s,
-                                    started_at_s=started_at_s,
-                                )
-                            )
                             yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
                             continue
 

@@ -46,11 +46,17 @@ def _chain_manager(configured=("eve_jsc", "main", "fallback")) -> LLMManager:
 
 
 class _FakeStreamGraph:
-    """Graph that streams fallback output then raises the primary-node error."""
+    """Graph that streams fallback output then raises the primary-node error.
 
-    def __init__(self, updates=None, messages=None, raise_exc=None):
+    ``events`` is a list of ``(mode, payload)`` pairs yielded in order, for
+    tests that need the real interleaving of message chunks and node updates;
+    it is streamed after ``updates`` and ``messages``.
+    """
+
+    def __init__(self, updates=None, messages=None, raise_exc=None, events=None):
         self._updates = updates or []
         self._messages = messages or []
+        self._events = events or []
         self._raise = raise_exc
 
     async def astream(self, *args, **kwargs):
@@ -58,6 +64,8 @@ class _FakeStreamGraph:
             yield "updates", update
         for message in self._messages:
             yield "messages", message
+        for event in self._events:
+            yield event
         if self._raise is not None:
             raise self._raise
 
@@ -221,6 +229,39 @@ class TestSerialiseTraceEntry:
         entry = _serialise_trace_entry(msg, node="tools")
 
         assert entry["content"] == "already a string"
+
+    def test_tool_message_repr_from_the_agent_graph_is_decoded(self):
+        """The agent graph builds its ToolMessage with ``str(result)``, so the
+        content blocks arrive as the Python repr of the list, already a
+        string. The block's text must still come through exactly.
+        """
+        payload = '{"place_name": "ESRIN", "total_results": 1}'
+        msg = ToolMessage(
+            content=str([{"type": "text", "text": payload, "id": "lc_1"}]),
+            name="geocode_place",
+            tool_call_id="call-4",
+        )
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["content"] == payload
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            '[1, 2, {"a": 1}]',
+            '[{"type": "Feature", "properties": {}}]',
+            "[not a literal",
+        ],
+    )
+    def test_tool_message_list_like_string_that_is_not_blocks_is_unchanged(
+        self, content
+    ):
+        msg = ToolMessage(content=content, name="geocode", tool_call_id="call-5")
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["content"] == content
 
     def test_ai_message_content_blocks_get_the_same_normalisation(self):
         """Some providers stream the assistant message itself as content
@@ -944,31 +985,54 @@ class TestTraceTiming:
     an agent step starts when the previous event ended, a tool step starts
     when the agent step that requested it ended, and the final answer starts
     when the previous event ended and ends at stream completion.
+
+    The events follow LangGraph's order for ``stream_mode=["messages",
+    "updates"]``: a node's message chunks, then that node's update.
     """
 
-    async def test_agent_tool_final_chain_gets_exact_timings(self):
-        graph = _FakeStreamGraph(
-            messages=[
-                (
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {"name": "search", "args": {}, "id": "call-1"}
-                        ],
-                    ),
-                    {"langgraph_node": "agent"},
-                ),
-                (
-                    ToolMessage(
-                        content="result", name="search", tool_call_id="call-1"
-                    ),
-                    {"langgraph_node": "tools"},
-                ),
-                (AIMessage(content="final answer"), {"langgraph_node": "agent"}),
-            ],
-        )
-        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+    @staticmethod
+    def _tool_call_turn(tool_calls, streamed_args=None):
+        """The first streamed chunk of a tool-calling turn, then the update.
 
+        The chunk carries ``streamed_args`` (the provider has not sent the
+        arguments yet), the update carries the complete message.
+        """
+        chunk_calls = [
+            {**call, "args": call["args"] if streamed_args is None else streamed_args}
+            for call in tool_calls
+        ]
+        full = AIMessage(
+            content="",
+            tool_calls=tool_calls,
+            response_metadata={"model_name": "test-model"},
+            usage_metadata={
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+            },
+        )
+        chunk = AIMessage(content="", tool_calls=chunk_calls)
+        return [
+            ("messages", (chunk, {"langgraph_node": "agent"})),
+            ("updates", {"agent": {"messages": [full]}}),
+        ]
+
+    @staticmethod
+    def _tool_turn(*tool_messages):
+        return [
+            ("messages", (msg, {"langgraph_node": "tools"})) for msg in tool_messages
+        ] + [("updates", {"tools": {"messages": list(tool_messages)}})]
+
+    @staticmethod
+    def _answer_turn(text):
+        return [
+            ("messages", (AIMessage(content=text), {"langgraph_node": "agent"})),
+            ("updates", {"agent": {"messages": [AIMessage(content=text)]}}),
+        ]
+
+    @staticmethod
+    async def _trace_of(graph):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
         with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
             with _patched_runner(
                 _build_react_graph=MagicMock(return_value=graph)
@@ -980,8 +1044,26 @@ class TestTraceTiming:
                     user_id="test-user",
                 ):
                     pass
+        return patched["persist_message_state"].await_args.kwargs["trace"]
 
-        trace = patched["persist_message_state"].await_args.kwargs["trace"]
+    async def test_agent_tool_final_chain_gets_exact_timings(self):
+        graph = _FakeStreamGraph(
+            events=[
+                *self._tool_call_turn(
+                    [{"name": "search", "args": {"q": "x"}, "id": "call-1"}]
+                ),
+                *self._tool_turn(
+                    ToolMessage(
+                        content="result", name="search", tool_call_id="call-1"
+                    )
+                ),
+                *self._answer_turn("final answer"),
+            ]
+        )
+
+        trace = await self._trace_of(graph)
+
+        assert [e["role"] for e in trace] == ["assistant", "tool", "assistant"]
         assert [
             {"started_at_s": e["started_at_s"], "latency_s": e["latency_s"]}
             for e in trace
@@ -993,49 +1075,64 @@ class TestTraceTiming:
 
     async def test_parallel_tool_calls_share_the_same_start(self):
         graph = _FakeStreamGraph(
-            messages=[
-                (
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {"name": "search", "args": {}, "id": "call-1"},
-                            {"name": "search2", "args": {}, "id": "call-2"},
-                        ],
-                    ),
-                    {"langgraph_node": "agent"},
+            events=[
+                *self._tool_call_turn(
+                    [
+                        {"name": "search", "args": {"q": "a"}, "id": "call-1"},
+                        {"name": "search2", "args": {"q": "b"}, "id": "call-2"},
+                    ]
                 ),
-                (
+                *self._tool_turn(
                     ToolMessage(
                         content="result-1", name="search", tool_call_id="call-1"
                     ),
-                    {"langgraph_node": "tools"},
-                ),
-                (
                     ToolMessage(
                         content="result-2", name="search2", tool_call_id="call-2"
                     ),
-                    {"langgraph_node": "tools"},
                 ),
-            ],
+            ]
         )
-        request = GenerationRequest(query="hi", llm_type="main", agent="react")
 
-        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
-            with _patched_runner(
-                _build_react_graph=MagicMock(return_value=graph)
-            ) as patched:
-                async for _event in generate_answer_agentic_stream_helper(
-                    request,
-                    conversation_id="c1",
-                    message_id="m1",
-                    user_id="test-user",
-                ):
-                    pass
+        trace = await self._trace_of(graph)
 
-        trace = patched["persist_message_state"].await_args.kwargs["trace"]
+        agent_end = trace[0]["started_at_s"] + trace[0]["latency_s"]
         tool_entries = [e for e in trace if e["role"] == "tool"]
-        assert [e["started_at_s"] for e in tool_entries] == [2.0, 2.0]
+        assert [e["started_at_s"] for e in tool_entries] == [agent_end, agent_end]
         assert [e["latency_s"] for e in tool_entries] == [3.0, 4.0]
+
+    async def test_agent_step_is_traced_from_the_update_with_its_arguments(self):
+        """Providers stream tool-call arguments over several chunks, so the
+        first chunk with a tool call has ``args == {}``. The trace entry must
+        come from the node update: complete arguments, model and usage, and
+        one entry per agent step.
+        """
+        call = {
+            "name": "geocode_place",
+            "args": {"place_name": "ESRIN", "buffer_km": 2},
+            "id": "call-1",
+        }
+        output = str([{"type": "text", "text": '{"total_results": 1}', "id": "lc_1"}])
+        graph = _FakeStreamGraph(
+            events=[
+                *self._tool_call_turn([call], streamed_args={}),
+                *self._tool_turn(
+                    ToolMessage(
+                        content=output, name="geocode_place", tool_call_id="call-1"
+                    )
+                ),
+                *self._answer_turn("here it is"),
+            ]
+        )
+
+        trace = await self._trace_of(graph)
+
+        agent_steps = [e for e in trace if e.get("tool_calls")]
+        assert len(agent_steps) == 1
+        assert agent_steps[0]["tool_calls"] == [call]
+        assert agent_steps[0]["response_metadata"]["model_name"] == "test-model"
+        assert agent_steps[0]["usage_metadata"]["total_tokens"] == 12
+        tool_step = next(e for e in trace if e["role"] == "tool")
+        assert tool_step["content"] == '{"total_results": 1}'
 
 
 class TestNodeBudgetSemantics:
