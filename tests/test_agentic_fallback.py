@@ -83,6 +83,22 @@ def _fake_agent():
     return agent
 
 
+def _fake_clock(step: float = 1.0):
+    """A ``time.perf_counter`` stand-in advancing by ``step`` seconds a call.
+
+    First call returns ``0.0``, second ``step``, third ``2 * step``, and so
+    on, so timing tests can predict exact ``started_at_s``/``latency_s``
+    values from the call order alone.
+    """
+    state = {"value": -step}
+
+    def _tick() -> float:
+        state["value"] += step
+        return state["value"]
+
+    return _tick
+
+
 @contextlib.contextmanager
 def _patched_runner(**overrides):
     """Patch the runner's external boundaries with sensible async defaults."""
@@ -152,6 +168,75 @@ class TestSerialiseTraceEntry:
         assert entry["tool_call_id"] == "call-1"
         assert entry["status"] == "success"
         assert entry["id"] == "tool-1"
+
+    def test_includes_started_at_s_when_given(self):
+        msg = AIMessage(content="answer")
+
+        entry = _serialise_trace_entry(
+            msg, node="agent", latency_s=1.2, started_at_s=0.5
+        )
+
+        assert entry["started_at_s"] == 0.5
+        assert entry["latency_s"] == 1.2
+
+    def test_tool_message_text_content_block_with_extra_key_is_unwrapped_exactly(
+        self,
+    ):
+        """MCP tool output arrives as content blocks, e.g.
+        ``[{"type": "text", "text": "...", "id": "lc_..."}]``. The block's own
+        ``text`` string (here itself a JSON document) must come through
+        exactly as written, not as the Python repr of the whole list, and the
+        extra ``id`` key must not stop it from being recognised as text.
+        """
+        payload = '{"retrieved_docs": [{"id": "doc-1"}]}'
+        msg = ToolMessage(
+            content=[{"type": "text", "text": payload, "id": "lc_1"}],
+            name="retrieve",
+            tool_call_id="call-1",
+        )
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["content"] == payload
+
+    def test_tool_message_mixed_text_and_image_blocks_join_with_placeholder(self):
+        msg = ToolMessage(
+            content=[
+                {"type": "text", "text": "here is the chart"},
+                {"type": "image", "source": {"data": "base64..."}},
+            ],
+            name="render_chart",
+            tool_call_id="call-2",
+        )
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["content"] == "here is the chart\n[image]"
+
+    def test_tool_message_plain_string_content_is_unchanged(self):
+        msg = ToolMessage(
+            content="already a string", name="geocode", tool_call_id="call-3"
+        )
+
+        entry = _serialise_trace_entry(msg, node="tools")
+
+        assert entry["content"] == "already a string"
+
+    def test_ai_message_content_blocks_get_the_same_normalisation(self):
+        """Some providers stream the assistant message itself as content
+        blocks (a text block plus a tool_use block); it must be normalised
+        the same way as tool output.
+        """
+        msg = AIMessage(
+            content=[
+                {"type": "text", "text": "let me check that"},
+                {"type": "tool_use", "id": "call-1", "name": "search", "input": {}},
+            ],
+        )
+
+        entry = _serialise_trace_entry(msg, node="agent")
+
+        assert entry["content"] == "let me check that\n[tool_use block]"
 
 
 # ─── _build_react_graph ───────────────────────────────────────────────────────
@@ -474,6 +559,66 @@ class TestGenerateAnswerAgenticInGraphFallback:
         )
 
 
+class TestNonStreamingTraceTiming:
+    """``_run_graph`` (the non-streaming path) used to store elapsed-since-run-
+    start as each trace entry's ``latency_s``. With a fake clock advancing by
+    one second per call, an agent step that requests a tool, the tool's
+    result, and the final answer must each get their own start and one-second
+    duration, not the cumulative elapsed time.
+    """
+
+    async def test_agent_tool_final_chain_gets_exact_timings(self):
+        updates = [
+            {
+                "agent": {
+                    "messages": [
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"name": "search", "args": {}, "id": "call-1"}
+                            ],
+                        )
+                    ]
+                }
+            },
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(
+                            content="result", name="search", tool_call_id="call-1"
+                        )
+                    ]
+                }
+            },
+            {"agent": {"messages": [AIMessage(content="final answer")]}},
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+                (
+                    _final_answer,
+                    _documents,
+                    _use_rag,
+                    _latencies,
+                    _prompts,
+                    trace,
+                    _artifact_ids,
+                ) = await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+
+        assert [
+            {"started_at_s": e["started_at_s"], "latency_s": e["latency_s"]}
+            for e in trace
+        ] == [
+            {"started_at_s": 0.0, "latency_s": 1.0},
+            {"started_at_s": 1.0, "latency_s": 1.0},
+            {"started_at_s": 2.0, "latency_s": 1.0},
+        ]
+
+
 # ─── generate_answer_agentic_stream_helper (streaming) ────────────────────────
 
 
@@ -789,6 +934,108 @@ class TestStructuredToolEvents:
             "tool_call": "Calling dummy search…",
             "tool_result": "result",
         }
+
+
+class TestTraceTiming:
+    """The streamed graph used to reset its clock on the first chunk of a new
+    node, so an agent step and a tool step both got ``latency_s`` values near
+    zero. With a fake clock advancing by one second per call, each step's
+    ``started_at_s``/``latency_s`` must reflect the timing contract instead:
+    an agent step starts when the previous event ended, a tool step starts
+    when the agent step that requested it ended, and the final answer starts
+    when the previous event ended and ends at stream completion.
+    """
+
+    async def test_agent_tool_final_chain_gets_exact_timings(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "search", "args": {}, "id": "call-1"}
+                        ],
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+                (
+                    ToolMessage(
+                        content="result", name="search", tool_call_id="call-1"
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (AIMessage(content="final answer"), {"langgraph_node": "agent"}),
+            ],
+        )
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(
+                _build_react_graph=MagicMock(return_value=graph)
+            ) as patched:
+                async for _event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                ):
+                    pass
+
+        trace = patched["persist_message_state"].await_args.kwargs["trace"]
+        assert [
+            {"started_at_s": e["started_at_s"], "latency_s": e["latency_s"]}
+            for e in trace
+        ] == [
+            {"started_at_s": 0.0, "latency_s": 2.0},
+            {"started_at_s": 2.0, "latency_s": 3.0},
+            {"started_at_s": 5.0, "latency_s": 6.0},
+        ]
+
+    async def test_parallel_tool_calls_share_the_same_start(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "search", "args": {}, "id": "call-1"},
+                            {"name": "search2", "args": {}, "id": "call-2"},
+                        ],
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+                (
+                    ToolMessage(
+                        content="result-1", name="search", tool_call_id="call-1"
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+                (
+                    ToolMessage(
+                        content="result-2", name="search2", tool_call_id="call-2"
+                    ),
+                    {"langgraph_node": "tools"},
+                ),
+            ],
+        )
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(
+                _build_react_graph=MagicMock(return_value=graph)
+            ) as patched:
+                async for _event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                ):
+                    pass
+
+        trace = patched["persist_message_state"].await_args.kwargs["trace"]
+        tool_entries = [e for e in trace if e["role"] == "tool"]
+        assert [e["started_at_s"] for e in tool_entries] == [2.0, 2.0]
+        assert [e["latency_s"] for e in tool_entries] == [3.0, 4.0]
 
 
 class TestNodeBudgetSemantics:

@@ -57,6 +57,7 @@ from src.utils.helpers import (
     extract_documents_from_retrieval_payload,
     get_mongodb_uri,
     is_retrieval_error_payload,
+    stringify_message_content,
 )
 from src.utils.langfuse_helper import get_callbacks, langfuse_context
 
@@ -159,18 +160,22 @@ def _enrich_trace_entry_with_message_metadata(
 
 
 def _serialise_trace_entry(
-    msg: Any, *, node: str = "", latency_s: Optional[float] = None
+    msg: Any,
+    *,
+    node: str = "",
+    latency_s: Optional[float] = None,
+    started_at_s: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Convert a LangChain message into a JSON-serialisable trace dict."""
     entry: Dict[str, Any] = {"node": node}
+    if started_at_s is not None:
+        entry["started_at_s"] = started_at_s
     if latency_s is not None:
         entry["latency_s"] = latency_s
 
     if AIMessage and isinstance(msg, AIMessage):
         entry["role"] = "assistant"
-        entry["content"] = (
-            msg.content if isinstance(msg.content, str) else str(msg.content)
-        )
+        entry["content"] = stringify_message_content(msg.content)
         tc = getattr(msg, "tool_calls", None)
         if tc:
             tool_calls: List[Dict[str, Any]] = []
@@ -186,7 +191,7 @@ def _serialise_trace_entry(
     elif ToolMessage and isinstance(msg, ToolMessage):
         entry["role"] = "tool"
         entry["name"] = getattr(msg, "name", "tool")
-        entry["content"] = str(msg.content)
+        entry["content"] = stringify_message_content(msg.content)
     elif HumanMessage and isinstance(msg, HumanMessage):
         entry["role"] = "user"
         entry["content"] = (
@@ -203,6 +208,64 @@ def _serialise_trace_entry(
 
     _enrich_trace_entry_with_message_metadata(entry, msg)
     return entry
+
+
+class _TraceTimeline:
+    """Tracks per-step ``started_at_s``/``latency_s`` against a run's start.
+
+    Timing rules (shared by the streaming and non-streaming runners):
+    - An agent step (an AIMessage) starts when the previous recorded step
+      ended, or at the run start for the first step, and ends when the
+      message arrives.
+    - A tool step (a ToolMessage) starts when the agent step that requested
+      it ended, matched by ``tool_call_id`` against the requesting
+      AIMessage's ``tool_calls``. Tools requested in parallel by one agent
+      step therefore share the same start. A tool call with no match falls
+      back to the most recently recorded agent step's end.
+    """
+
+    def __init__(self, run_start: float) -> None:
+        self._run_start = run_start
+        self._last_event_end_s: float = 0.0
+        self._last_agent_end_s: float = 0.0
+        self._agent_end_by_call_id: Dict[str, float] = {}
+
+    def _elapsed(self, at: Optional[float]) -> float:
+        return (at if at is not None else time.perf_counter()) - self._run_start
+
+    def agent_step(
+        self, tool_calls: Optional[List[Any]] = None, *, at: Optional[float] = None
+    ) -> tuple[float, float]:
+        """Record an agent step's end; return ``(started_at_s, latency_s)``.
+
+        Also covers the manual final-answer entry: it follows the exact same
+        rule (start at the previous event's end, end now) and carries no
+        tool calls.
+        """
+        end = self._elapsed(at)
+        start = self._last_event_end_s
+        self._last_event_end_s = end
+        self._last_agent_end_s = end
+        for call in tool_calls or []:
+            call_id = (
+                call.get("id")
+                if isinstance(call, dict)
+                else getattr(call, "id", None)
+            )
+            if call_id:
+                self._agent_end_by_call_id[str(call_id)] = end
+        return round(start, 3), round(end - start, 3)
+
+    def tool_step(
+        self, tool_call_id: Optional[str], *, at: Optional[float] = None
+    ) -> tuple[float, float]:
+        """Record a tool step's end; return ``(started_at_s, latency_s)``."""
+        end = self._elapsed(at)
+        start = self._agent_end_by_call_id.get(
+            str(tool_call_id or ""), self._last_agent_end_s
+        )
+        self._last_event_end_s = end
+        return round(start, 3), round(end - start, 3)
 
 
 def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) -> bool:
@@ -1080,6 +1143,11 @@ async def generate_answer_agentic(
             latency_map: Dict[str, float] = {}
             in_graph_fallback = False
             start = time.perf_counter()
+            # Separate from latency_map/node_latencies below: that dict keeps its
+            # existing "elapsed since run start" semantics for metadata.latencies,
+            # while the timeline computes the real per-step start/duration that
+            # each trace entry now carries.
+            trace_timeline = _TraceTimeline(start)
             graph_exc: Optional[Exception] = None
             with langfuse_context(
                 user_id=user_id,
@@ -1108,9 +1176,26 @@ async def generate_answer_agentic(
                                 else []
                             )
                             for msg in msgs:
+                                if ToolMessage and isinstance(msg, ToolMessage):
+                                    started_at_s, entry_latency_s = (
+                                        trace_timeline.tool_step(
+                                            getattr(msg, "tool_call_id", None),
+                                            at=step_time,
+                                        )
+                                    )
+                                else:
+                                    started_at_s, entry_latency_s = (
+                                        trace_timeline.agent_step(
+                                            getattr(msg, "tool_calls", None),
+                                            at=step_time,
+                                        )
+                                    )
                                 trace.append(
                                     _serialise_trace_entry(
-                                        msg, node=node_name, latency_s=step_latency_s
+                                        msg,
+                                        node=node_name,
+                                        latency_s=entry_latency_s,
+                                        started_at_s=started_at_s,
                                     )
                                 )
                                 raw_msgs.append(msg)
@@ -1360,6 +1445,10 @@ async def generate_answer_agentic_stream_helper(
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
+        # Separate from node_start_time/node_latencies above (kept for
+        # metadata.latencies): the timeline computes each trace entry's real
+        # started_at_s/latency_s per the agent/tool/final-answer timing rules.
+        trace_timeline = _TraceTimeline(gen_start)
 
         turn_buffer: List[str] = []
         current_node: Optional[str] = None
@@ -1478,10 +1567,18 @@ async def generate_answer_agentic_stream_helper(
 
                     if ToolMessage and isinstance(chunk, ToolMessage):
                         graph_messages.append(chunk)
-                        preview = str(chunk.content)[:200]
-                        step_s = time.perf_counter() - node_start_time
+                        preview = stringify_message_content(chunk.content)[:200]
+                        started_at_s, entry_latency_s = trace_timeline.tool_step(
+                            getattr(chunk, "tool_call_id", None),
+                            at=time.perf_counter(),
+                        )
                         trace_entries.append(
-                            _serialise_trace_entry(chunk, node=node, latency_s=step_s)
+                            _serialise_trace_entry(
+                                chunk,
+                                node=node,
+                                latency_s=entry_latency_s,
+                                started_at_s=started_at_s,
+                            )
                         )
                         yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok'})}\n\n"
                         continue
@@ -1509,9 +1606,16 @@ async def generate_answer_agentic_stream_helper(
                                 else f"Calling {tname}"
                             )
                             msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                            step_s = time.perf_counter() - node_start_time
+                            started_at_s, entry_latency_s = trace_timeline.agent_step(
+                                chunk.tool_calls, at=time.perf_counter()
+                            )
                             trace_entries.append(
-                                _serialise_trace_entry(chunk, node=node, latency_s=step_s)
+                                _serialise_trace_entry(
+                                    chunk,
+                                    node=node,
+                                    latency_s=entry_latency_s,
+                                    started_at_s=started_at_s,
+                                )
                             )
                             yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
                             continue
@@ -1554,7 +1658,8 @@ async def generate_answer_agentic_stream_helper(
                 exc,
             )
 
-        gen_latency = time.perf_counter() - gen_start
+        stream_end = time.perf_counter()
+        gen_latency = stream_end - gen_start
         answer = await append_missing_artifact_stubs(
             "".join(accumulated), _collected_artifact_ids()
         )
@@ -1569,13 +1674,19 @@ async def generate_answer_agentic_stream_helper(
 
         if answer:
             answer_node = current_node or "agent"
-            agent_s = node_latencies.get(answer_node, gen_latency)
+            # The final answer follows the same rule as an agent step: it
+            # starts when the previous recorded event ended and ends now, at
+            # stream completion.
+            started_at_s, entry_latency_s = trace_timeline.agent_step(
+                None, at=stream_end
+            )
             trace_entries.append(
                 {
                     "role": "assistant",
                     "node": answer_node,
                     "content": answer,
-                    "latency_s": agent_s,
+                    "started_at_s": started_at_s,
+                    "latency_s": entry_latency_s,
                 }
             )
 
