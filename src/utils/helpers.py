@@ -332,6 +332,42 @@ def stringify_message_content(content: Any) -> str:
     return "\n".join(parts)
 
 
+_NON_TEXT_BLOCK_TYPES = {"image", "audio", "file", "resource", "resource_link"}
+
+
+def _is_content_block_list(value: Any) -> bool:
+    """True for a non-empty list made only of message content blocks."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            _is_mcp_content_block(item)
+            or (isinstance(item, dict) and item.get("type") in _NON_TEXT_BLOCK_TYPES)
+            for item in value
+        )
+    )
+
+
+def stringify_tool_content(content: Any) -> str:
+    """Render a ``ToolMessage`` content value as a plain display string.
+
+    The agent graph (``make_tools_node`` in eve-esa-agents) builds its
+    ``ToolMessage`` with ``str(result)``, so MCP content blocks reach us as
+    the Python repr of the block list, already a string. That repr is decoded
+    back into the blocks first; any other string (plain text, JSON) is
+    returned unchanged. literal_eval only accepts literals, so this is safe
+    on tool output.
+    """
+    if isinstance(content, str) and content.lstrip().startswith("["):
+        try:
+            literal = ast.literal_eval(content)
+        except Exception:
+            literal = None
+        if _is_content_block_list(literal):
+            return stringify_message_content(literal)
+    return stringify_message_content(content)
+
+
 def _retrieval_payload_roots(
     payload: Any, *, keep_text_fallback: bool = False
 ) -> List[Any]:
