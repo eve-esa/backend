@@ -1059,6 +1059,46 @@ async def _fetch_conversation_context(
     return history, summary
 
 
+def _generation_unattributed_s(
+    generation_latency: float, node_latencies: Dict[str, float]
+) -> float:
+    """Seconds inside ``generation_latency`` that never landed on a node.
+
+    ``generation_latency`` minus the sum of the ``node_<name>_s`` values,
+    floored at zero.
+    """
+    return max(0.0, generation_latency - sum(node_latencies.values()))
+
+
+def _build_agentic_latencies(
+    *,
+    total_latency: float,
+    generation_latency: float,
+    node_latencies: Dict[str, float],
+    setup_latencies: Dict[str, float],
+    first_token_latency: Any = None,
+    include_first_token: bool = False,
+) -> Dict[str, Optional[float]]:
+    """Latencies persisted on the message as ``metadata.latencies``."""
+    # Backoffice reads these from metadata.latencies: setup_mcp_tool_loading_s,
+    # setup_checkpointer_s, setup_loading_history_s, setup_llm_resolve_s,
+    # setup_graph_compile_s (omitted when that step did not run), and
+    # generation_unattributed_s (generation_latency minus the node_<name>_s
+    # sum, floored at zero).
+    latencies: Dict[str, Optional[float]] = {}
+    if include_first_token:
+        latencies["first_token_latency"] = first_token_latency
+    latencies["generation_latency"] = generation_latency
+    latencies["total_latency"] = total_latency
+    latencies.update({f"node_{k}_s": v for k, v in node_latencies.items()})
+    # Only steps that actually ran. Callers omit a key by not recording it.
+    latencies.update(setup_latencies)
+    latencies["generation_unattributed_s"] = _generation_unattributed_s(
+        generation_latency, node_latencies
+    )
+    return latencies
+
+
 # ─── Non-streaming generation ─────────────────────────────────────────────────
 
 
@@ -1100,17 +1140,30 @@ async def generate_answer_agentic(
     agent_graph_type: Optional[str] = None
 
     try:
+        setup_latencies: Dict[str, float] = {}
+
+        step_start = time.perf_counter()
         tools = await _build_tools(request)
+        setup_latencies["setup_mcp_tool_loading_s"] = time.perf_counter() - step_start
+
+        step_start = time.perf_counter()
         checkpointer = await _get_agentic_checkpointer()
+        setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
+
+        step_start = time.perf_counter()
         history, summary = await _fetch_conversation_context(conversation_id)
+        setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
+        step_start = time.perf_counter()
         llm, llm_metadata = await _resolve_agentic_llm_client(
             request, user_id=user_id
         )
+        setup_latencies["setup_llm_resolve_s"] = time.perf_counter() - step_start
         endpoint_metadata = llm_metadata.pop("endpoint", None)
+        step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -1124,6 +1177,7 @@ async def generate_answer_agentic(
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
         )
+        setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {
             "configurable": {"thread_id": conversation_id or "default"},
@@ -1264,11 +1318,12 @@ async def generate_answer_agentic(
         use_rag = retrieval_calls > 0
 
         total_latency = time.perf_counter() - total_start
-        latencies: Dict[str, Optional[float]] = {
-            "generation_latency": gen_latency,
-            "total_latency": total_latency,
-            **{f"node_{k}_s": v for k, v in node_latencies.items()},
-        }
+        latencies = _build_agentic_latencies(
+            total_latency=total_latency,
+            generation_latency=gen_latency,
+            node_latencies=node_latencies,
+            setup_latencies=setup_latencies,
+        )
         if used_fallback_llm:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
             # Same re-point as the streaming path: the footer reads this key.
@@ -1407,19 +1462,32 @@ async def generate_answer_agentic_stream_helper(
 
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
 
+        setup_latencies: Dict[str, float] = {}
+
+        step_start = time.perf_counter()
         tools = await _build_tools(request, cancel_event=cancel_event)
+        setup_latencies["setup_mcp_tool_loading_s"] = time.perf_counter() - step_start
         rag_tool_names.update(_rag_tool_names(tools))
+
+        step_start = time.perf_counter()
         checkpointer = await _get_agentic_checkpointer()
+        setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
+
+        step_start = time.perf_counter()
         history, summary = await _fetch_conversation_context(conversation_id)
+        setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
 
         agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
+        step_start = time.perf_counter()
         llm, llm_prompts = await _resolve_agentic_llm_client(
             request, user_id=user_id
         )
+        setup_latencies["setup_llm_resolve_s"] = time.perf_counter() - step_start
         endpoint_metadata = llm_prompts.pop("endpoint", None)
 
+        step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -1433,6 +1501,7 @@ async def generate_answer_agentic_stream_helper(
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
         )
+        setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {
             "configurable": {"thread_id": conversation_id},
@@ -1687,12 +1756,14 @@ async def generate_answer_agentic_stream_helper(
         )
         total_latency = time.perf_counter() - total_start
 
-        latencies: Dict[str, Optional[float]] = {
-            "first_token_latency": first_token_latency,
-            "generation_latency": gen_latency,
-            "total_latency": total_latency,
-            **{f"node_{k}_s": v for k, v in node_latencies.items()},
-        }
+        latencies = _build_agentic_latencies(
+            total_latency=total_latency,
+            generation_latency=gen_latency,
+            node_latencies=node_latencies,
+            setup_latencies=setup_latencies,
+            first_token_latency=first_token_latency,
+            include_first_token=True,
+        )
 
         if answer:
             answer_node = current_node or "agent"

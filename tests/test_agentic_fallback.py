@@ -14,6 +14,7 @@ Covers:
 import asyncio
 import contextlib
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1659,3 +1660,155 @@ class TestAgenticRetrievalDocuments:
         kwargs = persist.await_args.kwargs
         assert kwargs["documents"] == []
         assert kwargs["use_rag"] is False
+
+
+# ─── setup latencies ──────────────────────────────────────────────────────────
+
+_SETUP_LATENCY_KEYS = (
+    "setup_mcp_tool_loading_s",
+    "setup_checkpointer_s",
+    "setup_loading_history_s",
+    "setup_llm_resolve_s",
+    "setup_graph_compile_s",
+)
+_SETUP_STEP_S = 0.02
+_GENERATION_GAP_S = 0.05
+
+
+class _GapUpdatesGraph(_FakeUpdatesGraph):
+    """Yield one node update, then spend time after the last node."""
+
+    def __init__(self, gap_s: float):
+        super().__init__(
+            updates=[{"agent": {"messages": [AIMessage(content="final answer")]}}]
+        )
+        self._gap_s = gap_s
+
+    async def astream(self, *args, **kwargs):
+        async for update in super().astream(*args, **kwargs):
+            yield update
+        await asyncio.sleep(self._gap_s)
+
+
+class _GapStreamGraph(_FakeStreamGraph):
+    """Spend time before the first node event, then stream one answer chunk."""
+
+    def __init__(self, gap_s: float):
+        super().__init__(
+            messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})]
+        )
+        self._gap_s = gap_s
+
+    async def astream(self, *args, **kwargs):
+        await asyncio.sleep(self._gap_s)
+        async for event in super().astream(*args, **kwargs):
+            yield event
+
+
+def _slow_setup_overrides(graph):
+    """Each setup step sleeps so a mistimed key cannot pass as noise."""
+
+    async def build_tools(request, cancel_event=None):
+        await asyncio.sleep(_SETUP_STEP_S)
+        return []
+
+    async def checkpointer():
+        await asyncio.sleep(_SETUP_STEP_S)
+        return None
+
+    async def history(conversation_id):
+        await asyncio.sleep(_SETUP_STEP_S)
+        return [], None
+
+    async def resolve_llm(request, *, user_id):
+        await asyncio.sleep(_SETUP_STEP_S)
+        return MagicMock(), {}
+
+    def compile_graph(*args, **kwargs):
+        time.sleep(_SETUP_STEP_S)
+        return graph
+
+    return {
+        "_build_tools": build_tools,
+        "_get_agentic_checkpointer": checkpointer,
+        "_fetch_conversation_context": history,
+        "_resolve_agentic_llm_client": resolve_llm,
+        "_build_react_graph": compile_graph,
+    }
+
+
+def _assert_setup_latency_sums(latencies: dict) -> None:
+    for key in _SETUP_LATENCY_KEYS:
+        assert key in latencies
+        assert latencies[key] >= _SETUP_STEP_S * 0.5
+
+    assert latencies["generation_unattributed_s"] >= _GENERATION_GAP_S * 0.5
+    assert latencies["generation_unattributed_s"] >= 0
+
+    node_sum = sum(
+        value
+        for key, value in latencies.items()
+        if key.startswith("node_") and key.endswith("_s")
+    )
+    assert latencies["generation_latency"] == pytest.approx(
+        node_sum + latencies["generation_unattributed_s"], abs=1e-4
+    )
+
+    setup_sum = sum(latencies[key] for key in _SETUP_LATENCY_KEYS)
+    # Residual is the short work outside the named steps: agent resolution
+    # between history and LLM resolve, artifact stubs, and timer noise.
+    residual = (
+        latencies["total_latency"] - setup_sum - latencies["generation_latency"]
+    )
+    assert residual == pytest.approx(0.0, abs=0.15)
+
+
+class TestAgenticSetupLatencies:
+    async def test_non_streaming_records_setup_steps(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _GapUpdatesGraph(_GENERATION_GAP_S)
+
+        with _patched_runner(**_slow_setup_overrides(graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                _prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert "node_agent_s" in latencies
+        assert "first_token_latency" not in latencies
+        _assert_setup_latency_sums(latencies)
+
+    async def test_streaming_records_setup_steps(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _GapStreamGraph(_GENERATION_GAP_S)
+        persist = AsyncMock()
+
+        with _patched_runner(
+            **_slow_setup_overrides(graph),
+            persist_message_state=persist,
+        ):
+            events = [
+                _event_payload(event)
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                )
+            ]
+
+        assert events[-1]["type"] == "final"
+        latencies = persist.await_args.kwargs["latencies"]
+        assert "node_agent_s" in latencies
+        assert latencies["first_token_latency"] is not None
+        _assert_setup_latency_sums(latencies)
+        assert events[-1]["latencies"]["generation_unattributed_s"] == (
+            latencies["generation_unattributed_s"]
+        )
