@@ -43,6 +43,11 @@ from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
 )
+from src.services.mcp.retrieval_context import (
+    get_retrieval_context,
+    reset_retrieval_context,
+    set_retrieval_context,
+)
 from src.services.mcp.tool_loader import (
     _MCPToolsWithClient,
     load_mcp_tools_for_servers as _load_mcp_tools_for_servers,
@@ -436,6 +441,11 @@ def _collect_retrieval_documents(
     answer as source-backed. A retrieval call that returned nothing still counts
     as a call (the UI then says "no sources found", not "answered without
     sources"); a call that returned an error payload counts as an error instead.
+
+    The documents themselves come from the per-request retrieval context when
+    ``RetrievalContextInterceptor`` filled it: the ToolMessage then holds only
+    the reduced copy the model read, without ids. The ToolMessage is parsed
+    only when no interceptor ran (tests, a RAG tool loaded another way).
     """
     if not rag_tool_names or ToolMessage is None:
         return [], 0, 0
@@ -476,6 +486,10 @@ def _collect_retrieval_documents(
             continue
         retrieval_calls += 1
         documents.extend(extract_documents_from_retrieval_payload(content))
+
+    ctx = get_retrieval_context()
+    if ctx is not None and ctx.documents:
+        documents = list(ctx.documents)
     return documents, retrieval_calls, retrieval_errors
 
 
@@ -1145,6 +1159,7 @@ async def generate_answer_agentic(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
+    _retrieval_ctx, retrieval_token = set_retrieval_context()
     endpoint_metadata: Optional[Dict[str, Any]] = None
     agent_graph_type: Optional[str] = None
 
@@ -1371,6 +1386,7 @@ async def generate_answer_agentic(
         )
         raise
     finally:
+        reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
 
@@ -1432,6 +1448,7 @@ async def generate_answer_agentic_stream_helper(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
+    _retrieval_ctx, retrieval_token = set_retrieval_context()
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1919,6 +1936,7 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
+        reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
 
