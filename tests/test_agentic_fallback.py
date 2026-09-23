@@ -1659,3 +1659,111 @@ class TestAgenticRetrievalDocuments:
         kwargs = persist.await_args.kwargs
         assert kwargs["documents"] == []
         assert kwargs["use_rag"] is False
+
+
+# ─── setup latencies ──────────────────────────────────────────────────────────
+
+_SETUP_LATENCY_KEYS = (
+    "setup_mcp_tool_loading_s",
+    "setup_checkpointer_s",
+    "setup_loading_history_s",
+    "setup_llm_resolve_s",
+    "setup_graph_compile_s",
+)
+
+
+def _assert_setup_latency_sums(latencies: dict) -> None:
+    """Named setup steps, generation, and the remainder are the whole total.
+
+    ``node_<name>_s`` and ``generation_unattributed_s`` are the whole
+    ``generation_latency``, so they are not added on top of it.
+    """
+    setup_sum = sum(latencies[key] for key in _SETUP_LATENCY_KEYS)
+    node_sum = sum(
+        value
+        for key, value in latencies.items()
+        if key.startswith("node_") and key.endswith("_s")
+    )
+    assert latencies["generation_latency"] == (
+        node_sum + latencies["generation_unattributed_s"]
+    )
+    assert latencies["total_latency"] == (
+        setup_sum + latencies["generation_latency"] + latencies["other_latency_s"]
+    )
+
+
+class TestAgenticSetupLatencies:
+    """Setup keys are exact under ``_fake_clock``: each step is one tick.
+
+    The clock advances one second per ``perf_counter`` call, so a step bounded
+    by two calls is exactly 1.0s and the sums are exact, not approximate.
+    """
+
+    async def test_non_streaming_records_setup_steps(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeUpdatesGraph(
+            updates=[{"agent": {"messages": [AIMessage(content="final answer")]}}]
+        )
+
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+                (
+                    _answer,
+                    _documents,
+                    _use_rag,
+                    latencies,
+                    _prompts,
+                    _trace,
+                    _artifact_ids,
+                ) = await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+
+        assert {key: latencies[key] for key in _SETUP_LATENCY_KEYS} == {
+            key: 1.0 for key in _SETUP_LATENCY_KEYS
+        }
+        assert latencies["node_agent_s"] == 1.0
+        assert latencies["generation_latency"] == 2.0
+        assert latencies["generation_unattributed_s"] == 1.0
+        assert latencies["other_latency_s"] == 8.0
+        assert latencies["total_latency"] == 15.0
+        assert "first_token_latency" not in latencies
+        _assert_setup_latency_sums(latencies)
+
+    async def test_streaming_records_setup_steps(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        graph = _FakeStreamGraph(
+            messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})]
+        )
+        persist = AsyncMock()
+
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(
+                _build_react_graph=MagicMock(return_value=graph),
+                persist_message_state=persist,
+            ):
+                events = [
+                    _event_payload(event)
+                    async for event in generate_answer_agentic_stream_helper(
+                        request,
+                        conversation_id="c1",
+                        message_id="m1",
+                        user_id="test-user",
+                    )
+                ]
+
+        assert events[-1]["type"] == "final"
+        latencies = persist.await_args.kwargs["latencies"]
+        assert {key: latencies[key] for key in _SETUP_LATENCY_KEYS} == {
+            key: 1.0 for key in _SETUP_LATENCY_KEYS
+        }
+        assert latencies["node_agent_s"] == 3.0
+        assert latencies["generation_latency"] == 5.0
+        assert latencies["generation_unattributed_s"] == 2.0
+        assert latencies["first_token_latency"] == 14.0
+        assert latencies["other_latency_s"] == 7.0
+        assert latencies["total_latency"] == 17.0
+        _assert_setup_latency_sums(latencies)
+        assert events[-1]["latencies"]["generation_unattributed_s"] == (
+            latencies["generation_unattributed_s"]
+        )
