@@ -1080,11 +1080,16 @@ def _build_agentic_latencies(
     include_first_token: bool = False,
 ) -> Dict[str, Optional[float]]:
     """Latencies persisted on the message as ``metadata.latencies``."""
-    # Backoffice reads these from metadata.latencies: setup_mcp_tool_loading_s,
-    # setup_checkpointer_s, setup_loading_history_s, setup_llm_resolve_s,
-    # setup_graph_compile_s (omitted when that step did not run), and
-    # generation_unattributed_s (generation_latency minus the node_<name>_s
-    # sum, floored at zero).
+    # Backoffice reads these from metadata.latencies.
+    # These add up to total_latency:
+    # setup_mcp_tool_loading_s, setup_checkpointer_s, setup_loading_history_s,
+    # setup_llm_resolve_s, setup_graph_compile_s (each omitted when that step
+    # did not run), generation_latency, and other_latency_s (whatever is left:
+    # agent selection, callbacks, artifact stubs).
+    # These add up to generation_latency, so they are not added on top of it:
+    # node_<name>_s and generation_unattributed_s (that difference, floored
+    # at zero). first_token_latency is the time until the first token, not a
+    # slice of the total.
     latencies: Dict[str, Optional[float]] = {}
     if include_first_token:
         latencies["first_token_latency"] = first_token_latency
@@ -1095,6 +1100,10 @@ def _build_agentic_latencies(
     latencies.update(setup_latencies)
     latencies["generation_unattributed_s"] = _generation_unattributed_s(
         generation_latency, node_latencies
+    )
+    latencies["other_latency_s"] = max(
+        0.0,
+        total_latency - generation_latency - sum(setup_latencies.values()),
     )
     return latencies
 

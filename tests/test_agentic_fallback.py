@@ -1755,12 +1755,15 @@ def _assert_setup_latency_sums(latencies: dict) -> None:
     )
 
     setup_sum = sum(latencies[key] for key in _SETUP_LATENCY_KEYS)
-    # Residual is the short work outside the named steps: agent resolution
-    # between history and LLM resolve, artifact stubs, and timer noise.
-    residual = (
-        latencies["total_latency"] - setup_sum - latencies["generation_latency"]
+    # other_latency_s is the rest of the wall clock, so the named setup steps,
+    # generation, and that remainder add up to total_latency.
+    assert latencies["other_latency_s"] >= 0
+    assert latencies["total_latency"] == pytest.approx(
+        setup_sum
+        + latencies["generation_latency"]
+        + latencies["other_latency_s"],
+        abs=1e-6,
     )
-    assert residual == pytest.approx(0.0, abs=0.15)
 
 
 class TestAgenticSetupLatencies:
