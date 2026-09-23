@@ -14,7 +14,6 @@ Covers:
 import asyncio
 import contextlib
 import json
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1671,146 +1670,99 @@ _SETUP_LATENCY_KEYS = (
     "setup_llm_resolve_s",
     "setup_graph_compile_s",
 )
-_SETUP_STEP_S = 0.02
-_GENERATION_GAP_S = 0.05
-
-
-class _GapUpdatesGraph(_FakeUpdatesGraph):
-    """Yield one node update, then spend time after the last node."""
-
-    def __init__(self, gap_s: float):
-        super().__init__(
-            updates=[{"agent": {"messages": [AIMessage(content="final answer")]}}]
-        )
-        self._gap_s = gap_s
-
-    async def astream(self, *args, **kwargs):
-        async for update in super().astream(*args, **kwargs):
-            yield update
-        await asyncio.sleep(self._gap_s)
-
-
-class _GapStreamGraph(_FakeStreamGraph):
-    """Spend time before the first node event, then stream one answer chunk."""
-
-    def __init__(self, gap_s: float):
-        super().__init__(
-            messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})]
-        )
-        self._gap_s = gap_s
-
-    async def astream(self, *args, **kwargs):
-        await asyncio.sleep(self._gap_s)
-        async for event in super().astream(*args, **kwargs):
-            yield event
-
-
-def _slow_setup_overrides(graph):
-    """Each setup step sleeps so a mistimed key cannot pass as noise."""
-
-    async def build_tools(request, cancel_event=None):
-        await asyncio.sleep(_SETUP_STEP_S)
-        return []
-
-    async def checkpointer():
-        await asyncio.sleep(_SETUP_STEP_S)
-        return None
-
-    async def history(conversation_id):
-        await asyncio.sleep(_SETUP_STEP_S)
-        return [], None
-
-    async def resolve_llm(request, *, user_id):
-        await asyncio.sleep(_SETUP_STEP_S)
-        return MagicMock(), {}
-
-    def compile_graph(*args, **kwargs):
-        time.sleep(_SETUP_STEP_S)
-        return graph
-
-    return {
-        "_build_tools": build_tools,
-        "_get_agentic_checkpointer": checkpointer,
-        "_fetch_conversation_context": history,
-        "_resolve_agentic_llm_client": resolve_llm,
-        "_build_react_graph": compile_graph,
-    }
 
 
 def _assert_setup_latency_sums(latencies: dict) -> None:
-    for key in _SETUP_LATENCY_KEYS:
-        assert key in latencies
-        assert latencies[key] >= _SETUP_STEP_S * 0.5
+    """Named setup steps, generation, and the remainder are the whole total.
 
-    assert latencies["generation_unattributed_s"] >= _GENERATION_GAP_S * 0.5
-    assert latencies["generation_unattributed_s"] >= 0
-
+    ``node_<name>_s`` and ``generation_unattributed_s`` are the whole
+    ``generation_latency``, so they are not added on top of it.
+    """
+    setup_sum = sum(latencies[key] for key in _SETUP_LATENCY_KEYS)
     node_sum = sum(
         value
         for key, value in latencies.items()
         if key.startswith("node_") and key.endswith("_s")
     )
-    assert latencies["generation_latency"] == pytest.approx(
-        node_sum + latencies["generation_unattributed_s"], abs=1e-4
+    assert latencies["generation_latency"] == (
+        node_sum + latencies["generation_unattributed_s"]
     )
-
-    setup_sum = sum(latencies[key] for key in _SETUP_LATENCY_KEYS)
-    # other_latency_s is the rest of the wall clock, so the named setup steps,
-    # generation, and that remainder add up to total_latency.
-    assert latencies["other_latency_s"] >= 0
-    assert latencies["total_latency"] == pytest.approx(
-        setup_sum
-        + latencies["generation_latency"]
-        + latencies["other_latency_s"],
-        abs=1e-6,
+    assert latencies["total_latency"] == (
+        setup_sum + latencies["generation_latency"] + latencies["other_latency_s"]
     )
 
 
 class TestAgenticSetupLatencies:
+    """Setup keys are exact under ``_fake_clock``: each step is one tick.
+
+    The clock advances one second per ``perf_counter`` call, so a step bounded
+    by two calls is exactly 1.0s and the sums are exact, not approximate.
+    """
+
     async def test_non_streaming_records_setup_steps(self):
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
-        graph = _GapUpdatesGraph(_GENERATION_GAP_S)
+        graph = _FakeUpdatesGraph(
+            updates=[{"agent": {"messages": [AIMessage(content="final answer")]}}]
+        )
 
-        with _patched_runner(**_slow_setup_overrides(graph)):
-            (
-                _answer,
-                _documents,
-                _use_rag,
-                latencies,
-                _prompts,
-                _trace,
-                _artifact_ids,
-            ) = await generate_answer_agentic(
-                request, user_id="test-user", conversation_id="c1"
-            )
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+                (
+                    _answer,
+                    _documents,
+                    _use_rag,
+                    latencies,
+                    _prompts,
+                    _trace,
+                    _artifact_ids,
+                ) = await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
 
-        assert "node_agent_s" in latencies
+        assert {key: latencies[key] for key in _SETUP_LATENCY_KEYS} == {
+            key: 1.0 for key in _SETUP_LATENCY_KEYS
+        }
+        assert latencies["node_agent_s"] == 1.0
+        assert latencies["generation_latency"] == 2.0
+        assert latencies["generation_unattributed_s"] == 1.0
+        assert latencies["other_latency_s"] == 8.0
+        assert latencies["total_latency"] == 15.0
         assert "first_token_latency" not in latencies
         _assert_setup_latency_sums(latencies)
 
     async def test_streaming_records_setup_steps(self):
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
-        graph = _GapStreamGraph(_GENERATION_GAP_S)
+        graph = _FakeStreamGraph(
+            messages=[(AIMessage(content="answer"), {"langgraph_node": "agent"})]
+        )
         persist = AsyncMock()
 
-        with _patched_runner(
-            **_slow_setup_overrides(graph),
-            persist_message_state=persist,
-        ):
-            events = [
-                _event_payload(event)
-                async for event in generate_answer_agentic_stream_helper(
-                    request,
-                    conversation_id="c1",
-                    message_id="m1",
-                    user_id="test-user",
-                )
-            ]
+        with patch(f"{_RUNNER}.time.perf_counter", side_effect=_fake_clock()):
+            with _patched_runner(
+                _build_react_graph=MagicMock(return_value=graph),
+                persist_message_state=persist,
+            ):
+                events = [
+                    _event_payload(event)
+                    async for event in generate_answer_agentic_stream_helper(
+                        request,
+                        conversation_id="c1",
+                        message_id="m1",
+                        user_id="test-user",
+                    )
+                ]
 
         assert events[-1]["type"] == "final"
         latencies = persist.await_args.kwargs["latencies"]
-        assert "node_agent_s" in latencies
-        assert latencies["first_token_latency"] is not None
+        assert {key: latencies[key] for key in _SETUP_LATENCY_KEYS} == {
+            key: 1.0 for key in _SETUP_LATENCY_KEYS
+        }
+        assert latencies["node_agent_s"] == 3.0
+        assert latencies["generation_latency"] == 5.0
+        assert latencies["generation_unattributed_s"] == 2.0
+        assert latencies["first_token_latency"] == 14.0
+        assert latencies["other_latency_s"] == 7.0
+        assert latencies["total_latency"] == 17.0
         _assert_setup_latency_sums(latencies)
         assert events[-1]["latencies"]["generation_unattributed_s"] == (
             latencies["generation_unattributed_s"]
