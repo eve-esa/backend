@@ -281,7 +281,10 @@ async def test_get_artifact_owner(async_client, monkeypatch):
         assert resp.headers["cache-control"] == "private, no-cache"
         # Vary: Authorization keys any HTTP cache on the token, preventing a
         # different user from being served another user's cached bytes.
-        assert resp.headers["vary"] == "Authorization"
+        # Starlette 1.7's CORS middleware also appends Origin, including when
+        # the request has no Origin header.
+        vary = {part.strip() for part in resp.headers["vary"].split(",")}
+        assert "Authorization" in vary
         assert resp.headers["x-content-type-options"] == "nosniff"
         assert resp.headers["content-disposition"] == 'inline; filename="pic.png"'
     finally:
