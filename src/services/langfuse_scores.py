@@ -2,7 +2,7 @@
 
 Traces reach Langfuse through the OTel collector; this module only posts
 scores to ``POST /api/public/scores`` so a thumbs up or down lands on the trace
-of the answer it rates. Off unless ``EVE_LANGFUSE_SCORES_ENABLED`` is true and
+of the answer it rates. Off unless ``FEATURE_LANGFUSE_SCORES`` is true and
 ``LANGFUSE_HOST``, ``LANGFUSE_PUBLIC_KEY`` and ``LANGFUSE_SECRET_KEY`` are set.
 
 Scores per message, each only when its field is set:
@@ -49,7 +49,7 @@ _transport: Optional[httpx.AsyncBaseTransport] = None
 
 def is_enabled() -> bool:
     return bool(
-        config.EVE_LANGFUSE_SCORES_ENABLED
+        config.FEATURE_LANGFUSE_SCORES
         and config.LANGFUSE_HOST
         and config.LANGFUSE_PUBLIC_KEY
         and config.LANGFUSE_SECRET_KEY

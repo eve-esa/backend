@@ -270,9 +270,9 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip()
 # Langfuse scores (src/services/langfuse_scores.py). Thumbs on a message become
 # a score on its trace. Traces reach Langfuse through the OTel collector, not
 # from here; these are only for POST /api/public/scores.
-EVE_LANGFUSE_SCORES_ENABLED = os.getenv(
-    "EVE_LANGFUSE_SCORES_ENABLED", ""
-).strip().lower() in ("1", "true", "yes", "on")
+# On: thumbs are posted as scores, when the three LANGFUSE_* values below are
+# set too. Default off, like FEATURE_JSC_MODEL: only "true" turns it on.
+FEATURE_LANGFUSE_SCORES = getenv_or("FEATURE_LANGFUSE_SCORES").lower() == "true"
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()

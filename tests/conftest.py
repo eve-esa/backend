@@ -47,7 +47,7 @@ from src import config as _config  # noqa: E402  (runs load_dotenv)
 _strip_telemetry_env()
 # Thumbs must not become scores in a live Langfuse; the score tests switch
 # this on with monkeypatch.
-_config.EVE_LANGFUSE_SCORES_ENABLED = False
+_config.FEATURE_LANGFUSE_SCORES = False
 
 from server import app  # noqa: E402
 

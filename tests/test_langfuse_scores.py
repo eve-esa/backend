@@ -47,7 +47,7 @@ class _Recorder:
 
 @pytest.fixture
 def enabled(monkeypatch):
-    monkeypatch.setattr(config, "EVE_LANGFUSE_SCORES_ENABLED", True)
+    monkeypatch.setattr(config, "FEATURE_LANGFUSE_SCORES", True)
     monkeypatch.setattr(config, "LANGFUSE_HOST", HOST)
     monkeypatch.setattr(config, "LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setattr(config, "LANGFUSE_SECRET_KEY", "sk-test")
@@ -153,7 +153,7 @@ def test_environment_langfuse_rejects_is_omitted(enabled, monkeypatch):
 
 @pytest.mark.no_db
 async def test_disabled_sends_nothing(enabled, recorder, monkeypatch):
-    monkeypatch.setattr(config, "EVE_LANGFUSE_SCORES_ENABLED", False)
+    monkeypatch.setattr(config, "FEATURE_LANGFUSE_SCORES", False)
     assert langfuse_scores.schedule_feedback_scores(_message(feedback="negative")) is None
     await _drain()
     assert recorder.requests == []
@@ -321,7 +321,7 @@ async def test_update_message_without_trace_id_sends_nothing(
 async def test_update_message_flag_off_sends_nothing(
     async_client, enabled, recorder, monkeypatch
 ):
-    monkeypatch.setattr(config, "EVE_LANGFUSE_SCORES_ENABLED", False)
+    monkeypatch.setattr(config, "FEATURE_LANGFUSE_SCORES", False)
     user, token, conversation, message = await _owned_message()
     try:
         resp = await _patch(
