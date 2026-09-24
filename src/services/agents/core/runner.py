@@ -1,7 +1,7 @@
 """Agent runner — all backend integration logic for agent graph execution.
 
 Handles: LLM instantiation, MCP tool loading, system prompt resolution,
-conversation history, langfuse tracing, SSE streaming, persistence,
+conversation history, OpenTelemetry root span, SSE streaming, persistence,
 cancellation, error logging, token consumption, and stream bus publishing.
 """
 
@@ -65,7 +65,18 @@ from src.utils.helpers import (
     stringify_message_content,
     stringify_tool_content,
 )
-from src.utils.langfuse_helper import get_callbacks, langfuse_context
+from src.observability.context import (
+    add_span_event,
+    agent_span,
+    current_trace_id,
+    set_llm_attributes,
+    span_trace_id,
+)
+
+# Unused since the OpenTelemetry root span replaced them. Still imported so
+# existing tests that patch these names on this module keep resolving; the
+# task that deletes src/utils/langfuse_helper.py removes both.
+from src.utils.langfuse_helper import get_callbacks, langfuse_context  # noqa: F401,E402
 
 logger = logging.getLogger(__name__)
 
@@ -1242,10 +1253,7 @@ async def generate_answer_agentic(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = {
-            "configurable": {"thread_id": conversation_id or "default"},
-            "callbacks": get_callbacks(),
-        }
+        config = {"configurable": {"thread_id": conversation_id or "default"}}
 
         async def _run_graph(
             g: Any,
@@ -1267,15 +1275,17 @@ async def generate_answer_agentic(
             # each trace entry now carries.
             trace_timeline = _TraceTimeline(start)
             graph_exc: Optional[Exception] = None
-            with langfuse_context(
+            with agent_span(
+                "agentic_generation",
+                conversation_id=conversation_id,
                 user_id=user_id,
-                session_id=conversation_id,
-                tags=[
-                    "agentic",
-                    request.custom_model_id or request.llm_type or "default",
-                ],
-                trace_name="agentic_generation",
-            ):
+                attributes={
+                    "eve.pipeline": "agentic",
+                    "eve.stream": False,
+                    "eve.agent_graph": agent_graph_type,
+                },
+            ) as root_span:
+                set_llm_attributes(root_span, endpoint_metadata, include_answered=False)
                 try:
                     async for update in g.astream(
                         {"messages": _build_initial_messages(request, tools, history)},
@@ -1492,6 +1502,10 @@ async def generate_answer_agentic_stream_helper(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
     _retrieval_ctx, retrieval_token = set_retrieval_context()
+    # The invoke_agent root span opens around the graph run below. Until then
+    # the request's own trace (same trace id) answers; None with telemetry off.
+    root_span: Any = None
+    trace_id: Optional[str] = current_trace_id()
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1509,7 +1523,7 @@ async def generate_answer_agentic_stream_helper(
     def _final_events(answer: str, latencies: Dict[str, Any]) -> List[str]:
         if output_format == "json":
             return [
-                f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids()})}\n\n"
+                f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids(), 'trace_id': trace_id})}\n\n"
             ]
         return ["data: [DONE]\n\n"]
 
@@ -1524,7 +1538,10 @@ async def generate_answer_agentic_stream_helper(
     try:
         if cancelled():
             await persist_message_state(
-                message_id, stopped=True, artifact_ids=_collected_artifact_ids()
+                message_id,
+                stopped=True,
+                artifact_ids=_collected_artifact_ids(),
+                trace_id=trace_id,
             )
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
@@ -1572,10 +1589,7 @@ async def generate_answer_agentic_stream_helper(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = {
-            "configurable": {"thread_id": conversation_id},
-            "callbacks": get_callbacks(),
-        }
+        config = {"configurable": {"thread_id": conversation_id}}
 
         gen_start = time.perf_counter()
         first_token_latency: Optional[float] = None
@@ -1642,6 +1656,11 @@ async def generate_answer_agentic_stream_helper(
                         "No final-answer token received within AGENTIC_TIMEOUT"
                     )
                 first_token_latency = time.perf_counter() - total_start
+                add_span_event(
+                    root_span,
+                    "gen_ai.first_token",
+                    {"eve.time_to_first_token_s": first_token_latency},
+                )
 
             for tok in answer_items:
                 if not tok:
@@ -1658,16 +1677,19 @@ async def generate_answer_agentic_stream_helper(
 
         graph_exc: Optional[Exception] = None
         try:
-            with langfuse_context(
+            with agent_span(
+                "agentic_generation_stream",
+                conversation_id=conversation_id,
                 user_id=user_id,
-                session_id=conversation_id,
-                tags=[
-                    "agentic",
-                    "stream",
-                    request.custom_model_id or request.llm_type or "default",
-                ],
-                trace_name="agentic_generation_stream",
-            ):
+                message_id=message_id,
+                attributes={
+                    "eve.pipeline": "agentic",
+                    "eve.stream": True,
+                    "eve.agent_graph": agent_graph_type,
+                },
+            ) as root_span:
+                trace_id = span_trace_id(root_span) or trace_id
+                set_llm_attributes(root_span, endpoint_metadata, include_answered=False)
                 async for mode, payload in graph.astream(
                     {"messages": _build_initial_messages(request, tools, history)},
                     config=config,
@@ -1677,6 +1699,7 @@ async def generate_answer_agentic_stream_helper(
                         cancel_documents, cancel_use_rag = _retrieval_state()
                         await persist_message_state(
                             message_id,
+                            trace_id=trace_id,
                             stopped=True,
                             output="".join(accumulated),
                             documents=cancel_documents,
@@ -1875,6 +1898,7 @@ async def generate_answer_agentic_stream_helper(
         documents, use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
+            trace_id=trace_id,
             output=answer,
             documents=documents,
             use_rag=use_rag,
@@ -1907,6 +1931,7 @@ async def generate_answer_agentic_stream_helper(
         cancelled_documents, cancelled_use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
+            trace_id=trace_id,
             output="".join(accumulated),
             documents=cancelled_documents,
             use_rag=cancelled_use_rag,
@@ -1934,6 +1959,7 @@ async def generate_answer_agentic_stream_helper(
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
+                trace_id=trace_id,
                 output=answer,
                 documents=timeout_documents,
                 use_rag=timeout_use_rag,
@@ -1966,6 +1992,7 @@ async def generate_answer_agentic_stream_helper(
         with contextlib.suppress(Exception):
             await persist_message_state(
                 message_id,
+                trace_id=trace_id,
                 output=answer,
                 documents=error_documents,
                 use_rag=error_use_rag,

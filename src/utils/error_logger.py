@@ -13,13 +13,13 @@ from typing import Optional, List, Dict, Any, Union
 from contextvars import ContextVar
 
 from src.database.models.error_log import ErrorLog
-from src.utils.langfuse_helper import record_error_kind
+from src.observability.context import record_kind
 # Re-exported: callers such as interceptors.py import redact_secrets from here.
 from src.utils.redaction import REDACTED as _REDACTED  # noqa: F401
 from src.utils.redaction import redact_secrets, redact_value  # noqa: F401
 
-# Graph failures also go to Langfuse when keys are set (no-op otherwise).
-_LANGFUSE_KINDS = frozenset(
+# Graph failures also become an event on the current span plus a WARNING log.
+_SPAN_EVENT_KINDS = frozenset(
     {
         "timeout",
         "run_timeout",
@@ -174,9 +174,9 @@ class ErrorLogger:
         ``rag``, ``frontend``, …). A ``policy=`` argument is accepted as an
         alias and stored as ``kind``.
 
-        Agentic kinds are always inserted into Mongo ``error_logs``. When
-        Langfuse is enabled they are also emitted as child events on the
-        generation trace (``record_error_kind`` is a no-op without keys).
+        Agentic kinds are always inserted into Mongo ``error_logs``. They are
+        also recorded by ``record_kind``: an event on the current span (none
+        when telemetry is off) and a WARNING log line.
         """
         try:
             error_doc = self._create_error_document(
@@ -193,8 +193,8 @@ class ErrorLogger:
                 source=source,
                 error_extra=error_extra,
             )
-            if error_doc.kind in _LANGFUSE_KINDS:
-                record_error_kind(
+            if error_doc.kind in _SPAN_EVENT_KINDS:
+                record_kind(
                     error_doc.kind,
                     node=error_doc.node,
                     graph=error_doc.graph,

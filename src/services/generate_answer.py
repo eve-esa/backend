@@ -41,6 +41,14 @@ from src.core.vector_store_manager import VectorStoreManager
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.user import User
+from src.observability.context import (
+    add_span_event,
+    agent_span,
+    child_span,
+    mark_error,
+    set_llm_attributes,
+    span_trace_id,
+)
 from src.schemas.generation_request import GenerationRequest
 from src.services.cancel_manager import get_cancel_manager
 from src.services.custom_model_service import (
@@ -70,8 +78,6 @@ from src.utils.helpers import (
     tiktoken_counter,
 )
 from src.utils.jsc_reranker import JSCReranker
-from src.utils.langfuse_helper import flush as langfuse_flush
-from src.utils.langfuse_helper import get_callbacks, langfuse_context
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.utils.template_loader import get_template
 
@@ -265,6 +271,7 @@ async def persist_message_state(
     trace: Optional[List[Dict[str, Any]]] = None,
     artifact_ids: Optional[List[str]] = None,
     endpoint: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -274,6 +281,7 @@ async def persist_message_state(
     - Filters out null values from error dictionaries before saving.
     - Sets Message.trace (agentic execution trace) if provided.
     - Sets Message.artifact_ids (MCP-produced artifacts from this run) if provided.
+    - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
     """
     try:
         message = await Message.find_by_id(message_id)
@@ -291,6 +299,8 @@ async def persist_message_state(
             message.trace = trace
         if artifact_ids is not None:
             message.artifact_ids = artifact_ids
+        if trace_id is not None:
+            message.trace_id = trace_id
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         if latencies is not None:
             existing_metadata["latencies"] = latencies
@@ -1245,10 +1255,7 @@ async def generate_answer(
                 # Pass temperature to the graph via state config
                 graph, mode = await _get_or_create_compiled_graph()
                 if graph is not None:
-                    config = {
-                        "configurable": {"thread_id": conversation_id},
-                        "callbacks": get_callbacks(),
-                    }
+                    config = {"configurable": {"thread_id": conversation_id}}
                     state = {
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
@@ -1257,14 +1264,17 @@ async def generate_answer(
                         "is_streaming": False,
                         "llm_type": candidate,
                     }
-                    with langfuse_context(
+                    with agent_span(
+                        "generation",
+                        conversation_id=conversation_id,
                         user_id=user_id,
-                        session_id=conversation_id,
-                        tags=["classic", request.llm_type or "default"],
-                        trace_name="generation",
+                        attributes={
+                            "eve.pipeline": "classic",
+                            "eve.stream": False,
+                            "eve.llm.candidate": candidate,
+                        },
                     ):
                         result = await graph.ainvoke(state, config)
-                    langfuse_flush()
                 else:
                     result = None
                 base_gen_latency = time.perf_counter() - gen_start
@@ -1433,7 +1443,50 @@ async def generate_answer_stream_generator_helper(
     cancel_event: Optional[asyncio.Event] = None,
     user_id: Optional[str] = None,
 ):
+    """Stream the classic RAG answer inside one ``invoke_agent`` root span.
+
+    The root covers the whole turn (policy, RAG decision, retrieval, every
+    endpoint candidate, persistence); each candidate of the chain walk is a
+    child ``eve.llm.candidate`` span. The trace id goes on the Message and in
+    the ``final`` event.
+    """
+    with agent_span(
+        "generation_stream",
+        conversation_id=conversation_id,
+        user_id=user_id,
+        message_id=message_id,
+        attributes={"eve.pipeline": "classic", "eve.stream": True},
+    ) as root_span:
+        async with contextlib.aclosing(
+            _classic_stream_events(
+                request,
+                conversation_id,
+                message_id,
+                output_format,
+                background_tasks,
+                cancel_event,
+                user_id,
+                root_span=root_span,
+            )
+        ) as events:
+            async for event in events:
+                yield event
+
+
+async def _classic_stream_events(
+    request: GenerationRequest,
+    conversation_id: str,
+    message_id: str,
+    output_format: str = "plain",
+    background_tasks: BackgroundTasks = None,
+    cancel_event: Optional[asyncio.Event] = None,
+    user_id: Optional[str] = None,
+    *,
+    root_span: Any = None,
+):
     """Stream tokens as Server-Sent Events while accumulating and persisting the final result."""
+    # None when telemetry is off: the Message and the final event carry null.
+    trace_id = span_trace_id(root_span)
     error_logger = get_error_logger()
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
@@ -1531,6 +1584,7 @@ async def generate_answer_stream_generator_helper(
             except asyncio.CancelledError:
                 await persist_message_state(
                     message_id,
+                    trace_id=trace_id,
                     stopped=True,
                     documents=results,
                     retrieved_docs=retrieved_docs,
@@ -1578,6 +1632,7 @@ async def generate_answer_stream_generator_helper(
         if cancelled():
             await persist_message_state(
                 message_id,
+                trace_id=trace_id,
                 stopped=True,
                 documents=results,
                 retrieved_docs=retrieved_docs,
@@ -1664,10 +1719,7 @@ async def generate_answer_stream_generator_helper(
                         logger.info(
                             f"Using optimized LangGraph streaming with mode: {mode}"
                         )
-                        config = {
-                            "configurable": {"thread_id": conversation_id},
-                            "callbacks": get_callbacks(),
-                        }
+                        config = {"configurable": {"thread_id": conversation_id}}
 
                         state = {
                             "messages": add_messages(
@@ -1685,14 +1737,21 @@ async def generate_answer_stream_generator_helper(
                             candidate,
                         )
                         llm_instruct_timeout = endpoint_timeout(candidate)
-                        _lf_exit = contextlib.ExitStack()
-                        _lf_exit.enter_context(
-                            langfuse_context(
-                                user_id=user_id,
-                                session_id=conversation_id,
-                                tags=["classic", "stream", candidate],
-                                trace_name="generation_stream",
+                        _candidate_exit = contextlib.ExitStack()
+                        candidate_span = _candidate_exit.enter_context(
+                            child_span(
+                                "eve.llm.candidate",
+                                {"eve.llm.candidate": candidate},
                             )
+                        )
+                        set_llm_attributes(
+                            candidate_span,
+                            build_endpoint_metadata(
+                                requested=request.llm_type,
+                                chain=chain,
+                                answered=None,
+                            ),
+                            include_answered=False,
                         )
                         try:
                             # Create the async generator once so we can pull the first token with a timeout
@@ -1707,6 +1766,13 @@ async def generate_answer_stream_generator_helper(
                                 if tokens_yielded == 1:
                                     first_token_latency = (
                                         time.perf_counter() - total_start
+                                    )
+                                    add_span_event(
+                                        candidate_span,
+                                        "gen_ai.first_token",
+                                        {
+                                            "eve.time_to_first_token_s": first_token_latency
+                                        },
                                     )
 
                             first_text = getattr(first_chunk, "content", None)
@@ -1725,6 +1791,7 @@ async def generate_answer_stream_generator_helper(
                                     logger.info("LangGraph streaming cancelled")
                                     await persist_message_state(
                                         message_id,
+                                        trace_id=trace_id,
                                         stopped=True,
                                         output="".join(accumulated),
                                         documents=results,
@@ -1756,18 +1823,20 @@ async def generate_answer_stream_generator_helper(
                                 tokens_yielded += 1
 
                             base_gen_latency = time.perf_counter() - gen_start
-                            langfuse_flush()
                             logger.info(
                                 f"LangGraph streaming completed. Tokens yielded: {tokens_yielded}, Latency: {base_gen_latency}"
                             )
                             used_stream = True
                             answered_by = candidate
+                            candidate_span.set_attribute("eve.llm.answered", candidate)
                             llm_manager.health.record_success(candidate)
                         except TimeoutError as e:
                             logger.warning(
                                 "LangGraph streaming on endpoint %s timed out",
                                 candidate,
                             )
+                            candidate_span.record_exception(e)
+                            candidate_span.set_attribute("eve.llm.outcome", "timeout")
                             await error_logger.log_error(
                                 error=e,
                                 component=Component.LLM,
@@ -1783,9 +1852,15 @@ async def generate_answer_stream_generator_helper(
                             # the next candidate.
                             if accumulated:
                                 stream_error = e
+                        except Exception as e:
+                            candidate_span.record_exception(e)
+                            candidate_span.set_attribute(
+                                "eve.llm.outcome", build_error_payload(e)["code"]
+                            )
+                            raise
                         finally:
                             # Ensure background tasks are torn down to avoid “Task was destroyed but it is pending!”
-                            _lf_exit.close()
+                            _candidate_exit.close()
                             with contextlib.suppress(Exception):
                                 await graph.aclose()
                     else:
@@ -1838,6 +1913,7 @@ async def generate_answer_stream_generator_helper(
                             await gen.aclose()
                             await persist_message_state(
                                 message_id,
+                                trace_id=trace_id,
                                 stopped=True,
                                 output="".join(accumulated),
                                 documents=results,
@@ -1905,8 +1981,10 @@ async def generate_answer_stream_generator_helper(
             attempts=endpoint_attempts,
             circuit_open=circuit_open,
         )
+        set_llm_attributes(root_span, endpoint_metadata)
         await persist_message_state(
             message_id,
+            trace_id=trace_id,
             output=answer,
             documents=results,
             use_rag=rag_decision_result.use_rag,
@@ -1929,6 +2007,7 @@ async def generate_answer_stream_generator_helper(
                 "answer": rewrite_catalog_image_urls(answer),
                 "latencies": latencies,
                 "generated_model_name": generated_model_name,
+                "trace_id": trace_id,
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         else:
@@ -1938,6 +2017,7 @@ async def generate_answer_stream_generator_helper(
         logger.info("Cancelled during generation")
         await persist_message_state(
             message_id,
+            trace_id=trace_id,
             output="".join(locals().get("accumulated") or []),
             documents=locals().get("results") or [],
             # A failure before the RAG decision leaves rag_decision_result
@@ -1982,8 +2062,13 @@ async def generate_answer_stream_generator_helper(
             else None
         )
         answered = locals().get("answered_by")
+        # Handled here (the client gets an error event), so the root span
+        # would otherwise end looking healthy.
+        mark_error(root_span, e)
+        set_llm_attributes(root_span, endpoint_info)
         await persist_message_state(
             message_id,
+            trace_id=trace_id,
             output=("".join(locals().get("accumulated") or [])),
             documents=locals().get("results") or [],
             # Same guard as the cancellation handler: the whole point of this

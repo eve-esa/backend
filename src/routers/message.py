@@ -51,6 +51,7 @@ from src.services.token_rate_limiter import (
     count_tokens_for_texts,
     enforce_token_budget_or_raise,
 )
+from src.observability.context import current_trace_id
 from src.utils.error_logger import (
     Component,
     PipelineStage,
@@ -534,6 +535,8 @@ async def create_message(
         message.output = answer
         message.documents = documents_data
         message.use_rag = is_rag
+        # Same trace as the invoke_agent span generate_answer opened.
+        message.trace_id = current_trace_id()
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         # Same lift as the retry branches: metadata.endpoint is the contract
         # location, prompts is only the transport out of generate_answer.
@@ -680,6 +683,7 @@ async def retry(
             message.stopped = False
             message.trace = trace_entries if trace_entries else None
             message.artifact_ids = artifact_ids if artifact_ids else None
+            message.trace_id = current_trace_id()
             existing_metadata = dict(getattr(message, "metadata", {}) or {})
             # A retry that lands on another endpoint must re-stamp attribution,
             # or the message keeps the failed endpoint from the first attempt.
@@ -744,6 +748,7 @@ async def retry(
         message.documents = documents_data
         message.use_rag = is_rag
         message.stopped = False
+        message.trace_id = current_trace_id()
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         # Same re-stamp as the agentic branch above: stale attribution outlives
         # the answer it described otherwise.
@@ -1393,6 +1398,7 @@ async def stream_hallucination(
                     "answer": None,
                     "latencies": latencies,
                     "top_k_retrieved_docs": None,
+                    "trace_id": current_trace_id(),
                 }
                 yield f"data: {json.dumps(final_payload)}\n\n"
                 return
@@ -1559,6 +1565,7 @@ async def stream_hallucination(
                 "answer": final_answer,
                 "latencies": latencies,
                 "top_k_retrieved_docs": results,
+                "trace_id": current_trace_id(),
             }
             yield f"data: {json.dumps(final_payload)}\n\n"
         except Exception as e:
@@ -1985,6 +1992,8 @@ async def create_agentic_message(
         message.use_rag = use_rag
         message.trace = trace_entries if trace_entries else None
         message.artifact_ids = artifact_ids if artifact_ids else None
+        # Same trace as the invoke_agent span generate_answer_agentic opened.
+        message.trace_id = current_trace_id()
         existing_metadata = dict(getattr(message, "metadata", {}) or {})
         # Same lift as the retry branches: metadata.endpoint is the contract
         # location, prompts is only the transport out of the generator.

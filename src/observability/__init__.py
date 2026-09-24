@@ -11,7 +11,10 @@ outermost ASGI app. Gunicorn runs without ``--preload``, so each worker runs
 this after the fork and owns its exporter threads.
 
 Instrumented: inbound HTTP (ASGI middleware), httpx, pymongo without
-statements, redis, botocore, stdlib logging. Not requests or urllib3 (the
+statements, redis, botocore, stdlib logging, LangChain and LangGraph through
+OpenLLMetry (prompts and completions only with EVE_OTEL_CAPTURE_CONTENT).
+The agent root span, the request ids on every span and kind events live in
+:mod:`src.observability.context`. Not requests or urllib3 (the
 exporter itself travels there and URLs carry keys), not openai (LangChain
 covers LLM calls), not FastAPIInstrumentor (misses the /v1 and /mcp
 dispatchers and would double the server span).
@@ -119,9 +122,12 @@ def build_tracer_provider(exporter, *, batch: bool = True):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 
+    from src.observability.context import ContextAttributesSpanProcessor
     from src.observability.redaction import RedactingSpanExporter
 
     provider = TracerProvider(resource=build_resource(), span_limits=_span_limits())
+    # First, so the ids are on the span before any exporter sees it.
+    provider.add_span_processor(ContextAttributesSpanProcessor())
     processor_cls = BatchSpanProcessor if batch else SimpleSpanProcessor
     provider.add_span_processor(processor_cls(RedactingSpanExporter(exporter)))
     return provider
@@ -187,6 +193,42 @@ def _instrument_clients(tracer_provider) -> None:
             logger.warning("OpenTelemetry: %s instrumentation skipped: %s", name, exc)
 
 
+def capture_content() -> bool:
+    """``EVE_OTEL_CAPTURE_CONTENT``: prompts, completions and tool arguments on spans."""
+    return os.getenv("EVE_OTEL_CAPTURE_CONTENT", "").strip().lower() in _TRUE
+
+
+def instrument_genai(tracer_provider) -> bool:
+    """OpenLLMetry LangChain and LangGraph spans, content gated by the env switch.
+
+    ``TRACELOOP_TRACE_CONTENT`` is written before ``instrument()`` because
+    OpenLLMetry captures content when it is unset. Trace context propagation
+    to LLM providers stays with the httpx instrumentation, so OpenLLMetry's own
+    OpenAI header patching is off. Returns True when instrumented.
+    """
+    os.environ["TRACELOOP_TRACE_CONTENT"] = "true" if capture_content() else "false"
+    try:
+        from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+
+        LangchainInstrumentor(disable_trace_context_propagation=True).instrument(
+            tracer_provider=tracer_provider
+        )
+        return True
+    except Exception as exc:
+        logger.warning("OpenTelemetry: LangChain instrumentation skipped: %s", exc)
+        return False
+
+
+def uninstrument_genai() -> None:
+    """Undo :func:`instrument_genai` (tests)."""
+    try:
+        from opentelemetry.instrumentation.langchain import LangchainInstrumentor
+
+        LangchainInstrumentor().uninstrument()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("OpenTelemetry: LangChain uninstrument failed: %s", exc)
+
+
 def _setup_logs(resource) -> None:
     from opentelemetry._logs import set_logger_provider
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -248,6 +290,7 @@ def init_telemetry() -> bool:
         _state["enabled"] = True
 
         _instrument_clients(tracer_provider)
+        instrument_genai(tracer_provider)
         try:
             _setup_logs(tracer_provider.resource)
         except Exception as exc:
