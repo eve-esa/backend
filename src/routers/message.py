@@ -44,6 +44,7 @@ from src.services.generate_answer_agentic import (
 from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import get_owned_custom_model
 from src.services.hallucination_detector import HallucinationDetector
+from src.services.langfuse_scores import schedule_feedback_scores
 from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
@@ -883,6 +884,8 @@ async def update_message(
             message.hallucination["was_copied"] = request.hallucination_was_copied
 
         await message.save()
+        # Off by default; without a trace_id there is nothing to attach to.
+        schedule_feedback_scores(message)
 
         return {"message": "Feedback updated successfully"}
 

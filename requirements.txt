@@ -15,10 +15,8 @@ langgraph==1.2.4
 # @main: the release image is built from this SHA. bbc2fad (0.5.3) emits
 # retry/timeout/error_handler/fallback via compile(..., on_policy=...).
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@bbc2fad57ea6ed693b9f97eec7549ed765c27bac
-langfuse>=2.60.10
-# OpenTelemetry, see src/observability. Pinned explicitly: langfuse pulls the
-# SDK in transitively today and goes away later. The contrib packages (0.65b0)
-# are released in lockstep with the SDK (1.44.0); bump them together.
+# OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
+# released in lockstep with the SDK (1.44.0); bump them together.
 opentelemetry-api==1.44.0
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0

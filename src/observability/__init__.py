@@ -66,13 +66,35 @@ def _sdk_disabled() -> bool:
     return os.getenv("OTEL_SDK_DISABLED", "").strip().lower() in _TRUE
 
 
+def _env_resource_attributes() -> dict:
+    """``OTEL_RESOURCE_ATTRIBUTES`` as a dict, values percent-decoded."""
+    from urllib.parse import unquote
+
+    parsed = {}
+    for item in os.getenv("OTEL_RESOURCE_ATTRIBUTES", "").split(","):
+        key, sep, value = item.partition("=")
+        if sep and key.strip():
+            parsed[key.strip()] = unquote(value.strip())
+    return parsed
+
+
 def _env_resource_keys() -> set:
-    raw = os.getenv("OTEL_RESOURCE_ATTRIBUTES", "")
-    return {
-        item.split("=", 1)[0].strip()
-        for item in raw.split(",")
-        if "=" in item and item.split("=", 1)[0].strip()
-    }
+    return set(_env_resource_attributes())
+
+
+def deployment_environment() -> str:
+    """The ``deployment.environment.name`` this process reports.
+
+    Same rule as :func:`build_resource`: ``OTEL_RESOURCE_ATTRIBUTES`` wins,
+    otherwise ``APP_ENVIRONMENT``. Works with telemetry off, so the feedback
+    score client tags scores with the environment the traces carry.
+    """
+    value = _env_resource_attributes().get("deployment.environment.name", "")
+    if value:
+        return value
+    from src.config import APP_ENVIRONMENT
+
+    return APP_ENVIRONMENT or "unknown"
 
 
 def build_resource():
@@ -92,9 +114,7 @@ def build_resource():
         "service.instance.id": str(uuid.uuid4()),
     }
     if "deployment.environment.name" not in _env_resource_keys():
-        from src.config import APP_ENVIRONMENT
-
-        attributes["deployment.environment.name"] = APP_ENVIRONMENT or "unknown"
+        attributes["deployment.environment.name"] = deployment_environment()
     git_sha = os.getenv("APP_GIT_SHA", "").strip()
     if git_sha and git_sha != "unknown":
         attributes["vcs.ref.head.revision"] = git_sha

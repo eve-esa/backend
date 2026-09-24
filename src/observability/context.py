@@ -7,7 +7,7 @@ caller.
 
 - :class:`ContextAttributesSpanProcessor` copies the request contextvars kept
   by ``src.utils.error_logger`` (conversation, message, user) onto every span,
-  under the names Langfuse and HyperDX read: ``session.id`` is the
+  under the names the trace UIs read: ``session.id`` is the
   conversation id, ``user.id`` the user id, never an email.
 - :func:`agent_span` opens the ``invoke_agent`` root of one answer. LangChain
   and LangGraph spans (OpenLLMetry) and the MCP client spans nest under it.

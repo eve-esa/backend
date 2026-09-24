@@ -257,10 +257,15 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
-# Langfuse observability
+# Langfuse scores (src/services/langfuse_scores.py). Thumbs on a message become
+# a score on its trace. Traces reach Langfuse through the OTel collector, not
+# from here; these are only for POST /api/public/scores.
+EVE_LANGFUSE_SCORES_ENABLED = os.getenv(
+    "EVE_LANGFUSE_SCORES_ENABLED", ""
+).strip().lower() in ("1", "true", "yes", "on")
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
-LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").strip()
 
 # ─── Agentic pipeline configuration ───────────────────────────────────────────
 # MODEL_TIMEOUT (defined above) is the per-step answer generation timeout used

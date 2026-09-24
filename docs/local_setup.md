@@ -223,6 +223,9 @@ IS_PROD=false
 | `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` | No | Longest span attribute value (default `4096`). |
 | `EVE_OTEL_CAPTURE_CONTENT` | No | Prompts, answers and tool arguments on GenAI spans. `true` only on dev and local. |
 | `EVE_OTEL_EXPORT_USER_EMAIL` | No | Export the user email as a span attribute (default `false`). |
+| `EVE_LANGFUSE_SCORES_ENABLED` | No | `true` posts thumbs feedback to Langfuse as scores on the message trace (`thumbs-<message_id>`, `hallucination-<message_id>`). Default `false`. Needs the three variables below and a message with `trace_id`. |
+| `LANGFUSE_HOST` | No | Langfuse base URL for `POST /api/public/scores`, e.g. `http://langfuse-web:3000` inside the stack compose. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | No | Secret. Langfuse project keys, sent as Basic auth. Only used for scores; traces reach Langfuse through the collector. |
 | `API_KEY_MAX_ACTIVE_PER_USER` | No | Max active self-service API keys per user (default `10`). `0` disables key creation. |
 | `API_KEY_DEFAULT_EXPIRES_IN_DAYS` | No | Expiry applied when a create request omits it (default `90`). |
 | `API_KEY_CREATE_MAX_PER_HOUR` | No | Rolling-hour cap on key creations per user (default `30`); `0` disables the throttle. |

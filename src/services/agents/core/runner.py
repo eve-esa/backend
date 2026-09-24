@@ -73,11 +73,6 @@ from src.observability.context import (
     span_trace_id,
 )
 
-# Unused since the OpenTelemetry root span replaced them. Still imported so
-# existing tests that patch these names on this module keep resolving; the
-# task that deletes src/utils/langfuse_helper.py removes both.
-from src.utils.langfuse_helper import get_callbacks, langfuse_context  # noqa: F401,E402
-
 logger = logging.getLogger(__name__)
 
 # ─── Optional imports ──────────────────────────────────────────────────────────

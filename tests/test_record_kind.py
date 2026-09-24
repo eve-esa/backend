@@ -1,6 +1,6 @@
 """Agentic error kinds as span events plus a WARNING log (record_kind).
 
-Replaces the Langfuse kind events: the taxonomy that lands in Mongo
+Replaces the old SDK kind events: the taxonomy that lands in Mongo
 ``error_logs`` (timeout, run_timeout, retry, error_handler, fallback,
 tool_error) also becomes an event on the current span, and a WARNING line in
 the log stream that carries the trace id.
