@@ -37,8 +37,11 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[a-z0-9._~+/=\-]+")
 _BASIC_RE = re.compile(
     r"(?i)\b(basic)\s+(?-i:(?=[A-Za-z0-9+/]*[A-Z0-9+/=])[A-Za-z0-9+/]{8,}={0,2})"
 )
+# Anchored on the start of a token character run: without the lookbehind a
+# long run that starts with "eyJ" and has no dot is rescanned from every
+# position, which is quadratic.
 _JWT_RE = re.compile(
-    r"eyJ[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-+=/.]*"
+    r"(?<![a-zA-Z0-9_\-])eyJ[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-+=/.]*"
 )
 # EVE API keys are "eve_" + 64 hex chars, RunPod keys "rpa_" + alphanumerics.
 # The length floor keeps identifiers like "eve_free" or "eve_jsc" readable.
@@ -47,12 +50,19 @@ _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:eve|rpa)_[A-Za-z0-9]{16,}")
 # Anchored on the start of a scheme character run, not on \b: a word boundary
 # inside a long run such as "a-b.a-b." restarts the scheme scan at every
 # hyphen or dot, which is quadratic on big inputs.
-_URL_USERINFO_RE = re.compile(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s@]+@")
+# The password class excludes ":" (it must be percent encoded in a URL), so
+# the user and password parts cannot overlap and the scan stays linear.
+_URL_USERINFO_RE = re.compile(
+    r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s:@]*@"
+)
 # Query string parameters named like a credential. The name is kept so a log
 # still says which parameter was there.
-_QUERY_PARAM_RE = re.compile(
-    r"(?i)([?&;][^=&#\s?;]*?(?:key|token|secret|password|passwd|pwd|signature|"
-    r"credential|jwt|code|session)[^=&#\s?;]*=)[^&#\s;]*"
+# Every parameter is matched once and the name is checked in Python: a lazy
+# quantifier in front of the keyword alternation made the scan quadratic on a
+# long name with no "=".
+_QUERY_PARAM_RE = re.compile(r"([?&;])([^=&#\s?;]*)=([^&#\s;]*)")
+_SECRET_PARAM_NAME_RE = re.compile(
+    r"(?i)key|token|secret|password|passwd|pwd|signature|credential|jwt|code|session"
 )
 # Free text assignments: api_key=..., "password": "...", token: ... .
 _ASSIGNMENT_RE = re.compile(
@@ -63,9 +73,38 @@ _ASSIGNMENT_RE = re.compile(
 # characters. Without it the engine retries from every position inside a long
 # run with no "@" (a base64 blob, a long generated output), which is quadratic:
 # about 400 seconds for one megabyte of letters.
-_EMAIL_RE = re.compile(
-    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}"
+# The regex matches only the "@" and the domain, which is anchored on the
+# literal "@" and therefore linear. The local part is read backwards from the
+# "@" by _redact_emails, so no quantified local part precedes the anchor.
+_EMAIL_DOMAIN_RE = re.compile(r"@(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}(?![A-Za-z0-9\-])")
+_EMAIL_LOCAL_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-"
 )
+
+
+def _redact_emails(value: str) -> str:
+    """Replace every local part plus domain around an "@" with the placeholder."""
+    out = []
+    last = 0
+    for match in _EMAIL_DOMAIN_RE.finditer(value):
+        at = match.start()
+        start = at
+        while start > 0 and value[start - 1] in _EMAIL_LOCAL_CHARS:
+            start -= 1
+        if start == at or start < last:
+            continue
+        out.append(value[last:start])
+        out.append(REDACTED_EMAIL)
+        last = match.end()
+    out.append(value[last:])
+    return "".join(out)
+
+
+def _redact_query_param(match: "re.Match[str]") -> str:
+    sep, name, val = match.group(1), match.group(2), match.group(3)
+    if _SECRET_PARAM_NAME_RE.search(name):
+        return f"{sep}{name}={REDACTED}"
+    return match.group(0)
 
 
 def redact_secrets(value: str) -> str:
@@ -82,9 +121,9 @@ def redact_secrets(value: str) -> str:
     out = _BEARER_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", out)
     out = _BASIC_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", out)
     out = _PREFIXED_KEY_RE.sub(REDACTED, out)
-    out = _QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
+    out = _QUERY_PARAM_RE.sub(_redact_query_param, out)
     out = _ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{REDACTED}", out)
-    out = _EMAIL_RE.sub(REDACTED_EMAIL, out)
+    out = _redact_emails(out)
     return out
 
 
