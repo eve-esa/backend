@@ -24,6 +24,9 @@ class RetrievalRequestContext:
     """
 
     documents: List[Dict[str, Any]] = field(default_factory=list)
+    # One entry per retrieval call: the ``latencies`` object the /retrieve
+    # endpoint returns (query_embedding_latency, qdrant_retrieval_latency, ...).
+    latencies: List[Dict[str, Any]] = field(default_factory=list)
 
 
 _retrieval_context: contextvars.ContextVar[Optional[RetrievalRequestContext]] = (

@@ -256,6 +256,44 @@ class TestContext:
         assert PRIVATE_ID in _model_text(out)
 
 
+class TestLatencies:
+    async def test_latencies_land_in_the_context_not_in_the_model_text(
+        self, with_context
+    ):
+        payload = {
+            "retrieved_docs": [],
+            "latencies": {
+                "query_embedding_latency": 0.12,
+                "qdrant_retrieval_latency": 0.34,
+            },
+        }
+        result = await _run(_result(_text(payload)))
+        text = json.loads(_model_text(result))
+        assert "latencies" not in text
+        assert with_context.latencies == [payload["latencies"]]
+
+    def test_merge_sums_per_key_and_ignores_missing_values(self):
+        from src.services.agents.core.runner import _merge_retrieval_latencies
+        from src.services.mcp.retrieval_context import retrieval_context
+
+        with retrieval_context() as ctx:
+            ctx.latencies.append(
+                {"query_embedding_latency": 0.1, "qdrant_retrieval_latency": 0.2}
+            )
+            ctx.latencies.append({"qdrant_retrieval_latency": 0.3, "other": "x"})
+            merged = _merge_retrieval_latencies({"total_latency": 1.0})
+        assert merged["total_latency"] == 1.0
+        assert merged["query_embedding_latency"] == 0.1
+        assert merged["qdrant_retrieval_latency"] == 0.5
+
+    def test_merge_without_context_is_a_no_op(self):
+        from src.services.agents.core.runner import _merge_retrieval_latencies
+
+        assert _merge_retrieval_latencies({"total_latency": 1.0}) == {
+            "total_latency": 1.0
+        }
+
+
 class TestPassthrough:
     @pytest.mark.asyncio
     async def test_error_payload_untouched(self, with_context):

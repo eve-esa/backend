@@ -1084,6 +1084,31 @@ def _generation_unattributed_s(
     return max(0.0, generation_latency - sum(node_latencies.values()))
 
 
+_RETRIEVAL_LATENCY_KEYS = ("query_embedding_latency", "qdrant_retrieval_latency")
+
+
+def _merge_retrieval_latencies(latencies: Dict[str, Any]) -> Dict[str, Any]:
+    """Add the /retrieve endpoint timings of this run to ``metadata.latencies``.
+
+    The retrieval interceptor stashes the ``latencies`` object of every
+    retrieval call in the request context. Summed per key so a run with two
+    retrieval calls reports the time spent in Qdrant across both, under the
+    same keys the classic RAG path writes and the back office averages.
+    """
+    ctx = get_retrieval_context()
+    if ctx is None or not ctx.latencies:
+        return latencies
+    for key in _RETRIEVAL_LATENCY_KEYS:
+        values = [
+            entry[key]
+            for entry in ctx.latencies
+            if isinstance(entry.get(key), (int, float))
+        ]
+        if values:
+            latencies[key] = round(sum(values), 6)
+    return latencies
+
+
 def _build_agentic_latencies(
     *,
     total_latency: float,
@@ -1342,11 +1367,13 @@ async def generate_answer_agentic(
         use_rag = retrieval_calls > 0
 
         total_latency = time.perf_counter() - total_start
-        latencies = _build_agentic_latencies(
-            total_latency=total_latency,
-            generation_latency=gen_latency,
-            node_latencies=node_latencies,
-            setup_latencies=setup_latencies,
+        latencies = _merge_retrieval_latencies(
+            _build_agentic_latencies(
+                total_latency=total_latency,
+                generation_latency=gen_latency,
+                node_latencies=node_latencies,
+                setup_latencies=setup_latencies,
+            )
         )
         if used_fallback_llm:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
@@ -1782,13 +1809,15 @@ async def generate_answer_agentic_stream_helper(
         )
         total_latency = time.perf_counter() - total_start
 
-        latencies = _build_agentic_latencies(
-            total_latency=total_latency,
-            generation_latency=gen_latency,
-            node_latencies=node_latencies,
-            setup_latencies=setup_latencies,
-            first_token_latency=first_token_latency,
-            include_first_token=True,
+        latencies = _merge_retrieval_latencies(
+            _build_agentic_latencies(
+                total_latency=total_latency,
+                generation_latency=gen_latency,
+                node_latencies=node_latencies,
+                setup_latencies=setup_latencies,
+                first_token_latency=first_token_latency,
+                include_first_token=True,
+            )
         )
 
         if answer:

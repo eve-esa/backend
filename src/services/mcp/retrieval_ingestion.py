@@ -54,6 +54,8 @@ _INTERNAL_KEYS = frozenset(
     }
 )
 _TEXT_KEYS = ("text", "content")
+# ``latencies`` is not for the model: the interceptor stashes it in the
+# request context and the runner persists it in ``metadata.latencies``.
 _RESPONSE_KEYS_KEPT = ("original_query", "requery")
 
 
@@ -174,6 +176,8 @@ class RetrievalContextInterceptor:
                 continue
 
             ctx.documents.extend(extract_documents_from_retrieval_payload(response))
+            if isinstance(response.get("latencies"), dict):
+                ctx.latencies.append(dict(response["latencies"]))
             slim = slim_retrieval_response_for_model(response)
             new_content.append(
                 block.model_copy(
