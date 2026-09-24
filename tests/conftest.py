@@ -24,7 +24,32 @@ except Exception:  # pragma: no cover - defensive: langchain may move the class
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from server import app
+
+
+# Telemetry export settings of the host process (a dev container recreated with
+# an OTLP endpoint, a developer .env) must not reach the suite: with an
+# endpoint set, server.app becomes the OpenTelemetryMiddleware wrapper and
+# spans and log records go to a live collector. Tests that need telemetry turn
+# it on themselves with in-memory exporters. Stripped before and after
+# src.config, because its load_dotenv(override=True) can put them back.
+_TELEMETRY_ENV_PREFIXES = ("OTEL_", "EVE_OTEL_", "TRACELOOP_")
+
+
+def _strip_telemetry_env() -> None:
+    for key in list(os.environ):
+        if key.startswith(_TELEMETRY_ENV_PREFIXES):
+            del os.environ[key]
+
+
+_strip_telemetry_env()
+from src import config as _config  # noqa: E402  (runs load_dotenv)
+
+_strip_telemetry_env()
+# Thumbs must not become scores in a live Langfuse; the score tests switch
+# this on with monkeypatch.
+_config.EVE_LANGFUSE_SCORES_ENABLED = False
+
+from server import app  # noqa: E402
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
