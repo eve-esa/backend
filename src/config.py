@@ -434,28 +434,57 @@ IMAGE_CATALOG_PATH = (
     os.getenv("IMAGE_CATALOG_PATH", "").strip() or _DEFAULT_IMAGE_CATALOG_PATH
 )
 
-def configure_logging(level=logging.INFO):
-    """Configure logging for the entire application."""
+# Client libraries that log every request (httpx prints each LLM, Qdrant and MCP
+# URL at INFO) or every command body (pymongo prints the key_hash filter of each
+# API key lookup and whole user documents at DEBUG). Held at WARNING whatever
+# LOG_LEVEL says.
+NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "pymongo",
+    "botocore",
+    "boto3",
+    "openai",
+    "mcp",
+)
+
+
+def resolve_log_level(value: Optional[str] = None) -> int:
+    """Map a LOG_LEVEL string (name or number) to a logging level, INFO if unset or unknown."""
+    raw = (os.getenv("LOG_LEVEL", "") if value is None else value).strip().upper()
+    if not raw:
+        return logging.INFO
+    if raw.isdigit():
+        return int(raw)
+    level = logging.getLevelName(raw)
+    return level if isinstance(level, int) else logging.INFO
+
+
+def configure_logging(level: Optional[int] = None):
+    """Configure logging for the entire application.
+
+    ``level`` wins when given; otherwise the ``LOG_LEVEL`` environment variable
+    decides, default INFO. ``LOG_LEVEL=DEBUG`` brings back the old verbose
+    output for application loggers; :data:`NOISY_LOGGERS` stay at WARNING.
+    """
+    if level is None:
+        level = resolve_log_level()
+
+    root_logger = logging.getLogger()
     # Check if already configured to avoid duplicate handlers
-    if not logging.getLogger().hasHandlers():
-        # Create formatter
+    if not root_logger.hasHandlers():
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
-
-        # Create console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
-
-        # Configure root logger
-        root_logger = logging.getLogger()
-        root_logger.setLevel(level)
         root_logger.addHandler(console_handler)
+    root_logger.setLevel(level)
 
-    # server.py runs the root logger at DEBUG, where pymongo's command monitoring
-    # logs every command body: the key_hash filter of each API key lookup, whole
-    # user documents. Outside the handler guard so it holds however logging was set up.
-    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    # Outside the handler guard so it holds however logging was set up.
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 class Config:

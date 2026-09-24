@@ -213,6 +213,7 @@ IS_PROD=false
 | `OPENAI_PROXY_API_KEY` | No | API key for that upstream (falls back to `MAIN_MODEL_API_KEY`, which is the same RunPod endpoint). |
 | `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
 | `IS_PROD` | No | Set to `true` to enable production mode toggles. |
+| `LOG_LEVEL` | No | Root log level: `DEBUG`, `INFO`, `WARNING` or `ERROR` (default `INFO`). `DEBUG` gives the verbose output the server used to run with. `httpx`, `httpcore`, `urllib3`, `pymongo`, `botocore`, `boto3`, `openai` and `mcp` stay at `WARNING` at every level, since they log request URLs and query bodies. |
 | `API_KEY_MAX_ACTIVE_PER_USER` | No | Max active self-service API keys per user (default `10`). `0` disables key creation. |
 | `API_KEY_DEFAULT_EXPIRES_IN_DAYS` | No | Expiry applied when a create request omits it (default `90`). |
 | `API_KEY_CREATE_MAX_PER_HOUR` | No | Rolling-hour cap on key creations per user (default `30`); `0` disables the throttle. |

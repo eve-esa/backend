@@ -28,7 +28,8 @@ from src.routers import (
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 from src.utils.error_logger import get_error_logger
 
-configure_logging(level=logging.DEBUG)
+# Root level from LOG_LEVEL, default INFO; set LOG_LEVEL=DEBUG for verbose logs.
+configure_logging()
 
 
 def register_routers(app: FastAPI):

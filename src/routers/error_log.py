@@ -4,6 +4,7 @@ from src.database.models.error_log import ErrorLog
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.schemas.error_log import FrontendErrorLogRequest
+from src.utils.redaction import redact_secrets, redact_value
 
 router = APIRouter()
 
@@ -28,16 +29,18 @@ async def log_error(
         HTTPException: 500 for server errors.
     """
     try:
+        # Browser errors carry whatever the page had: tokens in URLs, keys in
+        # stack messages, emails in metadata. Scrub before anything is stored.
         error_dict = {
             "type": request.error_type,
-            "message": request.error_message,
+            "message": redact_secrets(request.error_message),
         }
-        
+
         if request.error_stack:
-            error_dict["stack"] = request.error_stack
-        
+            error_dict["stack"] = redact_secrets(request.error_stack)
+
         if request.metadata:
-            error_dict["metadata"] = request.metadata
+            error_dict["metadata"] = redact_value(request.metadata)
 
         error_log = ErrorLog(
             user_id=requesting_user.id,
@@ -48,11 +51,11 @@ async def log_error(
             kind="frontend",
             error=error_dict,
             pipeline_stage="CLIENT_ERROR",
-            description=request.description or request.error_message,
+            description=redact_secrets(request.description or request.error_message),
         )
 
         if request.url:
-            error_log.error["url"] = request.url
+            error_log.error["url"] = redact_secrets(request.url)
         if request.user_agent:
             error_log.error["user_agent"] = request.user_agent
 
