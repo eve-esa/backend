@@ -270,28 +270,47 @@ class TestLatencies:
         result = await _run(_result(_text(payload)))
         text = json.loads(_model_text(result))
         assert "latencies" not in text
-        assert with_context.latencies == [payload["latencies"]]
+        assert [c.latencies for c in with_context.calls] == [payload["latencies"]]
+        assert with_context.calls[0].tool_name == "eve_retrieval_retrieve"
 
-    def test_merge_sums_per_key_and_ignores_missing_values(self):
+    def test_merge_sums_per_key_for_rag_tools_only(self):
         from src.services.agents.core.runner import _merge_retrieval_latencies
-        from src.services.mcp.retrieval_context import retrieval_context
+        from src.services.mcp.retrieval_context import RetrievalCall, retrieval_context
 
         with retrieval_context() as ctx:
-            ctx.latencies.append(
-                {"query_embedding_latency": 0.1, "qdrant_retrieval_latency": 0.2}
+            ctx.calls.append(
+                RetrievalCall(
+                    "eve_retrieval_retrieve",
+                    latencies={
+                        "query_embedding_latency": 0.1,
+                        "qdrant_retrieval_latency": 0.2,
+                        "reranking_latency": 0.05,
+                    },
+                )
             )
-            ctx.latencies.append({"qdrant_retrieval_latency": 0.3, "other": "x"})
-            merged = _merge_retrieval_latencies({"total_latency": 1.0})
+            ctx.calls.append(
+                RetrievalCall(
+                    "eve_retrieval_retrieve",
+                    latencies={"qdrant_retrieval_latency": 0.3, "other": "x"},
+                )
+            )
+            ctx.calls.append(
+                RetrievalCall("other_search", latencies={"qdrant_retrieval_latency": 9})
+            )
+            merged = _merge_retrieval_latencies(
+                {"total_latency": 1.0}, {"eve_retrieval_retrieve"}
+            )
         assert merged["total_latency"] == 1.0
         assert merged["query_embedding_latency"] == 0.1
         assert merged["qdrant_retrieval_latency"] == 0.5
+        assert merged["reranking_latency"] == 0.05
 
     def test_merge_without_context_is_a_no_op(self):
         from src.services.agents.core.runner import _merge_retrieval_latencies
 
-        assert _merge_retrieval_latencies({"total_latency": 1.0}) == {
-            "total_latency": 1.0
-        }
+        assert _merge_retrieval_latencies(
+            {"total_latency": 1.0}, {"eve_retrieval_retrieve"}
+        ) == {"total_latency": 1.0}
 
 
 class TestPassthrough:
@@ -381,6 +400,35 @@ class TestCollectRetrievalDocuments:
         assert [d["id"] for d in documents] == [PRIVATE_ID, "481257"]
         assert documents[0]["payload"]["user_id"] == OWNER_ID
         assert len(ctx.documents) == 2
+
+    @pytest.mark.asyncio
+    async def test_context_documents_of_other_tools_are_ignored(self):
+        with retrieval_context() as ctx:
+            other = SimpleNamespace(name="search", server_name="other", args={})
+            await RetrievalContextInterceptor()(
+                other, _handler(_result(_text(_response(_public_doc()))))
+            )
+            assert ctx.calls[0].tool_name == "other_search"
+
+            documents, calls, errors = _collect_retrieval_documents(
+                [], {"eve_retrieval_retrieve"}
+            )
+
+        assert (documents, calls, errors) == ([], 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_context_counts_the_call_when_the_tool_message_never_streamed(
+        self,
+    ):
+        with retrieval_context():
+            await _run(_result(_text(_response(_public_doc()))))
+
+            documents, calls, errors = _collect_retrieval_documents(
+                [], {"eve_retrieval_retrieve"}
+            )
+
+        assert (calls, errors) == (1, 0)
+        assert [d["id"] for d in documents] == ["481257"]
 
     def test_without_context_the_tool_message_is_parsed(self):
         messages = self._messages(json.dumps(_response(_private_doc())))

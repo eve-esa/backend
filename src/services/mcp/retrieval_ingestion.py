@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from src.services.mcp.retrieval_context import get_retrieval_context
+from src.services.mcp.retrieval_context import get_retrieval_context, RetrievalCall
 from src.utils.helpers import extract_documents_from_retrieval_payload
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,13 @@ def _parse_retrieval_response(text: Any) -> Optional[Dict[str, Any]]:
     return parsed
 
 
+def _graph_tool_name(request: Any) -> str:
+    """The name the graph gives this tool: ``<server>_<tool>``, lowercased."""
+    name = str(getattr(request, "name", "") or "")
+    server = str(getattr(request, "server_name", "") or "")
+    return f"{server}_{name}".lower() if server else name.lower()
+
+
 class RetrievalContextInterceptor:
     """Stash the full retrieval documents, hand the model a reduced copy.
 
@@ -148,7 +155,7 @@ class RetrievalContextInterceptor:
             return result
 
         try:
-            return self._reduce(result)
+            return self._reduce(result, _graph_tool_name(request))
         except Exception:
             logger.warning(
                 "Retrieval result reduction failed for tool %r on server %r; "
@@ -159,7 +166,7 @@ class RetrievalContextInterceptor:
             )
             return result
 
-    def _reduce(self, result: "CallToolResult") -> "CallToolResult":
+    def _reduce(self, result: "CallToolResult", tool_name: str) -> "CallToolResult":
         ctx = get_retrieval_context()
         if ctx is None:
             return result
@@ -175,9 +182,14 @@ class RetrievalContextInterceptor:
                 new_content.append(block)
                 continue
 
-            ctx.documents.extend(extract_documents_from_retrieval_payload(response))
-            if isinstance(response.get("latencies"), dict):
-                ctx.latencies.append(dict(response["latencies"]))
+            latencies = response.get("latencies")
+            ctx.calls.append(
+                RetrievalCall(
+                    tool_name=tool_name,
+                    documents=extract_documents_from_retrieval_payload(response),
+                    latencies=dict(latencies) if isinstance(latencies, dict) else {},
+                )
+            )
             slim = slim_retrieval_response_for_model(response)
             new_content.append(
                 block.model_copy(

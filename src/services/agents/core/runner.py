@@ -487,9 +487,15 @@ def _collect_retrieval_documents(
         retrieval_calls += 1
         documents.extend(extract_documents_from_retrieval_payload(content))
 
+    # The context is filled inside the tools node, so it is complete even when
+    # the run was cancelled before the ToolMessage reached the stream: the
+    # documents and the call count come from it whenever it has RAG calls.
     ctx = get_retrieval_context()
-    if ctx is not None and ctx.documents:
-        documents = list(ctx.documents)
+    if ctx is not None:
+        calls = ctx.for_tools(rag_tool_names)
+        if calls:
+            documents = [doc for call in calls for doc in call.documents]
+            retrieval_calls = max(retrieval_calls, len(calls))
     return documents, retrieval_calls, retrieval_errors
 
 
@@ -1084,25 +1090,33 @@ def _generation_unattributed_s(
     return max(0.0, generation_latency - sum(node_latencies.values()))
 
 
-_RETRIEVAL_LATENCY_KEYS = ("query_embedding_latency", "qdrant_retrieval_latency")
+# The keys the classic RAG path writes and the back office averages
+# (routers/message.py stats): summed across the retrieval calls of a run.
+_RETRIEVAL_LATENCY_KEYS = (
+    "query_embedding_latency",
+    "qdrant_retrieval_latency",
+    "reranking_latency",
+)
 
 
-def _merge_retrieval_latencies(latencies: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_retrieval_latencies(
+    latencies: Dict[str, Any], rag_tool_names: set[str]
+) -> Dict[str, Any]:
     """Add the /retrieve endpoint timings of this run to ``metadata.latencies``.
 
     The retrieval interceptor stashes the ``latencies`` object of every
     retrieval call in the request context. Summed per key so a run with two
-    retrieval calls reports the time spent in Qdrant across both, under the
-    same keys the classic RAG path writes and the back office averages.
+    retrieval calls reports the time spent in Qdrant across both.
     """
     ctx = get_retrieval_context()
-    if ctx is None or not ctx.latencies:
+    if ctx is None:
         return latencies
+    calls = ctx.for_tools(rag_tool_names)
     for key in _RETRIEVAL_LATENCY_KEYS:
         values = [
-            entry[key]
-            for entry in ctx.latencies
-            if isinstance(entry.get(key), (int, float))
+            call.latencies[key]
+            for call in calls
+            if isinstance(call.latencies.get(key), (int, float))
         ]
         if values:
             latencies[key] = round(sum(values), 6)
@@ -1361,8 +1375,9 @@ async def generate_answer_agentic(
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
+        rag_tool_names = _rag_tool_names(tools)
         documents, retrieval_calls, _retrieval_errors = _collect_retrieval_documents(
-            all_messages, _rag_tool_names(tools)
+            all_messages, rag_tool_names
         )
         use_rag = retrieval_calls > 0
 
@@ -1373,7 +1388,8 @@ async def generate_answer_agentic(
                 generation_latency=gen_latency,
                 node_latencies=node_latencies,
                 setup_latencies=setup_latencies,
-            )
+            ),
+            rag_tool_names,
         )
         if used_fallback_llm:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
@@ -1817,7 +1833,8 @@ async def generate_answer_agentic_stream_helper(
                 setup_latencies=setup_latencies,
                 first_token_latency=first_token_latency,
                 include_first_token=True,
-            )
+            ),
+            rag_tool_names,
         )
 
         if answer:

@@ -15,18 +15,39 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
 @dataclass
-class RetrievalRequestContext:
-    """Documents returned by the retrieval tool during the current agentic run.
+class RetrievalCall:
+    """One retrieval tool call seen by the interceptor.
 
-    ``documents`` holds the complete Document-shaped records (id, score,
-    payload, ...) as ``extract_document_data`` builds them. The model only sees
-    a reduced copy; the UI and the persisted message get these.
+    ``tool_name`` is the graph facing name (``<server>_<tool>``, lowercased),
+    so the runner can keep the same RAG tool gate it applies to ToolMessages.
+    ``documents`` are the complete Document-shaped records (id, score,
+    payload, ...) as ``extract_document_data`` builds them; ``latencies`` is the
+    ``latencies`` object the /retrieve endpoint returned, if any.
     """
 
+    tool_name: str
     documents: List[Dict[str, Any]] = field(default_factory=list)
-    # One entry per retrieval call: the ``latencies`` object the /retrieve
-    # endpoint returns (query_embedding_latency, qdrant_retrieval_latency, ...).
-    latencies: List[Dict[str, Any]] = field(default_factory=list)
+    latencies: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RetrievalRequestContext:
+    """Retrieval calls made during the current agentic run.
+
+    The model only sees a reduced copy of each result; the UI and the
+    persisted message get the full documents from ``calls``.
+    """
+
+    calls: List[RetrievalCall] = field(default_factory=list)
+
+    @property
+    def documents(self) -> List[Dict[str, Any]]:
+        """Every document of every call, in call order."""
+        return [doc for call in self.calls for doc in call.documents]
+
+    def for_tools(self, tool_names: set) -> List[RetrievalCall]:
+        """Calls made by one of ``tool_names`` (graph facing, lowercased)."""
+        return [call for call in self.calls if call.tool_name in tool_names]
 
 
 _retrieval_context: contextvars.ContextVar[Optional[RetrievalRequestContext]] = (
