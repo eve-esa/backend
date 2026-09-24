@@ -37,12 +37,55 @@ _BEARER_RE = re.compile(r"(?i)\b(bearer)\s+[a-z0-9._~+/=\-]+")
 _BASIC_RE = re.compile(
     r"(?i)\b(basic)\s+(?-i:(?=[A-Za-z0-9+/]*[A-Z0-9+/=])[A-Za-z0-9+/]{8,}={0,2})"
 )
-# Anchored on the start of a token character run: without the lookbehind a
-# long run that starts with "eyJ" and has no dot is rescanned from every
-# position, which is quadratic.
-_JWT_RE = re.compile(
-    r"(?<![a-zA-Z0-9_\-])eyJ[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-+=/.]*"
+# JWTs are found by a hand written scanner (see _redact_jwts): a regex with
+# three quantified segments after the literal "eyJ" rescans a long run from
+# every position, which is quadratic on big inputs.
+_JWT_SEGMENT_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
 )
+_JWT_TAIL_CHARS = _JWT_SEGMENT_CHARS | frozenset("+=/.")
+
+
+def _scan_segment(value: str, pos: int) -> int:
+    """Return the index after a run of segment characters plus padding."""
+    end = pos
+    while end < len(value) and value[end] in _JWT_SEGMENT_CHARS:
+        end += 1
+    while end < len(value) and value[end] == "=":
+        end += 1
+    return end
+
+
+def _redact_jwts(value: str) -> str:
+    """Replace header.payload.signature tokens that start with "eyJ"."""
+    out = []
+    last = 0
+    pos = 0
+    n = len(value)
+    while pos < n:
+        start = value.find("eyJ", pos)
+        if start < 0:
+            break
+        if start > 0 and value[start - 1] in _JWT_SEGMENT_CHARS:
+            pos = start + 3
+            continue
+        first_end = _scan_segment(value, start)
+        if first_end == start + 3 or first_end >= n or value[first_end] != ".":
+            pos = start + 3
+            continue
+        second_end = _scan_segment(value, first_end + 1)
+        if second_end == first_end + 1 or second_end >= n or value[second_end] != ".":
+            pos = start + 3
+            continue
+        end = second_end + 1
+        while end < n and value[end] in _JWT_TAIL_CHARS:
+            end += 1
+        out.append(value[last:start])
+        out.append(REDACTED)
+        last = end
+        pos = end
+    out.append(value[last:])
+    return "".join(out)
 # EVE API keys are "eve_" + 64 hex chars, RunPod keys "rpa_" + alphanumerics.
 # The length floor keeps identifiers like "eve_free" or "eve_jsc" readable.
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:eve|rpa)_[A-Za-z0-9]{16,}")
@@ -50,11 +93,10 @@ _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:eve|rpa)_[A-Za-z0-9]{16,}")
 # Anchored on the start of a scheme character run, not on \b: a word boundary
 # inside a long run such as "a-b.a-b." restarts the scheme scan at every
 # hyphen or dot, which is quadratic on big inputs.
-# The password class excludes ":" (it must be percent encoded in a URL), so
-# the user and password parts cannot overlap and the scan stays linear.
-_URL_USERINFO_RE = re.compile(
-    r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s:@]*@"
-)
+# Anchored on the literal "://" so the scan is linear; the scheme before it
+# is left in place untouched. The password class excludes ":" (it must be
+# percent encoded in a URL), so the user and password parts cannot overlap.
+_URL_USERINFO_RE = re.compile(r"://[^/\s:@]*:[^/\s:@]*@")
 # Query string parameters named like a credential. The name is kept so a log
 # still says which parameter was there.
 # Every parameter is matched once and the name is checked in Python: a lazy
@@ -116,8 +158,8 @@ def redact_secrets(value: str) -> str:
     """
     if not value or not isinstance(value, str):
         return value
-    out = _URL_USERINFO_RE.sub(lambda m: f"{m.group(1)}{REDACTED}@", value)
-    out = _JWT_RE.sub(REDACTED, out)
+    out = _URL_USERINFO_RE.sub(f"://{REDACTED}@", value)
+    out = _redact_jwts(out)
     out = _BEARER_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", out)
     out = _BASIC_RE.sub(lambda m: f"{m.group(1)} {REDACTED}", out)
     out = _PREFIXED_KEY_RE.sub(REDACTED, out)
