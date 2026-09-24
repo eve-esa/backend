@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.config import APP_VERSION, CORS_ALLOWED_ORIGINS, configure_logging
+from src import observability
 from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
 from src.services.provider_catalog import ensure_provider_catalog_seeded
@@ -27,6 +28,10 @@ from src.routers import (
 )
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 from src.utils.error_logger import get_error_logger
+
+# src.config ran load_dotenv on import. Telemetry goes first so the log
+# formatter can carry trace ids; a no-op without OTEL_EXPORTER_OTLP_ENDPOINT.
+observability.init_telemetry()
 
 # Root level from LOG_LEVEL, default INFO; set LOG_LEVEL=DEBUG for verbose logs.
 configure_logging()
@@ -95,6 +100,7 @@ def create_app(debug=False, **kwargs):
                 logging.exception("Error log flush failed")
             await async_mongo_manager.close()
             logging.info("Database connection closed")
+            observability.shutdown()
 
     # Surfaces the running version in /docs and in the OpenAPI document. setdefault so an
     # explicit version= from a caller still wins.
@@ -134,9 +140,11 @@ def create_app(debug=False, **kwargs):
     )
 
     register_routers(app)
+    fastapi_app = app
     app = OpenAIProxyDispatcher(app)
     app = MCPProxyDispatcher(app)
-    return app
+    # Outermost, so /v1 and /mcp get a server span too. Unchanged when off.
+    return observability.wrap_asgi(app, fastapi_app=fastapi_app)
 
 
 app = create_app()

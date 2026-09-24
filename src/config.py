@@ -461,21 +461,53 @@ def resolve_log_level(value: Optional[str] = None) -> int:
     return level if isinstance(level, int) else logging.INFO
 
 
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# With telemetry on, LoggingInstrumentor puts the ids on every record, so a
+# console line can be matched to its trace in the observability UI.
+LOG_FORMAT_WITH_TRACE = (
+    "%(asctime)s - %(name)s - %(levelname)s"
+    " [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
+)
+# Loggers whose handlers are set up by the server process, not by us.
+SERVER_LOGGERS = (
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "gunicorn.error",
+    "gunicorn.access",
+)
+
+
+def _attach_redaction(handler: logging.Handler) -> None:
+    from src.observability.redaction import RedactionFilter
+
+    if not any(isinstance(f, RedactionFilter) for f in handler.filters):
+        handler.addFilter(RedactionFilter())
+
+
 def configure_logging(level: Optional[int] = None):
     """Configure logging for the entire application.
 
     ``level`` wins when given; otherwise the ``LOG_LEVEL`` environment variable
     decides, default INFO. ``LOG_LEVEL=DEBUG`` brings back the old verbose
     output for application loggers; :data:`NOISY_LOGGERS` stay at WARNING.
+
+    Every handler on the root logger and on the server loggers gets a
+    redaction filter. With telemetry on (``init_telemetry`` ran first), the
+    console format carries the trace and span ids.
     """
+    from src.observability import is_enabled as telemetry_enabled
+
     if level is None:
         level = resolve_log_level()
 
     root_logger = logging.getLogger()
-    # Check if already configured to avoid duplicate handlers
-    if not root_logger.hasHandlers():
+    # The OTLP handler installed by init_telemetry does not count: the console
+    # handler is still needed next to it.
+    own_handlers = [h for h in root_logger.handlers if not getattr(h, "_eve_otel", False)]
+    if not own_handlers:
         formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            LOG_FORMAT_WITH_TRACE if telemetry_enabled() else LOG_FORMAT
         )
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
@@ -485,6 +517,15 @@ def configure_logging(level: Optional[int] = None):
     # Outside the handler guard so it holds however logging was set up.
     for name in NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    handlers = list(root_logger.handlers)
+    for name in SERVER_LOGGERS:
+        handlers.extend(logging.getLogger(name).handlers)
+    for handler in handlers:
+        # pytest's capture handlers are left alone so caplog sees raw records.
+        if type(handler).__module__.startswith("_pytest"):
+            continue
+        _attach_redaction(handler)
 
 
 class Config:
