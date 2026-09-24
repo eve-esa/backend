@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.graphs_bundle import graphs_base_module
 from src.services.mcp.artifact_ingestion import ArtifactInterceptor
+from src.services.mcp.retrieval_ingestion import RetrievalContextInterceptor
 from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp.tool_cache import get_or_load_mcp_tools
 from src.services.mcp_auth import get_cognito_token_provider
@@ -144,9 +145,16 @@ async def _discover_mcp_tools_uncached(
     client = MultiServerMCPClient(
         connections,
         tool_name_prefix=True,
+        # First entry is the outermost wrapper. RetrievalContextInterceptor
+        # reads the retrieval_context contextvar at call time, like
+        # ArtifactInterceptor, since this client may be cached and reused.
+        # ArtifactInterceptor stays last (innermost): it only rewrites
+        # non-text blocks, and the stubs it emits are markdown, not a
+        # retrieval payload, so the two never touch the same block.
         tool_interceptors=[
             LatencyInterceptor(),
             ErrorLoggingInterceptor(),
+            RetrievalContextInterceptor(),
             artifact_interceptor,
         ],
     )

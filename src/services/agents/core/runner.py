@@ -43,6 +43,11 @@ from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
 )
+from src.services.mcp.retrieval_context import (
+    get_retrieval_context,
+    reset_retrieval_context,
+    set_retrieval_context,
+)
 from src.services.mcp.tool_loader import (
     _MCPToolsWithClient,
     load_mcp_tools_for_servers as _load_mcp_tools_for_servers,
@@ -436,6 +441,11 @@ def _collect_retrieval_documents(
     answer as source-backed. A retrieval call that returned nothing still counts
     as a call (the UI then says "no sources found", not "answered without
     sources"); a call that returned an error payload counts as an error instead.
+
+    The documents themselves come from the per-request retrieval context when
+    ``RetrievalContextInterceptor`` filled it: the ToolMessage then holds only
+    the reduced copy the model read, without ids. The ToolMessage is parsed
+    only when no interceptor ran (tests, a RAG tool loaded another way).
     """
     if not rag_tool_names or ToolMessage is None:
         return [], 0, 0
@@ -476,6 +486,16 @@ def _collect_retrieval_documents(
             continue
         retrieval_calls += 1
         documents.extend(extract_documents_from_retrieval_payload(content))
+
+    # The context is filled inside the tools node, so it is complete even when
+    # the run was cancelled before the ToolMessage reached the stream: the
+    # documents and the call count come from it whenever it has RAG calls.
+    ctx = get_retrieval_context()
+    if ctx is not None:
+        calls = ctx.for_tools(rag_tool_names)
+        if calls:
+            documents = [doc for call in calls for doc in call.documents]
+            retrieval_calls = max(retrieval_calls, len(calls))
     return documents, retrieval_calls, retrieval_errors
 
 
@@ -1070,6 +1090,39 @@ def _generation_unattributed_s(
     return max(0.0, generation_latency - sum(node_latencies.values()))
 
 
+# The keys the classic RAG path writes and the back office averages
+# (routers/message.py stats): summed across the retrieval calls of a run.
+_RETRIEVAL_LATENCY_KEYS = (
+    "query_embedding_latency",
+    "qdrant_retrieval_latency",
+    "reranking_latency",
+)
+
+
+def _merge_retrieval_latencies(
+    latencies: Dict[str, Any], rag_tool_names: set[str]
+) -> Dict[str, Any]:
+    """Add the /retrieve endpoint timings of this run to ``metadata.latencies``.
+
+    The retrieval interceptor stashes the ``latencies`` object of every
+    retrieval call in the request context. Summed per key so a run with two
+    retrieval calls reports the time spent in Qdrant across both.
+    """
+    ctx = get_retrieval_context()
+    if ctx is None:
+        return latencies
+    calls = ctx.for_tools(rag_tool_names)
+    for key in _RETRIEVAL_LATENCY_KEYS:
+        values = [
+            call.latencies[key]
+            for call in calls
+            if isinstance(call.latencies.get(key), (int, float))
+        ]
+        if values:
+            latencies[key] = round(sum(values), 6)
+    return latencies
+
+
 def _build_agentic_latencies(
     *,
     total_latency: float,
@@ -1145,6 +1198,7 @@ async def generate_answer_agentic(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
+    _retrieval_ctx, retrieval_token = set_retrieval_context()
     endpoint_metadata: Optional[Dict[str, Any]] = None
     agent_graph_type: Optional[str] = None
 
@@ -1321,17 +1375,21 @@ async def generate_answer_agentic(
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
+        rag_tool_names = _rag_tool_names(tools)
         documents, retrieval_calls, _retrieval_errors = _collect_retrieval_documents(
-            all_messages, _rag_tool_names(tools)
+            all_messages, rag_tool_names
         )
         use_rag = retrieval_calls > 0
 
         total_latency = time.perf_counter() - total_start
-        latencies = _build_agentic_latencies(
-            total_latency=total_latency,
-            generation_latency=gen_latency,
-            node_latencies=node_latencies,
-            setup_latencies=setup_latencies,
+        latencies = _merge_retrieval_latencies(
+            _build_agentic_latencies(
+                total_latency=total_latency,
+                generation_latency=gen_latency,
+                node_latencies=node_latencies,
+                setup_latencies=setup_latencies,
+            ),
+            rag_tool_names,
         )
         if used_fallback_llm:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
@@ -1371,6 +1429,7 @@ async def generate_answer_agentic(
         )
         raise
     finally:
+        reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
 
@@ -1432,6 +1491,7 @@ async def generate_answer_agentic_stream_helper(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
+    _retrieval_ctx, retrieval_token = set_retrieval_context()
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1765,13 +1825,16 @@ async def generate_answer_agentic_stream_helper(
         )
         total_latency = time.perf_counter() - total_start
 
-        latencies = _build_agentic_latencies(
-            total_latency=total_latency,
-            generation_latency=gen_latency,
-            node_latencies=node_latencies,
-            setup_latencies=setup_latencies,
-            first_token_latency=first_token_latency,
-            include_first_token=True,
+        latencies = _merge_retrieval_latencies(
+            _build_agentic_latencies(
+                total_latency=total_latency,
+                generation_latency=gen_latency,
+                node_latencies=node_latencies,
+                setup_latencies=setup_latencies,
+                first_token_latency=first_token_latency,
+                include_first_token=True,
+            ),
+            rag_tool_names,
         )
 
         if answer:
@@ -1919,6 +1982,7 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
+        reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
 
