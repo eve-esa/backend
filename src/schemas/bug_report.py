@@ -1,8 +1,7 @@
 """Request and response shapes for ``POST /bug-reports``.
 
-The request is multipart: ``description`` and ``context`` are form fields,
-``context`` carries JSON text validated by :class:`BugReportContext`, and
-``screenshot`` is an optional file part.
+The request is multipart: ``description`` and ``context`` are form fields, and
+``context`` carries JSON text validated by :class:`BugReportContext`.
 """
 
 from datetime import datetime
@@ -61,14 +60,6 @@ class BugReportCreatedResponse(BaseModel):
 
     id: str
     created_at: datetime
-    screenshot: bool = Field(..., description="True when a screenshot was stored with the report")
-
-
-class BugReportScreenshotInfo(BaseModel):
-    """Stored screenshot metadata; the bytes are at ``GET /bug-reports/{id}/screenshot``."""
-
-    content_type: str
-    size_bytes: int
 
 
 class BugReportDetail(BaseModel):
@@ -89,5 +80,4 @@ class BugReportDetail(BaseModel):
     description: str
     context: Dict[str, Any]
     conversation: Optional[Dict[str, Any]] = None
-    screenshot: Optional[BugReportScreenshotInfo] = None
     request_trace_id: Optional[str] = None

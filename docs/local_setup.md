@@ -231,7 +231,6 @@ IS_PROD=false
 | `API_KEY_CREATE_MAX_PER_HOUR` | No | Rolling-hour cap on key creations per user (default `30`); `0` disables the throttle. |
 | `FEATURE_BUG_REPORT_RATE_LIMIT` | No | Bug report rate limit (default `true`). `false` or `0` lets `POST /bug-reports` take any number of reports and ignores `BUG_REPORT_MAX_PER_HOUR`; local compose and dev set it to `false`. |
 | `BUG_REPORT_MAX_PER_HOUR` | No | Rolling-hour cap on bug reports per user while `FEATURE_BUG_REPORT_RATE_LIMIT` is on (default `5`); `0` or negative means unlimited. |
-| `BUG_REPORT_SCREENSHOT_MAX_BYTES` | No | Largest bug report screenshot accepted, in bytes (default `1048576`, 1 MB). |
 
 ---
 

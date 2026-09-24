@@ -359,11 +359,8 @@ API_KEY_MAX_LIFETIME_DAYS = 3650
 
 # Bug reports (src/services/bug_reports.py). Reports per user per rolling hour,
 # read only while FEATURE_BUG_REPORT_RATE_LIMIT is on; <=0 means unlimited, as
-# for API keys. The screenshot cap is in bytes.
+# for API keys.
 BUG_REPORT_MAX_PER_HOUR = _tolerant_int_env("BUG_REPORT_MAX_PER_HOUR", 5)
-BUG_REPORT_SCREENSHOT_MAX_BYTES = _tolerant_int_env(
-    "BUG_REPORT_SCREENSHOT_MAX_BYTES", 1024 * 1024
-)
 # Cap on the JSON size of the conversation snapshot stored with a report.
 BUG_REPORT_CONVERSATION_MAX_BYTES = _tolerant_int_env(
     "BUG_REPORT_CONVERSATION_MAX_BYTES", 2 * 1024 * 1024

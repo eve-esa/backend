@@ -59,7 +59,7 @@ def register_routers(app: FastAPI):
     # Artifacts
     app.include_router(artifact_router, tags=["Artifacts"])
 
-    # Bug reports from the chat, with an optional screenshot
+    # Bug reports from the chat
     app.include_router(bug_report_router, tags=["Bug Reports"])
 
     # MCP Servers

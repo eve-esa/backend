@@ -1,11 +1,10 @@
 """Bug reports filed from the chat: validate, throttle, store, announce.
 
 Routes in ``src/routers/bug_report.py`` stay thin; this module holds the rate
-limit (same Mongo time window count as ``src/services/api_keys.py``, no Redis),
-the screenshot checks, the storage key layout and the ``bug_report.created``
-log event.
+limit (same Mongo time window count as ``src/services/api_keys.py``, no Redis)
+and the ``bug_report.created`` log event.
 
-Nothing here logs the description or the screenshot. The log event carries
+Nothing here logs the description. The log event carries
 ids and links only; the description stays in Mongo, redacted.
 """
 
@@ -13,14 +12,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
 from bson import ObjectId
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 
 from src import config
-from src.config import BUG_REPORT_SCREENSHOT_MAX_BYTES
-from src.database.models.bug_report import BugReport, BugReportScreenshot
+from src.database.models.bug_report import BugReport
 from src.database.models.user import User
 from src.observability import deployment_environment
 from src.observability.context import format_trace_id
@@ -30,11 +28,6 @@ from src.schemas.bug_report import (
     BugReportCreatedResponse,
 )
 from src.services.bug_report_snapshot import build_snapshot
-from src.services.storage import (
-    ARTIFACT_TYPE_CONTENT_TYPES,
-    sniff_artifact_type,
-    storage_service,
-)
 from src.utils.redaction import redact_secrets, redact_value
 
 logger = logging.getLogger(__name__)
@@ -43,10 +36,6 @@ logger = logging.getLogger(__name__)
 event_logger = logging.getLogger("eve.bug_report")
 
 EVENT_CREATED = "bug_report.created"
-SCREENSHOT_PREFIX = "bug-reports"
-# Image only allowlist, a subset of the artifact type keys sniffed by
-# sniff_artifact_type. The key doubles as the object extension.
-SCREENSHOT_ALLOWED_TYPES = ("png", "jpeg")
 _WINDOW = timedelta(hours=1)
 
 # Attribute names on the log record and the request span.
@@ -129,41 +118,6 @@ async def _is_among_first_in_window(user_id: str, report_id: str, now: datetime)
     return report_id in survivors
 
 
-async def read_screenshot(upload: Optional[UploadFile]) -> Optional[Tuple[bytes, str]]:
-    """Read and validate the optional screenshot part.
-
-    The declared Content-Type is ignored: the type is sniffed from the magic
-    bytes and must be PNG or JPEG. An empty part counts as no screenshot.
-
-    Returns:
-        ``(data, type_key)`` or None when no screenshot was sent.
-
-    Raises:
-        HTTPException: 413 above the byte cap, 415 for any other type.
-    """
-    if upload is None:
-        return None
-    data = await upload.read(BUG_REPORT_SCREENSHOT_MAX_BYTES + 1)
-    if not data:
-        return None
-    if len(data) > BUG_REPORT_SCREENSHOT_MAX_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Screenshot exceeds {BUG_REPORT_SCREENSHOT_MAX_BYTES} bytes",
-        )
-    type_key = sniff_artifact_type(data[:16], upload.filename, data)
-    if type_key not in SCREENSHOT_ALLOWED_TYPES:
-        raise HTTPException(
-            status_code=415, detail="Screenshot must be a PNG or JPEG image"
-        )
-    return data, type_key
-
-
-def screenshot_key(user_id: str, report_id: str, type_key: str) -> str:
-    """``bug-reports/{user_id}/{report_id}.{ext}``, outside the ``users/`` artifact tree."""
-    return f"{SCREENSHOT_PREFIX}/{user_id}/{report_id}.{type_key}"
-
-
 def _redacted_context(context: BugReportContext) -> dict:
     """Every context field, strings redacted, console errors clipped."""
     data = context.model_dump()
@@ -221,11 +175,10 @@ def emit_created_event(report: BugReport) -> None:
         except Exception:  # pragma: no cover - telemetry never breaks a request
             pass
     event_logger.warning(
-        "%s id=%s user_id=%s screenshot=%s",
+        "%s id=%s user_id=%s",
         EVENT_CREATED,
         report.id,
         report.user_id,
-        report.screenshot is not None,
         extra=attributes,
     )
 
@@ -234,19 +187,15 @@ async def create_bug_report(
     user: User,
     description: str,
     context: BugReportContext,
-    screenshot: Optional[Tuple[bytes, str]],
 ) -> BugReportCreatedResponse:
-    """Throttle, snapshot the conversation, store the report, then its
-    screenshot, then announce it.
+    """Throttle, snapshot the conversation, store the report, then announce it.
 
     The conversation is read from Mongo for ``context.conversation_id``; a
     conversation that is missing or not the user's is a 404 and stores nothing.
 
     Optimistic insert then verify, as in ``api_keys.create_api_key``: the row is
-    inserted, the window recounted, and a row past the cap deleted before
-    anything is uploaded, so a refused report never leaves an object behind.
-    A storage failure keeps the report and answers ``screenshot: false``: the
-    description is the part the user cannot easily send again.
+    inserted, the window recounted, and a row past the cap deleted before the
+    event is emitted, so a refused report leaves nothing behind.
     """
     now = datetime.now(timezone.utc)
     await enforce_rate_limit(user.id, now)
@@ -276,30 +225,8 @@ async def create_bug_report(
         await BugReport.get_collection().delete_one({"_id": oid})
         raise _throttled()
 
-    if screenshot is not None:
-        data, type_key = screenshot
-        key = screenshot_key(user.id, report.id, type_key)
-        content_type = ARTIFACT_TYPE_CONTENT_TYPES[type_key]
-        try:
-            await storage_service.put_object(key, data, content_type)
-        except Exception as exc:
-            logger.error(
-                "bug_report.screenshot_store_failed id=%s error=%s",
-                report.id,
-                type(exc).__name__,
-            )
-        else:
-            report.screenshot = BugReportScreenshot(
-                key=key, content_type=content_type, size_bytes=len(data)
-            )
-            await BugReport.get_collection().update_one(
-                {"_id": oid}, {"$set": {"screenshot": report.screenshot.model_dump()}}
-            )
-
     emit_created_event(report)
-    return BugReportCreatedResponse(
-        id=report.id, created_at=report.timestamp, screenshot=report.screenshot is not None
-    )
+    return BugReportCreatedResponse(id=report.id, created_at=report.timestamp)
 
 
 async def get_owned_report(report_id: str, user: User) -> BugReport:
