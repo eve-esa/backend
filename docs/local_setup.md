@@ -229,6 +229,8 @@ IS_PROD=false
 | `API_KEY_MAX_ACTIVE_PER_USER` | No | Max active self-service API keys per user (default `10`). `0` disables key creation. |
 | `API_KEY_DEFAULT_EXPIRES_IN_DAYS` | No | Expiry applied when a create request omits it (default `90`). |
 | `API_KEY_CREATE_MAX_PER_HOUR` | No | Rolling-hour cap on key creations per user (default `30`); `0` disables the throttle. |
+| `BUG_REPORT_MAX_PER_HOUR` | No | Rolling-hour cap on bug reports per user (default `5`); `0` disables the throttle. |
+| `BUG_REPORT_SCREENSHOT_MAX_BYTES` | No | Largest bug report screenshot accepted, in bytes (default `1048576`, 1 MB). |
 
 ---
 

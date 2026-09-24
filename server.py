@@ -14,6 +14,7 @@ from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
     artifact_router,
+    bug_report_router,
     collection_router,
     conversation_router,
     custom_model_router,
@@ -57,6 +58,9 @@ def register_routers(app: FastAPI):
 
     # Artifacts
     app.include_router(artifact_router, tags=["Artifacts"])
+
+    # Bug reports from the chat, with an optional screenshot
+    app.include_router(bug_report_router, tags=["Bug Reports"])
 
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])

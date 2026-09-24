@@ -44,6 +44,7 @@ async def ensure_indexes() -> None:
     openai_usage = get_collection("openai_usage")
     api_keys = get_collection("api_keys")
     artifacts = get_collection("artifacts")
+    bug_reports = get_collection("bug_reports")
     user_custom_models = get_collection("user_custom_models")
     catalog_platform_models = get_collection("catalog_platform_models")
     catalog_providers = get_collection("catalog_providers")
@@ -140,6 +141,13 @@ async def ensure_indexes() -> None:
         artifacts,
         [("user_id", 1), ("conversation_id", 1)],
         name="artifacts_by_user_conversation",
+    )
+
+    # Bug reports: the per-user rolling hour count behind the rate limit.
+    await _create_index(
+        bug_reports,
+        [("user_id", 1), ("timestamp", -1)],
+        name="bug_reports_by_user_time",
     )
 
     await _create_index(

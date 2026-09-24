@@ -346,6 +346,13 @@ API_KEY_CREATE_MAX_PER_HOUR = _tolerant_int_env("API_KEY_CREATE_MAX_PER_HOUR", 3
 # Not env-configurable: the outer bound on expires_in_days/expires_at, whatever
 # the default above is.
 API_KEY_MAX_LIFETIME_DAYS = 3650
+
+# Bug reports (src/services/bug_reports.py). Reports per user per rolling hour;
+# <=0 disables the throttle, as for API keys. The screenshot cap is in bytes.
+BUG_REPORT_MAX_PER_HOUR = _tolerant_int_env("BUG_REPORT_MAX_PER_HOUR", 5)
+BUG_REPORT_SCREENSHOT_MAX_BYTES = _tolerant_int_env(
+    "BUG_REPORT_SCREENSHOT_MAX_BYTES", 1024 * 1024
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:
