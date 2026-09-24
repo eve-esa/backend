@@ -213,9 +213,24 @@ IS_PROD=false
 | `OPENAI_PROXY_API_KEY` | No | API key for that upstream (falls back to `MAIN_MODEL_API_KEY`, which is the same RunPod endpoint). |
 | `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
 | `IS_PROD` | No | Set to `true` to enable production mode toggles. |
+| `LOG_LEVEL` | No | Root log level: `DEBUG`, `INFO`, `WARNING` or `ERROR` (default `INFO`). `DEBUG` gives the verbose output the server used to run with. `httpx`, `httpcore`, `urllib3`, `pymongo`, `botocore`, `boto3`, `openai` and `mcp` stay at `WARNING` at every level, since they log request URLs and query bodies. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTLP HTTP collector base URL, e.g. `http://otel-collector:4318` with the stack `clickstack` profile. Unset or empty keeps telemetry off: no SDK import, no exporter thread, no middleware. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | No | Secret. Headers for the collector, `authorization=<ingest key>`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | No | `http/protobuf`, the only protocol shipped. |
+| `OTEL_RESOURCE_ATTRIBUTES` | No | Extra resource attributes; `deployment.environment.name=<env>` names the environment, otherwise `APP_ENVIRONMENT` is used. `service.name` is always `eve-backend`. |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | No | Sampler, e.g. `parentbased_traceidratio` and `1.0`. SDK default `parentbased_always_on`. |
+| `OTEL_SDK_DISABLED` | No | `true` turns telemetry off even with an endpoint set. |
+| `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` | No | Longest span attribute value (default `4096`). |
+| `EVE_OTEL_CAPTURE_CONTENT` | No | Prompts, answers and tool arguments on GenAI spans. `true` only on dev and local. |
+| `EVE_OTEL_EXPORT_USER_EMAIL` | No | Export the user email as a span attribute (default `false`). |
+| `FEATURE_LANGFUSE_SCORES` | No | `true` posts thumbs feedback to Langfuse as scores on the message trace (`thumbs-<message_id>`, `hallucination-<message_id>`). Default `false`. Needs the three variables below and a message with `trace_id`. |
+| `LANGFUSE_HOST` | No | Langfuse base URL for `POST /api/public/scores`, e.g. `http://langfuse-web:3000` inside the stack compose. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | No | Secret. Langfuse project keys, sent as Basic auth. Only used for scores; traces reach Langfuse through the collector. |
 | `API_KEY_MAX_ACTIVE_PER_USER` | No | Max active self-service API keys per user (default `10`). `0` disables key creation. |
 | `API_KEY_DEFAULT_EXPIRES_IN_DAYS` | No | Expiry applied when a create request omits it (default `90`). |
 | `API_KEY_CREATE_MAX_PER_HOUR` | No | Rolling-hour cap on key creations per user (default `30`); `0` disables the throttle. |
+| `FEATURE_BUG_REPORT_RATE_LIMIT` | No | Bug report rate limit (default `true`). `false` or `0` lets `POST /bug-reports` take any number of reports and ignores `BUG_REPORT_MAX_PER_HOUR`; local compose and dev set it to `false`. |
+| `BUG_REPORT_MAX_PER_HOUR` | No | Rolling-hour cap on bug reports per user while `FEATURE_BUG_REPORT_RATE_LIMIT` is on (default `5`); `0` or negative means unlimited. |
 
 ---
 

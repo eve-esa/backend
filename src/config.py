@@ -120,6 +120,16 @@ FEATURE_MCP_SERVER_REGISTRATION = getenv_or(
     "0",
 )
 
+# Off: POST /bug-reports takes any number of reports, BUG_REPORT_MAX_PER_HOUR is
+# not read. Default on; local compose and dev set it to "false" to work without
+# limits. Treat only "false"/"0" (case-insensitively) as off.
+FEATURE_BUG_REPORT_RATE_LIMIT = getenv_or(
+    "FEATURE_BUG_REPORT_RATE_LIMIT", "true"
+).lower() not in (
+    "false",
+    "0",
+)
+
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
@@ -257,10 +267,15 @@ SCRAPING_DOG_API_KEY = os.getenv("SCRAPING_DOG_API_KEY", "").strip()
 # Optional Redis URL for cross-process cancel/pubsub
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
-# Langfuse observability
+# Langfuse scores (src/services/langfuse_scores.py). Thumbs on a message become
+# a score on its trace. Traces reach Langfuse through the OTel collector, not
+# from here; these are only for POST /api/public/scores.
+# On: thumbs are posted as scores, when the three LANGFUSE_* values below are
+# set too. Default off, like FEATURE_JSC_MODEL: only "true" turns it on.
+FEATURE_LANGFUSE_SCORES = getenv_or("FEATURE_LANGFUSE_SCORES").lower() == "true"
+LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
-LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "http://localhost:3000").strip()
 
 # ─── Agentic pipeline configuration ───────────────────────────────────────────
 # MODEL_TIMEOUT (defined above) is the per-step answer generation timeout used
@@ -341,6 +356,15 @@ API_KEY_CREATE_MAX_PER_HOUR = _tolerant_int_env("API_KEY_CREATE_MAX_PER_HOUR", 3
 # Not env-configurable: the outer bound on expires_in_days/expires_at, whatever
 # the default above is.
 API_KEY_MAX_LIFETIME_DAYS = 3650
+
+# Bug reports (src/services/bug_reports.py). Reports per user per rolling hour,
+# read only while FEATURE_BUG_REPORT_RATE_LIMIT is on; <=0 means unlimited, as
+# for API keys.
+BUG_REPORT_MAX_PER_HOUR = _tolerant_int_env("BUG_REPORT_MAX_PER_HOUR", 5)
+# Cap on the JSON size of the conversation snapshot stored with a report.
+BUG_REPORT_CONVERSATION_MAX_BYTES = _tolerant_int_env(
+    "BUG_REPORT_CONVERSATION_MAX_BYTES", 2 * 1024 * 1024
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:
@@ -434,28 +458,98 @@ IMAGE_CATALOG_PATH = (
     os.getenv("IMAGE_CATALOG_PATH", "").strip() or _DEFAULT_IMAGE_CATALOG_PATH
 )
 
-def configure_logging(level=logging.INFO):
-    """Configure logging for the entire application."""
-    # Check if already configured to avoid duplicate handlers
-    if not logging.getLogger().hasHandlers():
-        # Create formatter
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+# Client libraries that log every request (httpx prints each LLM, Qdrant and MCP
+# URL at INFO) or every command body (pymongo prints the key_hash filter of each
+# API key lookup and whole user documents at DEBUG). Held at WARNING whatever
+# LOG_LEVEL says.
+NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "pymongo",
+    "botocore",
+    "boto3",
+    "openai",
+    "mcp",
+)
 
-        # Create console handler
+
+def resolve_log_level(value: Optional[str] = None) -> int:
+    """Map a LOG_LEVEL string (name or number) to a logging level, INFO if unset or unknown."""
+    raw = (os.getenv("LOG_LEVEL", "") if value is None else value).strip().upper()
+    if not raw:
+        return logging.INFO
+    if raw.isdigit():
+        return int(raw)
+    level = logging.getLevelName(raw)
+    return level if isinstance(level, int) else logging.INFO
+
+
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+# With telemetry on, LoggingInstrumentor puts the ids on every record, so a
+# console line can be matched to its trace in the observability UI.
+LOG_FORMAT_WITH_TRACE = (
+    "%(asctime)s - %(name)s - %(levelname)s"
+    " [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] - %(message)s"
+)
+# Loggers whose handlers are set up by the server process, not by us.
+SERVER_LOGGERS = (
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "gunicorn.error",
+    "gunicorn.access",
+)
+
+
+def _attach_redaction(handler: logging.Handler) -> None:
+    from src.observability.redaction import RedactionFilter
+
+    if not any(isinstance(f, RedactionFilter) for f in handler.filters):
+        handler.addFilter(RedactionFilter())
+
+
+def configure_logging(level: Optional[int] = None):
+    """Configure logging for the entire application.
+
+    ``level`` wins when given; otherwise the ``LOG_LEVEL`` environment variable
+    decides, default INFO. ``LOG_LEVEL=DEBUG`` brings back the old verbose
+    output for application loggers; :data:`NOISY_LOGGERS` stay at WARNING.
+
+    Every handler on the root logger and on the server loggers gets a
+    redaction filter. With telemetry on (``init_telemetry`` ran first), the
+    console format carries the trace and span ids.
+    """
+    from src.observability import is_enabled as telemetry_enabled
+
+    if level is None:
+        level = resolve_log_level()
+
+    root_logger = logging.getLogger()
+    # The OTLP handler installed by init_telemetry does not count: the console
+    # handler is still needed next to it.
+    own_handlers = [h for h in root_logger.handlers if not getattr(h, "_eve_otel", False)]
+    if not own_handlers:
+        formatter = logging.Formatter(
+            LOG_FORMAT_WITH_TRACE if telemetry_enabled() else LOG_FORMAT
+        )
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
-
-        # Configure root logger
-        root_logger = logging.getLogger()
-        root_logger.setLevel(level)
         root_logger.addHandler(console_handler)
+    root_logger.setLevel(level)
 
-    # server.py runs the root logger at DEBUG, where pymongo's command monitoring
-    # logs every command body: the key_hash filter of each API key lookup, whole
-    # user documents. Outside the handler guard so it holds however logging was set up.
-    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    # Outside the handler guard so it holds however logging was set up.
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    handlers = list(root_logger.handlers)
+    for name in SERVER_LOGGERS:
+        handlers.extend(logging.getLogger(name).handlers)
+    for handler in handlers:
+        # pytest's capture handlers are left alone so caplog sees raw records.
+        if type(handler).__module__.startswith("_pytest"):
+            continue
+        _attach_redaction(handler)
 
 
 class Config:

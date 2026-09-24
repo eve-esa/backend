@@ -117,9 +117,7 @@ def _patched_runner(**overrides):
         "_fetch_conversation_context": AsyncMock(return_value=([], None)),
         "_resolve_agent_graph_type": MagicMock(return_value="react"),
         "get_agent_graph": MagicMock(return_value=_fake_agent()),
-        "get_callbacks": MagicMock(return_value=[]),
         "persist_policy_event": AsyncMock(),
-        "langfuse_context": lambda **kwargs: contextlib.nullcontext(),
         "persist_message_state": AsyncMock(),
         "maybe_rollup_and_trim_history": AsyncMock(),
     }

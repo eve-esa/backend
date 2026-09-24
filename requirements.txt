@@ -15,7 +15,24 @@ langgraph==1.2.4
 # @main: the release image is built from this SHA. bbc2fad (0.5.3) emits
 # retry/timeout/error_handler/fallback via compile(..., on_policy=...).
 eve-esa-agents @ git+https://github.com/eve-esa/agents.git@bbc2fad57ea6ed693b9f97eec7549ed765c27bac
-langfuse>=2.60.10
+# OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
+# released in lockstep with the SDK (1.44.0); bump them together.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation==0.65b0
+opentelemetry-instrumentation-asgi==0.65b0
+opentelemetry-instrumentation-httpx==0.65b0
+opentelemetry-instrumentation-pymongo==0.65b0
+opentelemetry-instrumentation-redis==0.65b0
+opentelemetry-instrumentation-botocore==0.65b0
+opentelemetry-instrumentation-logging==0.65b0
+# OpenLLMetry: LangChain and LangGraph spans. Exact pin, never a range: any
+# bump (Dependabot included) merges only with tests/test_trace_tree.py green,
+# that test is the canary. opentelemetry-instrumentation-mcp stays out (issues
+# 4463 and 4447, PR 4441): the MCP client span is ours, in tool_loader.py.
+opentelemetry-instrumentation-langchain==0.62.3
+opentelemetry-semantic-conventions-ai==0.5.1
 openai>=2.53.0,<3.0.0
 langgraph-checkpoint==4.2.0
 langgraph-checkpoint-mongodb==0.4.0
@@ -35,7 +52,9 @@ PyJWT[crypto]==2.13.0
 cryptography>=43.0.0
 jinja2==3.1.6
 pytest-asyncio==1.4.0
-mcp
+# Pinned: the TracingInterceptor and the trace canary depend on the MCP client
+# request and header plumbing. Dependabot proposes bumps.
+mcp==1.30.0
 fastmcp>=3.4.6,<4.0.0
 huggingface_hub
 replicate

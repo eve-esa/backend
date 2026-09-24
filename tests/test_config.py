@@ -296,7 +296,12 @@ def test_legacy_non_prod_uses_dev_private_collection(monkeypatch):
 def test_configure_logging_keeps_pymongo_command_bodies_out_of_debug_logs():
     # The app runs the root logger at DEBUG; pymongo's command monitoring would
     # then log every command body, including the key_hash of each API key lookup.
-    configure_logging(level=logging.DEBUG)
+    root = logging.getLogger()
+    saved = root.level
+    try:
+        configure_logging(level=logging.DEBUG)
 
-    assert not logging.getLogger("pymongo.command").isEnabledFor(logging.DEBUG)
-    assert logging.getLogger("pymongo.command").isEnabledFor(logging.WARNING)
+        assert not logging.getLogger("pymongo.command").isEnabledFor(logging.DEBUG)
+        assert logging.getLogger("pymongo.command").isEnabledFor(logging.WARNING)
+    finally:
+        root.setLevel(saved)

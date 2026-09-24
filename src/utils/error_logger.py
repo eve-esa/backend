@@ -7,17 +7,19 @@ Batches inserts in the background. Agentic call sites pass ``kind`` / ``node`` /
 
 import logging
 import asyncio
-import re
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
 
 from contextvars import ContextVar
 
 from src.database.models.error_log import ErrorLog
-from src.utils.langfuse_helper import record_error_kind
+from src.observability.context import record_kind
+# Re-exported: callers such as interceptors.py import redact_secrets from here.
+from src.utils.redaction import REDACTED as _REDACTED  # noqa: F401
+from src.utils.redaction import redact_secrets, redact_value  # noqa: F401
 
-# Graph failures also go to Langfuse when keys are set (no-op otherwise).
-_LANGFUSE_KINDS = frozenset(
+# Graph failures also become an event on the current span plus a WARNING log.
+_SPAN_EVENT_KINDS = frozenset(
     {
         "timeout",
         "run_timeout",
@@ -65,23 +67,7 @@ class PolicyEvent(Exception):
     """Stand-in exception when logging a policy that is not a Python failure."""
 
 
-_SECRET_KEY_RE = re.compile(
-    r"(?i)^(authorization|password|secret|token|access_token|api_key|jwt|credential)$"
-)
-_SECRET_VALUE_RE = re.compile(
-    r"(?i)(bearer\s+[a-z0-9._\-+=/]+|"
-    r"eyJ[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-]+=*\.[a-zA-Z0-9_\-+=/.]*|"
-    r"(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*\S+)"
-)
-_REDACTED = "[REDACTED]"
 _MAX_ERROR_STRING = 500
-
-
-def redact_secrets(value: str) -> str:
-    """Strip bearer tokens / JWTs / api-key assignments from a log string."""
-    if not value:
-        return value
-    return _SECRET_VALUE_RE.sub(_REDACTED, value)
 
 
 def _label(value: Any) -> Optional[str]:
@@ -104,30 +90,7 @@ class ErrorLogger:
         self._flush_task: Optional[asyncio.Task] = None
 
     def _serialize_error_value(self, value: Any, *, key: Optional[str] = None) -> Any:
-        if key and _SECRET_KEY_RE.match(str(key)):
-            return _REDACTED
-        if isinstance(value, Exception):
-            return {
-                "type": type(value).__name__,
-                "message": redact_secrets(str(value))[:_MAX_ERROR_STRING],
-                "args": [
-                    self._serialize_error_value(arg) for arg in value.args
-                ]
-                if hasattr(value, "args")
-                else [],
-            }
-        elif isinstance(value, (list, tuple)):
-            return [self._serialize_error_value(item) for item in value]
-        elif isinstance(value, dict):
-            return {
-                k: self._serialize_error_value(v, key=str(k)) for k, v in value.items()
-            }
-        elif isinstance(value, str):
-            return redact_secrets(value)[:_MAX_ERROR_STRING]
-        elif isinstance(value, (int, float, bool, type(None))):
-            return value
-        else:
-            return redact_secrets(str(value))[:_MAX_ERROR_STRING]
+        return redact_value(value, key=key, max_len=_MAX_ERROR_STRING)
 
     def _create_error_document(
         self,
@@ -211,9 +174,9 @@ class ErrorLogger:
         ``rag``, ``frontend``, …). A ``policy=`` argument is accepted as an
         alias and stored as ``kind``.
 
-        Agentic kinds are always inserted into Mongo ``error_logs``. When
-        Langfuse is enabled they are also emitted as child events on the
-        generation trace (``record_error_kind`` is a no-op without keys).
+        Agentic kinds are always inserted into Mongo ``error_logs``. They are
+        also recorded by ``record_kind``: an event on the current span (none
+        when telemetry is off) and a WARNING log line.
         """
         try:
             error_doc = self._create_error_document(
@@ -230,8 +193,8 @@ class ErrorLogger:
                 source=source,
                 error_extra=error_extra,
             )
-            if error_doc.kind in _LANGFUSE_KINDS:
-                record_error_kind(
+            if error_doc.kind in _SPAN_EVENT_KINDS:
+                record_kind(
                     error_doc.kind,
                     node=error_doc.node,
                     graph=error_doc.graph,

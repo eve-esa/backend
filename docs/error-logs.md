@@ -1,12 +1,11 @@
 # Error logging
 
-Ops log of failures, stored in MongoDB collection `error_logs`. The
-backoffice reads this collection. When Langfuse keys are set, agentic
-`kind`s are also child events on the generation trace; without keys that
-path is a no-op (hosted ECS today has no Langfuse).
+Ops log of failures, stored in MongoDB collection `error_logs`. Nothing
+in the backoffice reads this collection today; query it in Mongo. Agentic
+`kind`s also go to OpenTelemetry, see [OpenTelemetry path](#opentelemetry-path).
 
 This is **not** the chat-client contract (`metadata.error` / SSE
-`type: error` — see [generation-errors](api/generation-errors.md)).
+`type: error`, see [generation-errors](api/generation-errors.md)).
 Cancellation is not an error: it is `Message.stopped` / SSE `stopped`.
 Endpoint circuit state (`EndpointHealth`) is not written here.
 
@@ -20,7 +19,7 @@ producer  →  ErrorLogger.log_error()  →  in-memory buffer
                                           ├─ flush every 5s or 100 rows
                                           └─ ErrorLog.bulk_create() → Mongo error_logs
 
-                 if kind is agentic ──► record_error_kind()  (no-op without Langfuse keys)
+                 if kind is agentic ──► record_kind()  (span event + WARNING log)
 ```
 
 1. Request routers set contextvars (`user_id`, `conversation_id`,
@@ -58,9 +57,7 @@ failures never raise to the caller.
 | `classify_mcp_tool_result` | `src/services/agents/core/interceptors.py` | Detect returned MCP failures (`is_error` / `structured` / `text`) |
 | `_graph_on_policy` | `src/services/agents/core/runner.py` | Callback passed into `AgentGraph.compile(on_policy=…)` |
 | `_AgenticBudgetTimeout` | `src/services/agents/core/runner.py` | Whole-run `AGENTIC_TIMEOUT` (`kind=run_timeout`); does not open the LLM circuit |
-| `_NodeKindCallbackHandler` | `src/utils/langfuse_helper.py` | Langfuse `CallbackHandler` that caches node spans after they pop |
-| `record_error_kind` | `src/utils/langfuse_helper.py` | Optional Langfuse EVENT on the node span |
-| `langfuse_context` / `get_callbacks` | `src/utils/langfuse_helper.py` | Wrap LangGraph invoke; no-op when keys are missing |
+| `record_kind` | `src/observability/context.py` | Agentic `kind` as an event on the current span plus a WARNING log |
 
 
 `Component.MCP_TOOL` and `PipelineStage.HALLUCINATION` exist on the enums
@@ -81,7 +78,7 @@ import `src.*`; it only calls `on_policy`.
 | `AgentGraph.error_handler()` | Graph-level handler: emits `timeout` or `error_handler`, then `fallback` and `Command(goto="agent_fallback")` |
 | `emit_on_policy` | Invokes the backend callback; never raises into the graph |
 | `LatencyInterceptor` | MCP latency logs only (not `error_logs`) |
-| `retry_on_transient` | Retry `ConnectionError`, timeouts, LangGraph default HTTP failures — not `ValueError` |
+| `retry_on_transient` | Retry `ConnectionError`, timeouts, LangGraph default HTTP failures, not `ValueError` |
 
 
 ### LangGraph (library)
@@ -92,10 +89,10 @@ stdlib `TimeoutError`; the runner maps it with `_is_node_timeout_error`.
 
 ## Typology (`kind`)
 
-`kind` is the only discriminator. Switch the backoffice UI on this field.
+`kind` is the only discriminator. Filter on this field.
 
 
-| `kind` | What happened | Typical location | Also Langfuse? |
+| `kind` | What happened | Typical location | Also a span event? |
 | ------ | ------------- | ---------------- | -------------- |
 | `timeout` | Node idle/run timeout (`NodeTimeoutError`) | `node` + `graph` | yes |
 | `run_timeout` | Whole-run budget (`AGENTIC_TIMEOUT` / `_AgenticBudgetTimeout`) | `source=runner`, `graph` | yes |
@@ -165,7 +162,7 @@ LangGraph does not accept):
 
 
 `retry_on_transient` retries `ConnectionError`, stdlib `TimeoutError`,
-`NodeTimeoutError`, and LangGraph’s default HTTP failures — not
+`NodeTimeoutError`, and LangGraph’s default HTTP failures, not
 `ValueError`.
 
 ### The callback (graph → Mongo)
@@ -198,7 +195,7 @@ body. LangGraph invokes it with a `NodeError` (`error.node`,
    The exception is **swallowed by the graph**; the run continues.
 4. Otherwise re-raises. The exception leaves `astream` and layer C runs.
 
-### Layer A — LangGraph policies (exceptions that escape a node)
+### Layer A: LangGraph policies (exceptions that escape a node)
 
 Typical `agent` timeout (primary LLM stalled):
 
@@ -214,13 +211,13 @@ Typical `agent` timeout (primary LLM stalled):
    `agent_fallback`.
 5. `agent_fallback` is a single LLM call on the fallback model. If
    **it** times out, the same handler emits `timeout` (or `error_handler`)
-   and re-raises — no second fallback.
+   and re-raises, no second fallback.
 
 A programmer error (`ValueError`, bad prompt, …) skips retry (not
 transient), goes straight to `error_handler` → `kind=error_handler` →
 fallback if available.
 
-### Layer B — MCP interceptor (inside `tools`, before LangGraph)
+### Layer B: MCP interceptor (inside `tools`, before LangGraph)
 
 Most tool failures **never become graph exceptions**. That is why
 `RetryPolicy` / `error_handler` on `tools` almost never fire, and why
@@ -261,7 +258,7 @@ to `agent_fallback`.
 
 MCP **load** (missing URL, `get_tools` failed) is not a graph event at
 all: `tool_loader` calls `persist_policy_event(policy="mcp_load")`
-directly. `kind=mcp_load` never hits Langfuse.
+directly. `kind=mcp_load` is Mongo only.
 
 `error.signal` for `tool_error`:
 
@@ -274,7 +271,7 @@ directly. `kind=mcp_load` never hits Langfuse.
 | `text` | 401-style plain text (`Error 401`, `unauthorized`, …) |
 
 
-### Layer C — runner leftover (escaped the compiled graph)
+### Layer C: runner leftover (escaped the compiled graph)
 
 If `error_handler` re-raises, or a budget outside the node fires,
 `graph.astream(...)` raises into `generate_answer_agentic_helper` /
@@ -348,7 +345,7 @@ All of these go through `get_error_logger().log_error` with `Component` +
 
 ### Frontend
 
-`src/routers/error_log.py` — `POST /log-error`. Authenticated. Writes
+`src/routers/error_log.py`, `POST /log-error`. Authenticated. Writes
 `kind=frontend`, `source=frontend`, `component` from the body (default
 `FRONTEND`), `pipeline_stage=CLIENT_ERROR`. Direct `ErrorLog.save()`,
 not the batch logger.
@@ -362,7 +359,7 @@ not the batch logger.
 | ----- | ------- |
 | `_id` | Mongo id |
 | `timestamp` | When the row was written (UTC) |
-| `kind` | Discriminator — switch the backoffice UI on this |
+| `kind` | Discriminator, filter on this |
 | `description` | Human-readable summary (secrets redacted, max 500 chars) |
 
 
@@ -430,20 +427,18 @@ Agentic rows do **not** set these. Use `node` / `kind` instead.
 
 Documents written before this taxonomy may still contain those copies.
 
-## Langfuse overlay
+## OpenTelemetry path
 
-Enabled only when `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are
-set (`is_langfuse_enabled`). `LANGFUSE_BASE_URL` selects the instance.
+`ErrorLogger.log_error` calls `record_kind` for `timeout`, `run_timeout`,
+`retry`, `error_handler`, `fallback` and `tool_error`. It adds an event
+named after the kind to the current span (`eve.kind`, `eve.node`,
+`eve.graph`, `eve.source`, `eve.description`) and writes a WARNING log,
+which carries the trace id when telemetry is on. `mcp_load`, `rag` and
+`frontend` stay Mongo only.
 
-`ErrorLogger.log_error` calls `record_error_kind` for
-`timeout`, `run_timeout`, `retry`, `error_handler`, `fallback`,
-`tool_error`. The helper nests a Langfuse EVENT under the named node
-span (`agent`, `agent_fallback`, `tools`, …). `mcp_load`, `rag`, and
-`frontend` stay Mongo-only.
-
-Without keys the helper returns immediately; Mongo still receives the
-row. Hosted can turn Langfuse on later by adding URL + keys — no
-producer changes.
+With `OTEL_EXPORTER_OTLP_ENDPOINT` unset there is no span, the log line
+still goes to stdout and Mongo still receives the row. See
+`src/observability/` for the exporter setup.
 
 ## Example
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from src.observability.context import child_span
 from src.services.agents.core.interceptors import ErrorLoggingInterceptor
 from src.services.agents.graphs_bundle import graphs_base_module
 from src.services.mcp.artifact_ingestion import ArtifactInterceptor
@@ -26,6 +27,43 @@ try:
     _mcp_adapters_available = True
 except Exception:
     MultiServerMCPClient = None  # type: ignore[misc, assignment]
+
+
+class TracingInterceptor:
+    """MCP client span around each tool call, with W3C trace context outbound.
+
+    Outermost interceptor: the ``mcp.call_tool`` span wraps the latency, error
+    logging and artifact interceptors and the call itself, and is a child of
+    the LangChain tool span when OpenLLMetry is on. ``traceparent`` (and
+    ``tracestate`` when set) of that span go into the request headers, which
+    the adapter merges into the connection headers of the call. Tool
+    arguments never become attributes. With telemetry off the span is non
+    recording and nothing is injected.
+    """
+
+    async def __call__(self, request: Any, handler: Any) -> Any:
+        server_name = getattr(request, "server_name", None) or "unknown"
+        tool_name = getattr(request, "name", None) or "unknown"
+        with child_span(
+            "mcp.call_tool",
+            {
+                "eve.mcp.server": server_name,
+                "gen_ai.tool.name": tool_name,
+                "gen_ai.operation.name": "execute_tool",
+            },
+        ):
+            carrier: Dict[str, str] = {}
+            try:
+                from opentelemetry.propagate import inject
+
+                inject(carrier)
+            except Exception:  # pragma: no cover - never block a tool call
+                carrier = {}
+            if carrier:
+                headers = dict(getattr(request, "headers", None) or {})
+                headers.update(carrier)
+                request = request.override(headers=headers)
+            return await handler(request)
 
 
 class _MCPToolsWithClient(list):
@@ -152,6 +190,7 @@ async def _discover_mcp_tools_uncached(
         # non-text blocks, and the stubs it emits are markdown, not a
         # retrieval payload, so the two never touch the same block.
         tool_interceptors=[
+            TracingInterceptor(),
             LatencyInterceptor(),
             ErrorLoggingInterceptor(),
             RetrievalContextInterceptor(),

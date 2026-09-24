@@ -53,6 +53,10 @@ class Message(MongoModel):
         default=None,
         description="Artifacts produced by MCP tool calls during this message's generation",
     )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="OpenTelemetry trace id (32 hex chars) of the generation, null with telemetry off",
+    )
 
     collection_name: ClassVar[str] = "messages"
 
