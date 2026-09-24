@@ -343,3 +343,15 @@ def test_configure_logging_quiets_client_libraries_even_at_debug(
         assert not logging.getLogger(name).isEnabledFor(logging.INFO), name
         assert logging.getLogger(name).isEnabledFor(logging.WARNING), name
     assert logging.getLogger("src.anything").isEnabledFor(logging.DEBUG)
+
+
+@pytest.mark.parametrize("unit", ["x", "a-b.", "a.", "A1+/", "k=v&", "a:b@", "_key="])
+def test_redaction_is_linear_on_a_megabyte_without_matches(unit):
+    """A long run of local part or scheme characters used to be quadratic
+    (minutes per megabyte); bug report snapshots redact whole outputs."""
+    import time
+
+    text = unit * (1024 * 1024 // len(unit))
+    started = time.monotonic()
+    redact_secrets(text)
+    assert time.monotonic() - started < 5

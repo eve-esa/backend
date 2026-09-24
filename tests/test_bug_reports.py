@@ -1,4 +1,4 @@
-"""POST /bug-reports and GET /bug-reports/{id}/screenshot.
+"""POST /bug-reports, GET /bug-reports/{id} and GET /bug-reports/{id}/screenshot.
 
 Storage is the in-memory fake except in the MinIO round trip, which runs only
 where the stack's MinIO answers. The log event tests cover both halves: a
@@ -22,6 +22,8 @@ from httpx import ASGITransport, AsyncClient
 import server
 from src import observability
 from src.database.models.bug_report import BugReport
+from src.database.models.conversation import Conversation
+from src.database.models.message import Message
 from src.observability.redaction import RedactionFilter
 from src.services import bug_reports as bug_report_service
 from src.services.storage import StorageService
@@ -61,7 +63,9 @@ def _context(**overrides) -> dict:
         "session_id": "5f1c2a9e0d7b4c3a8e6f1b2d9c0a7e4f",
         "replay_url": "http://localhost:8081/sessions?sid=5f1c2a9e0d7b4c3a8e6f1b2d9c0a7e4f",
         "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-        "conversation_id": "66f1a2b3c4d5e6f7a8b9c0d1",
+        # A real conversation is checked for ownership; tests that need one
+        # pass the id of the ``conversation`` fixture.
+        "conversation_id": None,
         "message_id": "66f1a2b3c4d5e6f7a8b9c0d2",
         "app_version": "v0.1.1",
         "app_commit": "8ea24e5",
@@ -104,6 +108,18 @@ async def author():
     finally:
         await BugReport.delete_many({"user_id": user.id})
         await cleanup_models([user])
+
+
+@pytest.fixture
+async def conversation(author):
+    user, _ = author
+    conv = Conversation(user_id=user.id, name="Bug report conversation")
+    await conv.save()
+    try:
+        yield conv
+    finally:
+        await Message.delete_many({"conversation_id": conv.id})
+        await conv.delete()
 
 
 # C1: contract, storage, redaction
@@ -382,11 +398,13 @@ async def test_minio_round_trip_through_the_storage_service(async_client, author
 # C4: the log event
 
 
-async def test_created_event_is_a_plain_warning_with_telemetry_off(async_client, fake_storage, author, caplog):
+async def test_created_event_is_a_plain_warning_with_telemetry_off(
+    async_client, fake_storage, author, conversation, caplog
+):
     user, token = author
     assert not observability.is_enabled()
     caplog.set_level(logging.INFO)
-    ctx = _context()
+    ctx = _context(conversation_id=conversation.id)
     resp = await _post(async_client, token, description="SECRET-DESCRIPTION-991", context=ctx)
     assert resp.status_code == 201
     (record,) = [r for r in caplog.records if r.name == "eve.bug_report"]
@@ -400,13 +418,15 @@ async def test_created_event_is_a_plain_warning_with_telemetry_off(async_client,
     assert attrs["eve.message_id"] == ctx["message_id"]
     assert attrs["user.id"] == user.id
     assert attrs["deployment.environment.name"] == observability.deployment_environment()
+    assert attrs["eve.bug_report.messages"] == 0
+    assert attrs["eve.bug_report.truncated"] is False
     assert attrs["event.name"] == "bug_report.created"
     assert "SECRET-DESCRIPTION-991" not in json.dumps({k: str(v) for k, v in attrs.items()})
     doc = await BugReport.get_collection().find_one({"_id": ObjectId(resp.json()["id"])})
     assert doc["request_trace_id"] is None
 
 
-async def test_created_event_is_exported_inside_the_request_span(fake_storage, author):
+async def test_created_event_is_exported_inside_the_request_span(fake_storage, author, conversation):
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -428,7 +448,7 @@ async def test_created_event_is_exported_inside_the_request_span(fake_storage, a
     app = observability.wrap_asgi(
         outer, fastapi_app=observability._find_fastapi_app(outer), tracer_provider=tracer_provider
     )
-    ctx = _context()
+    ctx = _context(conversation_id=conversation.id)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await _post(client, token, description="SECRET-DESCRIPTION-552", context=ctx)
@@ -510,3 +530,217 @@ async def test_missing_context_is_422(async_client, fake_storage, author):
     _, token = author
     resp = await _post(async_client, token, context=False)
     assert resp.status_code == 422
+
+
+# Server side conversation snapshot
+
+
+async def _message(conv, when, **fields) -> Message:
+    msg = Message(conversation_id=conv.id, timestamp=when, **fields)
+    await msg.save()
+    return msg
+
+
+async def _three_messages(conv) -> list:
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    first = await _message(
+        conv,
+        base,
+        input="What is Sentinel-2?",
+        output=f"MSG-OUTPUT-ONE-4411 ask {EMAIL} with Bearer {JWT}",
+        trace_id="a" * 32,
+        metadata={"endpoint": "main", "latencies": {"rag_decision_latency": 0.4, "mcp_retrieval_latency": 1.5}},
+        feedback="negative",
+        feedback_reason="wrong band count",
+        hallucination={"label": 1, "reason": "made up"},
+        stopped=False,
+        artifact_ids=["66f1a2b3c4d5e6f7a8b9c0aa"],
+        attachments=[
+            {"image_id": "66f1a2b3c4d5e6f7a8b9c0bb", "filename": "band.png", "url": "/artifacts/x", "size_bytes": 10}
+        ],
+        trace=[{"type": "tool_call", "name": "retrieve", "args": {"query": "s2", "api_key": EVE_KEY}}],
+    )
+    second = await _message(conv, base + timedelta(minutes=1), input="And Landsat?", output="MSG-OUTPUT-TWO-4412")
+    third = await _message(
+        conv, base + timedelta(minutes=2), input="Thanks", output="MSG-OUTPUT-THREE-4413", stopped=True
+    )
+    return [first, second, third]
+
+
+async def test_report_carries_the_whole_conversation_from_mongo(
+    async_client, fake_storage, author, conversation, caplog
+):
+    user, token = author
+    caplog.set_level(logging.DEBUG)
+    messages = await _three_messages(conversation)
+    resp = await _post(async_client, token, context=_context(conversation_id=conversation.id))
+    assert resp.status_code == 201, resp.text
+    assert set(resp.json()) == {"id", "created_at", "screenshot"}
+
+    doc = await BugReport.get_collection().find_one({"_id": ObjectId(resp.json()["id"])})
+    snap = doc["conversation"]
+    assert snap["id"] == conversation.id
+    assert snap["title"] == "Bug report conversation"
+    assert snap["created_at"].startswith(conversation.timestamp.isoformat()[:19])
+    assert snap["truncated"] is False
+    assert [m["id"] for m in snap["messages"]] == [m.id for m in messages]
+    first, second, third = snap["messages"]
+    assert first["input"] == "What is Sentinel-2?"
+    assert first["trace_id"] == "a" * 32
+    assert first["metadata"] == {"endpoint": "main", "latencies": {"rag_decision_latency": 0.4, "mcp_retrieval_latency": 1.5}}
+    assert first["feedback"] == "negative"
+    assert first["feedback_reason"] == "wrong band count"
+    assert first["hallucination"] == {"label": 1, "reason": "made up"}
+    assert first["stopped"] is False
+    assert first["artifact_ids"] == ["66f1a2b3c4d5e6f7a8b9c0aa"]
+    assert first["attachments"] == ["band.png"]
+    assert first["trace"][0]["name"] == "retrieve"
+    assert first["created_at"] < second["created_at"] < third["created_at"]
+    assert second["output"] == "MSG-OUTPUT-TWO-4412"
+    assert third["stopped"] is True
+
+    # Redacted like every other string of the report.
+    stored = json.dumps(snap)
+    for secret in SECRETS:
+        assert secret not in stored
+    assert first["output"] == f"MSG-OUTPUT-ONE-4411 ask {REDACTED_EMAIL} with Bearer {REDACTED}"
+    assert first["trace"][0]["args"]["api_key"] == REDACTED
+
+    # The log event counts messages and never carries their text.
+    (record,) = [r for r in caplog.records if r.name == "eve.bug_report"]
+    assert vars(record)["eve.bug_report.messages"] == 3
+    assert vars(record)["eve.bug_report.truncated"] is False
+    dumped = "\n".join(
+        f"{r.getMessage()} {json.dumps({k: str(v) for k, v in vars(r).items()})}" for r in caplog.records
+    )
+    for text in ("MSG-OUTPUT-ONE-4411", "MSG-OUTPUT-TWO-4412", "MSG-OUTPUT-THREE-4413", "Sentinel-2"):
+        assert text not in dumped
+
+
+async def test_foreign_or_missing_conversation_is_404_and_stores_nothing(async_client, fake_storage, author):
+    user, token = author
+    other, _ = await create_test_user_and_token()
+    foreign = Conversation(user_id=other.id, name="not yours")
+    await foreign.save()
+    try:
+        await _message(foreign, datetime.now(timezone.utc), input="private", output="private")
+        for conversation_id in (foreign.id, str(ObjectId()), "not-an-object-id"):
+            resp = await _post(
+                async_client,
+                token,
+                context=_context(conversation_id=conversation_id),
+                screenshot=("s.png", io.BytesIO(PNG_BYTES), "image/png"),
+            )
+            assert resp.status_code == 404, (conversation_id, resp.text)
+        assert await BugReport.count_documents({"user_id": user.id}) == 0
+        assert fake_storage.objects == {}
+    finally:
+        await Message.delete_many({"conversation_id": foreign.id})
+        await foreign.delete()
+        await cleanup_models([other])
+
+
+async def test_report_without_conversation_id_is_accepted_with_null_conversation(
+    async_client, fake_storage, author, caplog
+):
+    _, token = author
+    caplog.set_level(logging.INFO)
+    resp = await _post(async_client, token, context=_context(conversation_id=None))
+    assert resp.status_code == 201, resp.text
+    doc = await BugReport.get_collection().find_one({"_id": ObjectId(resp.json()["id"])})
+    assert doc["conversation"] is None
+    (record,) = [r for r in caplog.records if r.name == "eve.bug_report"]
+    assert "eve.bug_report.messages" not in vars(record)
+
+
+async def test_oversized_conversation_is_cut_from_the_oldest_output(
+    async_client, fake_storage, author, conversation, caplog
+):
+    from src.config import BUG_REPORT_CONVERSATION_MAX_BYTES
+    from src.services.bug_report_snapshot import TRUNCATED_MARKER, json_size
+
+    assert BUG_REPORT_CONVERSATION_MAX_BYTES == 2 * 1024 * 1024
+    _, token = author
+    caplog.set_level(logging.INFO)
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+    one_mb = 900_000  # three of them are 2.7 MB, over the 2 MB cap
+    for i, letter in enumerate("xyz"):
+        await _message(conversation, base + timedelta(minutes=i), input=f"q{i}", output=letter * one_mb)
+
+    resp = await _post(async_client, token, context=_context(conversation_id=conversation.id))
+    assert resp.status_code == 201, resp.text
+    doc = await BugReport.get_collection().find_one({"_id": ObjectId(resp.json()["id"])})
+    snap = doc["conversation"]
+    assert snap["truncated"] is True
+    assert json_size(snap) <= BUG_REPORT_CONVERSATION_MAX_BYTES
+    oldest, middle, newest = snap["messages"]
+    # The oldest output went first; the rest survive whole.
+    assert oldest["output"].endswith(TRUNCATED_MARKER)
+    assert oldest["output_truncated"] is True
+    assert len(oldest["output"]) < one_mb
+    assert middle["output"] == "y" * one_mb and "output_truncated" not in middle
+    assert newest["output"] == "z" * one_mb
+    assert [m["input"] for m in snap["messages"]] == ["q0", "q1", "q2"]
+
+    (record,) = [r for r in caplog.records if r.name == "eve.bug_report"]
+    assert vars(record)["eve.bug_report.truncated"] is True
+    assert vars(record)["eve.bug_report.messages"] == 3
+
+
+def test_fit_to_cap_handles_multibyte_text_and_moves_to_the_next_message():
+    from src.services.bug_report_snapshot import TRUNCATED_MARKER, fit_to_cap, json_size
+
+    snapshot = {
+        "messages": [
+            {"input": "a", "output": "é" * 50, "trace": [{"k": "v" * 200}]},
+            {"input": "b", "output": "中" * 100, "trace": None},
+        ]
+    }
+    cap = 250
+    assert fit_to_cap(snapshot, cap) is True
+    assert json_size(snapshot) <= cap
+    first, second = snapshot["messages"]
+    assert first["output"] == TRUNCATED_MARKER
+    assert second["output"].endswith(TRUNCATED_MARKER)
+    assert first["trace"] == TRUNCATED_MARKER
+    small = {"messages": [{"input": "a", "output": "b"}]}
+    assert fit_to_cap(small, 10_000) is False
+
+
+async def test_get_report_returns_the_whole_document_to_its_author_only(
+    async_client, fake_storage, author, conversation
+):
+    user, token = author
+    await _three_messages(conversation)
+    resp = await _post(
+        async_client,
+        token,
+        description="It broke",
+        context=_context(conversation_id=conversation.id),
+        screenshot=("s.png", io.BytesIO(PNG_BYTES), "image/png"),
+    )
+    report_id = resp.json()["id"]
+
+    got = await async_client.get(f"/bug-reports/{report_id}", headers={"Authorization": f"Bearer {token}"})
+    assert got.status_code == 200, got.text
+    body = got.json()
+    doc = await BugReport.get_collection().find_one({"_id": ObjectId(report_id)})
+    assert body["id"] == report_id
+    assert body["user_id"] == user.id
+    assert body["description"] == "It broke"
+    assert body["context"] == doc["context"]
+    assert body["conversation"] == doc["conversation"]
+    assert len(body["conversation"]["messages"]) == 3
+    assert body["screenshot"] == {"content_type": "image/png", "size_bytes": len(PNG_BYTES)}
+    assert "key" not in body["screenshot"]
+
+    other, other_token = await create_test_user_and_token()
+    try:
+        denied = await async_client.get(f"/bug-reports/{report_id}", headers={"Authorization": f"Bearer {other_token}"})
+        assert denied.status_code == 404
+    finally:
+        await cleanup_models([other])
+    assert (await async_client.get(f"/bug-reports/{report_id}")).status_code == 401
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await async_client.get("/bug-reports/not-an-id", headers=headers)).status_code == 404
+    assert (await async_client.get(f"/bug-reports/{ObjectId()}", headers=headers)).status_code == 404

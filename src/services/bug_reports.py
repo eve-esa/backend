@@ -28,6 +28,7 @@ from src.schemas.bug_report import (
     BugReportContext,
     BugReportCreatedResponse,
 )
+from src.services.bug_report_snapshot import build_snapshot
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
     sniff_artifact_type,
@@ -55,6 +56,8 @@ ATTR_CONVERSATION_ID = "gen_ai.conversation.id"
 ATTR_MESSAGE_ID = "eve.message_id"
 ATTR_USER_ID = "user.id"
 ATTR_ENVIRONMENT = "deployment.environment.name"
+ATTR_MESSAGES = "eve.bug_report.messages"
+ATTR_TRUNCATED = "eve.bug_report.truncated"
 
 
 def _throttled_detail() -> dict:
@@ -168,9 +171,11 @@ def _current_span():
 def _event_attributes(report: BugReport, environment: str) -> dict:
     """Log record extras for ``bug_report.created``; absent values are left out.
 
-    Ids and links only, never the description: this record leaves the process.
+    Ids, links and counts only, never the description or any message text:
+    this record leaves the process.
     """
     context = report.context or {}
+    snapshot = report.conversation
     candidates = {
         ATTR_BUG_REPORT_ID: report.id,
         ATTR_RUM_SESSION_ID: context.get("session_id"),
@@ -179,6 +184,8 @@ def _event_attributes(report: BugReport, environment: str) -> dict:
         ATTR_MESSAGE_ID: context.get("message_id"),
         ATTR_USER_ID: report.user_id,
         ATTR_ENVIRONMENT: environment,
+        ATTR_MESSAGES: len(snapshot.get("messages") or []) if snapshot else None,
+        ATTR_TRUNCATED: bool(snapshot.get("truncated")) if snapshot else None,
     }
     attributes = {k: v for k, v in candidates.items() if v not in (None, "")}
     attributes["event.name"] = EVENT_CREATED
@@ -215,7 +222,11 @@ async def create_bug_report(
     context: BugReportContext,
     screenshot: Optional[Tuple[bytes, str]],
 ) -> BugReportCreatedResponse:
-    """Throttle, store the report, then its screenshot, then announce it.
+    """Throttle, snapshot the conversation, store the report, then its
+    screenshot, then announce it.
+
+    The conversation is read from Mongo for ``context.conversation_id``; a
+    conversation that is missing or not the user's is a 404 and stores nothing.
 
     Optimistic insert then verify, as in ``api_keys.create_api_key``: the row is
     inserted, the window recounted, and a row past the cap deleted before
@@ -225,6 +236,8 @@ async def create_bug_report(
     """
     now = datetime.now(timezone.utc)
     await enforce_rate_limit(user.id, now)
+    # 404 before anything is stored when the conversation is not the user's.
+    snapshot, _ = await build_snapshot(context.conversation_id, user)
 
     span = _current_span()
     request_trace_id = format_trace_id(span.get_span_context()) if span is not None else None
@@ -233,6 +246,7 @@ async def create_bug_report(
         user_id=user.id,
         description=redact_secrets(description),
         context=_redacted_context(context),
+        conversation=snapshot,
         request_trace_id=request_trace_id,
         timestamp=now,
     )

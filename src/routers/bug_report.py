@@ -2,7 +2,10 @@
 
 ``POST /bug-reports`` is multipart: ``description`` (text), ``context`` (JSON
 text, see :class:`src.schemas.bug_report.BugReportContext`) and an optional
-``screenshot`` (PNG or JPEG). Logic lives in ``src/services/bug_reports.py``.
+``screenshot`` (PNG or JPEG). The conversation named by
+``context.conversation_id`` is snapshotted server side from Mongo, see
+``src/services/bug_report_snapshot.py``. ``GET /bug-reports/{id}`` reads the
+whole report back. Logic lives in ``src/services/bug_reports.py``.
 """
 
 import logging
@@ -22,6 +25,8 @@ from src.schemas.bug_report import (
     DESCRIPTION_MAX_CHARS,
     BugReportContext,
     BugReportCreatedResponse,
+    BugReportDetail,
+    BugReportScreenshotInfo,
 )
 from src.services import bug_reports
 from src.services.storage import ObjectNotFoundError
@@ -80,8 +85,10 @@ async def create_bug_report(
     """
     File a bug report with its browser context and an optional screenshot.
 
-    Every string is redacted (credentials, API keys, emails) before it is
-    stored in ``bug_reports``. The screenshot type is sniffed from its bytes,
+    The whole conversation named by ``context.conversation_id`` is read from
+    Mongo and stored with the report, capped at 2 MB of JSON (oldest outputs
+    cut first). Every string is redacted (credentials, API keys, emails)
+    before it is stored in ``bug_reports``. The screenshot type is sniffed from its bytes,
     never taken from the declared Content-Type. On success a WARNING log event
     ``bug_report.created`` is emitted inside the request span.
 
@@ -96,7 +103,9 @@ async def create_bug_report(
         a screenshot was stored.
 
     Raises:
-        HTTPException: 401 without a valid credential; 413 for a screenshot
+        HTTPException: 401 without a valid credential; 404 when
+        ``context.conversation_id`` is missing or not the caller's (nothing is
+        stored); 413 for a screenshot
         above the cap; 415 for a screenshot that is not PNG or JPEG; 422 for
         an empty or too long description or invalid context JSON; 429 with
         ``detail.code == "bug_report_rate_limited"`` past 5 reports per hour.
@@ -107,6 +116,52 @@ async def create_bug_report(
     image = await bug_reports.read_screenshot(screenshot)
     return await bug_reports.create_bug_report(
         requesting_user, description, parsed_context, image
+    )
+
+
+@router.get("/bug-reports/{report_id}", response_model=BugReportDetail)
+async def get_bug_report(
+    report_id: str = Path(..., description="Bug report ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> BugReportDetail:
+    """
+    Read a whole bug report, to its author only.
+
+    This is the read path for the planned Asana automation: the report plus
+    the server side conversation snapshot, so a ticket never has to ask the
+    user for the conversation. The automation will read it with an internal
+    credential that does not exist yet; today only the author can.
+
+    Args:
+        report_id (str): Bug report identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        BugReportDetail: Description, browser context, conversation snapshot,
+        screenshot metadata and the trace id of the filing request.
+
+    Raises:
+        HTTPException: 401 without a valid credential; 404 when the report
+        does not exist or belongs to someone else.
+    """
+    report = await bug_reports.get_owned_report(report_id, requesting_user)
+    screenshot = (
+        BugReportScreenshotInfo(
+            content_type=report.screenshot.content_type,
+            size_bytes=report.screenshot.size_bytes,
+        )
+        if report.screenshot is not None
+        else None
+    )
+    return BugReportDetail(
+        id=report.id,
+        user_id=report.user_id,
+        created_at=report.timestamp,
+        description=report.description,
+        context=report.context,
+        conversation=report.conversation,
+        screenshot=screenshot,
+        request_trace_id=report.request_trace_id,
     )
 
 

@@ -44,7 +44,10 @@ _JWT_RE = re.compile(
 # The length floor keeps identifiers like "eve_free" or "eve_jsc" readable.
 _PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:eve|rpa)_[A-Za-z0-9]{16,}")
 # user:password@ in any URL (https, mongodb, redis, ...).
-_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s@]+@")
+# Anchored on the start of a scheme character run, not on \b: a word boundary
+# inside a long run such as "a-b.a-b." restarts the scheme scan at every
+# hyphen or dot, which is quadratic on big inputs.
+_URL_USERINFO_RE = re.compile(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.\-]*://)[^/\s:@]*:[^/\s@]+@")
 # Query string parameters named like a credential. The name is kept so a log
 # still says which parameter was there.
 _QUERY_PARAM_RE = re.compile(
@@ -56,7 +59,13 @@ _ASSIGNMENT_RE = re.compile(
     r"(?i)\b([a-z0-9_\-]*(?:api[_-]?key|apikey|token|secret|password|passwd)"
     r"[\"']?\s*[:=]\s*[\"']?)[^\s\"'&,;}#]+"
 )
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
+# The lookbehind anchors a match at the start of a run of local part
+# characters. Without it the engine retries from every position inside a long
+# run with no "@" (a base64 blob, a long generated output), which is quadratic:
+# about 400 seconds for one megabyte of letters.
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}"
+)
 
 
 def redact_secrets(value: str) -> str:

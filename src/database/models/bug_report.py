@@ -1,5 +1,6 @@
 """A bug report filed from the chat: what the user wrote plus the telemetry
-context the browser had at the time (session, replay, last trace, ids).
+context the browser had at the time (session, replay, last trace, ids), plus
+a server side snapshot of the conversation it points at.
 
 Every string is redacted before it is stored. The screenshot bytes live in
 object storage under ``bug-reports/{user_id}/{id}.{ext}``; only the key and the
@@ -32,6 +33,12 @@ class BugReport(MongoModel):
     )
     screenshot: Optional[BugReportScreenshot] = Field(
         default=None, description="Stored screenshot, None when the report has none"
+    )
+    conversation: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Snapshot of the whole conversation read from Mongo at filing "
+        "time (src/services/bug_report_snapshot.py), redacted and capped; None "
+        "when the report names no conversation",
     )
     request_trace_id: Optional[str] = Field(
         default=None,

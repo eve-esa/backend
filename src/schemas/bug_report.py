@@ -6,7 +6,7 @@ The request is multipart: ``description`` and ``context`` are form fields,
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -62,3 +62,32 @@ class BugReportCreatedResponse(BaseModel):
     id: str
     created_at: datetime
     screenshot: bool = Field(..., description="True when a screenshot was stored with the report")
+
+
+class BugReportScreenshotInfo(BaseModel):
+    """Stored screenshot metadata; the bytes are at ``GET /bug-reports/{id}/screenshot``."""
+
+    content_type: str
+    size_bytes: int
+
+
+class BugReportDetail(BaseModel):
+    """``GET /bug-reports/{id}``: the whole stored report.
+
+    ``conversation`` is the server side snapshot: ``{id, title, created_at,
+    summary, settings, truncated, messages: [{id, created_at, input, output,
+    trace_id, metadata, request, use_rag, feedback, feedback_reason,
+    hallucination, stopped, artifact_ids, attachments, trace}]}``, messages
+    oldest first, every string redacted. A message cut to fit the 2 MB cap has
+    ``output_truncated`` (and possibly ``trace_truncated``, ``request_truncated``,
+    ``input_truncated``) set to true and the cut value ends with ``[truncated]``.
+    """
+
+    id: str
+    user_id: str
+    created_at: datetime
+    description: str
+    context: Dict[str, Any]
+    conversation: Optional[Dict[str, Any]] = None
+    screenshot: Optional[BugReportScreenshotInfo] = None
+    request_trace_id: Optional[str] = None
