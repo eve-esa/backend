@@ -93,6 +93,21 @@ STRING_CASES = [
         OPAQUE,
     ),
     (
+        # The email pattern is anchored on the start of a local part run
+        # (e10eb1b): punctuation right before the address must not stop it.
+        "email_after_punctuation",
+        "owner:(jane.doe@esa.example.org)",
+        f"owner:({REDACTED_EMAIL})",
+        "jane.doe",
+    ),
+    (
+        # Same anchoring for the scheme: a URL right after "=" or a quote.
+        "url_credentials_after_assignment",
+        f'DSN="postgres://svc:{OPAQUE}@db.local/eve"',
+        f'DSN="postgres://{REDACTED}@db.local/eve"',
+        OPAQUE,
+    ),
+    (
         "json_assignment",
         f'{{"api_key": "{OPAQUE}", "model": "eve"}}',
         f'{{"api_key": "{REDACTED}", "model": "eve"}}',
@@ -355,3 +370,16 @@ def test_redaction_is_linear_on_a_megabyte_without_matches(unit):
     started = time.monotonic()
     redact_secrets(text)
     assert time.monotonic() - started < 5
+
+
+@pytest.mark.no_db
+def test_redaction_of_a_megabyte_of_letters_without_at_takes_under_two_seconds():
+    """The pre e10eb1b email pattern took minutes on this input."""
+    import string
+    import time
+
+    text = (string.ascii_letters * (1024 * 1024 // len(string.ascii_letters) + 1))[: 1024 * 1024]
+    assert len(text) == 1024 * 1024 and "@" not in text
+    started = time.monotonic()
+    assert redact_secrets(text) == text
+    assert time.monotonic() - started < 2
