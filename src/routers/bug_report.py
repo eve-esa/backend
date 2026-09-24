@@ -108,7 +108,9 @@ async def create_bug_report(
         stored); 413 for a screenshot
         above the cap; 415 for a screenshot that is not PNG or JPEG; 422 for
         an empty or too long description or invalid context JSON; 429 with
-        ``detail.code == "bug_report_rate_limited"`` past 5 reports per hour.
+        ``detail.code == "bug_report_rate_limited"`` past
+        ``BUG_REPORT_MAX_PER_HOUR`` reports per hour (default 5), only while
+        ``FEATURE_BUG_REPORT_RATE_LIMIT`` is on.
     """
     if not description.strip():
         raise _field_error("description", "Description must not be blank")

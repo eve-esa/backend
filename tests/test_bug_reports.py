@@ -20,7 +20,7 @@ from bson import ObjectId
 from httpx import ASGITransport, AsyncClient
 
 import server
-from src import observability
+from src import config, observability
 from src.database.models.bug_report import BugReport
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
@@ -91,6 +91,14 @@ async def _post(client, token=None, *, description="It broke", context=None, raw
         parts["screenshot"] = screenshot
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return await client.post("/bug-reports", headers=headers, files=parts)
+
+
+@pytest.fixture(autouse=True)
+def rate_limit_on(monkeypatch):
+    """Pin the limit as production runs it, whatever the container env says:
+    local compose sets FEATURE_BUG_REPORT_RATE_LIMIT to false."""
+    monkeypatch.setattr(config, "FEATURE_BUG_REPORT_RATE_LIMIT", True)
+    monkeypatch.setattr(config, "BUG_REPORT_MAX_PER_HOUR", 5)
 
 
 @pytest.fixture
@@ -195,6 +203,37 @@ async def test_sixth_report_in_an_hour_is_rate_limited(async_client, fake_storag
     finally:
         await BugReport.delete_many({"user_id": other.id})
         await cleanup_models([other])
+
+
+async def _post_six(client, token) -> list:
+    return [(await _post(client, token, description=f"report {i}")).status_code for i in range(6)]
+
+
+async def test_flag_off_allows_a_sixth_report(async_client, fake_storage, author, monkeypatch):
+    user, token = author
+    monkeypatch.setattr(config, "FEATURE_BUG_REPORT_RATE_LIMIT", False)
+    assert await _post_six(async_client, token) == [201] * 6
+    assert await BugReport.count_documents({"user_id": user.id}) == 6
+
+
+async def test_flag_on_with_limit_5_refuses_the_sixth(async_client, fake_storage, author, monkeypatch):
+    user, token = author
+    monkeypatch.setattr(config, "FEATURE_BUG_REPORT_RATE_LIMIT", True)
+    monkeypatch.setattr(config, "BUG_REPORT_MAX_PER_HOUR", 5)
+    statuses = await _post_six(async_client, token)
+    assert statuses == [201] * 5 + [429]
+    resp = await _post(async_client, token)
+    assert resp.json()["detail"]["code"] == "bug_report_rate_limited"
+    assert resp.json()["detail"]["limit"] == 5
+    assert await BugReport.count_documents({"user_id": user.id}) == 5
+
+
+async def test_flag_on_with_limit_0_is_unlimited(async_client, fake_storage, author, monkeypatch):
+    user, token = author
+    monkeypatch.setattr(config, "FEATURE_BUG_REPORT_RATE_LIMIT", True)
+    monkeypatch.setattr(config, "BUG_REPORT_MAX_PER_HOUR", 0)
+    assert await _post_six(async_client, token) == [201] * 6
+    assert await BugReport.count_documents({"user_id": user.id}) == 6
 
 
 async def test_reports_older_than_an_hour_do_not_count(async_client, fake_storage, author):

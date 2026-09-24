@@ -18,7 +18,8 @@ from typing import Optional, Tuple
 from bson import ObjectId
 from fastapi import HTTPException, UploadFile
 
-from src.config import BUG_REPORT_MAX_PER_HOUR, BUG_REPORT_SCREENSHOT_MAX_BYTES
+from src import config
+from src.config import BUG_REPORT_SCREENSHOT_MAX_BYTES
 from src.database.models.bug_report import BugReport, BugReportScreenshot
 from src.database.models.user import User
 from src.observability import deployment_environment
@@ -60,11 +61,22 @@ ATTR_MESSAGES = "eve.bug_report.messages"
 ATTR_TRUNCATED = "eve.bug_report.truncated"
 
 
+def _rate_limit_cap() -> int:
+    """Reports allowed per user per rolling hour; <=0 means unlimited.
+
+    Read at call time so the flag and the number can be switched in tests.
+    With FEATURE_BUG_REPORT_RATE_LIMIT off the number is ignored.
+    """
+    if not config.FEATURE_BUG_REPORT_RATE_LIMIT:
+        return 0
+    return config.BUG_REPORT_MAX_PER_HOUR
+
+
 def _throttled_detail() -> dict:
     return {
         "code": "bug_report_rate_limited",
         "message": "Too many bug reports sent recently. Try again later.",
-        "limit": BUG_REPORT_MAX_PER_HOUR,
+        "limit": _rate_limit_cap(),
     }
 
 
@@ -84,13 +96,15 @@ async def enforce_rate_limit(user_id: str, now: Optional[datetime] = None) -> No
     """Refuse with 429 once the user has filed the cap within the last hour.
 
     Stored reports are the counter: a request refused by validation never
-    counts, and nothing needs expiring. <=0 disables the throttle.
+    counts, and nothing needs expiring. Skipped when
+    FEATURE_BUG_REPORT_RATE_LIMIT is off or the cap is <=0.
     """
-    if BUG_REPORT_MAX_PER_HOUR <= 0:
+    cap = _rate_limit_cap()
+    if cap <= 0:
         return
     now = now or datetime.now(timezone.utc)
     recent = await BugReport.count_documents(_window_filter(user_id, now))
-    if recent >= BUG_REPORT_MAX_PER_HOUR:
+    if recent >= cap:
         raise _throttled()
 
 
@@ -109,7 +123,7 @@ async def _is_among_first_in_window(user_id: str, report_id: str, now: datetime)
         BugReport.get_collection()
         .find(_window_filter(user_id, now), {"_id": 1})
         .sort("_id", 1)
-        .limit(BUG_REPORT_MAX_PER_HOUR)
+        .limit(_rate_limit_cap())
     )
     survivors = {str(doc["_id"]) async for doc in cursor}
     return report_id in survivors
@@ -256,7 +270,7 @@ async def create_bug_report(
     await BugReport.get_collection().insert_one(doc)
     report.id = str(oid)
 
-    if BUG_REPORT_MAX_PER_HOUR > 0 and not await _is_among_first_in_window(
+    if _rate_limit_cap() > 0 and not await _is_among_first_in_window(
         user.id, report.id, now
     ):
         await BugReport.get_collection().delete_one({"_id": oid})

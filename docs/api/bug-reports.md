@@ -44,7 +44,8 @@ Answers:
 - `422` blank or too long description, missing context, invalid context JSON or field.
 - `429` `{"detail": {"code": "bug_report_rate_limited", ...}}` with `Retry-After: 3600` after
   `BUG_REPORT_MAX_PER_HOUR` (default 5) reports in the rolling hour. Counted on the
-  `bug_reports` collection, no Redis; `<=0` disables it.
+  `bug_reports` collection, no Redis; `<=0` disables it. The whole limit is behind
+  `FEATURE_BUG_REPORT_RATE_LIMIT` (default on): `false` or `0` means no limit at all.
 
 ```bash
 curl -X POST "$BASE_URL/bug-reports" \

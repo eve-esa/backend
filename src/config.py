@@ -120,6 +120,16 @@ FEATURE_MCP_SERVER_REGISTRATION = getenv_or(
     "0",
 )
 
+# Off: POST /bug-reports takes any number of reports, BUG_REPORT_MAX_PER_HOUR is
+# not read. Default on; local compose and dev set it to "false" to work without
+# limits. Treat only "false"/"0" (case-insensitively) as off.
+FEATURE_BUG_REPORT_RATE_LIMIT = getenv_or(
+    "FEATURE_BUG_REPORT_RATE_LIMIT", "true"
+).lower() not in (
+    "false",
+    "0",
+)
+
 MONGO_HOST = os.getenv("MONGO_HOST", "localhost").strip()
 MONGO_PORT = int(os.getenv("MONGO_PORT", 27017))
 MONGO_USERNAME = os.getenv("MONGO_USERNAME", "").strip()
@@ -347,8 +357,9 @@ API_KEY_CREATE_MAX_PER_HOUR = _tolerant_int_env("API_KEY_CREATE_MAX_PER_HOUR", 3
 # the default above is.
 API_KEY_MAX_LIFETIME_DAYS = 3650
 
-# Bug reports (src/services/bug_reports.py). Reports per user per rolling hour;
-# <=0 disables the throttle, as for API keys. The screenshot cap is in bytes.
+# Bug reports (src/services/bug_reports.py). Reports per user per rolling hour,
+# read only while FEATURE_BUG_REPORT_RATE_LIMIT is on; <=0 means unlimited, as
+# for API keys. The screenshot cap is in bytes.
 BUG_REPORT_MAX_PER_HOUR = _tolerant_int_env("BUG_REPORT_MAX_PER_HOUR", 5)
 BUG_REPORT_SCREENSHOT_MAX_BYTES = _tolerant_int_env(
     "BUG_REPORT_SCREENSHOT_MAX_BYTES", 1024 * 1024
