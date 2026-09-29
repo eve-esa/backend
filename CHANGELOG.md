@@ -11,6 +11,29 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.2.0](https://github.com/eve-esa/backend/compare/v0.1.5...v0.2.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **api-keys:** self-service key management with provenance, cascade revoke and a cap ([#220](https://github.com/eve-esa/backend/issues/220))
+* **openai-gateway:** allowlist forwarded paths and charge the token budget ([#221](https://github.com/eve-esa/backend/issues/221))
+
+### Added
+
+* **agents:** record agentic setup time separately from total latency ([#227](https://github.com/eve-esa/backend/issues/227)) ([5a74376](https://github.com/eve-esa/backend/commit/5a74376e4116be15d9ea71dbeb93d76567e442eb))
+* **api-keys:** self-service key management with provenance, cascade revoke and a cap ([#220](https://github.com/eve-esa/backend/issues/220)) ([c1c309b](https://github.com/eve-esa/backend/commit/c1c309b4469f62297133f17b1f3d3ac17c6c5246))
+* **observability:** OpenTelemetry tracing and logs, Langfuse through the collector, bug reports ([#230](https://github.com/eve-esa/backend/issues/230)) ([9d7b6b9](https://github.com/eve-esa/backend/commit/9d7b6b96726211c939cdeea5fc1ea28ff86b2667))
+* **openai-gateway:** allowlist forwarded paths and charge the token budget ([#221](https://github.com/eve-esa/backend/issues/221)) ([b7aba48](https://github.com/eve-esa/backend/commit/b7aba4881ed93c469f2e8fb325469bc019d430f0))
+
+
+### Fixed
+
+* **agents:** compute real per-step trace timings and fix tool content ([#225](https://github.com/eve-esa/backend/issues/225)) ([6ed58c7](https://github.com/eve-esa/backend/commit/6ed58c7e78d30558e2ed69e95b9b85796a1d3ab7))
+* **agents:** keep retrieval chunk ids out of the model context ([#228](https://github.com/eve-esa/backend/issues/228)) ([ca504da](https://github.com/eve-esa/backend/commit/ca504da9ea324d0cdf2448980242b2a13cdd95e6))
+* **agents:** trace streamed agent steps from the node update ([#226](https://github.com/eve-esa/backend/issues/226)) ([3f93f9b](https://github.com/eve-esa/backend/commit/3f93f9b9811592c1a6f89e0ef62afe5fb6b94b15))
+* **openai-gateway:** resolve the route before reserving the token budget ([#223](https://github.com/eve-esa/backend/issues/223)) ([a5aa545](https://github.com/eve-esa/backend/commit/a5aa545a02f7fb8397e88487caec55a5d03bcffe))
+
 ## [0.1.5](https://github.com/eve-esa/backend/compare/v0.1.4...v0.1.5) (2026-09-17)
 
 
