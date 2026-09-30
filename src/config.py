@@ -83,6 +83,14 @@ DEEPINFRA_EMBEDDING_API_KEY = (
     or getenv_or("EMBEDDING_API_KEY")
     or DEEPINFRA_API_TOKEN
 )
+# Embedding providers, tried in order. DeepInfra first: Blablador no longer serves
+# a 2560-d Qwen3-Embedding-4B, which is what every collection is indexed with, so
+# the JSC call only added a failed request to every query.
+EMBEDDING_PROVIDER_ORDER = [
+    name.strip()
+    for name in os.getenv("EMBEDDING_PROVIDER_ORDER", "deepinfra,jsc").split(",")
+    if name.strip()
+]
 JSC_RERANKER_API_KEY = getenv_or("JSC_RERANKER_API_KEY") or EVE_JSC_API_KEY
 JSC_RERANKER_MODEL_NAME = getenv_or(
     "JSC_RERANKER_MODEL_NAME", "alias-qwen3-4b-reranking"

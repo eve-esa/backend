@@ -32,6 +32,7 @@ from qdrant_client.http.models import (
 from src.config import (
     DEEPINFRA_EMBEDDING_API_KEY,
     DEEPINFRA_EMBEDDING_URL,
+    EMBEDDING_PROVIDER_ORDER,
     EVE_JSC_BASE_URL,
     IS_PROD,
     JSC_EMBEDDING_API_KEY,
@@ -205,6 +206,33 @@ def _deepinfra_embedding_model_name(model: str) -> str:
     return model
 
 
+# Every collection, public and private, is indexed with 2560-d Qwen3-Embedding-4B vectors.
+EMBEDDING_SIZE = 2560
+
+
+def _embedding_providers(model: str) -> List[Tuple[str, str, str, str]]:
+    """(name, api key, base url, model) for each configured provider, in order.
+
+    Unknown names in EMBEDDING_PROVIDER_ORDER are skipped. A provider without a
+    key stays in the list so its failure is reported, not silently dropped.
+    """
+    known = {
+        "deepinfra": (
+            DEEPINFRA_EMBEDDING_API_KEY,
+            DEEPINFRA_EMBEDDING_URL,
+            _deepinfra_embedding_model_name(model),
+        ),
+        "jsc": (
+            JSC_EMBEDDING_API_KEY,
+            EVE_JSC_BASE_URL,
+            _jsc_embedding_model_name(model),
+        ),
+    }
+    return [
+        (name, *known[name]) for name in EMBEDDING_PROVIDER_ORDER if name in known
+    ]
+
+
 def _is_already_exists_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "already exists" in msg or "already exist" in msg
@@ -288,7 +316,7 @@ class VectorStoreManager:
             timeout=120.0,  # 2 minutes timeout for operations
         )
         self.embeddings_model = embeddings_model
-        self.embeddings_size = 2560
+        self.embeddings_size = EMBEDDING_SIZE
         self._env_payload_cache: Dict[str, bool] = {}
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
@@ -1111,6 +1139,60 @@ class VectorStoreManager:
             logger.error(f"Failed to delete documents: {e}")
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
+    async def _embed(
+        self, texts: List[str], embeddings_model: str
+    ) -> Tuple[List[List[float]], Optional[str]]:
+        """Embed with the first provider that answers.
+
+        Returns the vectors and, when an earlier provider failed, that first
+        error as a string (None when the first provider answered).
+        """
+        providers = _embedding_providers(embeddings_model)
+        if not providers:
+            raise RuntimeError(
+                f"No embedding provider configured in {EMBEDDING_PROVIDER_ORDER!r}"
+            )
+
+        error_logger = get_error_logger()
+        first_error: Optional[Exception] = None
+        last_error: Optional[Exception] = None
+        for index, (name, api_key, base_url, model) in enumerate(providers):
+            try:
+                if not api_key:
+                    raise RuntimeError(f"{name} embedding API key is not set")
+                response = OpenAI(api_key=api_key, base_url=base_url).embeddings.create(
+                    input=texts, model=model
+                )
+                vectors = [item.embedding for item in response.data]
+                sizes = {len(vector) for vector in vectors}
+                if sizes - {EMBEDDING_SIZE}:
+                    # A provider serving another model answers 200 with vectors the
+                    # collections cannot hold; Qdrant would reject them later with a
+                    # far less clear error.
+                    raise RuntimeError(
+                        f"{name} returned {sorted(sizes)}-d vectors, "
+                        f"collections expect {EMBEDDING_SIZE}"
+                    )
+                return vectors, None if first_error is None else str(first_error)
+            except Exception as e:
+                first_error = first_error or e
+                logger.error(f"Failed to generate embeddings via {name}: {e}")
+                await error_logger.log_error_sync(
+                    error=e,
+                    component=(
+                        Component.RETRIEVAL if index == 0 else Component.RETRIEVAL_FALLBACK
+                    ),
+                    pipeline_stage=PipelineStage.RETRIEVAL,
+                    description=f"Failed to generate embeddings via {name}",
+                    error_type=type(e).__name__,
+                )
+                last_error = e
+
+        names = " and ".join(name for name, *_ in providers)
+        raise RuntimeError(
+            f"Embedding generation failed via {names}: {last_error}"
+        ) from last_error
+
     async def generate_query_vector(
         self, query: str, embeddings_model: str
     ) -> Tuple[List[float], Optional[str]]:
@@ -1122,62 +1204,13 @@ class VectorStoreManager:
             embeddings_model: Model to use for embedding generation
 
         Returns:
-            List[float]: Vector representation of the query
+            The vector, and the first provider error when a later provider answered
 
         Raises:
-            RuntimeError: If embedding generation fails
+            RuntimeError: If every provider fails
         """
-        primary_error: Optional[Exception] = None
-
-        try:
-            if not JSC_EMBEDDING_API_KEY:
-                raise RuntimeError("JSC_EMBEDDING_API_KEY/EVE_JSC_API_KEY is not set")
-
-            openai = OpenAI(api_key=JSC_EMBEDDING_API_KEY, base_url=EVE_JSC_BASE_URL)
-            response = openai.embeddings.create(
-                input=query,
-                model=_jsc_embedding_model_name(embeddings_model),
-            )
-            return response.data[0].embedding, None
-
-        except Exception as e:
-            primary_error = e
-            logger.error(f"Failed to generate query vector from JSC model: {e}")
-            error_logger = get_error_logger()
-            await error_logger.log_error_sync(
-                error=e,
-                component=Component.RETRIEVAL,
-                pipeline_stage=PipelineStage.RETRIEVAL,
-                description="Failed to generate query vector from JSC model",
-                error_type=type(e).__name__,
-            )
-            try:
-                if not DEEPINFRA_EMBEDDING_API_KEY:
-                    raise RuntimeError("DeepInfra embedding API key is not set")
-
-                openai = OpenAI(
-                    api_key=DEEPINFRA_EMBEDDING_API_KEY,
-                    base_url=DEEPINFRA_EMBEDDING_URL,
-                )
-                response = openai.embeddings.create(
-                    input=query,
-                    model=_deepinfra_embedding_model_name(embeddings_model),
-                )
-                return response.data[0].embedding, str(primary_error)
-            except Exception as e:
-                logger.error(
-                    f"Failed to generate query vector from DeepInfra fallback: {e}"
-                )
-                await error_logger.log_error_sync(
-                    error=e,
-                    component=Component.RETRIEVAL_FALLBACK,
-                    pipeline_stage=PipelineStage.RETRIEVAL,
-                    description="Failed to generate query vector from DeepInfra fallback",
-                    error_type=type(e).__name__,
-                )
-                raise RuntimeError(
-                    f"Embedding generation failed via JSC and DeepInfra: {e}"
-                ) from e
+        vectors, fallback_error = await self._embed([query], embeddings_model)
+        return vectors[0], fallback_error
 
     async def generate_batch_embeddings(
         self, texts: List[str], embeddings_model: str
@@ -1190,47 +1223,14 @@ class VectorStoreManager:
             embeddings_model: Model to use for embedding generation
 
         Returns:
-            Tuple[List[List[float]], Optional[str]]: List of embedding vectors and optional error message
+            The vectors, and the first provider error when a later provider answered
 
         Raises:
-            RuntimeError: If embedding generation fails
+            RuntimeError: If every provider fails
         """
         if not texts:
             return [], None
-
-        primary_error: Optional[Exception] = None
-
-        try:
-            if not JSC_EMBEDDING_API_KEY:
-                raise RuntimeError("JSC_EMBEDDING_API_KEY/EVE_JSC_API_KEY is not set")
-
-            openai = OpenAI(api_key=JSC_EMBEDDING_API_KEY, base_url=EVE_JSC_BASE_URL)
-            response = openai.embeddings.create(
-                input=texts,
-                model=_jsc_embedding_model_name(embeddings_model),
-            )
-            embeddings = [item.embedding for item in response.data]
-            return embeddings, None
-
-        except Exception as e:
-            primary_error = e
-            logger.error(f"Failed to generate batch embeddings from JSC model: {e}")
-            if not DEEPINFRA_EMBEDDING_API_KEY:
-                raise RuntimeError(
-                    "Embedding generation failed via JSC and DeepInfra: "
-                    "DeepInfra embedding API key is not set"
-                ) from e
-
-            openai = OpenAI(
-                api_key=DEEPINFRA_EMBEDDING_API_KEY,
-                base_url=DEEPINFRA_EMBEDDING_URL,
-            )
-            response = openai.embeddings.create(
-                input=texts,
-                model=_deepinfra_embedding_model_name(embeddings_model),
-            )
-            embeddings = [item.embedding for item in response.data]
-            return embeddings, str(primary_error)
+        return await self._embed(texts, embeddings_model)
 
     async def retrieve_documents_from_query(
         self,
