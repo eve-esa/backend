@@ -206,6 +206,10 @@ def _deepinfra_embedding_model_name(model: str) -> str:
     return model
 
 
+# Every collection, public and private, is indexed with 2560-d Qwen3-Embedding-4B vectors.
+EMBEDDING_SIZE = 2560
+
+
 def _embedding_providers(model: str) -> List[Tuple[str, str, str, str]]:
     """(name, api key, base url, model) for each configured provider, in order.
 
@@ -312,7 +316,7 @@ class VectorStoreManager:
             timeout=120.0,  # 2 minutes timeout for operations
         )
         self.embeddings_model = embeddings_model
-        self.embeddings_size = 2560
+        self.embeddings_size = EMBEDDING_SIZE
         self._env_payload_cache: Dict[str, bool] = {}
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
@@ -1160,6 +1164,15 @@ class VectorStoreManager:
                     input=texts, model=model
                 )
                 vectors = [item.embedding for item in response.data]
+                sizes = {len(vector) for vector in vectors}
+                if sizes - {EMBEDDING_SIZE}:
+                    # A provider serving another model answers 200 with vectors the
+                    # collections cannot hold; Qdrant would reject them later with a
+                    # far less clear error.
+                    raise RuntimeError(
+                        f"{name} returned {sorted(sizes)}-d vectors, "
+                        f"collections expect {EMBEDDING_SIZE}"
+                    )
                 return vectors, None if first_error is None else str(first_error)
             except Exception as e:
                 first_error = first_error or e
