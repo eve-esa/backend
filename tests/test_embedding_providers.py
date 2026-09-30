@@ -14,6 +14,7 @@ class _FakeOpenAI:
 
     calls: list = []
     failing: set = set()
+    size = vsm.EMBEDDING_SIZE
 
     def __init__(self, api_key, base_url):
         self.base_url = base_url
@@ -24,7 +25,10 @@ class _FakeOpenAI:
         if self.base_url in _FakeOpenAI.failing:
             raise RuntimeError(f"{self.base_url} down")
         return SimpleNamespace(
-            data=[SimpleNamespace(embedding=[float(len(text))]) for text in input]
+            data=[
+                SimpleNamespace(embedding=[float(len(text))] * _FakeOpenAI.size)
+                for text in input
+            ]
         )
 
 
@@ -32,6 +36,7 @@ class _FakeOpenAI:
 def manager(monkeypatch):
     _FakeOpenAI.calls = []
     _FakeOpenAI.failing = set()
+    _FakeOpenAI.size = vsm.EMBEDDING_SIZE
     monkeypatch.setattr(vsm, "OpenAI", _FakeOpenAI)
     monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_URL", "deepinfra")
     monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_API_KEY", "di-key")
@@ -49,7 +54,7 @@ async def test_deepinfra_answers_first_and_jsc_is_not_called(manager):
         "sentinel", JSC_DEFAULT_EMBEDDING_MODEL
     )
 
-    assert vector == [8.0]
+    assert vector[0] == 8.0 and len(vector) == vsm.EMBEDDING_SIZE
     assert fallback_error is None
     assert _FakeOpenAI.calls == [("deepinfra", DEEPINFRA_DEFAULT_EMBEDDING_MODEL)]
 
@@ -61,7 +66,7 @@ async def test_falls_back_to_jsc_and_reports_the_first_error(manager):
         "sentinel", JSC_DEFAULT_EMBEDDING_MODEL
     )
 
-    assert vector == [8.0]
+    assert vector[0] == 8.0 and len(vector) == vsm.EMBEDDING_SIZE
     assert fallback_error == "deepinfra down"
     assert [url for url, _ in _FakeOpenAI.calls] == ["deepinfra", "jsc"]
 
@@ -106,7 +111,7 @@ async def test_batch_uses_the_same_order(manager):
         ["a", "bb"], JSC_DEFAULT_EMBEDDING_MODEL
     )
 
-    assert vectors == [[1.0], [2.0]]
+    assert [vector[0] for vector in vectors] == [1.0, 2.0]
     assert fallback_error == "deepinfra down"
 
 
@@ -116,3 +121,12 @@ async def test_batch_with_no_texts_calls_nothing(manager):
         None,
     )
     assert _FakeOpenAI.calls == []
+
+
+async def test_wrong_vector_size_counts_as_a_failure(manager, monkeypatch):
+    # Blablador only serves 4096-d models now: its vectors must not reach Qdrant.
+    monkeypatch.setattr(vsm, "EMBEDDING_PROVIDER_ORDER", ["jsc"])
+    _FakeOpenAI.size = 4096
+
+    with pytest.raises(RuntimeError, match=r"jsc returned \[4096\]-d vectors"):
+        await manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
