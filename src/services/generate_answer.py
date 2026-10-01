@@ -543,10 +543,52 @@ Please continue the conversation using this summary as context for understanding
                 return None, None
 
 
+# How many prior messages the agent instruction prefix includes.
+# A new turn skips the in-progress row. Hallucination passes that row as before_message.
+_CONVERSATION_HISTORY_WINDOW = 1
+
+
+def _history_before_message_filter(
+    conversation_id: str, before_message: Any
+) -> Dict[str, Any]:
+    """Messages strictly before ``before_message``, in conversation order.
+
+    Same timestamp: the smaller Mongo id is earlier. Missing id falls back to
+    a strict timestamp comparison.
+    """
+    from bson import ObjectId
+
+    timestamp = getattr(before_message, "timestamp", None)
+    message_id = getattr(before_message, "id", None)
+    if timestamp is None:
+        filt: Dict[str, Any] = {"conversation_id": conversation_id}
+        if message_id:
+            filt["_id"] = {"$ne": ObjectId(message_id)}
+        return filt
+    earlier_than_timestamp = {"timestamp": {"$lt": timestamp}}
+    if not message_id:
+        return {"conversation_id": conversation_id, **earlier_than_timestamp}
+    return {
+        "conversation_id": conversation_id,
+        "$or": [
+            earlier_than_timestamp,
+            {"timestamp": timestamp, "_id": {"$lt": ObjectId(message_id)}},
+        ],
+    }
+
+
 async def _get_conversation_history_from_db(
     conversation_id: str,
+    *,
+    before_message: Optional[Any] = None,
 ) -> tuple[List[Any], Optional[str]]:
-    """Get conversation history and summary from database for fallback when LangGraph is not available."""
+    """Get conversation history and summary from database for fallback when LangGraph is not available.
+
+    ``before_message`` is the turn being judged. The window is then the prior
+    messages only, so a check on an older turn does not pick up later ones.
+    Generation leaves it unset and skips the newest row, which is the turn
+    in progress.
+    """
     try:
         summary = None
         try:
@@ -556,13 +598,21 @@ async def _get_conversation_history_from_db(
         except Exception:
             summary = None
 
-        # Get recent messages from the conversation (limit to last 10 for context)
-        messages = await Message.find_all(
-            filter_dict={"conversation_id": conversation_id},
-            sort=[("timestamp", -1)],
-            limit=1,
-            skip=1,
-        )
+        if before_message is not None:
+            messages = await Message.find_all(
+                filter_dict=_history_before_message_filter(
+                    conversation_id, before_message
+                ),
+                sort=[("timestamp", -1)],
+                limit=_CONVERSATION_HISTORY_WINDOW,
+            )
+        else:
+            messages = await Message.find_all(
+                filter_dict={"conversation_id": conversation_id},
+                sort=[("timestamp", -1)],
+                limit=_CONVERSATION_HISTORY_WINDOW,
+                skip=1,
+            )
         # Convert to LangChain-compatible message format
         history = []
         for msg in messages:

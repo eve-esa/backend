@@ -43,7 +43,10 @@ from src.services.generate_answer_agentic import (
 )
 from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import get_owned_custom_model
-from src.services.hallucination_detector import HallucinationDetector
+from src.services.hallucination_detector import (
+    HallucinationDetector,
+    load_new_turn_history_prefix,
+)
 from src.services.langfuse_scores import schedule_feedback_scores
 from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.stream_bus import get_stream_bus
@@ -1233,6 +1236,11 @@ async def hallucination_detect(
     try:
         total_start = time.perf_counter()
         detector = HallucinationDetector()
+        conversation_prefix = await load_new_turn_history_prefix(
+            conversation_id,
+            request=message.request_input,
+            before_message=message,
+        )
 
         (
             label,
@@ -1246,6 +1254,7 @@ async def hallucination_detect(
             model_response=message.output,
             docs=build_context(message.documents),
             llm_type=message.request_input.llm_type,
+            conversation=conversation_prefix,
         )
         total_latency = time.perf_counter() - total_start
 
@@ -1348,6 +1357,11 @@ async def stream_hallucination(
         try:
             # Emit an initial status event early to start the stream promptly
             yield f"data: {json.dumps({'type': 'status', 'content': 'hallucination detection started...'})}\n\n"
+            conversation_prefix = await load_new_turn_history_prefix(
+                conversation_id,
+                request=message.request_input,
+                before_message=message,
+            )
             # Step 1: Detect
             t0 = time.perf_counter()
             label, reason = await detector.detect(
@@ -1355,6 +1369,7 @@ async def stream_hallucination(
                 model_response=message.output,
                 docs=build_context(message.documents),
                 llm_type=message.request_input.llm_type,
+                conversation=conversation_prefix,
             )
             detect_latency = time.perf_counter() - t0
 
@@ -1415,6 +1430,7 @@ async def stream_hallucination(
                 answer=message.output,
                 reason=reason,
                 llm_type=message.request_input.llm_type,
+                conversation=conversation_prefix,
             )
             rewrite_latency = time.perf_counter() - t1
             yield f"data: {json.dumps({'type': 'rewritten_question', 'content': rewritten_question})}\n\n"
