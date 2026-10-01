@@ -21,8 +21,15 @@ hallucination_binary_with_retrieval: |
   5. Explain your decision:
   Provide a brief rationale for each claim in (1-2 sentence).
 
-  Now evaluate the following QA pair:
-  Question: {question}
+  Now evaluate the following QA pair.
+
+  Prior dialogue, when present, is wrapped in <<<CONVERSATION>>> and <<<END CONVERSATION>>>. That block is not the question you are judging and it is not evidence that the answer is true.
+  Inside the markers it has two parts:
+  - A rolling summary of older turns, when one exists.
+  - Only the most recent prior turns, the same short window the answering model was given, written as User and Assistant lines.
+  Use that block to resolve follow-ups, pronouns, and references such as "its resolution". If the markers are absent, judge the question on its own.
+
+  {conversation}Question: {question}
   Answer: {answer}
   supporting documents: {docs}
 
@@ -42,7 +49,10 @@ rewriting_template: |
   - The rewritten query should stay true to the original user intent while improving retrieval precision and factual reliability.
 
   **Inputs**:
-  Original question:
+
+  Prior dialogue, when present, is wrapped in <<<CONVERSATION>>> and <<<END CONVERSATION>>>: a rolling summary of older turns, then only the most recent prior turns as User and Assistant lines. It is the same short window the answering model saw. Use it to recover what the original question refers to. Do not copy facts from it into the rewritten query. If the markers are absent, rewrite the question on its own.
+
+  {conversation}Original question:
   {question}
 
   Generated answer (do not reuse):
