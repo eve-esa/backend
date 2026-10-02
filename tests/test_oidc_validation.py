@@ -248,6 +248,35 @@ async def test_unknown_kid_is_rejected_after_one_refetch(provider):
     assert JWKS_URI in provider.requests
 
 
+MALFORMED_JWK = {"kty": "RSA", "kid": "broken", "use": "sig", "n": 42, "e": "AQAB"}
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_malformed_jwks_member_does_not_hide_the_good_key(provider):
+    """One broken entry in the provider's JWKS must not lock every user out."""
+    provider.jwks = {"keys": [MALFORMED_JWK, test_public_jwk()]}
+    claims = await verify_access_token(keycloak_token())
+    assert claims["sub"] == "kc-subject"
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_jwks_with_only_malformed_members_is_provider_unavailable(provider):
+    provider.jwks = {"keys": [MALFORMED_JWK]}
+    with pytest.raises(IdentityProviderUnavailable):
+        await verify_access_token(keycloak_token())
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_exp", [[], {"at": 1}, None])
+async def test_non_numeric_expiry_is_a_permission_error(provider, bad_exp):
+    """A malformed ``exp`` is a bad credential, never a raw TypeError (a 500)."""
+    with pytest.raises(PermissionError):
+        await verify_access_token(keycloak_token(extra_claims={"exp": bad_exp}))
+
+
 @pytest.mark.no_db
 @pytest.mark.asyncio
 async def test_token_signed_by_a_foreign_key_is_rejected(provider):
