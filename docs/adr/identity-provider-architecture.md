@@ -125,22 +125,20 @@ cost of not sharing a session across tabs directly. Persistence comes back
 through the IdP session cookie via silent sign-in, which is the mechanism that
 should own it anyway.
 
-## What is deliberately temporary
+## The migration bridge, removed
 
-Two things in this change are built to be deleted, and both say so in their own
-source:
+The production cutover needed two temporary pieces: an internal endpoint the
+Cognito Migrate-user Lambda called so existing users kept their password, and the
+legacy `password_hash`, `is_active` and `activation_code` fields on the `User`
+model. Both were removed once the production migration window closed, after the
+back office stopped reading and writing `is_active`. Stored documents lose the
+three fields on their next save, since `MongoModel.save()` is a full `replace_one`
+of `model_dump()`; the accounts nobody uses are swept once with:
 
-- `src/routers/migration.py`, the endpoint the Cognito Migrate-user Lambda calls
-  during the production cutover so existing users sign in with the password they
-  already have. It holds the last copy of the legacy hash function.
-- `password_hash`, `is_active` and `activation_code` on the `User` model.
-  Nothing writes them. They stay because `MongoModel.save()` is a full
-  `replace_one` of `model_dump()`, so removing a field erases it from stored
-  documents on the next save, which happens on every message. Deleting them now
-  would destroy the hashes the migration needs and make rollback one-way.
-
-Both go in the cleanup PR once the migration window closes, together with a
-one-off `$unset` sweep.
+```bash
+python -m src.commands.unset_legacy_credentials          # dry run, counts only
+python -m src.commands.unset_legacy_credentials --apply
+```
 
 `users.email` has a non-unique index for the same kind of reason: building a
 unique index on a collection that already holds duplicates fails, and production

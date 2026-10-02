@@ -11,7 +11,6 @@ from .mcp_server import router as mcp_server_router
 from .custom_model import router as custom_model_router
 from .error_log import router as error_log_router
 from .internal_notifications import router as internal_notifications_router
-from .migration import router as migration_router
 from .openai_proxy import OpenAIProxyDispatcher
 
 __all__ = [
@@ -27,6 +26,5 @@ __all__ = [
     "custom_model_router",
     "error_log_router",
     "internal_notifications_router",
-    "migration_router",
     "OpenAIProxyDispatcher",
 ]

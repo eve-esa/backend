@@ -19,46 +19,8 @@
 
 ## Auth
 
-### LoginRequest
-
-- **email**: string (email)
-- **password**: string
-
-### LoginResponse
-
-- **access_token**: string
-- **refresh_token**: string
-
-### RefreshRequest
-
-- **refresh_token**: string
-
-### RefreshResponse
-
-- **access_token**: string
-
-### SignupRequest
-
-- **email**: string (email)
-- **password**: string
-- **first_name**: string | null
-- **last_name**: string | null
-
-### SignupResponse
-
-- **id**: string
-- **email**: string (email)
-- **first_name**: string | null
-- **last_name**: string | null
-
-### ResendActivationRequest
-
-- **email**: string
-
-### VerifyRequest
-
-- **email**: string
-- **activation_code**: string
+Sign-in, sign-up and token refresh belong to the identity provider; this API has no
+request or response types of its own for them. See [Auth](routers-auth.md).
 
 ## User
 
@@ -67,15 +29,15 @@
 - **first_name**: string
 - **last_name**: string
 
-### User (response model)
+### UserPublic (response of `GET /users/me` and `PATCH /users`)
 
-- Inherits `MongoModel` → includes **id**: string, **timestamp**: datetime
-- **email**: string (email)
-- **password_hash**: string
+- **id**: string
+- **email**: string
 - **first_name**: string | null
 - **last_name**: string | null
-- **is_active**: bool
-- **activation_code**: string | null
+- **approval_status**: string | null (`"approved"`, `"pending"` or null)
+- **rate_limit_group**: string
+- **created_at**: datetime
 
 ## Collections
 

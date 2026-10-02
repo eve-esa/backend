@@ -23,7 +23,6 @@ from src.routers import (
     health_check_router,
     internal_notifications_router,
     mcp_server_router,
-    migration_router,
     message_router,
     user_router,
 )
@@ -74,10 +73,6 @@ def register_routers(app: FastAPI):
     # Internal, in-VPC only: the back office asks here to mail an approved user.
     # The edge blocks /api/internal/*, and the router checks a shared secret.
     app.include_router(internal_notifications_router, tags=["Internal"])
-
-    # TEMPORARY: serves the Cognito Migrate-user Lambda during the cutover.
-    # Removed with src/routers/migration.py in the cleanup PR.
-    app.include_router(migration_router, tags=["Migration"])
 
 
 def create_app(debug=False, **kwargs):

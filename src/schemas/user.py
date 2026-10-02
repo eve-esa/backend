@@ -12,13 +12,6 @@ class UpdateUserRequest(BaseModel):
     last_name: str
 
 
-class UserCreate(BaseModel):
-    email: str
-    password: str
-    first_name: str | None = None
-    last_name: str | None = None
-
-
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -29,9 +22,9 @@ class UserResponse(BaseModel):
 class UserPublic(BaseModel):
     """What ``/users/me`` and ``PATCH /users`` return.
 
-    Deliberately not the full ``User`` model: that one still carries
-    ``password_hash`` (read by the Cognito migration Lambda) and
-    ``activation_code``, neither of which any API caller needs to see.
+    Deliberately not the full ``User`` model: the API exposes a curated view,
+    so a field added to the stored document stays private until somebody
+    decides a caller needs it, rather than leaking by default.
     """
 
     id: str
