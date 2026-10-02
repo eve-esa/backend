@@ -14,7 +14,7 @@ langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Pinned to a commit, not
 # @main: the release image is built from this SHA. bbc2fad (0.5.3) emits
 # retry/timeout/error_handler/fallback via compile(..., on_policy=...).
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@bbc2fad57ea6ed693b9f97eec7549ed765c27bac
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@ab597fa5f8093f805bdb108298d6d6d0b73116c4
 # OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
 # released in lockstep with the SDK (1.44.0); bump them together.
 opentelemetry-api==1.44.0
