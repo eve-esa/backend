@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - 8000:8000
+      - 8001:8000
     command:
       [
         "uvicorn",
@@ -22,7 +22,6 @@ services:
     environment:
       # Override .env values for Docker networking
       - MONGO_HOST=mongo
-      - MONGO_PARAMS=?authSource=admin
       - REDIS_URL=redis://redis:6379/0
       # generate-agentic MCP client calls this app’s /mcp/*; host :8001 is not open inside the container
       - MCP_PROXY_INTERNAL_BASE_URL=http://127.0.0.1:8000
@@ -104,23 +103,10 @@ services:
       # Must be reachable from the browser, not just the compose network.
       - VITE_API_URL=http://localhost:8000
       - VITE_ENABLE_STREAMING=true
-      - VITE_FEATURE_ARTIFACTS=true
-      - VITE_FEATURE_TOOLKITS=true
-      - VITE_FEATURE_PRIVATE_COLLECTIONS=true
-      - VITE_FEATURE_ATTACHMENTS=true
-      - VITE_FEATURE_ANSWERED_BY=true
-      - VITE_FEATURE_BETA_BADGE=true
-      - VITE_FEATURE_WELCOME_DIALOG=true
-      - VITE_FEATURE_STREAM_STATUS_NOTICES=true
-      # Keep Vite's optimizer cache outside the anonymous node_modules volume.
-      # The browser otherwise can request immutable dep chunks that Vite has
-      # regenerated away, which leaves the app as a blank page.
-      - VITE_CACHE_DIR=/tmp/eve-vite-cache
       # Same-machine Keycloak: the issuer must be the browser-visible host.
       - VITE_AUTH_ISSUER=http://localhost:${KEYCLOAK_PORT:-8080}/realms/eve
       - VITE_AUTH_CLIENT_ID=eve-frontend
       - VITE_AUTH_SCOPE=openid profile email
-    command: ["yarn", "dev", "--host", "0.0.0.0", "--port", "5173", "--force"]
     volumes:
       - ../frontend:/app
       - /app/node_modules
