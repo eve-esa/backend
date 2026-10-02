@@ -6,9 +6,9 @@ write the back office already owns; composing the message and knowing which
 transport is configured is this application's job, and this endpoint is the
 seam between the two.
 
-Same shape and same guard as src/routers/migration.py. The edge blocks
-``/api/internal/*``, so only a caller already inside the VPC reaches this, and
-the shared secret is the second wall rather than the only one. Unset secret
+Two walls guard it. The edge blocks ``/api/internal/*``, so only a caller
+already inside the VPC reaches this, and the ``X-Internal-Secret`` shared secret
+is the second wall rather than the only one. Unset secret
 means closed: an endpoint that sends mail on request must not be reachable
 because somebody forgot to set a variable.
 

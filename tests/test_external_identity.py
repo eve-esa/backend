@@ -216,7 +216,8 @@ async def test_provisions_a_new_user_when_nothing_matches(monkeypatch):
         assert created.first_name == "Fresh"
         assert created.last_name == "Account"
         # Nothing writes a credential any more.
-        assert created.password_hash is None
+        stored = await User.get_collection().find_one({"_id": ObjectId(resolved)})
+        assert "password_hash" not in stored
 
         row = await ExternalIdentity.find_one({"subject": subject})
         assert row is not None and row.user_id == resolved

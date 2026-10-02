@@ -148,13 +148,6 @@ async def _login(client: httpx.AsyncClient, email: str, password: str) -> str:
     return resp.json()["access_token"]
 
 
-async def _activate(user) -> None:
-    """Mirror the --test flag in src/commands/create_user.py: skip email verification."""
-    user.is_active = True
-    user.activation_code = None
-    await user.save()
-
-
 @pytest.mark.asyncio
 async def test_artifact_capture_and_serving_e2e(mcp_client):
     tools, _client = mcp_client  # keep `_client` alive: see mcp_client's docstring
@@ -164,8 +157,6 @@ async def test_artifact_capture_and_serving_e2e(mcp_client):
     intruder, _intruder_test_token = await create_test_user_and_token(
         email=f"e2e-intruder-{uuid.uuid4().hex[:8]}@example.com", password=E2E_PASSWORD
     )
-    await _activate(owner)
-    await _activate(intruder)
     conversation_id = f"e2e-conv-{uuid.uuid4().hex[:8]}"
 
     try:
@@ -311,7 +302,6 @@ async def test_compute_metrics_effis_pattern_e2e(mcp_client):
     owner, _owner_test_token = await create_test_user_and_token(
         email=f"e2e-metrics-{uuid.uuid4().hex[:8]}@example.com", password=E2E_PASSWORD
     )
-    await _activate(owner)
     conversation_id = f"e2e-conv-{uuid.uuid4().hex[:8]}"
 
     try:
