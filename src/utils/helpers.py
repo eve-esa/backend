@@ -230,6 +230,35 @@ def extract_year_range_from_filters(filters: Any) -> Optional[List[int]]:
     return [start, end]
 
 
+# Ingestion wrote missing titles as text: pandas NaN became "nan", Python None
+# became "None". Clients only fall back to "Title not available" on a null title.
+_MISSING_TITLE_MARKERS = {"", "nan", "none", "null", "undefined"}
+
+
+def _without_placeholder_title(record: Any) -> Any:
+    """Return ``record`` with a placeholder ``title`` replaced by None.
+
+    The input is never mutated: payloads can be shared with other callers.
+    """
+    if not isinstance(record, dict):
+        return record
+    title = record.get("title")
+    if isinstance(title, str) and title.strip().lower() in _MISSING_TITLE_MARKERS:
+        return {**record, "title": None}
+    return record
+
+
+def _normalize_titles(metadata: Any) -> Any:
+    metadata = _without_placeholder_title(metadata)
+    if isinstance(metadata, dict) and isinstance(
+        metadata.get("additionalMetadata"), dict
+    ):
+        additional = _without_placeholder_title(metadata["additionalMetadata"])
+        if additional is not metadata["additionalMetadata"]:
+            metadata = {**metadata, "additionalMetadata": additional}
+    return metadata
+
+
 def extract_document_data(result: Any) -> Dict[str, Any]:
     result_id = _field(result, "id")
     result_version = _to_int(_field(result, "version"))
@@ -261,9 +290,9 @@ def extract_document_data(result: Any) -> Dict[str, Any]:
         "score": result_score,
         "reranking_score": result_rerank,
         "collection_name": collection_name,
-        "payload": result_payload,
+        "payload": _without_placeholder_title(result_payload),
         "text": result_text,
-        "metadata": result_metadata,
+        "metadata": _normalize_titles(result_metadata),
     }
 
 
