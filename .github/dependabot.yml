@@ -3,7 +3,7 @@
 # pin it to a tag/commit and bump it manually.
 version: 2
 updates:
-  # Python runtime and dev dependencies (requirements.txt).
+  # Python runtime and dev dependencies (requirements.txt, requirements-dev.txt).
   # This repo is requirements.txt-based: use the pip ecosystem, not uv,
   # until the project migrates to pyproject.toml + uv.lock.
   - package-ecosystem: "pip"

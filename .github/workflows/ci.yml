@@ -103,6 +103,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          # The default key hashes requirements.txt only and misses requirements-dev.txt.
+          cache-dependency-path: requirements*.txt
 
       - name: Check the Python version matches the Dockerfile
         # Fails when a Dockerfile bump or a CI bump lands without the other. Every
@@ -123,8 +125,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          pip install -r requirements-dev.txt
 
       - name: Run tests
         # e2e is excluded on purpose: those tests talk to real deployed services and

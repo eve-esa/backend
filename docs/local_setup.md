@@ -66,8 +66,11 @@ Other variables in the table in the **Environment variable reference** section b
 With the virtual environment activated:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+`requirements-dev.txt` adds the test suite and the docs toolchain to `requirements.txt`, which is
+all the production image installs.
 
 ### 5. Run MongoDB (local)
 
