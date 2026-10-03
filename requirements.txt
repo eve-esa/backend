@@ -14,9 +14,9 @@ langchain-text-splitters==1.1.2
 langchain-classic==1.0.7
 langgraph==1.2.4
 # Standalone agent graphs (import package ``agents``). Pinned to a commit, not
-# @main: the release image is built from this SHA. a1683f2 (0.5.3) drops the
-# helpers no consumer used and aligns __version__ with the package metadata.
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@a1683f2def79546842b5e98e3a1d6e9eae328354
+# @main: the release image is built from this SHA. 6875621 (0.5.4) names the
+# tools in the react prompt by their exposed names (eve_retrieval_retrieve).
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@687562107a0fca0442b146025dacc95a1edd9b32
 # OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
 # released in lockstep with the SDK (1.44.0); bump them together.
 opentelemetry-api==1.44.0
