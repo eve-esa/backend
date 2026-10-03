@@ -11,6 +11,21 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [0.2.2](https://github.com/eve-esa/backend/compare/v0.2.1...v0.2.2) (2026-10-03)
+
+
+### Fixed
+
+* **deps:** patch PyJWT and pypdf advisories ([#241](https://github.com/eve-esa/backend/issues/241)) ([ff932f5](https://github.com/eve-esa/backend/commit/ff932f559b015b1ebfcd835bebd98ab3fbe1b4f6))
+* **retrieval:** report placeholder source titles as missing ([#238](https://github.com/eve-esa/backend/issues/238)) ([135f92b](https://github.com/eve-esa/backend/commit/135f92b6217c60aacaae9632e7e5afa90805b100))
+
+
+### Changed
+
+* **deps:** drop packages nothing imports ([#242](https://github.com/eve-esa/backend/issues/242)) ([098c79d](https://github.com/eve-esa/backend/commit/098c79d19fd204734b53597166a029070d1e5f4a))
+* remove helpers and schemas nothing calls ([#250](https://github.com/eve-esa/backend/issues/250)) ([748b2e1](https://github.com/eve-esa/backend/commit/748b2e17868e244259799b9289ad697481894f2a))
+* remove modules that nothing imports ([#248](https://github.com/eve-esa/backend/issues/248)) ([ba6d183](https://github.com/eve-esa/backend/commit/ba6d183671fa48d7028e3f4ec9e089e412a00129))
+
 ## [0.2.1](https://github.com/eve-esa/backend/compare/v0.2.0...v0.2.1) (2026-10-01)
 
 
