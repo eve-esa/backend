@@ -251,25 +251,6 @@ class StorageService:
             )
         )
 
-    async def generate_presigned_put(
-        self,
-        key: str,
-        content_type: Optional[str] = None,
-        expires_in: Optional[int] = None,
-    ) -> str:
-        """Generate a short-TTL presigned PUT URL (never persist it)."""
-        ttl = expires_in or S3_PRESIGN_TTL_SECONDS
-        params = {"Bucket": S3_BUCKET_NAME, "Key": key}
-        if content_type:
-            params["ContentType"] = content_type
-        return await run_in_threadpool(
-            lambda: self._client().generate_presigned_url(
-                "put_object",
-                Params=params,
-                ExpiresIn=ttl,
-            )
-        )
-
 
 # Module-level singleton (mirrors the `document_service` pattern; monkeypatchable in tests).
 storage_service = StorageService()

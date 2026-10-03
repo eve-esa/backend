@@ -2,9 +2,9 @@
 
 Folder structure:
 
-- :mod:`src.services.agents.graphs` — standalone code (no backend imports),
-  contains :class:`AgentGraph`, :class:`LatencyInterceptor`, shared utilities,
-  and graph implementations.
+- ``agents.graphs`` (the ``eve-esa-agents`` package): standalone code (no backend
+  imports), contains :class:`AgentGraph`, :class:`LatencyInterceptor`, shared
+  utilities, and graph implementations.
 - :mod:`src.services.agents.core` — backend-bound integration (runner,
   registry, error-logging interceptor).
 

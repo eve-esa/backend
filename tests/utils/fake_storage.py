@@ -52,6 +52,3 @@ class FakeStorage:
 
     async def generate_presigned_get(self, key, expires_in=None):
         return f"http://minio.local/{key}?signed=1"
-
-    async def generate_presigned_put(self, key, content_type=None, expires_in=None):
-        return f"http://minio.local/{key}?signed=1"

@@ -8,7 +8,6 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
 
 from src.database.models.message import Message
 from src.schemas.generation_request import GenerationRequest
@@ -202,71 +201,5 @@ def might_be_incomplete_text_tool_call(content: str) -> bool:
 # These functions depend on LangChain message types which may not be installed.
 # Import them lazily so the module stays importable regardless.
 
-def reformat_messages_for_text_tool_model(
-    messages: List[Any],
-    *,
-    AIMessage: Any,
-    ToolMessage: Any,
-    HumanMessage: Any,
-) -> List[Any]:
-    """Convert structured tool_calls / ToolMessage objects back to the plain-text
-    format used by Mistral-family models (e.g. EVE-Instruct).
-
-    The caller passes in the LangChain message classes to avoid a hard dependency.
-    """
-    if not (AIMessage and ToolMessage and HumanMessage):
-        return messages
-
-    result: List[Any] = []
-    for msg in messages:
-        if (
-            isinstance(msg, AIMessage)
-            and not msg.content
-            and getattr(msg, "tool_calls", None)
-        ):
-            calls = [
-                {"name": tc["name"], "arguments": tc.get("args", {})}
-                for tc in msg.tool_calls
-            ]
-            result.append(AIMessage(content=f"[TOOL_CALLS] {json.dumps(calls)}"))
-        elif isinstance(msg, ToolMessage):
-            result.append(HumanMessage(content=f"[TOOL_RESULTS]\n{msg.content}"))
-        else:
-            result.append(msg)
-    return result
-
-
-def strip_content_from_tool_call_messages(
-    messages: List[Any],
-    *,
-    AIMessage: Any,
-) -> List[Any]:
-    """Strip text content from AIMessages that also carry tool_calls.
-
-    Some LLM APIs (Mistral) reject assistant messages with both non-empty
-    content AND tool_calls.  The text was already streamed to the user so
-    nothing is lost.
-    """
-    return [
-        AIMessage(content="", tool_calls=m.tool_calls, id=m.id)
-        if (
-            isinstance(m, AIMessage)
-            and m.content
-            and getattr(m, "tool_calls", None)
-        )
-        else m
-        for m in messages
-    ]
-
 
 # ─── Tool input schemas ───────────────────────────────────────────────────────
-
-
-class SearchWileyInput(BaseModel):
-    query: str = Field(description="Search query for scientific articles")
-    start_year: Optional[int] = Field(
-        default=None, description="Start year filter (inclusive)"
-    )
-    end_year: Optional[int] = Field(
-        default=None, description="End year filter (inclusive)"
-    )

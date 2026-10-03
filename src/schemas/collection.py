@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
 from src.constants import DEFAULT_EMBEDDING_MODEL
-from src.database.models.collection import Collection as CollectionModel
 
 
 class CollectionRequest(BaseModel):
@@ -28,8 +27,3 @@ class CollectionRequest(BaseModel):
 
 class CollectionUpdate(BaseModel):
     name: str
-
-
-class CollectionOut(CollectionModel):
-    documents_count: int
-    points_count: int

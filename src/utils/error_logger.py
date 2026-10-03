@@ -316,18 +316,6 @@ def set_user_context(user_id: Optional[str]) -> None:
     user_id_context.set(user_id)
 
 
-def get_conversation_context() -> Optional[str]:
-    return conversation_id_context.get()
-
-
-def get_message_context() -> Optional[str]:
-    return message_id_context.get()
-
-
-def get_user_context() -> Optional[str]:
-    return user_id_context.get()
-
-
 async def persist_policy_event(
     *,
     policy: str,

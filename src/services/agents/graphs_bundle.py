@@ -1,7 +1,7 @@
-"""Resolve agent graphs from pip ``agents.graphs`` or vendored ``src.services.agents.graphs``.
+"""Resolve agent graphs from the ``eve-esa-agents`` package (import name ``agents``).
 
-Prefer the installable `eve-esa-agents` package (import name ``agents``) when
-its base module is importable; otherwise use the monorepo copy.
+A local checkout under ``repos/eve-esa-agents`` is put on ``sys.path`` first when
+present, so a dev container can run unreleased graphs without a pip install.
 """
 
 from __future__ import annotations
@@ -17,10 +17,6 @@ _CANDIDATES: Tuple[Tuple[str, str], ...] = (
     (
         "agents.graphs",
         "agents.graphs.base",
-    ),
-    (
-        "src.services.agents.graphs",
-        "src.services.agents.graphs.base",
     ),
 )
 
@@ -57,8 +53,7 @@ def graphs_prefix() -> str:
             continue
     raise ImportError(
         "No agent graphs package found. Install `eve-esa-agents` "
-        "(pip install git+https://github.com/eve-esa/agents.git) "
-        "or keep `src.services.agents.graphs` in the project. "
+        "(pip install git+https://github.com/eve-esa/agents.git). "
         f"Import errors: {errors}"
     )
 
@@ -71,10 +66,3 @@ def graphs_base_module() -> ModuleType:
 @lru_cache(maxsize=1)
 def graphs_utils_module() -> ModuleType:
     return importlib.import_module(f"{graphs_prefix()}.utils")
-
-
-def clear_graphs_bundle_cache() -> None:
-    """Reset resolution (e.g. after tests install/uninstall the pip package)."""
-    graphs_prefix.cache_clear()
-    graphs_base_module.cache_clear()
-    graphs_utils_module.cache_clear()

@@ -5,5 +5,5 @@ and backend-specific MCP interceptors.  These modules import from the
 rest of the backend (database, FastAPI, etc.) and are NOT portable.
 
 For the standalone parts (AgentGraph base class, utilities, graph
-implementations), see :mod:`src.services.agents.graphs`.
+implementations), see ``agents.graphs`` in the ``eve-esa-agents`` package.
 """
