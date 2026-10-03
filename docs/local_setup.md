@@ -57,7 +57,8 @@ python -m venv venv
             - `MONGO_PORT` (usually `27017`)
             - `MONGO_DATABASE` (for example `eve-backend`)
         - **Auth**
-            - `JWT_SECRET_KEY`
+            - `AUTH_ISSUER`
+            - `AUTH_CLIENT_ID`
 
 Other variables in the table in the **Environment variable reference** section below are **optional** for basic local development and can be configured later as you enable more features (SMTP, Satcom, external rerankers, etc.).
 
@@ -130,12 +131,6 @@ MONGO_PASSWORD=
 MONGO_DATABASE=eve-backend
 MONGO_PARAMS=
 
-# JWT Configuration
-JWT_SECRET_KEY=
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=15
-JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
-
 # SMTP
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
@@ -148,7 +143,6 @@ EMAIL_FROM_NAME=EVE
 CORS_ALLOWED_ORIGINS=http://localhost:5173
 
 DEEPINFRA_API_TOKEN=
-SILICONFLOW_API_TOKEN=
 
 SCRAPING_DOG_API_KEY=
 
@@ -157,9 +151,6 @@ SATCOM_LARGE_MODEL_NAME=esa-sceva/satcom-chat-70b
 SATCOM_LARGE_BASE_URL=https://api.runpod.ai/v2/zyy9iu4i7vmcxc/openai/v1
 SATCOM_SMALL_BASE_URL=https://api.runpod.ai/v2/ucttr8up9sxh0k/openai/v1
 SATCOM_RUNPOD_API_KEY=
-
-SATCOM_QDRANT_URL=
-SATCOM_QDRANT_API_KEY=
 
 REDIS_URL=redis://127.0.0.1:6379/0
 
@@ -172,8 +163,6 @@ IS_PROD=false
 | `WORKDER` | Yes (for docker) | Backend uvicon worker counts `2` |
 | `QDRANT_URL` | Yes | Base URL for the primary Qdrant instance. |
 | `QDRANT_API_KEY` | Yes | API key for the primary Qdrant instance. |
-| `SATCOM_QDRANT_URL` | No | Base URL for the Satcom-specific Qdrant instance that is used when SatcomLLM is selected on staging. |
-| `SATCOM_QDRANT_API_KEY` | No | API key for the Satcom-specific Qdrant instance that is used when SatcomLLM is selected on staging. |
 | `MAIN_MODEL_URL` | Yes | OpenAI-compatible URL for the main LLM model (e.g., `https://api.runpod.ai/v2/{endpoint_id}/openai/v1` or `http://localhost:8000/v1`). |
 | `FALLBACK_MODEL_URL` | Yes | OpenAI-compatible URL for the fallback LLM model (e.g., `https://api.mistral.ai/v1` or any OpenAI-compatible endpoint). |
 | `MAIN_MODEL_NAME` | No | Model name for the main model (defaults to value in config.yaml). |
@@ -186,7 +175,6 @@ IS_PROD=false
 | `EMBEDDING_FALLBACK_URL` | Yes | Fallback Embedding Model provider url, OpenAI capatible (e.g., https://api.siliconflow.com/v1) |
 | `EMBEDDING_FALLBACK_API_KEY` | Yes | Fallback Embedding Model provider API token |
 | `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for embedding and reranking retrieved documents (recommended for best retrieval quality, but backend still works without it). |
-| `SILICONFLOW_API_TOKEN` | Yes | SiliconFlow API token for reranking, used as a fallback only. |
 | `SATCOM_RUNPOD_API_KEY` | No | Runpod key dedicated to Satcom workloads. |
 | `MONGO_HOST` | Yes | MongoDB host (default `localhost` or `mongo` in docker). |
 | `MONGO_PORT` | Yes | MongoDB port (default `27017`). |
@@ -194,10 +182,6 @@ IS_PROD=false
 | `MONGO_PASSWORD` | No | MongoDB password. |
 | `MONGO_DATABASE` | Yes | MongoDB database name (default `eve-backend`). |
 | `MONGO_PARAMS` | No | Extra Mongo connection params (default `?authSource=admin`). |
-| `JWT_SECRET_KEY` | Yes | Secret for signing JWTs. |
-| `JWT_ALGORITHM` | No | JWT algorithm (default `HS256`). |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | No | Access token lifetime in minutes (default `15`). |
-| `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | No | Refresh token lifetime in days (default `7`). |
 | `SMTP_HOST` | No | SMTP host (default `smtp.gmail.com`). |
 | `SMTP_PORT` | No | SMTP port (default `587`). |
 | `SMTP_USERNAME` | No | SMTP username. |
