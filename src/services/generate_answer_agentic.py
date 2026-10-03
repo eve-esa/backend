@@ -2,7 +2,7 @@
 
 Delegates to ``src.services.agents.core.runner`` which implements all backend
 integration logic (streaming, persistence, MCP tool loading, etc.) while
-using pluggable graph definitions from ``src.services.agents.graphs``.
+using pluggable graph definitions from ``agents.graphs`` (``eve-esa-agents``).
 
 Public API is unchanged — all existing imports continue to work.
 """

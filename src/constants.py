@@ -58,10 +58,6 @@ def private_collection_name_for(environment: str) -> str:
 # Fallback LLM options
 FALLBACK_LLM = "mistral-vanilla"  # Vanilla Mistral 3.2 24B as fallback
 
-JSC_DEFAULT_RERANKER_MODEL = "alias-qwen3-4b-reranking"
-DEEPINFRA_DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
-RERANKER_MODEL = JSC_DEFAULT_RERANKER_MODEL
-
 WILEY_PUBLIC_COLLECTIONS = [
     {
         "name": "Wiley AI Gateway",

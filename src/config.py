@@ -287,8 +287,8 @@ LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
 AGENTIC_LLM_TYPE = os.getenv("AGENTIC_LLM_TYPE", "").strip() or None
 
 
-# Which agent graph to use.  Short names (e.g. "react") resolve to built-in
-# graphs in src/services/agents/graphs/.  Dotted paths (e.g.
+# Which agent graph to use.  Short names (e.g. "react") resolve to graphs in
+# agents.graphs (the eve-esa-agents package).  Dotted paths (e.g.
 # "my_package.MyAgent") are imported dynamically for external graphs.
 def _normalize_agent_graph_type(raw: str) -> str:
     s = raw.strip().lstrip("\ufeff").strip()
@@ -687,24 +687,6 @@ class Config:
                     }
                 }
         return servers
-
-    def get_mcp_server_url(self):
-        """Legacy method for backward compatibility."""
-        servers = self.get_mcp_servers()
-        if servers:
-            # Get the first server's URL
-            first_server = next(iter(servers.values()))
-            return first_server.get("url")
-        return None
-
-    def get_mcp_headers(self):
-        """Legacy method for backward compatibility."""
-        servers = self.get_mcp_servers()
-        if servers:
-            # Get the first server's headers
-            first_server = next(iter(servers.values()))
-            return first_server.get("headers", {})
-        return {}
 
 
 # Expose a module-level config instance for convenient imports

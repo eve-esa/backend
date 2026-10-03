@@ -2,7 +2,7 @@
 
 Persists tool-call failures to MongoDB via :class:`ErrorLogger`.
 Designed to compose with :class:`LatencyInterceptor` from
-``src.services.agents.graphs.base`` which handles latency tracking independently.
+``agents.graphs.base`` which handles latency tracking independently.
 
 Does not re-raise returned MCP errors (``isError``, structured, text). Exceptions
 are logged and re-raised so the tools node can swallow them into a ToolMessage.
@@ -160,10 +160,10 @@ class ErrorLoggingInterceptor:
     (``isError``, structured ``{error: ...}``, 401-ish text) are logged and
     the result is returned so the graph continues.
 
-    Compose with :class:`~src.services.agents.graphs.base.LatencyInterceptor` for
+    Compose with :class:`~agents.graphs.base.LatencyInterceptor` for
     latency tracking::
 
-        from src.services.agents.graphs.base import LatencyInterceptor
+        from agents.graphs.base import LatencyInterceptor
 
         client = MultiServerMCPClient(
             connections,

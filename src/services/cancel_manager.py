@@ -117,9 +117,6 @@ class CancelManager:
         except Exception:
             pass
 
-    def get_event(self, message_id: str) -> Optional[asyncio.Event]:
-        return self._events.get(message_id)
-
     def cancel(self, message_id: str) -> None:
         ev = self._events.get(message_id)
         if ev is not None:

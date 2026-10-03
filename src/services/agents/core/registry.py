@@ -2,14 +2,10 @@
 
 Resolution rules for ``AGENT_GRAPH_TYPE``:
 
-- **``react``** (case-insensitive): prefer ``ReactAgent`` from the active graphs
-  tree selected by :mod:`graphs_bundle`; if unavailable, fall back to vendored.
-- **Other short names**: merge discoverable graphs from both sources:
-  ``agents.graphs`` and ``src.services.agents.graphs``.
+- **``react``** (case-insensitive): ``ReactAgent`` from the graphs tree selected
+  by :mod:`graphs_bundle`.
+- **Other short names**: graphs discovered under ``agents.graphs``.
 - **Dotted path** (``module.Class``): ``importlib`` (e.g. external packages).
-
-This avoids cases where an older installed pip package shadows newer local
-graphs (e.g. ``simple``).
 """
 
 import importlib
@@ -19,7 +15,6 @@ import pkgutil
 from typing import Dict, Iterable, Optional, Type
 
 from src.services.agents.graphs_bundle import (
-    clear_graphs_bundle_cache,
     graphs_base_module,
     graphs_prefix,
 )
@@ -29,7 +24,7 @@ AgentGraph = graphs_base_module().AgentGraph
 logger = logging.getLogger(__name__)
 
 _local_registry: Optional[Dict[str, Type[AgentGraph]]] = None
-_DISCOVERY_PREFIXES = ("agents.graphs", "src.services.agents.graphs")
+_DISCOVERY_PREFIXES = ("agents.graphs",)
 
 
 def _react_graph_module_path() -> str:
@@ -37,7 +32,7 @@ def _react_graph_module_path() -> str:
 
 
 def _iter_discovery_prefixes() -> Iterable[str]:
-    """Yield active prefix first, then remaining known fallbacks."""
+    """Yield the active graphs prefix first, then any other discovery prefix."""
     active = graphs_prefix()
     yielded = set()
     if active in _DISCOVERY_PREFIXES:
@@ -50,7 +45,7 @@ def _iter_discovery_prefixes() -> Iterable[str]:
 
 
 def _react_agent_type() -> Type[AgentGraph]:
-    """Return ReactAgent, trying active source first then fallback source."""
+    """Return ReactAgent from the discovery prefixes, the active one first."""
     tried = []
     for prefix in _iter_discovery_prefixes():
         module_path = f"{prefix}.react.graph"
@@ -75,7 +70,7 @@ def _register_builtin_react(registry: Dict[str, Type[AgentGraph]]) -> None:
 
 
 def _is_agent_graph_like(obj: object) -> bool:
-    """Return True for subclasses of an AgentGraph class from either source."""
+    """Return True for subclasses of an AgentGraph class."""
     if not inspect.isclass(obj):
         return False
     if getattr(obj, "__name__", "") == "AgentGraph":
@@ -121,7 +116,7 @@ def _discover_graphs_from_prefix(
 
 
 def _discover_local_graphs() -> Dict[str, Type[AgentGraph]]:
-    """Collect AgentGraph subclasses from active + fallback prefixes."""
+    """Collect AgentGraph subclasses from the discovery prefixes."""
     registry: Dict[str, Type[AgentGraph]] = {}
 
     _register_builtin_react(registry)
@@ -164,13 +159,6 @@ def _get_local_registry() -> Dict[str, Type[AgentGraph]]:
     return _local_registry
 
 
-def clear_graph_registry_cache() -> None:
-    """Clear the in-process graph registry (e.g. for tests)."""
-    global _local_registry
-    _local_registry = None
-    clear_graphs_bundle_cache()
-
-
 def _normalize_graph_type(graph_type: Optional[str]) -> str:
     """Strip whitespace, UTF-8 BOM, and surrounding quotes from env values."""
     s = (graph_type or "react").strip()
@@ -187,7 +175,7 @@ def get_agent_graph(graph_type: Optional[str] = None) -> AgentGraph:
     """
     graph_type = _normalize_graph_type(graph_type)
 
-    # Built-in react: same tree as graphs_bundle (pip agents or monorepo).
+    # Built-in react: same tree as graphs_bundle (the eve-esa-agents package).
     if graph_type.casefold() == "react":
         return _react_agent_type()()
 
