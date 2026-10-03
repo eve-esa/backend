@@ -10,7 +10,8 @@ RUN python -m venv $VIRTUAL_ENV
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
-FROM python:3.12-slim-bookworm AS prod
+# Runtime layout shared by the production image and the local dev image.
+FROM python:3.12-slim-bookworm AS runtime
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -31,6 +32,19 @@ RUN chmod +x start.sh create_user.sh
 COPY src/ ./src/
 COPY templates/ ./templates/
 
+CMD ["./start.sh"]
+
+# Local development only: the test suite and the docs toolchain on top of the runtime. Built only
+# when asked for by name (compose build.target: dev); a build without a target builds the last stage.
+# git: requirements-dev.txt includes requirements.txt, and pip re-checks its git dependency.
+FROM runtime AS dev
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-dev.txt /tmp/requirements/
+RUN pip install --no-cache-dir -r /tmp/requirements/requirements-dev.txt && rm -rf /tmp/requirements
+
+# Production. Must stay the last stage: the deploy workflow builds without a target.
+FROM runtime AS prod
+
 # Build-time identity. The image is built on push to main, before any version tag exists, and is
 # then promoted to staging and prod by digest without being rebuilt, so the commit is the only
 # thing that can be baked in here. The human version arrives at deploy time as APP_VERSION.
@@ -38,5 +52,3 @@ COPY templates/ ./templates/
 # dependency or source layers above it.
 ARG GIT_SHA
 ENV APP_GIT_SHA=${GIT_SHA}
-
-CMD ["./start.sh"]
