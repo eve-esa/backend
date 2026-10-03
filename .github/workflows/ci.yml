@@ -97,10 +97,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Same minor version as the image. CI tested 3.13 while the image ran 3.12, so a
+      # dependency that breaks on only one of them passed here and failed in production.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.12"
           cache: pip
+
+      - name: Check the Python version matches the Dockerfile
+        # Fails when a Dockerfile bump or a CI bump lands without the other. Every
+        # FROM python:X.Y stage must match the interpreter this job runs.
+        run: |
+          set -euo pipefail
+          ci=$(python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+          docker=$( (grep -oE '^FROM python:[0-9]+\.[0-9]+' Dockerfile || true) | cut -d: -f2 | sort -u)
+          if [[ -z "$docker" ]]; then
+            echo "::error file=Dockerfile::No FROM python:X.Y line found."
+            exit 1
+          fi
+          if [[ "$docker" != "$ci" ]]; then
+            echo "::error file=Dockerfile::Dockerfile uses python ${docker//$'\n'/, }, CI runs ${ci}."
+            exit 1
+          fi
+          echo "OK: Dockerfile and CI both on Python ${ci}"
 
       - name: Install dependencies
         run: |
