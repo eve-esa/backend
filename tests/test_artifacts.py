@@ -38,10 +38,8 @@ def _use_fake_storage(monkeypatch) -> FakeStorage:
 
 
 # The full generalized allowlist, set explicitly by tests that exercise the
-# non-image types: the ambient ARTIFACT_UPLOAD_ALLOWED_TYPES may resolve to
-# the legacy image-only IMAGE_ALLOWED_TYPES value depending on which env vars
-# happen to be set in the environment the tests run in (see config.py's
-# fallback chain), so tests must not rely on it.
+# non-image types: the ambient ARTIFACT_UPLOAD_ALLOWED_TYPES depends on the
+# environment the tests run in, so tests must not rely on it.
 FULL_ARTIFACT_ALLOWED_TYPES = ["png", "jpeg", "webp", "gif", "pdf", "csv", "txt", "json", "geojson"]
 
 
