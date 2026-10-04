@@ -97,6 +97,7 @@ def create_app(debug=False, **kwargs):
         await ensure_indexes()
         await ensure_provider_catalog_seeded()
         logging.info("Database connection established")
+        observability.start_runtime_metrics()
         try:
             yield
         finally:
