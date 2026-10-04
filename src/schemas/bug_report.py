@@ -81,3 +81,18 @@ class BugReportDetail(BaseModel):
     context: Dict[str, Any]
     conversation: Optional[Dict[str, Any]] = None
     request_trace_id: Optional[str] = None
+
+
+class InternalBugReportDetail(BugReportDetail):
+    """``GET /internal/bug-reports/{id}``: the author view plus what a ticket needs.
+
+    ``trace_id`` and ``conversation_id`` are lifted from ``context`` (the last
+    trace the page saw and the conversation the report names). ``environment``
+    is the backend's own ``deployment.environment.name``, the value the
+    ``bug_report.created`` event carries; the browser's claim stays in
+    ``context.environment``.
+    """
+
+    trace_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    environment: str
