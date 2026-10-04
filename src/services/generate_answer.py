@@ -5,20 +5,14 @@ import contextlib
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from src.config import (
-    DEEPINFRA_API_TOKEN,
-    EVE_JSC_BASE_URL,
     EVE_JSC_MODEL_NAME,
     FALLBACK_MODEL_NAME,
-    JSC_RERANKER_API_KEY,
-    JSC_RERANKER_MODEL_NAME,
     MAIN_MODEL_NAME,
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_MODEL_NAME,
@@ -56,12 +50,12 @@ from src.services.custom_model_service import (
     custom_model_id_from_messages,
 )
 from src.services.mcp_client_service import MultiServerMCPClientService
+from src.services.rerank import rerank_candidates
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
     count_tokens_for_texts,
 )
-from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.error_logger import (
     Component,
     PipelineStage,
@@ -77,7 +71,6 @@ from src.utils.helpers import (
     get_mongodb_uri,
     tiktoken_counter,
 )
-from src.utils.jsc_reranker import JSCReranker
 from src.utils.scraping_dog_crawler import ScrapingDogCrawler
 from src.utils.template_loader import get_template
 
@@ -700,76 +693,6 @@ def _select_top_k_unique_results(
     return _deduplicate_results(ranked_results)[:top_k]
 
 
-async def _maybe_rerank_jsc(
-    candidate_texts: List[str], query: str, timeout: int = 10
-) -> List[Dict[str, Any]]:
-    """Call JSC reranker if configured with timeout, else fall back to DeepInfra."""
-    if not candidate_texts or len(candidate_texts) == 0:
-        return []
-
-    error_logger = get_error_logger()
-
-    api_token = JSC_RERANKER_API_KEY
-    if not api_token:
-        logger.warning(
-            "JSC_RERANKER_API_KEY/EVE_JSC_API_KEY environment variable not set"
-        )
-    else:
-        reranker = JSCReranker(
-            api_token=api_token,
-            base_url=EVE_JSC_BASE_URL,
-            model_name=JSC_RERANKER_MODEL_NAME,
-        )
-        executor = ThreadPoolExecutor(max_workers=1)
-        logger.info("Using JSC reranker")
-        future = executor.submit(reranker.rerank, [query], candidate_texts)
-        try:
-            results = future.result(timeout=timeout)
-            return results
-        except FutureTimeoutError as e:
-            logger.warning("JSC reranker timed out after %s seconds", timeout)
-            await error_logger.log_error(
-                error=e,
-                component=Component.RE_RANKER,
-                pipeline_stage=PipelineStage.RETRIEVAL,
-                description="JSC reranker timed out",
-                error_type=type(e).__name__,
-            )
-            future.cancel()
-        except Exception as e:
-            logger.warning("JSC reranker failed", exc_info=True)
-            await error_logger.log_error(
-                error=e,
-                component=Component.RE_RANKER,
-                pipeline_stage=PipelineStage.RETRIEVAL,
-                description="JSC reranker failed",
-                error_type=type(e).__name__,
-            )
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
-
-    logger.info("Using DeepInfra reranker fallback")
-    api_token = DEEPINFRA_API_TOKEN
-    if not api_token:
-        logger.warning("DEEPINFRA_API_TOKEN environment variable not set")
-        return []
-
-    try:
-        reranker = DeepInfraReranker(api_token)
-        results = reranker.rerank([query], candidate_texts)
-        return results
-    except Exception as e:
-        logger.warning("DeepInfra reranker fallback failed", exc_info=True)
-        await error_logger.log_error(
-            error=e,
-            component=Component.RE_RANKER,
-            pipeline_stage=PipelineStage.RETRIEVAL,
-            description="DeepInfra reranker fallback failed",
-            error_type=type(e).__name__,
-        )
-        return []
-
-
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -1119,11 +1042,11 @@ async def setup_rag_and_context(
                 if text_str and "API call failed" not in text_str:
                     candidate_texts.append(text_str)
 
-        # Rerank candidates using JSC first, with DeepInfra as fallback.
+        # Rerank through RERANK_PROVIDER_ORDER (JSC, then DeepInfra by default).
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         latency = time.perf_counter()
-        reranked = await _maybe_rerank_jsc(candidate_texts, request.query)
+        reranked = await rerank_candidates(candidate_texts, request.query)
         latencies["reranking_latency"] = time.perf_counter() - latency
         # Attach reranking_score to each result
         formated_results = [extract_document_data(e) for e in merged_results]

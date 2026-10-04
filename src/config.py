@@ -92,6 +92,12 @@ JSC_RERANKER_API_KEY = getenv_or("JSC_RERANKER_API_KEY") or EVE_JSC_API_KEY
 JSC_RERANKER_MODEL_NAME = getenv_or(
     "JSC_RERANKER_MODEL_NAME", "alias-qwen3-4b-reranking"
 )
+# Rerankers tried in order on the classic answer path, comma-separated. Known
+# names: "jsc" (EVE_JSC_BASE_URL plus JSC_RERANKER_API_KEY or EVE_JSC_API_KEY)
+# and "deepinfra" (DEEPINFRA_API_TOKEN). Unknown names are skipped with a
+# warning, unconfigured providers are skipped. When no provider answers, the
+# candidates keep their retrieval order so the answer keeps its sources.
+RERANK_PROVIDER_ORDER = getenv_or("RERANK_PROVIDER_ORDER", "jsc,deepinfra")
 
 # Ordered EVE endpoint chain, comma-separated llm_type names. Unconfigured
 # entries are dropped at resolution time and "fallback" is always appended
