@@ -22,6 +22,7 @@ try:
 except Exception:  # pragma: no cover - defensive: langchain may move the class
     pass
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -48,10 +49,6 @@ _strip_telemetry_env()
 # Thumbs must not become scores in a live Langfuse; the score tests switch
 # this on with monkeypatch.
 _config.FEATURE_LANGFUSE_SCORES = False
-# An endpoint circuit opened by one test must not reach the next one through a
-# live Valkey (the compose stack sets REDIS_URL): every manager keeps its own
-# breaker. The shared path is tested with a stub in test_llm_health.py.
-_config.ENDPOINT_BREAKER_SHARED = False
 
 from server import app  # noqa: E402
 
@@ -158,3 +155,17 @@ async def async_client():
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
         yield ac
+
+
+@pytest.fixture(autouse=True)
+def _per_process_endpoint_breaker(monkeypatch):
+    """Keep every LLMManager on its own breaker, test by test.
+
+    CI and the compose stack set REDIS_URL, so a circuit one test opens would
+    reach the next through the live Redis. Set per test, not once at import:
+    tests/test_config.py reloads src.config, which re-reads the switch from the
+    environment. The shared path is tested with a stub in test_llm_health.py.
+    """
+    import src.config
+
+    monkeypatch.setattr(src.config, "ENDPOINT_BREAKER_SHARED", False)
