@@ -48,6 +48,10 @@ _strip_telemetry_env()
 # Thumbs must not become scores in a live Langfuse; the score tests switch
 # this on with monkeypatch.
 _config.FEATURE_LANGFUSE_SCORES = False
+# An endpoint circuit opened by one test must not reach the next one through a
+# live Valkey (the compose stack sets REDIS_URL): every manager keeps its own
+# breaker. The shared path is tested with a stub in test_llm_health.py.
+_config.ENDPOINT_BREAKER_SHARED = False
 
 from server import app  # noqa: E402
 

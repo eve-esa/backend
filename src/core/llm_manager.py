@@ -32,6 +32,7 @@ from src.config import (
     EVE_JSC_API_KEY,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
+from src import config as _config
 from src.core.llm_health import EndpointHealth, is_endpoint_failure
 from src.services.image_catalog import append_image_context
 from src.utils.helpers import (
@@ -93,7 +94,12 @@ class LLMManager:
         self._setup_api_keys()
         self._init_langchain_clients()
         self._selected_llm_type = None
-        self._health = EndpointHealth(EVE_ENDPOINT_COOLDOWN_S)
+        # Read through the module at construction so the suite can keep each
+        # manager on its own breaker (tests/conftest.py).
+        self._health = EndpointHealth(
+            EVE_ENDPOINT_COOLDOWN_S,
+            redis_url=_config.REDIS_URL if _config.ENDPOINT_BREAKER_SHARED else None,
+        )
         # Load system prompt once
         try:
             self._system_prompt: Optional[str] = get_template(
@@ -419,7 +425,8 @@ class LLMManager:
 
     @property
     def health(self) -> EndpointHealth:
-        """Circuit breaker shared by every caller of this manager."""
+        """Circuit breaker shared by every caller of this manager, and by every
+        worker when REDIS_URL is set."""
         return self._health
 
     def health_snapshot(self) -> dict:
