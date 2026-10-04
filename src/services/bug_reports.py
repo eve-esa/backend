@@ -229,6 +229,22 @@ async def create_bug_report(
     return BugReportCreatedResponse(id=report.id, created_at=report.timestamp)
 
 
+async def get_report(report_id: str) -> BugReport:
+    """The report whoever wrote it, otherwise 404.
+
+    For trusted in-VPC callers only (``src/routers/internal_bug_reports.py``):
+    no author filter. A malformed id answers like a missing one.
+    """
+    try:
+        oid = ObjectId(report_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    doc = await BugReport.get_collection().find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Bug report not found")
+    return BugReport.from_dict(doc)
+
+
 async def get_owned_report(report_id: str, user: User) -> BugReport:
     """The report if ``user`` wrote it, otherwise 404.
 

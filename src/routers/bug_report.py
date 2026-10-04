@@ -6,7 +6,8 @@ part, a ``screenshot`` file included, is ignored: the session replay linked by
 ``context.replay_url`` replaced the screenshot. The conversation named by
 ``context.conversation_id`` is snapshotted server side from Mongo, see
 ``src/services/bug_report_snapshot.py``. ``GET /bug-reports/{id}`` reads the
-whole report back. Logic lives in ``src/services/bug_reports.py``.
+whole report back to its author; ``GET /internal/bug-reports/{id}`` is the
+in-VPC read for the observability sink. Logic lives in ``src/services/bug_reports.py``.
 """
 
 from typing import Annotated
@@ -113,10 +114,10 @@ async def get_bug_report(
     """
     Read a whole bug report, to its author only.
 
-    This is the read path for the planned Asana automation: the report plus
-    the server side conversation snapshot, so a ticket never has to ask the
-    user for the conversation. The automation will read it with an internal
-    credential that does not exist yet; today only the author can.
+    The report plus the server side conversation snapshot. The observability
+    Asana sink reads the same body, plus ticket fields, through
+    ``GET /internal/bug-reports/{id}`` with the internal shared secret
+    (``src/routers/internal_bug_reports.py``).
 
     Args:
         report_id (str): Bug report identifier.
