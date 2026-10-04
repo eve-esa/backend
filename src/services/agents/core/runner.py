@@ -42,6 +42,7 @@ from src.services.generate_answer import (
     resolve_generated_model_name,
 )
 from src.services.agents.core.registry import get_agent_graph
+from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
@@ -720,7 +721,10 @@ async def _get_agentic_checkpointer() -> Optional[Any]:
         try:
             from pymongo import MongoClient
 
-            _agentic_checkpointer = MongoDBSaver(MongoClient(get_mongodb_uri()))
+            # Off the event loop: a TTL index build can take a while.
+            _agentic_checkpointer = await asyncio.to_thread(
+                build_mongo_checkpointer, MongoClient(get_mongodb_uri())
+            )
             logger.info("Agentic agent using MongoDB checkpointer")
             return _agentic_checkpointer
         except Exception as exc:

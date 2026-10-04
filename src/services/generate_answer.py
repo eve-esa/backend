@@ -45,6 +45,7 @@ from src.observability.context import (
 )
 from src.schemas.generation_request import GenerationRequest
 from src.services.cancel_manager import get_cancel_manager
+from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.custom_model_service import (
     build_custom_model_llm_for_user,
     custom_model_id_from_messages,
@@ -512,7 +513,8 @@ Please continue the conversation using this summary as context for understanding
 
             uri = get_mongodb_uri()
             client = MongoClient(uri)
-            checkpointer = MongoDBSaver(client)
+            # Off the event loop: a TTL index build can take a while.
+            checkpointer = await asyncio.to_thread(build_mongo_checkpointer, client)
             graph = builder.compile(checkpointer=checkpointer)
 
             _mongo_checkpointer_cm = None
