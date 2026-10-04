@@ -391,3 +391,111 @@ def test_default_cap_reads_the_config():
     from src.config import MAX_INFLIGHT_GENERATIONS_PER_WORKER
 
     assert get_generation_limiter().limit == MAX_INFLIGHT_GENERATIONS_PER_WORKER
+
+
+# ─── Deadline ─────────────────────────────────────────────────────────────────
+
+
+class _RecordingGoneClientBus(_GoneClientBus):
+    """The client left, but what the runner publishes is kept for the test."""
+
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, key, data):
+        self.events.append(data)
+
+
+def _never_ending_stream(absorbs_cancel: bool):
+    """A stream generator that hangs after its first chunk.
+
+    With ``absorbs_cancel`` it behaves like the real ones: the cancel becomes a
+    stopped turn persisted on the message and a normal return.
+    """
+    from src.services.generate_answer import persist_message_state
+
+    async def _stream(*, message_id, **kwargs):
+        yield 'data: {"type": "status", "content": "thinking"}\n\n'
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if not absorbs_cancel:
+                raise
+            await persist_message_state(message_id, stopped=True)
+            return
+
+    return _stream
+
+
+DEADLINE_ROUTES = [
+    (
+        "stream_messages",
+        "CLASSIC_GENERATION_TIMEOUT",
+        "src.services.generate_answer.generate_answer_json_stream_generator",
+    ),
+    (
+        "stream-generate-agentic",
+        "AGENTIC_STREAM_DEADLINE_SECONDS",
+        "src.services.agents.core.runner.generate_answer_agentic_json_stream",
+    ),
+]
+
+
+@pytest.mark.parametrize("absorbs_cancel", [True, False])
+@pytest.mark.parametrize("path,setting,stream", DEADLINE_ROUTES)
+async def test_a_generation_that_never_ends_is_cut_at_the_deadline(
+    async_client, conversation_owner, cap, monkeypatch, path, setting, stream, absorbs_cancel
+):
+    user, token, conversation = conversation_owner
+    limiter = cap(1)
+    bus = _RecordingGoneClientBus()
+    for module in (
+        "src.routers.message",
+        "src.services.generate_answer",
+        "src.services.agents.core.runner",
+    ):
+        monkeypatch.setattr(f"{module}.get_stream_bus", lambda: bus)
+    monkeypatch.setattr(f"src.routers.message.{setting}", 0.3)
+    monkeypatch.setattr(stream, _never_ending_stream(absorbs_cancel))
+
+    response = await async_client.post(
+        f"/conversations/{conversation.id}/{path}",
+        json={"query": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    assert limiter.in_flight == 1
+
+    await _wait_in_flight(limiter, 0)
+
+    errors = [e for e in bus.events if '"type": "error"' in e]
+    assert len(errors) == 1, bus.events
+    assert '"code": "timeout"' in errors[0]
+    assert "did not finish within 0.3 seconds" in errors[0]
+    [message] = await Message.find_all(filter_dict={"conversation_id": conversation.id})
+    assert message.metadata["error"]["code"] == "timeout"
+    assert message.metadata["error"]["type"] == "GenerationDeadlineExceeded"
+    # Cut by the deadline, not stopped by the user: the frontend offers a retry.
+    assert not message.stopped
+
+
+@pytest.mark.no_db
+async def test_a_slot_held_long_is_logged_at_release(monkeypatch, caplog):
+    limiter = GenerationLimiter(1)
+    slot = await limiter.try_acquire("stream_messages")
+    monkeypatch.setattr(load_shedding, "SLOW_SLOT_LOG_SECONDS", -1)
+
+    slot.release()
+
+    held = [r for r in caplog.records if "held" in r.getMessage()]
+    assert len(held) == 1
+    assert held[0].levelname == "WARNING"
+    assert "stream_messages" in held[0].getMessage()
+
+
+@pytest.mark.no_db
+async def test_a_quick_slot_is_not_logged(caplog):
+    limiter = GenerationLimiter(1)
+    slot = await limiter.try_acquire("messages")
+    slot.release()
+    assert not [r for r in caplog.records if "held" in r.getMessage()]

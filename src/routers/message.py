@@ -11,7 +11,12 @@ from langchain_core.messages import HumanMessage
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
-from src.config import IS_PROD, MODEL_TIMEOUT
+from src.config import (
+    AGENTIC_TIMEOUT,
+    CLASSIC_GENERATION_TIMEOUT,
+    IS_PROD,
+    MODEL_TIMEOUT,
+)
 from src.core.llm_manager import LLMType
 from src.database.models.co2eq_comparison import CO2EQComparison
 from src.database.models.collection import Collection as CollectionModel
@@ -76,6 +81,12 @@ from src.utils.helpers import (
 from src.utils.sse_keepalive import with_sse_keepalive
 
 logger = logging.getLogger(__name__)
+
+# Overall deadline of one streamed agentic turn. The runner's own AGENTIC_TIMEOUT
+# guard counts per model run from after setup (tool discovery, history), so a
+# healthy turn with tool rounds can pass it in total; this backstop only frees
+# the load shedding slot from a hang, hence twice the guard.
+AGENTIC_STREAM_DEADLINE_SECONDS = 2 * AGENTIC_TIMEOUT
 
 router = APIRouter()
 
@@ -1018,6 +1029,11 @@ async def create_message_stream(
                 cancel_event=cancel_event,
                 user_id=requesting_user.id,
                 stream_ready=stream_ready,
+                deadline_seconds=(
+                    CLASSIC_GENERATION_TIMEOUT
+                    if CLASSIC_GENERATION_TIMEOUT > 0
+                    else None
+                ),
             )
         )
         slot.release_when_done(gen_task)
@@ -1205,6 +1221,9 @@ async def get_source_logs(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+# Not load shed yet: the hallucination routes below, /generate and /generate-llm
+# call models without a generation slot, as does the /v1 OpenAI proxy
+# (routers/openai_proxy.py). Follow-up, logged in the backlog.
 @router.post(
     "/conversations/{conversation_id}/messages/{message_id}/hallucination",
     response_model=HallucinationDetectResponse,
@@ -1626,6 +1645,7 @@ async def stream_hallucination(
     return response
 
 
+# Not load shed yet, with /generate: see the note above hallucination_detect.
 @router.post("/generate-llm")
 async def generate_llm(
     request: GenerateLLMRequest,
@@ -1749,6 +1769,9 @@ async def generate(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+# Uncapped on purpose: inside an agentic turn the eve_retrieval tool on AgentCore
+# calls back into /retrieve while the turn holds a generation slot, so a cap
+# here would deadlock every worker at the limit.
 @router.post("/retrieve")
 async def retrieve(
     request: GenerationRequest, requesting_user: User = Depends(get_current_user)
@@ -2186,6 +2209,7 @@ async def create_agentic_message_stream(
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
                 subscriber_ready=subscriber_ready,
+                deadline_seconds=AGENTIC_STREAM_DEADLINE_SECONDS,
             )
         )
         slot.release_when_done(gen_task)

@@ -392,6 +392,11 @@ BUG_REPORT_CONVERSATION_MAX_BYTES = _tolerant_int_env(
 MAX_INFLIGHT_GENERATIONS_PER_WORKER = _tolerant_int_env(
     "MAX_INFLIGHT_GENERATIONS_PER_WORKER", 40
 )
+# Overall deadline of one classic (non agentic) streamed generation, in seconds.
+# A backstop, not a model timeout: it frees the load shedding slot when
+# retrieval, embedding or a model hangs, and ends the stream with a timeout
+# error. <=0 disables it.
+CLASSIC_GENERATION_TIMEOUT = _tolerant_int_env("CLASSIC_GENERATION_TIMEOUT", 300)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:

@@ -13,6 +13,7 @@ keeps working after the client goes away, so the slot follows that task.
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from fastapi import HTTPException
@@ -22,6 +23,9 @@ from src.config import MAX_INFLIGHT_GENERATIONS_PER_WORKER
 logger = logging.getLogger(__name__)
 
 SHED_RETRY_AFTER_SECONDS = 10
+# A slot held longer than this is logged when it comes back: a generation that
+# slow is either a cold model or a hang the deadline had to cut.
+SLOW_SLOT_LOG_SECONDS = 60
 SHED_DETAIL = {
     "code": "overloaded",
     "message": "The service is busy, retry in a few seconds",
@@ -31,17 +35,27 @@ SHED_DETAIL = {
 class GenerationSlot:
     """One admitted generation. ``release`` is idempotent."""
 
-    __slots__ = ("_limiter", "_released")
+    __slots__ = ("_limiter", "_released", "_route", "_acquired_at")
 
-    def __init__(self, limiter: "GenerationLimiter") -> None:
+    def __init__(self, limiter: "GenerationLimiter", route: str = "") -> None:
         self._limiter = limiter
         self._released = False
+        self._route = route
+        self._acquired_at = time.monotonic()
 
     def release(self) -> None:
         if self._released:
             return
         self._released = True
         self._limiter._release()
+        held = time.monotonic() - self._acquired_at
+        if held > SLOW_SLOT_LOG_SECONDS:
+            logger.warning(
+                "Generation slot on %s held %.0f s, %d generations in flight",
+                self._route,
+                held,
+                self._limiter.in_flight,
+            )
 
     def release_when_done(self, task: asyncio.Task) -> None:
         """Hand the slot to ``task``: freed when it ends, fails or is cancelled."""
@@ -64,7 +78,7 @@ class GenerationLimiter:
     def in_flight(self) -> int:
         return self._in_flight
 
-    async def try_acquire(self) -> Optional[GenerationSlot]:
+    async def try_acquire(self, route: str = "") -> Optional[GenerationSlot]:
         semaphore = self._semaphore
         if semaphore is not None:
             if semaphore.locked():
@@ -73,7 +87,7 @@ class GenerationLimiter:
             # and returns without yielding to the loop.
             await semaphore.acquire()
         self._in_flight += 1
-        return GenerationSlot(self)
+        return GenerationSlot(self, route)
 
     def _release(self) -> None:
         self._in_flight -= 1
@@ -91,7 +105,7 @@ def get_generation_limiter() -> GenerationLimiter:
 async def acquire_generation_slot_or_raise(route: str) -> GenerationSlot:
     """Admit one generation on ``route`` or raise 429 ``overloaded``."""
     limiter = _limiter
-    slot = await limiter.try_acquire()
+    slot = await limiter.try_acquire(route)
     if slot is None:
         logger.warning(
             "Load shed on %s: %d generations in flight, cap %d per worker",
