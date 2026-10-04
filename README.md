@@ -44,6 +44,18 @@ Inside the container, run the following command:
 python -m src.commands.create_user test@gmail.com test
 ```
 
+### Read-only commands
+
+These connect without creating indexes, so they work with the reader database
+credential (prod has no writer by design):
+
+- `python -m src.commands.report_duplicate_emails`
+- `python -m src.commands.send_cohort_invite --cohort <name>` without `--apply`
+- `python -m src.commands.gc_mcp_artifacts` without `--apply`
+- `python -m src.commands.migrate_custom_model_secrets --dry-run`
+
+With `--apply` (or without `--dry-run`) they write and need the writer.
+
 ### Run Tests
 
 To run the tests, run the following command inside the container:

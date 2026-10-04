@@ -3,8 +3,10 @@
 import logging
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from motor.motor_asyncio import AsyncIOMotorCollection
 
 from src.commands import send_cohort_invite as command
 from src.commands.send_cohort_invite import (
@@ -15,11 +17,12 @@ from src.commands.send_cohort_invite import (
     read_emails_file,
     send_cohort_invite,
 )
-from src.database.mongo import get_collection
+from src.database.mongo import AsyncMongoDBManager, async_mongo_manager, get_collection
 from src.services.account_notifications import (
     COHORT_INVITE_SUBJECT,
     render_cohort_invite,
 )
+from tests.conftest import _resolve_test_mongo_uri
 
 
 class FakeMailer:
@@ -293,3 +296,101 @@ async def test_apply_refuses_when_mail_is_off(world, fake_mailer, monkeypatch):
         await send_cohort_invite(world["cohort"], apply=True, emails=[email])
     assert fake_mailer.sent == []
     assert await _sent_rows(world["cohort"]) == []
+
+
+# ------------------------------------------- connecting with the reader credential
+
+
+class _IndexSpy:
+    """Records create_index calls on every Motor collection, then delegates."""
+
+    def __init__(self, real):
+        self.real = real
+        self.calls: list[tuple[str, object]] = []
+
+    def install(self, monkeypatch) -> "_IndexSpy":
+        spy = self
+
+        async def create_index(collection, keys, **kwargs):
+            spy.calls.append((collection.name, keys))
+            return await spy.real(collection, keys, **kwargs)
+
+        monkeypatch.setattr(AsyncIOMotorCollection, "create_index", create_index)
+        return self
+
+
+@pytest.fixture
+def fresh_connection(monkeypatch):
+    """Make the command open its own connection, as it does from the CLI.
+
+    The suite's fixture has already connected and the command reuses that
+    connection, so ``connect`` would never run. Calling the returned function
+    (after the test rows are inserted) clears ``database`` and points the
+    default URI at the test database, so the command takes the real path.
+    """
+    opened: list = []
+    real_connect = async_mongo_manager.connect
+
+    async def connect(connection_string=None, **kwargs):
+        database = await real_connect(connection_string, **kwargs)
+        opened.append(async_mongo_manager.client)
+        return database
+
+    def detach() -> list:
+        monkeypatch.setattr("src.database.mongo.get_mongodb_uri", _resolve_test_mongo_uri)
+        monkeypatch.setattr(async_mongo_manager, "connect", connect)
+        monkeypatch.setattr(async_mongo_manager, "client", async_mongo_manager.client)
+        monkeypatch.setattr(async_mongo_manager, "database", None)
+        return opened
+
+    yield detach
+    monkeypatch.undo()
+    for client in opened:
+        client.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_connects_without_creating_indexes(world, fresh_connection, monkeypatch):
+    _, email = await _user(world, "reader")
+    opened = fresh_connection()
+    spy = _IndexSpy(AsyncIOMotorCollection.create_index).install(monkeypatch)
+
+    summary = await send_cohort_invite(world["cohort"], emails=[email])
+
+    assert len(opened) == 1
+    assert summary["recipients"] == 1
+    assert spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_still_ensures_indexes(world, fake_mailer, pauses, fresh_connection, monkeypatch):
+    _, email = await _user(world, "writer")
+    opened = fresh_connection()
+    spy = _IndexSpy(AsyncIOMotorCollection.create_index).install(monkeypatch)
+
+    summary = await send_cohort_invite(world["cohort"], apply=True, emails=[email], sleep_seconds=0)
+
+    assert len(opened) == 1
+    assert summary["sent"] == 1
+    touched = {name for name, _ in spy.calls}
+    assert {"documents", COLLECTION} <= touched
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ensure, expected", [(True, 2), (False, 0)])
+async def test_connect_ensure_indexes_flag(monkeypatch, ensure, expected):
+    collection = MagicMock()
+    collection.create_index = AsyncMock()
+    client = MagicMock()
+    client.admin.command = AsyncMock(return_value={"ok": 1})
+    client.get_database.return_value = MagicMock(__getitem__=MagicMock(return_value=collection))
+    monkeypatch.setattr("src.database.mongo.AsyncIOMotorClient", lambda _uri: client)
+
+    manager = AsyncMongoDBManager()
+    if ensure:
+        await manager.connect("mongodb://unused")
+    else:
+        await manager.connect("mongodb://unused", ensure_indexes=False)
+
+    assert collection.create_index.await_count == expected

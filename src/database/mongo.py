@@ -14,9 +14,16 @@ class AsyncMongoDBManager:
         self.database: Optional[AsyncIOMotorDatabase] = None
 
     async def connect(
-        self, connection_string: Optional[str] = None
+        self,
+        connection_string: Optional[str] = None,
+        *,
+        ensure_indexes: bool = True,
     ) -> AsyncIOMotorDatabase:
-        """Connect to MongoDB and return the database instance."""
+        """Connect to MongoDB and return the database instance.
+
+        ``ensure_indexes=False`` skips index creation, so a read-only command
+        can connect with the reader credential, which may not create indexes.
+        """
         if connection_string is None:
             connection_string = get_mongodb_uri()
 
@@ -27,7 +34,8 @@ class AsyncMongoDBManager:
 
             # Get the database
             self.database = self.client.get_database()
-            await self._ensure_indexes()
+            if ensure_indexes:
+                await self._ensure_indexes()
             return self.database
 
         except Exception as e:

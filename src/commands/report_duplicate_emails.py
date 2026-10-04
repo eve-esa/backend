@@ -1,6 +1,7 @@
 """Report users whose email addresses collide once case is normalised.
 
-Read-only. Run it before anyone makes ``users.email`` unique: building a unique
+Read-only, so it works with the reader credential: it connects without
+creating indexes. Run it before anyone makes ``users.email`` unique: building a unique
 index on a collection that already holds duplicates fails the build, and doing
 that discovery on production at startup is not the moment to find out.
 
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def report_duplicate_emails() -> int:
     """Print every lowercased address held by more than one user row."""
-    await async_mongo_manager.connect()
+    await async_mongo_manager.connect(ensure_indexes=False)
 
     pipeline = [
         {
