@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
+
 from bson import ObjectId
 from fastapi import HTTPException
 
 from src.constants import MAX_PRIVATE_DOCUMENTS
 from src.database.models.document import Document
 from src.database.models.user import User
+
+logger = logging.getLogger(__name__)
+
+_RELEASE_ATTEMPTS = 3
 
 
 def _limit_reached_error(current_count: int) -> HTTPException:
@@ -58,27 +64,42 @@ async def reserve_private_document_slots(user_id: str, slot_count: int) -> None:
 
 
 async def release_private_document_slots(user_id: str, slot_count: int) -> None:
-    """Return reserved or deleted slots to the user's private document counter."""
+    """Return reserved or deleted slots to the user's private document counter.
+
+    Plain update operators only: DocumentDB 5.0 rejects pipeline updates
+    (code 14), which local MongoDB accepts. The counter never goes below 0.
+    """
     if slot_count <= 0:
         return
 
-    await User.get_collection().update_one(
-        {"_id": ObjectId(user_id)},
-        [
-            {
-                "$set": {
-                    "private_document_count": {
-                        "$max": [
-                            {
-                                "$subtract": [
-                                    {"$ifNull": ["$private_document_count", 0]},
-                                    slot_count,
-                                ]
-                            },
-                            0,
-                        ]
-                    }
-                }
-            }
-        ],
+    users = User.get_collection()
+    user_id_filter = {"_id": ObjectId(user_id)}
+    for _ in range(_RELEASE_ATTEMPTS):
+        decremented = await users.update_one(
+            {**user_id_filter, "private_document_count": {"$gte": slot_count}},
+            {"$inc": {"private_document_count": -slot_count}},
+        )
+        if decremented.matched_count:
+            return
+        # Fewer slots held than released, or no counter yet: floor at 0, but
+        # only on the value just read, so a concurrent reserve is never erased.
+        user_doc = await users.find_one(
+            user_id_filter, projection={"private_document_count": 1}
+        )
+        if user_doc is None:
+            return
+        observed = user_doc.get("private_document_count")
+        if observed is not None and observed >= slot_count:
+            continue
+        floored = await users.update_one(
+            {**user_id_filter, "private_document_count": observed},
+            {"$set": {"private_document_count": 0}},
+        )
+        if floored.matched_count:
+            return
+    logger.warning(
+        "private_document_release_exhausted user_id=%s released=%s attempts=%s",
+        user_id,
+        slot_count,
+        _RELEASE_ATTEMPTS,
     )
