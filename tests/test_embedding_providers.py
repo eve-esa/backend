@@ -4,12 +4,12 @@ import asyncio
 import json
 import threading
 import time
-import weakref
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import openai
 import pytest
 
 import src.core.vector_store_manager as vsm
@@ -17,23 +17,46 @@ from src.constants import DEEPINFRA_DEFAULT_EMBEDDING_MODEL, JSC_DEFAULT_EMBEDDI
 
 
 class _FakeOpenAI:
-    """Records each client's base_url and model; fails for the base urls in `failing`."""
+    """Records (base_url, model, read timeout) per call; fails for the urls in `failing`.
+
+    A url in `rate_limited` answers 429 once, then succeeds; `delay` holds every call.
+    """
 
     calls: list = []
-    failing: set = set()
-    size = vsm.EMBEDDING_SIZE
-
     built: list = []
+    failing: set = set()
+    rate_limited: set = set()
+    delay = 0.0
+    in_flight = 0
+    max_in_flight = 0
+    size = vsm.EMBEDDING_SIZE
 
     def __init__(self, api_key, base_url, timeout, max_retries):
         _FakeOpenAI.built.append((base_url, timeout, max_retries))
         self.base_url = base_url
         self.embeddings = SimpleNamespace(create=self._create)
 
+    async def close(self):
+        pass
+
     async def _create(self, input, model, timeout):
-        _FakeOpenAI.calls.append((self.base_url, model))
+        _FakeOpenAI.calls.append((self.base_url, model, timeout.read))
+        _FakeOpenAI.in_flight += 1
+        _FakeOpenAI.max_in_flight = max(_FakeOpenAI.max_in_flight, _FakeOpenAI.in_flight)
+        try:
+            await asyncio.sleep(_FakeOpenAI.delay)
+        finally:
+            _FakeOpenAI.in_flight -= 1
         if self.base_url in _FakeOpenAI.failing:
             raise RuntimeError(f"{self.base_url} down")
+        if self.base_url in _FakeOpenAI.rate_limited:
+            _FakeOpenAI.rate_limited.discard(self.base_url)
+            response = httpx.Response(
+                429,
+                headers={"retry-after": "0.05"},
+                request=httpx.Request("POST", f"http://{self.base_url}/embeddings"),
+            )
+            raise openai.RateLimitError("slow down", response=response, body=None)
         return SimpleNamespace(
             data=[
                 SimpleNamespace(embedding=[float(len(text))] * _FakeOpenAI.size)
@@ -43,7 +66,7 @@ class _FakeOpenAI:
 
 
 def _configure_providers(monkeypatch):
-    monkeypatch.setattr(vsm, "_embedding_clients", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(vsm, "_embedding_clients", {})
     monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_API_KEY", "di-key")
     monkeypatch.setattr(vsm, "JSC_EMBEDDING_API_KEY", "jsc-key")
     monkeypatch.setattr(vsm, "EMBEDDING_PROVIDER_ORDER", ["deepinfra", "jsc"])
@@ -58,6 +81,9 @@ def manager(monkeypatch):
     _FakeOpenAI.calls = []
     _FakeOpenAI.built = []
     _FakeOpenAI.failing = set()
+    _FakeOpenAI.rate_limited = set()
+    _FakeOpenAI.delay = 0.0
+    _FakeOpenAI.in_flight = _FakeOpenAI.max_in_flight = 0
     _FakeOpenAI.size = vsm.EMBEDDING_SIZE
     monkeypatch.setattr(vsm, "AsyncOpenAI", _FakeOpenAI)
     monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_URL", "deepinfra")
@@ -72,7 +98,7 @@ async def test_deepinfra_answers_first_and_jsc_is_not_called(manager):
 
     assert vector[0] == 8.0 and len(vector) == vsm.EMBEDDING_SIZE
     assert fallback_error is None
-    assert _FakeOpenAI.calls == [("deepinfra", DEEPINFRA_DEFAULT_EMBEDDING_MODEL)]
+    assert _FakeOpenAI.calls == [("deepinfra", DEEPINFRA_DEFAULT_EMBEDDING_MODEL, 10.0)]
 
 
 async def test_falls_back_to_jsc_and_reports_the_first_error(manager):
@@ -84,7 +110,7 @@ async def test_falls_back_to_jsc_and_reports_the_first_error(manager):
 
     assert vector[0] == 8.0 and len(vector) == vsm.EMBEDDING_SIZE
     assert fallback_error == "deepinfra down"
-    assert [url for url, _ in _FakeOpenAI.calls] == ["deepinfra", "jsc"]
+    assert [url for url, *_ in _FakeOpenAI.calls] == ["deepinfra", "jsc"]
 
 
 async def test_order_is_configurable(manager, monkeypatch):
@@ -92,7 +118,7 @@ async def test_order_is_configurable(manager, monkeypatch):
 
     await manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
 
-    assert _FakeOpenAI.calls == [("jsc", vsm.JSC_EMBEDDING_MODEL_NAME)]
+    assert _FakeOpenAI.calls == [("jsc", vsm.JSC_EMBEDDING_MODEL_NAME, 10.0)]
 
 
 async def test_missing_key_counts_as_a_failure(manager, monkeypatch):
@@ -103,7 +129,7 @@ async def test_missing_key_counts_as_a_failure(manager, monkeypatch):
     )
 
     assert fallback_error == "deepinfra embedding API key is not set"
-    assert [url for url, _ in _FakeOpenAI.calls] == ["jsc"]
+    assert [url for url, *_ in _FakeOpenAI.calls] == ["jsc"]
 
 
 async def test_every_provider_failing_names_them_all(manager):
@@ -129,6 +155,7 @@ async def test_batch_uses_the_same_order(manager):
 
     assert [vector[0] for vector in vectors] == [1.0, 2.0]
     assert fallback_error == "deepinfra down"
+    assert [read for *_, read in _FakeOpenAI.calls] == [60.0, 60.0]
 
 
 async def test_batch_with_no_texts_calls_nothing(manager):
@@ -159,6 +186,58 @@ async def test_one_client_per_provider_without_sdk_retries(manager):
         ("jsc", vsm.EMBEDDING_TIMEOUT, 0),
     ]
     assert vsm.EMBEDDING_TIMEOUT.connect == 3.0 and vsm.EMBEDDING_TIMEOUT.read == 10.0
+
+
+async def test_deadline_bounds_the_whole_call(manager, monkeypatch):
+    # httpx bounds connect and each read; a provider trickling bytes would pass both.
+    monkeypatch.setattr(vsm, "EMBEDDING_DEADLINE_S", 0.1)
+    _FakeOpenAI.delay = 0.3
+
+    started = time.perf_counter()
+    with pytest.raises(RuntimeError, match="jsc did not answer within 0.1 s"):
+        await manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
+
+    assert [url for url, *_ in _FakeOpenAI.calls] == ["deepinfra", "jsc"]
+    assert time.perf_counter() - started < 0.5
+
+
+async def test_rate_limit_is_retried_once_on_the_same_provider(manager):
+    _FakeOpenAI.rate_limited = {"deepinfra"}
+
+    vector, fallback_error = await manager.generate_query_vector(
+        "sentinel", JSC_DEFAULT_EMBEDDING_MODEL
+    )
+
+    assert fallback_error is None and len(vector) == vsm.EMBEDDING_SIZE
+    assert [url for url, *_ in _FakeOpenAI.calls] == ["deepinfra", "deepinfra"]
+
+
+async def test_rate_limit_wait_follows_retry_after_with_a_cap():
+    def limited(headers):
+        response = httpx.Response(
+            429, headers=headers, request=httpx.Request("POST", "http://x/embeddings")
+        )
+        return openai.RateLimitError("slow down", response=response, body=None)
+
+    assert vsm._rate_limit_wait_s(limited({"retry-after": "0.5"})) == 0.5
+    assert vsm._rate_limit_wait_s(limited({"retry-after": "30"})) == 2.0
+    assert vsm._rate_limit_wait_s(limited({"retry-after": "Wed, 21 Oct"})) == 1.0
+    assert vsm._rate_limit_wait_s(limited({})) == 1.0
+
+
+async def test_concurrency_per_provider_is_capped(manager, monkeypatch):
+    monkeypatch.setattr(vsm, "EMBEDDING_MAX_CONCURRENCY", 2)
+    _FakeOpenAI.delay = 0.05
+
+    await asyncio.gather(
+        *(
+            manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
+            for _ in range(6)
+        )
+    )
+
+    assert len(_FakeOpenAI.calls) == 6
+    assert _FakeOpenAI.max_in_flight == 2
 
 
 # Real AsyncOpenAI against a local HTTP server running in its own thread, so a client
@@ -199,8 +278,9 @@ class _EmbeddingHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def provider_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _EmbeddingHandler)
-    server.daemon_threads = True
-    server.block_on_close = False
+    # Joined on close, so no handler thread outlives its test.
+    server.daemon_threads = False
+    server.block_on_close = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
@@ -208,8 +288,10 @@ def provider_server():
 
 
 @pytest.fixture
-def real_manager(monkeypatch, provider_server):
-    return _configure_providers(monkeypatch)
+async def real_manager(monkeypatch, provider_server):
+    yield _configure_providers(monkeypatch)
+    for entry in vsm._embedding_clients.values():
+        await entry.client.close()
 
 
 async def test_slow_provider_does_not_block_the_event_loop(
@@ -245,7 +327,7 @@ async def test_provider_past_the_timeout_falls_to_the_next(
     real_manager, provider_server, monkeypatch
 ):
     monkeypatch.setattr(vsm, "EMBEDDING_TIMEOUT", httpx.Timeout(0.1))
-    monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_URL", f"{provider_server}/2/v1")
+    monkeypatch.setattr(vsm, "DEEPINFRA_EMBEDDING_URL", f"{provider_server}/0.3/v1")
     monkeypatch.setattr(vsm, "EVE_JSC_BASE_URL", f"{provider_server}/0/v1")
 
     started = time.perf_counter()
