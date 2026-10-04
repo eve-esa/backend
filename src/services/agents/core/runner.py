@@ -32,10 +32,13 @@ from src.services.generate_answer import (
     _get_conversation_history_from_db,
     build_endpoint_metadata,
     build_error_payload,
+    deadline_error,
+    deadline_overrides,
     endpoint_answered_by,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
+    raise_if_deadline_expired,
     resolve_generated_model_name,
 )
 from src.services.agents.core.registry import get_agent_graph
@@ -2064,6 +2067,7 @@ async def run_agentic_generation_to_bus(
     background_tasks: Optional[BackgroundTasks] = None,
     cancel_event: Optional[asyncio.Event] = None,
     subscriber_ready: Optional[asyncio.Event] = None,
+    deadline_seconds: Optional[float] = None,
 ):
     """Run agentic generation in background, publishing chunks to stream bus.
 
@@ -2073,29 +2077,38 @@ async def run_agentic_generation_to_bus(
     timeout is a guard against a response that is never consumed (client gone
     between request and response start): after it, generation runs anyway,
     because persistence must happen regardless of the SSE channel.
+
+    ``deadline_seconds`` bounds the whole run (None: no bound), same contract as
+    ``run_generation_to_bus``: on expiry the turn fails with a timeout error and
+    the task ends, which frees its load shedding slot.
     """
     bus = get_stream_bus()
     if subscriber_ready is not None:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(subscriber_ready.wait(), timeout=5.0)
+    deadline = asyncio.timeout(deadline_seconds)
     try:
-        async for chunk in generate_answer_agentic_json_stream(
-            request=request,
-            conversation_id=conversation_id,
-            message_id=message_id,
-            background_tasks=background_tasks,
-            cancel_event=cancel_event,
-            user_id=user_id,
-        ):
-            await bus.publish(message_id, chunk)
+        async with deadline:
+            async for chunk in generate_answer_agentic_json_stream(
+                request=request,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                background_tasks=background_tasks,
+                cancel_event=cancel_event,
+                user_id=user_id,
+            ):
+                await bus.publish(message_id, chunk)
+        raise_if_deadline_expired(deadline, deadline_seconds)
     except asyncio.CancelledError:
         pass
     except Exception as exc:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.
-        error_info = build_error_payload(exc)
+        error_info = build_error_payload(deadline_error(exc, deadline, deadline_seconds))
         with contextlib.suppress(Exception):
-            await persist_message_state(message_id, error=error_info)
+            await persist_message_state(
+                message_id, error=error_info, **deadline_overrides(deadline)
+            )
         await bus.publish(
             message_id,
             f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n",

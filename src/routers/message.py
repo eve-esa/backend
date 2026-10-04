@@ -11,7 +11,12 @@ from langchain_core.messages import HumanMessage
 from bson import ObjectId
 from pydantic import BaseModel, Field
 
-from src.config import IS_PROD, MODEL_TIMEOUT
+from src.config import (
+    AGENTIC_TIMEOUT,
+    CLASSIC_GENERATION_TIMEOUT,
+    IS_PROD,
+    MODEL_TIMEOUT,
+)
 from src.core.llm_manager import LLMType
 from src.database.models.co2eq_comparison import CO2EQComparison
 from src.database.models.collection import Collection as CollectionModel
@@ -49,6 +54,7 @@ from src.services.hallucination_detector import (
 )
 from src.services.langfuse_scores import schedule_feedback_scores
 from src.services.llm_inference import invoke_llm_and_consume_tokens
+from src.services.load_shedding import acquire_generation_slot_or_raise
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -75,6 +81,12 @@ from src.utils.helpers import (
 from src.utils.sse_keepalive import with_sse_keepalive
 
 logger = logging.getLogger(__name__)
+
+# Overall deadline of one streamed agentic turn. The runner's own AGENTIC_TIMEOUT
+# guard counts per model run from after setup (tool discovery, history), so a
+# healthy turn with tool rounds can pass it in total; this backstop only frees
+# the load shedding slot from a hang, hence twice the guard.
+AGENTIC_STREAM_DEADLINE_SECONDS = 2 * AGENTIC_TIMEOUT
 
 router = APIRouter()
 
@@ -453,10 +465,11 @@ async def create_message(
         Message id, query, answer, documents, flags, and metadata.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
+    slot = await acquire_generation_slot_or_raise("messages")
 
     message = None
     try:
@@ -598,6 +611,8 @@ async def create_message(
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    finally:
+        slot.release()
 
 
 @router.post("/conversations/{conversation_id}/messages/{message_id}/retry")
@@ -623,8 +638,9 @@ async def retry(
         Response payload mirroring create_message with updated answer and metadata.
 
     Raises:
-        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 500 for server errors.
+        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
     """
+    slot = await acquire_generation_slot_or_raise("retry")
     # Hoisted so the failure handler reads plain locals. ownership_validated
     # arms the error persist only after the caller's right to touch this
     # message is proven; generation_persisted disarms it once a fresh answer
@@ -814,6 +830,8 @@ async def retry(
             status_code=500,
             detail={"code": error_info["code"], "message": error_info["message"]},
         ) from e
+    finally:
+        slot.release()
 
 
 @router.patch("/conversations/{conversation_id}/messages/{message_id}")
@@ -923,10 +941,14 @@ async def create_message_stream(
         SSE stream for the generation lifecycle.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership/collections invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
+    # Held by the generation task once it exists (it outlives a client that
+    # goes away), released here if the request fails before that.
+    slot = await acquire_generation_slot_or_raise("stream_messages")
+    gen_task = None
 
     message = None
     try:
@@ -1007,8 +1029,14 @@ async def create_message_stream(
                 cancel_event=cancel_event,
                 user_id=requesting_user.id,
                 stream_ready=stream_ready,
+                deadline_seconds=(
+                    CLASSIC_GENERATION_TIMEOUT
+                    if CLASSIC_GENERATION_TIMEOUT > 0
+                    else None
+                ),
             )
         )
+        slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
 
         async def _gen():
@@ -1051,6 +1079,9 @@ async def create_message_stream(
                 error_type=type(e).__name__,
             )
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    finally:
+        if gen_task is None:
+            slot.release()
 
 
 @router.post("/conversations/{conversation_id}/stop")
@@ -1190,6 +1221,9 @@ async def get_source_logs(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+# Not load shed yet: the hallucination routes below, /generate and /generate-llm
+# call models without a generation slot, as does the /v1 OpenAI proxy
+# (routers/openai_proxy.py). Follow-up, logged in the backlog.
 @router.post(
     "/conversations/{conversation_id}/messages/{message_id}/hallucination",
     response_model=HallucinationDetectResponse,
@@ -1611,6 +1645,7 @@ async def stream_hallucination(
     return response
 
 
+# Not load shed yet, with /generate: see the note above hallucination_detect.
 @router.post("/generate-llm")
 async def generate_llm(
     request: GenerateLLMRequest,
@@ -1734,6 +1769,9 @@ async def generate(
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+# Uncapped on purpose: inside an agentic turn the eve_retrieval tool on AgentCore
+# calls back into /retrieve while the turn holds a generation slot, so a cap
+# here would deadlock every worker at the limit.
 @router.post("/retrieve")
 async def retrieve(
     request: GenerationRequest, requesting_user: User = Depends(get_current_user)
@@ -1944,10 +1982,11 @@ async def create_agentic_message(
         ``trace`` contains the agentic execution steps captured during generation.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
+    slot = await acquire_generation_slot_or_raise("generate-agentic")
 
     message = None
     try:
@@ -2062,6 +2101,8 @@ async def create_agentic_message(
             except Exception:
                 pass
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    finally:
+        slot.release()
 
 
 @router.post(
@@ -2102,10 +2143,13 @@ async def create_agentic_message_stream(
         The ``final`` event includes ``trace`` with the agentic execution steps captured during generation.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
+    # Same hand-off as create_message_stream: the generation task holds it.
+    slot = await acquire_generation_slot_or_raise("stream-generate-agentic")
+    gen_task = None
 
     message = None
     try:
@@ -2165,8 +2209,10 @@ async def create_agentic_message_stream(
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
                 subscriber_ready=subscriber_ready,
+                deadline_seconds=AGENTIC_STREAM_DEADLINE_SECONDS,
             )
         )
+        slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
 
         bus = get_stream_bus()
@@ -2210,3 +2256,6 @@ async def create_agentic_message_stream(
                 error_type=type(e).__name__,
             )
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    finally:
+        if gen_task is None:
+            slot.release()

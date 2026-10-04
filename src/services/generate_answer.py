@@ -2106,6 +2106,46 @@ async def generate_answer_json_stream_generator(
         yield chunk
 
 
+class GenerationDeadlineExceeded(TimeoutError):
+    """A streamed generation outlived its overall deadline."""
+
+
+def _deadline_exceeded(seconds: Optional[float]) -> GenerationDeadlineExceeded:
+    return GenerationDeadlineExceeded(
+        f"Generation did not finish within {seconds or 0:g} seconds"
+    )
+
+
+def raise_if_deadline_expired(deadline: asyncio.Timeout, seconds: Optional[float]) -> None:
+    """Turn a deadline the generator absorbed into a failure.
+
+    The stream generators catch CancelledError to persist a stopped turn and
+    return normally, so the cancel ``asyncio.timeout`` uses to cut them never
+    reaches its own exit as a TimeoutError. ``expired()`` still says it fired.
+    """
+    if deadline.expired():
+        raise _deadline_exceeded(seconds)
+
+
+def deadline_error(
+    exc: BaseException, deadline: asyncio.Timeout, seconds: Optional[float]
+) -> BaseException:
+    """The error to report: a cut that landed outside the generator surfaces as a
+    bare TimeoutError with no message, so name it like the absorbed case."""
+    if deadline.expired() and not isinstance(exc, GenerationDeadlineExceeded):
+        return _deadline_exceeded(seconds)
+    return exc
+
+
+def deadline_overrides(deadline: asyncio.Timeout) -> Dict[str, Any]:
+    """Extra persist fields for a turn the deadline cut.
+
+    The generator persisted it as stopped while absorbing the cancel; it was
+    not stopped by the user, it failed, and the frontend must offer a retry.
+    """
+    return {"stopped": False} if deadline.expired() else {}
+
+
 async def run_generation_to_bus(
     request: GenerationRequest,
     conversation_id: str,
@@ -2114,10 +2154,15 @@ async def run_generation_to_bus(
     cancel_event: Optional[asyncio.Event] = None,
     user_id: Optional[str] = None,
     stream_ready: Optional[asyncio.Event] = None,
+    deadline_seconds: Optional[float] = None,
 ):
     """
     Run generation in the background and publish chunks to a per-message bus.
     This decouples generation from HTTP connection lifetime.
+
+    ``deadline_seconds`` bounds the whole generation (None: no bound). On expiry
+    the turn ends like any other failure: error persisted, error event, bus
+    closed, so the task ends and frees its load shedding slot.
     """
     if stream_ready is not None:
         try:
@@ -2128,26 +2173,31 @@ async def run_generation_to_bus(
                 message_id,
             )
     bus = get_stream_bus()
+    deadline = asyncio.timeout(deadline_seconds)
     try:
-        async for chunk in generate_answer_json_stream_generator(
-            request=request,
-            conversation_id=conversation_id,
-            message_id=message_id,
-            background_tasks=background_tasks,
-            cancel_event=cancel_event,
-            user_id=user_id,
-        ):
-            # Forward SSE-formatted chunks as-is
-            await bus.publish(message_id, chunk)
+        async with deadline:
+            async for chunk in generate_answer_json_stream_generator(
+                request=request,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                background_tasks=background_tasks,
+                cancel_event=cancel_event,
+                user_id=user_id,
+            ):
+                # Forward SSE-formatted chunks as-is
+                await bus.publish(message_id, chunk)
+        raise_if_deadline_expired(deadline, deadline_seconds)
     except asyncio.CancelledError:
         # Task was cancelled (via stop endpoint). Do not publish error; just exit.
         pass
     except Exception as e:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.
-        error_info = build_error_payload(e)
+        error_info = build_error_payload(deadline_error(e, deadline, deadline_seconds))
         with contextlib.suppress(Exception):
-            await persist_message_state(message_id, error=error_info)
+            await persist_message_state(
+                message_id, error=error_info, **deadline_overrides(deadline)
+            )
         await bus.publish(
             message_id,
             f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n",
