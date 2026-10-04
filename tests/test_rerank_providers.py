@@ -1,33 +1,47 @@
 """Ordered rerank providers: order, fallback, skipping, and no event loop blocking."""
 
 import asyncio
+import json
 import logging
 import time
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from src.services import rerank as rerank_module
+from src.services.generate_answer import _select_top_k_unique_results
 from src.services.rerank import (
     RerankProvider,
     configured_providers,
     parse_provider_order,
     rerank_candidates,
 )
+from src.utils import jsc_reranker
 from src.utils.deepinfra_reranker import DeepInfraReranker
 from src.utils.jsc_reranker import JSCReranker
 
 pytestmark = pytest.mark.no_db
 
 DOCS = ["first chunk", "second chunk"]
+RETRIEVAL_ORDER = [{"index": 0, "reranking_score": None}, {"index": 1, "reranking_score": None}]
 
 
 class _RecordingErrorLogger:
     def __init__(self):
         self.descriptions = []
+        self.error_types = []
 
-    async def log_error(self, *, description="", **_kwargs):
+    async def log_error(self, *, description="", error_type=None, **_kwargs):
         self.descriptions.append(description)
+        self.error_types.append(error_type)
+
+
+@pytest.fixture(autouse=True)
+def _no_jsc_backoff():
+    jsc_reranker.reset_backoff()
+    yield
+    jsc_reranker.reset_backoff()
 
 
 @pytest.fixture
@@ -79,22 +93,89 @@ async def test_timeout_falls_to_the_next_provider_within_the_budget(error_log):
     ]
 
     started = time.perf_counter()
-    result = await rerank_candidates(DOCS, "q", providers=providers, timeout=0.1)
+    result = await rerank_candidates(
+        DOCS, "q", providers=providers, timeout=1.0, attempt_timeout=0.1
+    )
     elapsed = time.perf_counter() - started
 
     assert result == _result("fast")
     assert calls == ["slow", "fast"]
     assert elapsed < 1.0
     assert error_log.descriptions == ["Slow reranker timed out"]
+    assert error_log.error_types == ["TimeoutError"]
 
 
-async def test_every_provider_failing_returns_empty_with_todays_descriptions(error_log):
+async def test_one_deadline_covers_the_whole_provider_loop(error_log):
+    calls = []
+    providers = [
+        _provider("a", "A", sleep=2.0, calls=calls),
+        _provider("b", "B", sleep=2.0, calls=calls),
+        _provider("c", "C", calls=calls),
+    ]
+
+    started = time.perf_counter()
+    result = await rerank_candidates(
+        DOCS, "q", providers=providers, timeout=0.4, attempt_timeout=0.3
+    )
+    elapsed = time.perf_counter() - started
+
+    # a takes 0.3, b gets the 0.1 left, c is never tried.
+    assert result == RETRIEVAL_ORDER
+    assert calls == ["a", "b"]
+    assert elapsed < 0.7
+    assert error_log.descriptions == ["A reranker timed out", "B reranker fallback timed out"]
+
+
+async def test_saturated_provider_is_skipped_after_the_acquire_timeout(error_log):
+    calls = []
+    busy = asyncio.Semaphore(1)
+    await busy.acquire()
+    slow = _provider("jsc", "JSC", calls=calls)
+    providers = [
+        RerankProvider(slow.name, slow.label, None, slow.call, semaphore=lambda: busy),
+        _provider("deepinfra", "DeepInfra", calls=calls),
+    ]
+
+    result = await rerank_candidates(DOCS, "q", providers=providers, acquire_timeout=0.05)
+
+    assert result == _result("deepinfra")
+    assert calls == ["deepinfra"]
+    assert error_log.descriptions == []
+
+
+async def test_error_types_keep_the_requests_era_names():
+    request = httpx.Request("POST", "https://x.example")
+    response = httpx.Response(503, request=request)
+    assert rerank_module.error_type_name(TimeoutError()) == "TimeoutError"
+    assert rerank_module.error_type_name(httpx.ReadTimeout("t", request=request)) == "TimeoutError"
+    assert rerank_module.error_type_name(httpx.ConnectError("c", request=request)) == "RequestException"
+    assert (
+        rerank_module.error_type_name(httpx.HTTPStatusError("s", request=request, response=response))
+        == "RequestException"
+    )
+    assert rerank_module.error_type_name(json.JSONDecodeError("bad", "x", 0)) == "ValueError"
+    assert rerank_module.error_type_name(KeyError("scores")) == "KeyError"
+
+
+def test_retry_after_is_parsed_and_capped():
+    assert jsc_reranker._retry_after_seconds("5") == 5.0
+    assert jsc_reranker._retry_after_seconds("3600") == jsc_reranker.RETRY_AFTER_CAP_S
+    assert jsc_reranker._retry_after_seconds(None) == jsc_reranker.RETRY_AFTER_DEFAULT_S
+    assert jsc_reranker._retry_after_seconds("soon") == jsc_reranker.RETRY_AFTER_DEFAULT_S
+    assert jsc_reranker._retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
+
+
+async def test_every_provider_failing_keeps_retrieval_order_with_todays_descriptions(
+    error_log, caplog
+):
     providers = [
         _provider("jsc", "JSC", fail=True),
         _provider("deepinfra", "DeepInfra", fail=True),
     ]
 
-    assert await rerank_candidates(DOCS, "q", providers=providers) == []
+    with caplog.at_level(logging.WARNING, logger="src.services.rerank"):
+        assert await rerank_candidates(DOCS, "q", providers=providers) == RETRIEVAL_ORDER
+    assert caplog.text.count("rerank.skipped reason=all_providers_failed") == 1
     assert error_log.descriptions == [
         "JSC reranker failed",
         "DeepInfra reranker fallback failed",
@@ -212,11 +293,147 @@ async def test_deepinfra_reranker_parses_scores_and_raises_on_http_error():
 
 
 async def test_shared_client_has_the_agreed_timeouts_and_is_reused():
-    holder = rerank_module._LoopBoundClient()
+    holder = rerank_module._LoopBoundClient(concurrency=16)
     try:
         client = holder.get()
         assert holder.get() is client
+        assert holder.semaphore() is holder.semaphore()
         assert client.timeout.connect == 3.0
         assert client.timeout.read == 10.0
+        pool = client._transport._pool
+        assert pool._max_connections == 64
+        assert pool._max_keepalive_connections == 32
     finally:
         await holder.aclose()
+
+
+async def test_stale_client_from_another_loop_is_closed_in_the_background():
+    class _DeadLoop:
+        def is_closed(self):
+            return True
+
+    holder = rerank_module._LoopBoundClient(concurrency=1)
+    stale = holder.get()
+    holder._loop = _DeadLoop()
+
+    fresh = holder.get()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert fresh is not stale
+    assert stale.is_closed
+    assert not fresh.is_closed
+    await holder.aclose()
+
+
+# End to end through the real providers, with MockTransport in the module clients.
+
+
+@pytest_asyncio.fixture
+async def wired(monkeypatch, error_log):
+    hits = {"jsc": 0, "deepinfra": 0}
+    behaviour = {"jsc": None, "deepinfra": None}
+
+    def jsc_handler(request):
+        hits["jsc"] += 1
+        return behaviour["jsc"](request)
+
+    def deepinfra_handler(request):
+        hits["deepinfra"] += 1
+        return behaviour["deepinfra"](request)
+
+    monkeypatch.setattr(rerank_module, "JSC_RERANKER_API_KEY", "jsc-key")
+    monkeypatch.setattr(rerank_module, "EVE_JSC_BASE_URL", "https://jsc.example/v1")
+    monkeypatch.setattr(rerank_module, "DEEPINFRA_API_TOKEN", "di-token")
+    monkeypatch.setattr(
+        rerank_module, "_jsc_client",
+        rerank_module._LoopBoundClient(16, transport=httpx.MockTransport(jsc_handler)),
+    )
+    monkeypatch.setattr(
+        rerank_module, "_deepinfra_client",
+        rerank_module._LoopBoundClient(32, transport=httpx.MockTransport(deepinfra_handler)),
+    )
+    yield hits, behaviour, error_log
+    await rerank_module._jsc_client.aclose()
+    await rerank_module._deepinfra_client.aclose()
+
+
+JSC_OK = {"results": [{"index": 0, "relevance_score": 0.3}, {"index": 1, "relevance_score": 0.6}]}
+DI_OK = {"scores": [0.9, 0.2]}
+
+
+async def test_e2e_jsc_answers(wired):
+    hits, behaviour, error_log = wired
+    behaviour["jsc"] = lambda r: httpx.Response(200, json=JSC_OK)
+    behaviour["deepinfra"] = lambda r: httpx.Response(200, json=DI_OK)
+
+    result = await rerank_candidates(DOCS, "q", providers=configured_providers("jsc,deepinfra"))
+
+    assert result == [{"index": 1, "reranking_score": 0.6}, {"index": 0, "reranking_score": 0.3}]
+    assert hits == {"jsc": 1, "deepinfra": 0}
+    assert error_log.descriptions == []
+
+
+async def test_e2e_jsc_429_falls_back_and_skips_jsc_for_the_window(wired, caplog):
+    hits, behaviour, error_log = wired
+    behaviour["jsc"] = lambda r: httpx.Response(429, headers={"Retry-After": "5"}, text="slow down")
+    behaviour["deepinfra"] = lambda r: httpx.Response(200, json=DI_OK)
+    di_result = [{"index": 0, "reranking_score": 0.9}, {"index": 1, "reranking_score": 0.2}]
+
+    with caplog.at_level(logging.WARNING):
+        first = await rerank_candidates(DOCS, "q", providers=configured_providers("jsc,deepinfra"))
+        second = await rerank_candidates(DOCS, "q", providers=configured_providers("jsc,deepinfra"))
+
+    assert first == di_result
+    assert second == di_result
+    assert hits == {"jsc": 1, "deepinfra": 2}
+    assert 4.0 < jsc_reranker.backoff_remaining() <= 5.0
+    assert caplog.text.count("rate limited (429), skipped for") == 1
+    assert error_log.descriptions == ["JSC reranker failed"]
+    assert error_log.error_types == ["RequestException"]
+
+
+async def test_e2e_both_failing_returns_empty(wired):
+    hits, behaviour, error_log = wired
+    behaviour["jsc"] = lambda r: httpx.Response(500, text="boom")
+    behaviour["deepinfra"] = lambda r: httpx.Response(200, text="not json")
+
+    result = await rerank_candidates(DOCS, "q", providers=configured_providers("jsc,deepinfra"))
+
+    assert result == RETRIEVAL_ORDER
+    assert hits == {"jsc": 1, "deepinfra": 1}
+    assert error_log.descriptions == ["JSC reranker failed", "DeepInfra reranker fallback failed"]
+    assert error_log.error_types == ["RequestException", "ValueError"]
+
+
+async def test_no_configured_provider_keeps_retrieval_order(error_log, caplog):
+    providers = [_provider("jsc", "JSC", missing="DEEPINFRA_API_TOKEN environment variable not set")]
+
+    with caplog.at_level(logging.WARNING, logger="src.services.rerank"):
+        assert await rerank_candidates(DOCS, "q", providers=providers) == RETRIEVAL_ORDER
+    assert "rerank.skipped reason=no_provider_available" in caplog.text
+
+
+async def test_e2e_jsc_429_and_deepinfra_timeout_still_answer_with_sources(wired, caplog):
+    hits, behaviour, error_log = wired
+
+    async def deepinfra_hangs(request):
+        await asyncio.sleep(1.0)
+        return httpx.Response(200, json=DI_OK)
+
+    behaviour["jsc"] = lambda r: httpx.Response(429, headers={"Retry-After": "5"})
+    behaviour["deepinfra"] = deepinfra_hangs
+    texts = ["chunk a", "chunk a", "chunk b", "chunk c"]
+    formatted = [{"id": f"r{i}", "text": t} for i, t in enumerate(texts)]
+
+    with caplog.at_level(logging.WARNING, logger="src.services.rerank"):
+        reranked = await rerank_candidates(
+            texts, "q", providers=configured_providers("jsc,deepinfra"), attempt_timeout=0.1
+        )
+    selected = _select_top_k_unique_results(formatted, reranked, top_k=2)
+
+    assert hits == {"jsc": 1, "deepinfra": 1}
+    assert [r["id"] for r in selected] == ["r0", "r2"]
+    assert caplog.text.count("rerank.skipped reason=all_providers_failed") == 1
+    assert error_log.descriptions == ["JSC reranker failed", "DeepInfra reranker fallback timed out"]
+    assert error_log.error_types == ["RequestException", "TimeoutError"]
