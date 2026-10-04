@@ -66,6 +66,8 @@
 
 - **first_name**: string
 - **last_name**: string
+- **country**: string | null, optional, max 100 after stripping; omitted keeps, empty or null clears
+- **institution**: string | null, optional, max 200 after stripping; omitted keeps, empty or null clears
 
 ### User (response model)
 
@@ -74,6 +76,8 @@
 - **password_hash**: string
 - **first_name**: string | null
 - **last_name**: string | null
+- **country**: string | null
+- **institution**: string | null
 - **is_active**: bool
 - **activation_code**: string | null
 
