@@ -9,14 +9,16 @@ document storage, and similarity search operations.
 import asyncio
 import logging
 import re
+import threading
+import time
 from types import SimpleNamespace
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Tuple
 from uuid import uuid4
 
 import httpx
 from langchain_core.documents import Document
 from openai import AsyncOpenAI, RateLimitError
-from qdrant_client import QdrantClient, models
+from qdrant_client import AsyncQdrantClient, QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.http.models import (
@@ -330,6 +332,134 @@ async def _create_embeddings(
         raise RuntimeError(f"{name} did not answer within {deadline_s:g} s") from e
 
 
+# Reads (search, aliases, payload schema) go through one AsyncQdrantClient per
+# process and loop, so a slow Qdrant holds no worker thread and never blocks the
+# event loop. Writes keep the sync client and run in a worker thread.
+QDRANT_READ_TIMEOUT_S = 10
+# Aliases and payload schemas change only on a collection write, which
+# invalidates the cache; the TTL bounds staleness for writes made elsewhere.
+QDRANT_READ_CACHE_TTL_S = 60.0
+
+
+class _QdrantReadClient(NamedTuple):
+    client: AsyncQdrantClient
+    loop: asyncio.AbstractEventLoop
+
+
+# (url, api key) -> client, one per Qdrant endpoint and process.
+_qdrant_read_clients: Dict[Tuple[str, str], _QdrantReadClient] = {}
+
+
+async def _qdrant_read_client(url: str, api_key: str) -> AsyncQdrantClient:
+    """The shared async read client for one Qdrant endpoint, created on first use.
+
+    httpx pools connections on the loop that opened them, so an entry left by a
+    loop that is gone is closed and replaced.
+    """
+    loop = asyncio.get_running_loop()
+    key = (url, api_key)
+    stale = _qdrant_read_clients.get(key)
+    if stale is not None and stale.loop is loop:
+        return stale.client
+    # Stored before any await, so concurrent first calls share one client.
+    entry = _QdrantReadClient(
+        client=AsyncQdrantClient(
+            url=url or None,
+            api_key=api_key or None,
+            timeout=QDRANT_READ_TIMEOUT_S,
+        ),
+        loop=loop,
+    )
+    _qdrant_read_clients[key] = entry
+    if stale is not None and stale.loop.is_closed():
+        try:
+            await stale.client.close()
+        except Exception as e:  # its connections died with their loop
+            logger.debug(f"Closing a stale Qdrant read client failed: {e}")
+    return entry.client
+
+
+async def aclose_qdrant_read_clients() -> None:
+    """Close the read clients opened on the running loop (app shutdown)."""
+    loop = asyncio.get_running_loop()
+    for key, entry in list(_qdrant_read_clients.items()):
+        if entry.loop is not loop:
+            continue
+        _qdrant_read_clients.pop(key, None)
+        await entry.client.close()
+
+
+class _CachedRead(NamedTuple):
+    value: Any
+    expires_at: float
+
+
+# (url, what) -> value. Failures are never cached.
+_qdrant_read_cache: Dict[Tuple[str, str], _CachedRead] = {}
+# One fetch in flight per key, so an expiry under load costs one Qdrant call.
+_qdrant_read_inflight: Dict[Tuple[str, str], "asyncio.Task[Any]"] = {}
+_qdrant_read_cache_lock = threading.Lock()
+_qdrant_read_cache_generation = 0
+
+
+def invalidate_qdrant_read_cache() -> None:
+    """Drop cached aliases and payload schemas after a collection write."""
+    global _qdrant_read_cache_generation
+    with _qdrant_read_cache_lock:
+        _qdrant_read_cache_generation += 1
+        _qdrant_read_cache.clear()
+
+
+def _consume_task_exception(task: "asyncio.Task[Any]") -> None:
+    # Every waiter may have been cancelled: mark the error as retrieved.
+    if not task.cancelled():
+        task.exception()
+
+
+async def _cached_qdrant_read(
+    key: Tuple[str, str], fetch: Callable[[], Awaitable[Any]]
+) -> Any:
+    """Serve ``key`` from the in-process cache, or fetch it once for all waiters."""
+    hit = _qdrant_read_cache.get(key)
+    if hit is not None and hit.expires_at > time.monotonic():
+        return hit.value
+    loop = asyncio.get_running_loop()
+    task = _qdrant_read_inflight.get(key)
+    if task is None or task.done() or task.get_loop() is not loop:
+        generation = _qdrant_read_cache_generation
+
+        async def _fetch_and_store() -> Any:
+            try:
+                value = await fetch()
+                with _qdrant_read_cache_lock:
+                    # A write during the fetch may have changed the answer.
+                    if generation == _qdrant_read_cache_generation:
+                        _qdrant_read_cache[key] = _CachedRead(
+                            value, time.monotonic() + QDRANT_READ_CACHE_TTL_S
+                        )
+                return value
+            finally:
+                if _qdrant_read_inflight.get(key) is asyncio.current_task():
+                    _qdrant_read_inflight.pop(key, None)
+
+        task = loop.create_task(_fetch_and_store())
+        task.add_done_callback(_consume_task_exception)
+        _qdrant_read_inflight[key] = task
+    # shield: a cancelled waiter must not cancel the fetch the others wait on.
+    return await asyncio.shield(task)
+
+
+def _alias_map_from_response(aliases_response: Any) -> Dict[str, str]:
+    alias_map: Dict[str, str] = {}
+    alias_items = getattr(aliases_response, "aliases", aliases_response)
+    for item in alias_items or []:
+        alias_name = getattr(item, "alias_name", None)
+        collection_name = getattr(item, "collection_name", None)
+        if collection_name and alias_name:
+            alias_map.setdefault(collection_name, alias_name)
+    return alias_map
+
+
 def _is_already_exists_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "already exists" in msg or "already exist" in msg
@@ -412,6 +542,10 @@ class VectorStoreManager:
             api_key=qdrant_api_key,
             timeout=120.0,  # 2 minutes timeout for operations
         )
+        self.qdrant_url = qdrant_url
+        self.qdrant_api_key = qdrant_api_key
+        # A test fake, or None for the shared per-process read client.
+        self.aclient: Optional[AsyncQdrantClient] = None
         self.embeddings_model = embeddings_model
         self.embeddings_size = EMBEDDING_SIZE
         self._env_payload_cache: Dict[str, bool] = {}
@@ -436,6 +570,7 @@ class VectorStoreManager:
                     raise RuntimeError(
                         f"Failed to create collection: {PRIVATE_COLLECTION_NAME}"
                     )
+                invalidate_qdrant_read_cache()
                 logger.info(
                     "Collection '%s' created successfully", PRIVATE_COLLECTION_NAME
                 )
@@ -544,12 +679,33 @@ class VectorStoreManager:
             if success is False:
                 raise RuntimeError(f"Failed to create collection: {collection_name}")
 
+            invalidate_qdrant_read_cache()
             logger.info(f"Collection '{collection_name}' created successfully")
             return True
 
         except Exception as e:
             logger.error(f"Failed to create collection '{collection_name}': {e}")
             raise RuntimeError(f"Failed to create collection: {str(e)}") from e
+
+    async def _read_client(self) -> AsyncQdrantClient:
+        """The async client for reads: a test fake, else the shared one."""
+        fake = getattr(self, "aclient", None)
+        if fake is not None:
+            return fake
+        return await _qdrant_read_client(
+            getattr(self, "qdrant_url", QDRANT_URL),
+            getattr(self, "qdrant_api_key", QDRANT_API_KEY),
+        )
+
+    async def _alias_map(self) -> Dict[str, str]:
+        """Collection name to alias, cached per process; raises when Qdrant fails."""
+
+        async def _fetch() -> Dict[str, str]:
+            client = await self._read_client()
+            return _alias_map_from_response(await client.get_aliases())
+
+        url = getattr(self, "qdrant_url", QDRANT_URL)
+        return dict(await _cached_qdrant_read((url, "aliases"), _fetch))
 
     def list_collections(self) -> types.CollectionsResponse:
         """
@@ -569,13 +725,7 @@ class VectorStoreManager:
         """
         alias_map: Dict[str, str] = {}
         try:
-            aliases_response = self.client.get_aliases()
-            alias_items = getattr(aliases_response, "aliases", aliases_response)
-            for item in alias_items or []:
-                alias_name = getattr(item, "alias_name", None)
-                collection_name = getattr(item, "collection_name", None)
-                if collection_name and alias_name:
-                    alias_map.setdefault(collection_name, alias_name)
+            alias_map = await self._alias_map()
         except Exception as e:
             logger.warning("Failed to load Qdrant aliases for public collections: %s", e)
 
@@ -661,6 +811,7 @@ class VectorStoreManager:
 
         try:
             self.client.delete_collection(collection_name=collection_name)
+            invalidate_qdrant_read_cache()
             logger.info(f"Collection '{collection_name}' deleted successfully")
             return True
 
@@ -940,12 +1091,14 @@ class VectorStoreManager:
         except Exception:
             return None
 
-    def _collection_has_env_payload(self, collection_name: str) -> bool:
+    async def _collection_has_env_payload(self, collection_name: str) -> bool:
         """True when Qdrant lists an ``env`` payload field on the collection.
 
         Uses ``CollectionInfo.payload_schema``, which reports indexed payload
         fields. Collections without an ``env`` index are left unfiltered.
         See https://qdrant.tech/documentation/concepts/collections/
+        Answers are cached per process; a failure is remembered only by this
+        manager, so one Qdrant error does not drop the env filter process wide.
         """
         cache = getattr(self, "_env_payload_cache", None)
         if cache is None:
@@ -954,11 +1107,19 @@ class VectorStoreManager:
         cached = cache.get(collection_name)
         if cached is not None:
             return cached
-        has_env = False
-        try:
-            info = self.client.get_collection(collection_name)
+
+        async def _fetch() -> bool:
+            client = await self._read_client()
+            info = await client.get_collection(collection_name)
             schema = getattr(info, "payload_schema", None) or {}
-            has_env = "env" in schema
+            return "env" in schema
+
+        has_env = False
+        url = getattr(self, "qdrant_url", QDRANT_URL)
+        try:
+            has_env = await _cached_qdrant_read(
+                (url, f"env_payload:{collection_name}"), _fetch
+            )
         except Exception as e:
             logger.warning(
                 "Could not inspect payload schema for '%s'; skipping env filter: %s",
@@ -969,7 +1130,7 @@ class VectorStoreManager:
         cache[collection_name] = has_env
         return has_env
 
-    def _search_across_collections(
+    async def _search_across_collections(
         self,
         collection_names: List[str],
         query_vector: List[float],
@@ -988,15 +1149,10 @@ class VectorStoreManager:
         logger.debug("private_collections_map: %s", private_collections_map)
         alias_map: Dict[str, str] = {}
         try:
-            aliases_response = self.client.get_aliases()
-            alias_items = getattr(aliases_response, "aliases", aliases_response)
-            for item in alias_items or []:
-                alias_name = getattr(item, "alias_name", None)
-                collection_name = getattr(item, "collection_name", None)
-                if collection_name and alias_name:
-                    alias_map.setdefault(collection_name, alias_name)
+            alias_map = await self._alias_map()
         except Exception as e:
             logger.warning("Failed to load Qdrant aliases during search: %s", e)
+        client = await self._read_client()
 
         public_names, private_ids = split_public_and_private_collections(
             collection_names, private_collections_map
@@ -1011,12 +1167,12 @@ class VectorStoreManager:
             extra_must: List[Any] = []
             if (
                 not is_wiley_public_collection(collection_name)
-                and self._collection_has_env_payload(collection_name)
+                and await self._collection_has_env_payload(collection_name)
             ):
                 extra_must.append(build_public_env_filter(IS_PROD))
             collection_query_filter = merge_must_filters(client_filter, extra_must)
             try:
-                qp_response = self.client.query_points(
+                qp_response = await client.query_points(
                     collection_name=collection_name,
                     query=query_vector,
                     limit=limit_per_collection,
@@ -1029,7 +1185,7 @@ class VectorStoreManager:
                             oversampling=2.0,
                         )
                     ),
-                    timeout=120,
+                    timeout=QDRANT_READ_TIMEOUT_S,
                 )
                 results = getattr(qp_response, "points", []) or []
                 display_name = alias_map.get(collection_name, collection_name)
@@ -1052,7 +1208,7 @@ class VectorStoreManager:
                 )
             else:
                 try:
-                    self.ensure_private_collection()
+                    await asyncio.to_thread(self.ensure_private_collection)
                 except Exception as e:
                     logger.error(
                         "Skipping private collection search; could not ensure '%s': %s",
@@ -1069,7 +1225,7 @@ class VectorStoreManager:
                             private_filter = merge_must_filters(
                                 private_filter, year_conditions
                             )
-                            qp_response = self.client.query_points(
+                            qp_response = await client.query_points(
                                 collection_name=PRIVATE_COLLECTION_NAME,
                                 query=query_vector,
                                 limit=limit_per_collection,
@@ -1082,7 +1238,7 @@ class VectorStoreManager:
                                         oversampling=2.0,
                                     )
                                 ),
-                                timeout=120,
+                                timeout=QDRANT_READ_TIMEOUT_S,
                             )
                             results = getattr(qp_response, "points", []) or []
                             for scored in results:
@@ -1376,8 +1532,7 @@ class VectorStoreManager:
             query_filter = Filter(**filters) if filters else None
 
             # Retrieve k per collection (caller may further rerank/filter)
-            all_results = await asyncio.to_thread(
-                self._search_across_collections,
+            all_results = await self._search_across_collections(
                 collection_names,
                 query_vector,
                 score_threshold,
@@ -1433,8 +1588,7 @@ class VectorStoreManager:
 
             # Search across collections
             t1 = time.perf_counter()
-            all_results = await asyncio.to_thread(
-                self._search_across_collections,
+            all_results = await self._search_across_collections(
                 collection_names,
                 query_vector,
                 score_threshold,

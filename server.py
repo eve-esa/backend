@@ -30,6 +30,7 @@ from src.routers import (
 )
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 from src.services.rerank import aclose_rerank_clients
+from src.core.vector_store_manager import aclose_qdrant_read_clients
 from src.utils.error_logger import get_error_logger
 
 # src.config ran load_dotenv on import. Telemetry goes first so the log
@@ -107,6 +108,10 @@ def create_app(debug=False, **kwargs):
                 await aclose_rerank_clients()
             except Exception:
                 logging.exception("Rerank client shutdown failed")
+            try:
+                await aclose_qdrant_read_clients()
+            except Exception:
+                logging.exception("Qdrant read client shutdown failed")
             try:
                 await get_error_logger().flush()
             except Exception:
