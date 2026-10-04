@@ -164,13 +164,18 @@ def _otlp_log_handler_class():
         _eve_otel = True
 
         def _get_attributes(self, record):
-            attributes = super()._get_attributes(record)
-            return redact_attributes(
-                {
-                    k: v
-                    for k, v in attributes.items()
-                    if not k.startswith(("_eve", "otel"))
-                }
+            # Private API: since opentelemetry-instrumentation-logging 0.66b0 it returns
+            # (attributes, event_name), the event name promoted out of the attributes.
+            attributes, event_name = super()._get_attributes(record)
+            return (
+                redact_attributes(
+                    {
+                        k: v
+                        for k, v in attributes.items()
+                        if not k.startswith(("_eve", "otel"))
+                    }
+                ),
+                event_name,
             )
 
     return RedactingLoggingHandler
