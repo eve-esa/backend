@@ -85,3 +85,79 @@ async def test_release_decrements_and_floors_at_zero(monkeypatch, start, release
 async def test_release_for_a_missing_user_is_a_no_op(monkeypatch):
     reject_pipeline_updates(monkeypatch)
     await release_private_document_slots(str(ObjectId()), 3)
+
+
+class _RacingUsers:
+    """Users collection where a reserve of `bump` lands right after the first read."""
+
+    def __init__(self, inner, user_id: str, bump: int) -> None:
+        self._inner = inner
+        self._user_id = user_id
+        self._bump = bump
+        self.reads = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def find_one(self, *args, **kwargs):
+        doc = await self._inner.find_one(*args, **kwargs)
+        self.reads += 1
+        if self.reads == 1:
+            await self._inner.update_one(
+                {"_id": ObjectId(self._user_id)},
+                {"$inc": {"private_document_count": self._bump}},
+            )
+        return doc
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_a_reserve_that_lands_before_the_floor(monkeypatch):
+    """The floor is a compare-and-set: a missed floor retries the decrement."""
+    reject_pipeline_updates(monkeypatch)
+    user, _ = await create_test_user_and_token()
+    try:
+        await _set_counter(user.id, 1)
+        racing = _RacingUsers(User.get_collection(), user.id, bump=5)
+        monkeypatch.setattr(User, "get_collection", classmethod(lambda cls: racing))
+
+        await release_private_document_slots(user.id, 3)
+
+        monkeypatch.undo()
+        assert racing.reads == 1
+        # 1, then a reserve of 5 lands (6), the floor misses, the retry takes 3.
+        assert await _counter(user.id) == 3
+    finally:
+        await cleanup_models([user])
+
+
+class _NeverMatches:
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def update_one(self, *args, **kwargs):
+        class _Result:
+            matched_count = 0
+
+        return _Result()
+
+
+@pytest.mark.asyncio
+async def test_release_logs_a_warning_when_attempts_run_out(monkeypatch, caplog):
+    reject_pipeline_updates(monkeypatch)
+    user, _ = await create_test_user_and_token()
+    try:
+        await _set_counter(user.id, 1)
+        stuck = _NeverMatches(User.get_collection())
+        monkeypatch.setattr(User, "get_collection", classmethod(lambda cls: stuck))
+
+        with caplog.at_level("WARNING", logger="src.services.private_document_limit"):
+            await release_private_document_slots(user.id, 3)
+
+        monkeypatch.undo()
+        assert f"private_document_release_exhausted user_id={user.id} released=3" in caplog.text
+        assert await _counter(user.id) == 1
+    finally:
+        await cleanup_models([user])

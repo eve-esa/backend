@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 from bson import ObjectId
 from fastapi import HTTPException
 
 from src.constants import MAX_PRIVATE_DOCUMENTS
 from src.database.models.document import Document
 from src.database.models.user import User
+
+logger = logging.getLogger(__name__)
 
 _RELEASE_ATTEMPTS = 3
 
@@ -77,20 +81,25 @@ async def release_private_document_slots(user_id: str, slot_count: int) -> None:
         )
         if decremented.matched_count:
             return
-        # Fewer slots held than released, or no counter yet: floor at 0.
+        # Fewer slots held than released, or no counter yet: floor at 0, but
+        # only on the value just read, so a concurrent reserve is never erased.
+        user_doc = await users.find_one(
+            user_id_filter, projection={"private_document_count": 1}
+        )
+        if user_doc is None:
+            return
+        observed = user_doc.get("private_document_count")
+        if observed is not None and observed >= slot_count:
+            continue
         floored = await users.update_one(
-            {
-                **user_id_filter,
-                "$or": [
-                    {"private_document_count": {"$lt": slot_count}},
-                    {"private_document_count": None},
-                ],
-            },
+            {**user_id_filter, "private_document_count": observed},
             {"$set": {"private_document_count": 0}},
         )
         if floored.matched_count:
             return
-        # A concurrent reserve raised the counter between the two writes, or
-        # the user is gone: retry the decrement, stop when nothing matches.
-        if await users.count_documents(user_id_filter, limit=1) == 0:
-            return
+    logger.warning(
+        "private_document_release_exhausted user_id=%s released=%s attempts=%s",
+        user_id,
+        slot_count,
+        _RELEASE_ATTEMPTS,
+    )
