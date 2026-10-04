@@ -372,6 +372,11 @@ API_KEY_MAX_ACTIVE_PER_USER = _tolerant_int_env("API_KEY_MAX_ACTIVE_PER_USER", 1
 API_KEY_DEFAULT_EXPIRES_IN_DAYS = _tolerant_int_env("API_KEY_DEFAULT_EXPIRES_IN_DAYS", 90)
 # <=0 disables the per-user create throttle.
 API_KEY_CREATE_MAX_PER_HOUR = _tolerant_int_env("API_KEY_CREATE_MAX_PER_HOUR", 30)
+
+# Days a LangGraph checkpoint is kept in checkpointing_db before the TTL index
+# expires it. <=0 disables retention: no TTL index (an existing one is dropped)
+# and the purge command does nothing. See src/services/checkpoint_retention.py.
+CHECKPOINT_RETENTION_DAYS = _tolerant_int_env("CHECKPOINT_RETENTION_DAYS", 30)
 # Not env-configurable: the outer bound on expires_in_days/expires_at, whatever
 # the default above is.
 API_KEY_MAX_LIFETIME_DAYS = 3650
