@@ -58,7 +58,7 @@ mcp==1.30.0
 fastmcp>=3.4.6,<4.0.0
 tiktoken
 trafilatura
-boto3>=1.43.67
+boto3>=1.43.106
 # Pinned, not >=: the rediss:// TLS setup relies on redis-py 8.x defaults
 # (ssl_cert_reqs "required", ssl_check_hostname True, socket_keepalive True), and
 # cancel_manager.py calls aclose(), which does not exist before 5.0.1. 8.1.0 is
