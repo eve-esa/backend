@@ -9,12 +9,14 @@ document storage, and similarity search operations.
 import asyncio
 import logging
 import re
+import weakref
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+import httpx
 from langchain_core.documents import Document
-from openai import OpenAI
+from openai import AsyncOpenAI
 from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -231,6 +233,37 @@ def _embedding_providers(model: str) -> List[Tuple[str, str, str, str]]:
     return [
         (name, *known[name]) for name in EMBEDDING_PROVIDER_ORDER if name in known
     ]
+
+
+# A query embedding answers in well under a second; a provider that has not answered
+# in 10 s is down, and the next provider in the loop is the retry.
+EMBEDDING_TIMEOUT = httpx.Timeout(10.0, connect=3.0)
+# Upload batches embed up to 32 chunks in one request: give them more time to answer.
+EMBEDDING_BATCH_TIMEOUT = httpx.Timeout(60.0, connect=3.0)
+
+# event loop -> (base url, api key) -> client
+_embedding_clients: "weakref.WeakKeyDictionary[Any, Dict[Tuple[str, str], AsyncOpenAI]]"
+_embedding_clients = weakref.WeakKeyDictionary()
+
+
+def _embedding_client(api_key: str, base_url: str) -> AsyncOpenAI:
+    """The shared async client for one provider, created on first use.
+
+    Cached per running event loop: httpx pools connections on the loop that opened
+    them, and asyncio.run callers bring a fresh loop each time. No SDK retries, the
+    provider loop in _embed is the retry.
+    """
+    clients = _embedding_clients.setdefault(asyncio.get_running_loop(), {})
+    client = clients.get((base_url, api_key))
+    if client is None:
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=EMBEDDING_TIMEOUT,
+            max_retries=0,
+        )
+        clients[(base_url, api_key)] = client
+    return client
 
 
 def _is_already_exists_error(exc: BaseException) -> bool:
@@ -1140,7 +1173,10 @@ class VectorStoreManager:
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
     async def _embed(
-        self, texts: List[str], embeddings_model: str
+        self,
+        texts: List[str],
+        embeddings_model: str,
+        timeout: Optional[httpx.Timeout] = None,
     ) -> Tuple[List[List[float]], Optional[str]]:
         """Embed with the first provider that answers.
 
@@ -1160,8 +1196,10 @@ class VectorStoreManager:
             try:
                 if not api_key:
                     raise RuntimeError(f"{name} embedding API key is not set")
-                response = OpenAI(api_key=api_key, base_url=base_url).embeddings.create(
-                    input=texts, model=model
+                response = await _embedding_client(
+                    api_key, base_url
+                ).embeddings.create(
+                    input=texts, model=model, timeout=timeout or EMBEDDING_TIMEOUT
                 )
                 vectors = [item.embedding for item in response.data]
                 sizes = {len(vector) for vector in vectors}
@@ -1230,7 +1268,7 @@ class VectorStoreManager:
         """
         if not texts:
             return [], None
-        return await self._embed(texts, embeddings_model)
+        return await self._embed(texts, embeddings_model, EMBEDDING_BATCH_TIMEOUT)
 
     async def retrieve_documents_from_query(
         self,
