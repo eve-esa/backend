@@ -42,23 +42,26 @@ async def update_user(
     """
     Update the authenticated user's profile.
 
-    Only the two name fields are settable here, and only those two are ever
-    written: a ``$set`` of the request body, never a full-document replace, so
-    a concurrent token-budget update on the same row is never clobbered.
+    The two names are always written. ``country`` and ``institution`` are
+    written only when the body carries them, so a client that sends just the
+    names leaves them untouched; an empty string or null clears one. Only these
+    fields are ever written: a ``$set`` of the request body, never a
+    full-document replace, so a concurrent token-budget update on the same row
+    is never clobbered.
 
     Args:
-        request (UpdateUserRequest): New first and last name.
+        request (UpdateUserRequest): New names and, optionally, country and institution.
         user (User): Authenticated user injected by dependency.
 
     Returns:
         The public subset of the updated user's profile.
     """
-    await User.get_collection().update_one(
-        {"_id": ObjectId(user.id)},
-        {"$set": {"first_name": request.first_name, "last_name": request.last_name}},
+    fields = request.model_dump(
+        include={"first_name", "last_name"} | (request.model_fields_set & {"country", "institution"})
     )
-    user.first_name = request.first_name
-    user.last_name = request.last_name
+    await User.get_collection().update_one({"_id": ObjectId(user.id)}, {"$set": fields})
+    for name, value in fields.items():
+        setattr(user, name, value)
     return to_user_public(user)
 
 

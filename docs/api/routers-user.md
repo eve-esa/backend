@@ -83,7 +83,12 @@ Returns token budget and usage information for the current user.
 ```python
 resp = requests.patch(
     f"{BASE_URL}/users",
-    json={"first_name": "Astro", "last_name": "User"},
+    json={
+        "first_name": "Astro",
+        "last_name": "User",
+        "country": "Italy",
+        "institution": "European Space Agency",
+    },
     headers=headers,
     timeout=30,
 )
@@ -98,6 +103,10 @@ Updates mutable profile fields for the authenticated user.
 ### Notes
 
 - Route updates only the current authenticated user.
+- `first_name` and `last_name` are required.
+- `country` (max 100 characters) and `institution` (max 200) are optional free text, stripped
+  before the length check. Left out of the body, the stored value is kept; an empty string or
+  `null` clears it. `GET /users/me` returns both, `null` when unset.
 
 ## API keys
 

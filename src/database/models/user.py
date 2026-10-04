@@ -21,6 +21,12 @@ class User(MongoModel):
     )
     first_name: Optional[str] = Field(default=None, description="User's first name")
     last_name: Optional[str] = Field(default=None, description="User's last name")
+    # Optional profile fields, free text, set only by the user through PATCH /users.
+    # Rows written before they existed read as None.
+    country: Optional[str] = Field(default=None, description="User's country")
+    institution: Optional[str] = Field(
+        default=None, description="User's institution or organisation"
+    )
     is_active: bool = Field(
         default=False, description="Indicates if the user is active"
     )
