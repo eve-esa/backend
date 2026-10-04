@@ -620,7 +620,7 @@ class VectorStoreManager:
         self.aclient: Optional[AsyncQdrantClient] = None
         self.embeddings_model = embeddings_model
         self.embeddings_size = EMBEDDING_SIZE
-        self._env_payload_cache: Dict[str, bool] = {}
+        self._env_payload_cache: Dict[str, frozenset] = {}
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def ensure_private_collection(self) -> None:
@@ -1197,12 +1197,21 @@ class VectorStoreManager:
     ) -> Optional[bool]:
         """True when Qdrant lists an ``env`` payload field on the collection.
 
+        Collections without an ``env`` index are left unfiltered. None when the
+        schema cannot be read: the caller skips the collection rather than
+        search it without the env filter.
+        """
+        fields = await self._collection_payload_fields(collection_name)
+        return None if fields is None else "env" in fields
+
+    async def _collection_payload_fields(
+        self, collection_name: str
+    ) -> Optional[frozenset]:
+        """Indexed payload field names of a collection, or None if unreadable.
+
         Uses ``CollectionInfo.payload_schema``, which reports indexed payload
-        fields. Collections without an ``env`` index are left unfiltered.
-        See https://qdrant.tech/documentation/concepts/collections/
-        Answers are cached per process. None when the schema cannot be read:
-        the caller skips the collection rather than search it without the env
-        filter.
+        fields. See https://qdrant.tech/documentation/concepts/collections/
+        Answers are cached per process.
         """
         cache = getattr(self, "_env_payload_cache", None)
         if cache is None:
@@ -1212,17 +1221,17 @@ class VectorStoreManager:
         if cached is not None:
             return cached
 
-        async def _fetch() -> bool:
+        async def _fetch() -> frozenset:
             client, slots = await self._read_handle()
             async with _qdrant_read_slot(slots):
                 info = await client.get_collection(collection_name)
             schema = getattr(info, "payload_schema", None) or {}
-            return "env" in schema
+            return frozenset(schema)
 
         url = getattr(self, "qdrant_url", QDRANT_URL)
         try:
-            has_env = await _cached_qdrant_read(
-                (url, f"env_payload:{collection_name}"), _fetch
+            fields = await _cached_qdrant_read(
+                (url, f"payload_fields:{collection_name}"), _fetch
             )
         except Exception as e:
             if _is_timeout_error(e):
@@ -1234,8 +1243,8 @@ class VectorStoreManager:
                 e,
             )
             return None
-        cache[collection_name] = has_env
-        return has_env
+        cache[collection_name] = fields
+        return fields
 
     async def _search_across_collections(
         self,
@@ -1274,9 +1283,8 @@ class VectorStoreManager:
         # point without ``n_citations`` fails the range and is excluded. The rest
         # of the client filter targets EVE metadata only. Private collections
         # keep the year filter alone.
-        public_conditions = year_conditions + must_conditions_for_key(
-            query_filter, "n_citations"
-        )
+        citation_conditions = must_conditions_for_key(query_filter, "n_citations")
+        public_conditions = year_conditions + citation_conditions
 
         async def _query(collection_name: str, collection_filter: Any) -> List[Any]:
             async with _qdrant_read_slot(slots):
@@ -1304,6 +1312,16 @@ class VectorStoreManager:
             extra_must: List[Any] = []
             try:
                 async with asyncio.timeout_at(deadline):
+                    if citation_conditions and not is_eve_public_collection(
+                        collection_name
+                    ):
+                        # No n_citations index means no point can pass the
+                        # range: skip the call instead of a filtered scan.
+                        fields = await self._collection_payload_fields(
+                            collection_name
+                        )
+                        if fields is None or "n_citations" not in fields:
+                            return []
                     if not is_wiley_public_collection(collection_name):
                         has_env = await self._collection_has_env_payload(
                             collection_name
