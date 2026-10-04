@@ -384,6 +384,14 @@ BUG_REPORT_MAX_PER_HOUR = _tolerant_int_env("BUG_REPORT_MAX_PER_HOUR", 5)
 BUG_REPORT_CONVERSATION_MAX_BYTES = _tolerant_int_env(
     "BUG_REPORT_CONVERSATION_MAX_BYTES", 2 * 1024 * 1024
 )
+
+# Load shedding (src/services/load_shedding.py). Answer generations one worker
+# runs at once; past the cap a new generation answers 429 "overloaded" with
+# Retry-After instead of slowing every stream already running. Per worker, so
+# the task cap is this times WORKERS. <=0 disables the cap.
+MAX_INFLIGHT_GENERATIONS_PER_WORKER = _tolerant_int_env(
+    "MAX_INFLIGHT_GENERATIONS_PER_WORKER", 40
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:
