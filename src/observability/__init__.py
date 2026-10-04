@@ -1,4 +1,4 @@
-"""OpenTelemetry setup for the backend: traces and logs over OTLP HTTP.
+"""OpenTelemetry setup for the backend: traces, logs and metrics over OTLP HTTP.
 
 Off unless ``OTEL_EXPORTER_OTLP_ENDPOINT`` is set: then nothing from the SDK is
 imported, no provider is registered, no exporter thread starts and
@@ -17,7 +17,9 @@ The agent root span, the request ids on every span and kind events live in
 :mod:`src.observability.context`. Not requests or urllib3 (the
 exporter itself travels there and URLs carry keys), not openai (LangChain
 covers LLM calls), not FastAPIInstrumentor (misses the /v1 and /mcp
-dispatchers and would double the server span).
+dispatchers and would double the server span). Metrics: two gauges per
+worker, event loop lag and in-flight generations (:mod:`src.observability.metrics`);
+the lag probe starts with :func:`start_runtime_metrics` from the app lifespan.
 """
 
 import logging
@@ -50,7 +52,12 @@ SANITIZED_HEADERS = [
 
 _TRUE = {"1", "true", "yes", "on"}
 
-_state: dict = {"enabled": False, "tracer_provider": None, "logger_provider": None}
+_state: dict = {
+    "enabled": False,
+    "tracer_provider": None,
+    "logger_provider": None,
+    "meter_provider": None,
+}
 
 
 def is_enabled() -> bool:
@@ -283,8 +290,30 @@ def _setup_logs(resource) -> None:
     logging.getLogger().addHandler(handler)
 
 
+def _setup_metrics(resource) -> None:
+    from src.observability.metrics import build_meter_provider
+
+    _state["meter_provider"] = build_meter_provider(resource)
+
+
+def start_runtime_metrics() -> bool:
+    """Start the event loop lag probe on the running loop (app lifespan).
+
+    No-op when metrics are off. Returns True when the probe started.
+    """
+    if _state.get("meter_provider") is None:
+        return False
+    try:
+        from src.observability.metrics import get_loop_lag_monitor
+
+        return get_loop_lag_monitor().start()
+    except Exception as exc:
+        logger.warning("OpenTelemetry: event loop lag probe not started: %s", exc)
+        return False
+
+
 def init_telemetry() -> bool:
-    """Install tracing and OTLP logs when an endpoint is configured.
+    """Install tracing, OTLP logs and metrics when an endpoint is configured.
 
     Reads the standard ``OTEL_*`` variables: the exporters pick up
     ``OTEL_EXPORTER_OTLP_ENDPOINT`` and ``OTEL_EXPORTER_OTLP_HEADERS`` on their
@@ -320,6 +349,10 @@ def init_telemetry() -> bool:
             _setup_logs(tracer_provider.resource)
         except Exception as exc:
             logger.warning("OpenTelemetry: OTLP logs disabled: %s", exc)
+        try:
+            _setup_metrics(tracer_provider.resource)
+        except Exception as exc:
+            logger.warning("OpenTelemetry: OTLP metrics disabled: %s", exc)
         return True
     except Exception as exc:
         logger.warning("OpenTelemetry: init failed, telemetry stays off: %s", exc)
@@ -434,8 +467,12 @@ def wrap_asgi(app: Any, fastapi_app: Any = None, tracer_provider: Any = None) ->
 
 
 def shutdown() -> None:
-    """Flush and stop the exporters. Safe to call when telemetry is off."""
-    for key in ("tracer_provider", "logger_provider"):
+    """Flush and stop the exporters. Safe to call when telemetry is off.
+
+    The meter provider's shutdown runs one last collection and export before
+    the lag probe stops, so the final interval is not lost.
+    """
+    for key in ("tracer_provider", "logger_provider", "meter_provider"):
         provider = _state.get(key)
         if provider is None:
             continue
@@ -443,3 +480,10 @@ def shutdown() -> None:
             provider.shutdown()
         except Exception as exc:
             logger.warning("OpenTelemetry: %s shutdown failed: %s", key, exc)
+    if _state.get("meter_provider") is not None:
+        try:
+            from src.observability.metrics import get_loop_lag_monitor
+
+            get_loop_lag_monitor().stop()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("OpenTelemetry: event loop lag probe stop failed: %s", exc)
