@@ -1270,6 +1270,13 @@ class VectorStoreManager:
             collection_names, private_collections_map
         )
         year_conditions = must_conditions_for_key(query_filter, "year")
+        # Every public collection honours the year and the citation minimum; a
+        # point without ``n_citations`` fails the range and is excluded. The rest
+        # of the client filter targets EVE metadata only. Private collections
+        # keep the year filter alone.
+        public_conditions = year_conditions + must_conditions_for_key(
+            query_filter, "n_citations"
+        )
 
         async def _query(collection_name: str, collection_filter: Any) -> List[Any]:
             async with _qdrant_read_slot(slots):
@@ -1293,7 +1300,7 @@ class VectorStoreManager:
         async def _search_public(collection_name: str) -> List[Any]:
             client_filter = query_filter if is_eve_public_collection(
                 collection_name
-            ) else (Filter(must=year_conditions) if year_conditions else None)
+            ) else (Filter(must=public_conditions) if public_conditions else None)
             extra_must: List[Any] = []
             try:
                 async with asyncio.timeout_at(deadline):
