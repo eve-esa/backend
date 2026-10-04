@@ -98,6 +98,14 @@ JSC_RERANKER_MODEL_NAME = getenv_or(
 # last, so a chain can never end without a last resort.
 EVE_ENDPOINT_ORDER = os.getenv("EVE_ENDPOINT_ORDER", "eve_jsc,main,fallback").strip()
 EVE_ENDPOINT_COOLDOWN_S = float(os.getenv("EVE_ENDPOINT_COOLDOWN_S", "120"))
+# With REDIS_URL set, open endpoint circuits are shared by every worker through
+# Valkey (src/core/llm_health.py). False keeps each process on its own breaker.
+ENDPOINT_BREAKER_SHARED = os.getenv("ENDPOINT_BREAKER_SHARED", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 # Per-endpoint first-token budgets. RunPod is serverless with 1-3 min cold
 # starts; JSC is a warm vLLM. One MODEL_TIMEOUT cannot serve both.
 EVE_JSC_TIMEOUT = int(os.getenv("EVE_JSC_TIMEOUT", MODEL_TIMEOUT))

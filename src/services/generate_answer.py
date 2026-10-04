@@ -1764,6 +1764,7 @@ async def _classic_stream_events(
             for candidate in walkable:
                 try:
                     gen_start = time.perf_counter()
+                    attempt_started_at = time.time()
                     graph, mode = await _get_or_create_compiled_graph()
                     if graph is not None:
                         logger.info(
@@ -1879,7 +1880,9 @@ async def _classic_stream_events(
                             used_stream = True
                             answered_by = candidate
                             candidate_span.set_attribute("eve.llm.answered", candidate)
-                            llm_manager.health.record_success(candidate)
+                            llm_manager.health.record_success(
+                                candidate, started_at=attempt_started_at
+                            )
                         except TimeoutError as e:
                             logger.warning(
                                 "LangGraph streaming on endpoint %s timed out",
