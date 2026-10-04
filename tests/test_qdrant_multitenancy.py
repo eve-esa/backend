@@ -122,6 +122,8 @@ def _manager_with_mock_client(env_collections: set[str] | None = None) -> Vector
     aclient = MagicMock()
     aclient.get_aliases = AsyncMock(return_value=SimpleNamespace(aliases=[]))
     aclient.query_points = AsyncMock(return_value=SimpleNamespace(points=[]))
+    # Missing, so the search path runs the (mocked) sync ensure.
+    aclient.collection_exists = AsyncMock(return_value=False)
     env_collections = env_collections or set()
 
     def _get_collection(name: str):
