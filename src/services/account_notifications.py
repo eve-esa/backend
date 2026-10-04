@@ -108,3 +108,49 @@ async def notify_account_approved(
 ) -> None:
     """Welcome an account that can sign in, whether it waited first or not."""
     await _notify(KIND_APPROVED, user_id, email, after_hold=after_hold)
+
+
+# The launch mail to legacy accounts (decision D16, sent in cohorts by
+# ``src/commands/send_cohort_invite.py``). The subject and the text block are
+# approved by product and arrive from the command line, so these defaults are
+# deliberately neutral: they say what is true for every legacy account and
+# nothing more.
+COHORT_INVITE_SUBJECT = "The new EVE is ready for you"
+COHORT_INVITE_TEXT = (
+    "EVE, the Earth Virtual Expert by ESA Phi-lab, has a new version, and your "
+    "account comes with it.\n"
+    "\n"
+    "Sign in with the same e-mail address and password you used before. If you "
+    "do not remember your password, choose \"Forgot password\" on the sign-in "
+    "page and follow the steps."
+)
+
+
+def _paragraphs(text: str) -> list[str]:
+    """Split a plain-text block on blank lines, joining wrapped lines."""
+    blocks = [block.strip() for block in text.replace("\r\n", "\n").split("\n\n")]
+    return [" ".join(line.strip() for line in block.splitlines()) for block in blocks if block]
+
+
+def render_cohort_invite(
+    email: str,
+    *,
+    sign_in_url: str | None = None,
+    text_block: str | None = None,
+    subject: str | None = None,
+) -> Tuple[str, str, str]:
+    """Return ``(subject, html, text)`` for the launch mail of one account.
+
+    The text block is plain text from a file the product owner approves; it is
+    escaped in the HTML part like every other value, so a stray ``<`` cannot
+    change the layout.
+    """
+    context = {
+        "email": email,
+        "app_url": FRONTEND_URL,
+        "sign_in_url": (sign_in_url or FRONTEND_URL).strip(),
+        "paragraphs": _paragraphs(text_block or COHORT_INVITE_TEXT),
+    }
+    html = _environment.get_template("cohort_invite.html").render(**context)
+    text = _environment.get_template("cohort_invite.txt").render(**context)
+    return (subject or COHORT_INVITE_SUBJECT).strip(), html, text

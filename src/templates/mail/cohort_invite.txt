@@ -1,0 +1,13 @@
+The new EVE is here
+
+{% for paragraph in paragraphs %}
+{{ paragraph }}
+
+{% endfor %}
+Sign in to EVE: {{ sign_in_url }}
+
+Kind regards,
+The EVE Team
+
+You receive this message because {{ email }} has an EVE account. If you wish to unregister from the system, please use the contact form:
+https://eve.philab.esa.int/contact
