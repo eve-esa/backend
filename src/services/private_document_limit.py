@@ -7,6 +7,8 @@ from src.constants import MAX_PRIVATE_DOCUMENTS
 from src.database.models.document import Document
 from src.database.models.user import User
 
+_RELEASE_ATTEMPTS = 3
+
 
 def _limit_reached_error(current_count: int) -> HTTPException:
     return HTTPException(
@@ -58,27 +60,37 @@ async def reserve_private_document_slots(user_id: str, slot_count: int) -> None:
 
 
 async def release_private_document_slots(user_id: str, slot_count: int) -> None:
-    """Return reserved or deleted slots to the user's private document counter."""
+    """Return reserved or deleted slots to the user's private document counter.
+
+    Plain update operators only: DocumentDB 5.0 rejects pipeline updates
+    (code 14), which local MongoDB accepts. The counter never goes below 0.
+    """
     if slot_count <= 0:
         return
 
-    await User.get_collection().update_one(
-        {"_id": ObjectId(user_id)},
-        [
+    users = User.get_collection()
+    user_id_filter = {"_id": ObjectId(user_id)}
+    for _ in range(_RELEASE_ATTEMPTS):
+        decremented = await users.update_one(
+            {**user_id_filter, "private_document_count": {"$gte": slot_count}},
+            {"$inc": {"private_document_count": -slot_count}},
+        )
+        if decremented.matched_count:
+            return
+        # Fewer slots held than released, or no counter yet: floor at 0.
+        floored = await users.update_one(
             {
-                "$set": {
-                    "private_document_count": {
-                        "$max": [
-                            {
-                                "$subtract": [
-                                    {"$ifNull": ["$private_document_count", 0]},
-                                    slot_count,
-                                ]
-                            },
-                            0,
-                        ]
-                    }
-                }
-            }
-        ],
-    )
+                **user_id_filter,
+                "$or": [
+                    {"private_document_count": {"$lt": slot_count}},
+                    {"private_document_count": None},
+                ],
+            },
+            {"$set": {"private_document_count": 0}},
+        )
+        if floored.matched_count:
+            return
+        # A concurrent reserve raised the counter between the two writes, or
+        # the user is gone: retry the decrement, stop when nothing matches.
+        if await users.count_documents(user_id_filter, limit=1) == 0:
+            return
