@@ -10,11 +10,12 @@ import asyncio
 import logging
 import re
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from uuid import uuid4
 
+import httpx
 from langchain_core.documents import Document
-from openai import OpenAI
+from openai import AsyncOpenAI, RateLimitError
 from qdrant_client import QdrantClient, models
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -231,6 +232,102 @@ def _embedding_providers(model: str) -> List[Tuple[str, str, str, str]]:
     return [
         (name, *known[name]) for name in EMBEDDING_PROVIDER_ORDER if name in known
     ]
+
+
+# A query embedding answers in well under a second; a provider that has not answered
+# in 10 s is down, and the next provider in the loop is the retry. httpx bounds
+# connect and each read; the deadline bounds the whole call, rate limit retry included.
+EMBEDDING_TIMEOUT = httpx.Timeout(10.0, connect=3.0)
+EMBEDDING_DEADLINE_S = 10.0
+# Upload batches embed up to 32 chunks in one request: give them more time to answer.
+EMBEDDING_BATCH_TIMEOUT = httpx.Timeout(60.0, connect=3.0)
+EMBEDDING_BATCH_DEADLINE_S = 60.0
+# In-flight requests per provider and process.
+EMBEDDING_MAX_CONCURRENCY = 32
+# One retry on 429 before failing over, never waiting longer than this.
+EMBEDDING_RATE_LIMIT_WAIT_MAX_S = 2.0
+
+
+class _EmbeddingClient(NamedTuple):
+    client: AsyncOpenAI
+    semaphore: asyncio.Semaphore
+    loop: asyncio.AbstractEventLoop
+
+
+# (base url, api key) -> client, one per provider and process.
+_embedding_clients: Dict[Tuple[str, str], _EmbeddingClient] = {}
+
+
+async def _embedding_client(api_key: str, base_url: str) -> _EmbeddingClient:
+    """The shared async client for one provider, created on first use.
+
+    httpx pools connections on the loop that opened them, so an entry left by a
+    loop that is gone is closed and replaced. No SDK retries: the provider loop in
+    _embed is the failover.
+    """
+    loop = asyncio.get_running_loop()
+    key = (base_url, api_key)
+    stale = _embedding_clients.get(key)
+    if stale is not None and stale.loop is loop:
+        return stale
+    # Stored before any await, so concurrent first calls share one client.
+    entry = _EmbeddingClient(
+        client=AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=EMBEDDING_TIMEOUT,
+            max_retries=0,
+        ),
+        semaphore=asyncio.Semaphore(EMBEDDING_MAX_CONCURRENCY),
+        loop=loop,
+    )
+    _embedding_clients[key] = entry
+    if stale is not None and stale.loop.is_closed():
+        try:
+            await stale.client.close()
+        except Exception as e:  # its connections died with their loop
+            logger.debug(f"Closing a stale embedding client failed: {e}")
+    return entry
+
+
+def _rate_limit_wait_s(error: RateLimitError) -> float:
+    """Seconds to wait before the one retry: Retry-After, capped, 1 s without it."""
+    try:
+        wait = float(error.response.headers.get("retry-after", "1"))
+    except (AttributeError, TypeError, ValueError):
+        wait = 1.0
+    return min(max(wait, 0.0), EMBEDDING_RATE_LIMIT_WAIT_MAX_S)
+
+
+async def _create_embeddings(
+    name: str,
+    api_key: str,
+    base_url: str,
+    texts: List[str],
+    model: str,
+    timeout: httpx.Timeout,
+    deadline_s: float,
+) -> Any:
+    """One provider call: bounded concurrency, one 429 retry, one overall deadline."""
+    entry = await _embedding_client(api_key, base_url)
+    try:
+        async with asyncio.timeout(deadline_s):
+            async with entry.semaphore:
+                try:
+                    return await entry.client.embeddings.create(
+                        input=texts, model=model, timeout=timeout
+                    )
+                except RateLimitError as e:
+                    wait_s = _rate_limit_wait_s(e)
+                    logger.warning(
+                        f"{name} embedding rate limited, retrying once in {wait_s:g} s"
+                    )
+                    await asyncio.sleep(wait_s)
+                    return await entry.client.embeddings.create(
+                        input=texts, model=model, timeout=timeout
+                    )
+    except TimeoutError as e:
+        raise RuntimeError(f"{name} did not answer within {deadline_s:g} s") from e
 
 
 def _is_already_exists_error(exc: BaseException) -> bool:
@@ -1140,7 +1237,10 @@ class VectorStoreManager:
             raise RuntimeError(f"Failed to delete documents: {str(e)}") from e
 
     async def _embed(
-        self, texts: List[str], embeddings_model: str
+        self,
+        texts: List[str],
+        embeddings_model: str,
+        batch: bool = False,
     ) -> Tuple[List[List[float]], Optional[str]]:
         """Embed with the first provider that answers.
 
@@ -1160,8 +1260,14 @@ class VectorStoreManager:
             try:
                 if not api_key:
                     raise RuntimeError(f"{name} embedding API key is not set")
-                response = OpenAI(api_key=api_key, base_url=base_url).embeddings.create(
-                    input=texts, model=model
+                response = await _create_embeddings(
+                    name,
+                    api_key,
+                    base_url,
+                    texts,
+                    model,
+                    EMBEDDING_BATCH_TIMEOUT if batch else EMBEDDING_TIMEOUT,
+                    EMBEDDING_BATCH_DEADLINE_S if batch else EMBEDDING_DEADLINE_S,
                 )
                 vectors = [item.embedding for item in response.data]
                 sizes = {len(vector) for vector in vectors}
@@ -1230,7 +1336,7 @@ class VectorStoreManager:
         """
         if not texts:
             return [], None
-        return await self._embed(texts, embeddings_model)
+        return await self._embed(texts, embeddings_model, batch=True)
 
     async def retrieve_documents_from_query(
         self,
@@ -1353,29 +1459,6 @@ class VectorStoreManager:
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
             raise RuntimeError(f"Failed to retrieve documents: {str(e)}") from e
-
-    def sync_retrieve_documents_from_query(
-        self,
-        collection_name: str,
-        query: str,
-        k: int = 5,
-        score_threshold: float = 0.7,
-        embeddings_model: Optional[str] = None,
-    ) -> List[Any]:
-        """
-        Synchronous wrapper for retrieve_documents_from_query.
-
-        This method allows calling the async retrieval method from sync contexts.
-        """
-        return asyncio.run(
-            self.retrieve_documents_from_query(
-                collection_names=[collection_name],
-                query=query,
-                k=k,
-                score_threshold=score_threshold,
-                embeddings_model=embeddings_model,
-            )
-        )
 
     # RAG decision moved to LLMManager.should_use_rag
 
