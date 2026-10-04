@@ -1,7 +1,7 @@
 """Unit tests for public env filters and private tenant partitioning."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from qdrant_client.http.models import (
@@ -26,6 +26,7 @@ from src.core.vector_store_manager import (
     build_public_env_filter,
     is_eve_public_collection,
     is_private_qdrant_collection,
+    invalidate_qdrant_read_cache,
     is_wiley_public_collection,
     looks_like_mongo_id,
     merge_must_filters,
@@ -113,18 +114,24 @@ PRIVATE_ID_B = "aaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 def _manager_with_mock_client(env_collections: set[str] | None = None) -> VectorStoreManager:
+    # Aliases and payload schemas are cached per process: start each test cold.
+    invalidate_qdrant_read_cache()
     manager = VectorStoreManager.__new__(VectorStoreManager)
-    client = MagicMock()
-    client.get_aliases.return_value = SimpleNamespace(aliases=[])
-    client.query_points.return_value = SimpleNamespace(points=[])
+    # Writes go through the sync client, reads through the async one.
+    manager.client = MagicMock()
+    aclient = MagicMock()
+    aclient.get_aliases = AsyncMock(return_value=SimpleNamespace(aliases=[]))
+    aclient.query_points = AsyncMock(return_value=SimpleNamespace(points=[]))
+    # Missing, so the search path runs the (mocked) sync ensure.
+    aclient.collection_exists = AsyncMock(return_value=False)
     env_collections = env_collections or set()
 
     def _get_collection(name: str):
         schema = {"env": object()} if name in env_collections else {}
         return SimpleNamespace(payload_schema=schema)
 
-    client.get_collection.side_effect = _get_collection
-    manager.client = client
+    aclient.get_collection = AsyncMock(side_effect=_get_collection)
+    manager.aclient = aclient
     manager._env_payload_cache = {}
     manager.ensure_private_collection = MagicMock()
     return manager
@@ -152,11 +159,11 @@ def _private_collection_id_from_filter(query_filter) -> str:
     return collection_cond.match.value
 
 
-def test_private_search_queries_each_collection_with_own_limit():
+async def test_private_search_queries_each_collection_with_own_limit():
     manager = _manager_with_mock_client()
     limit = 7
 
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=[PRIVATE_ID, PRIVATE_ID_B],
         query_vector=[0.1, 0.2],
         score_threshold=0.5,
@@ -166,7 +173,7 @@ def test_private_search_queries_each_collection_with_own_limit():
         user_id="user-1",
     )
 
-    calls = manager.client.query_points.call_args_list
+    calls = manager.aclient.query_points.call_args_list
     assert len(calls) == 2
     seen_ids = []
     for call in calls:
@@ -181,10 +188,10 @@ def test_private_search_queries_each_collection_with_own_limit():
     assert seen_ids == [PRIVATE_ID, PRIVATE_ID_B]
 
 
-def test_private_search_skipped_without_user_id():
+async def test_private_search_skipped_without_user_id():
     manager = _manager_with_mock_client()
 
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=[PRIVATE_ID, PRIVATE_ID_B],
         query_vector=[0.1, 0.2],
         score_threshold=0.5,
@@ -194,13 +201,13 @@ def test_private_search_skipped_without_user_id():
         user_id=None,
     )
 
-    manager.client.query_points.assert_not_called()
+    manager.aclient.query_points.assert_not_called()
     manager.ensure_private_collection.assert_not_called()
 
 
-def test_private_search_ensures_collection_before_query():
+async def test_private_search_ensures_collection_before_query():
     manager = _manager_with_mock_client()
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=[PRIVATE_ID],
         query_vector=[0.1, 0.2],
         score_threshold=0.5,
@@ -210,13 +217,13 @@ def test_private_search_ensures_collection_before_query():
         user_id="user-1",
     )
     manager.ensure_private_collection.assert_called_once()
-    manager.client.query_points.assert_called_once()
+    manager.aclient.query_points.assert_called_once()
 
 
-def test_private_ensure_failure_keeps_public_results():
+async def test_private_ensure_failure_keeps_public_results():
     manager = _manager_with_mock_client()
     manager.ensure_private_collection.side_effect = RuntimeError("cannot create")
-    results = manager._search_across_collections(
+    results = await manager._search_across_collections(
         collection_names=["wikipedia-512", PRIVATE_ID],
         query_vector=[0.1],
         score_threshold=0.0,
@@ -228,12 +235,12 @@ def test_private_ensure_failure_keeps_public_results():
     assert results == []
     names = [
         call.kwargs["collection_name"]
-        for call in manager.client.query_points.call_args_list
+        for call in manager.aclient.query_points.call_args_list
     ]
     assert names == ["wikipedia-512"]
 
 
-def test_private_missing_collection_does_not_abort_public():
+async def test_private_missing_collection_does_not_abort_public():
     manager = _manager_with_mock_client()
 
     def _query_points(*args, **kwargs):
@@ -244,8 +251,8 @@ def test_private_missing_collection_does_not_abort_public():
             )
         return SimpleNamespace(points=[])
 
-    manager.client.query_points.side_effect = _query_points
-    results = manager._search_across_collections(
+    manager.aclient.query_points.side_effect = _query_points
+    results = await manager._search_across_collections(
         collection_names=["wikipedia-512", PRIVATE_ID],
         query_vector=[0.1],
         score_threshold=0.0,
@@ -257,7 +264,7 @@ def test_private_missing_collection_does_not_abort_public():
     assert results == []
     names = [
         call.kwargs["collection_name"]
-        for call in manager.client.query_points.call_args_list
+        for call in manager.aclient.query_points.call_args_list
     ]
     assert "wikipedia-512" in names
 
@@ -280,11 +287,11 @@ def test_merge_must_filters_preserves_min_should():
     assert extra in merged.must
 
 
-def test_year_filter_applies_to_all_public_collections():
+async def test_year_filter_applies_to_all_public_collections():
     manager = _manager_with_mock_client()
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     journal = FieldCondition(key="journal", match=MatchValue(value="Nature"))
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
@@ -295,7 +302,7 @@ def test_year_filter_applies_to_all_public_collections():
     )
     by_name = {
         call.kwargs["collection_name"]: call.kwargs["query_filter"]
-        for call in manager.client.query_points.call_args_list
+        for call in manager.aclient.query_points.call_args_list
     }
     assert set(by_name) == {
         "qwen-512-filtered",
@@ -314,13 +321,13 @@ def test_year_filter_applies_to_all_public_collections():
     assert wiki_must_keys == ["year"]
 
 
-def test_missing_public_collection_raises():
+async def test_missing_public_collection_raises():
     manager = _manager_with_mock_client()
-    manager.client.query_points.side_effect = RuntimeError(
+    manager.aclient.query_points.side_effect = RuntimeError(
         "Not found: Collection `qwen-512-filtered` doesn't exist!"
     )
     with pytest.raises(RuntimeError, match="Failed to search collection"):
-        manager._search_across_collections(
+        await manager._search_across_collections(
             collection_names=["qwen-512-filtered"],
             query_vector=[0.1],
             score_threshold=0.0,
@@ -351,9 +358,9 @@ def test_eve_public_collection_name_helper():
     assert not is_wiley_public_collection("qwen-512-filtered")
 
 
-def test_env_filter_applied_only_when_payload_schema_has_env():
+async def test_env_filter_applied_only_when_payload_schema_has_env():
     manager = _manager_with_mock_client(env_collections={"qwen-512-filtered"})
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
@@ -364,15 +371,15 @@ def test_env_filter_applied_only_when_payload_schema_has_env():
     )
     by_name = {
         call.kwargs["collection_name"]: call.kwargs["query_filter"]
-        for call in manager.client.query_points.call_args_list
+        for call in manager.aclient.query_points.call_args_list
     }
     assert _filter_has_env(by_name["qwen-512-filtered"])
     assert not _filter_has_env(by_name["wikipedia-512"])
 
 
-def test_wiley_never_gets_env_filter():
+async def test_wiley_never_gets_env_filter():
     manager = _manager_with_mock_client(env_collections={"Wiley AI Gateway"})
-    manager._search_across_collections(
+    await manager._search_across_collections(
         collection_names=["Wiley AI Gateway"],
         query_vector=[0.1],
         score_threshold=0.0,
@@ -381,9 +388,9 @@ def test_wiley_never_gets_env_filter():
         private_collections_map={},
         user_id="user-1",
     )
-    query_filter = manager.client.query_points.call_args.kwargs["query_filter"]
+    query_filter = manager.aclient.query_points.call_args.kwargs["query_filter"]
     assert not _filter_has_env(query_filter)
-    manager.client.get_collection.assert_not_called()
+    manager.aclient.get_collection.assert_not_called()
 
 
 def test_create_collection_does_not_recreate_existing():
