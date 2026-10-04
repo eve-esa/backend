@@ -99,6 +99,8 @@ class LLMManager:
         self._health = EndpointHealth(
             EVE_ENDPOINT_COOLDOWN_S,
             redis_url=_config.REDIS_URL if _config.ENDPOINT_BREAKER_SHARED else None,
+            # The half-open probe gets the endpoint's own first-token budget.
+            probe_s=endpoint_timeout,
         )
         # Load system prompt once
         try:
