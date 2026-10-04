@@ -8,7 +8,8 @@ retention window, run manually or from an external scheduler:
     python -m src.commands.gc_mcp_artifacts [--days N] [--apply]
 
 Defaults to a dry run (prints what would be deleted); pass --apply to
-actually delete. User uploads (source.type == "upload") are never touched --
+actually delete. A dry run works with the reader credential: it connects
+without creating indexes. User uploads (source.type == "upload") are never touched --
 this mirrors the DELETE /artifacts/{id} restriction that only MCP-generated
 artifacts are eligible for this kind of automated reclaim.
 """
@@ -46,7 +47,7 @@ async def gc_mcp_artifacts(days: int = DEFAULT_RETENTION_DAYS, apply: bool = Fal
     # Reuse an already-open connection (e.g. the test suite's isolated test
     # database) instead of unconditionally reconnecting to the default URI.
     if async_mongo_manager.database is None:
-        await async_mongo_manager.connect()
+        await async_mongo_manager.connect(ensure_indexes=apply)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     candidates = await Artifact.find_all(

@@ -19,6 +19,9 @@ safe to re-run after a partial failure.
 Usage:
 
     python -m src.commands.migrate_custom_model_secrets [--dry-run]
+
+``--dry-run`` works with the reader credential: it connects without creating
+indexes.
 """
 
 import argparse
@@ -41,7 +44,7 @@ logger = logging.getLogger(__name__)
 async def migrate_custom_model_secrets(*, dry_run: bool = False) -> dict[str, int]:
     """Re-encrypt every un-migrated custom model row. Returns a summary dict."""
     if async_mongo_manager.database is None:
-        await async_mongo_manager.connect()
+        await async_mongo_manager.connect(ensure_indexes=not dry_run)
 
     collection = UserCustomModel.get_collection()
     # Only live rows: a soft-deleted row's key material is cleared on delete,

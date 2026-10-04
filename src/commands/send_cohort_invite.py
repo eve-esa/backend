@@ -9,7 +9,8 @@ cohorts so that SES reputation, support load and sign-in traffic grow in steps.
     python -m src.commands.send_cohort_invite --cohort vip --emails-file vip.txt --apply
 
 Dry run by default: it reads, prints the counts and the first five recipients
-masked, and writes nothing, so it runs with the read-only database user.
+masked, and writes nothing. A dry run works with the reader credential: it
+connects without creating indexes. ``--apply`` needs the writer.
 
 Selection. ``--limit`` and ``--offset`` slice ``users`` sorted by ``_id``, before
 any skip rule, so a slice is the same set of rows on every run and consecutive
@@ -299,7 +300,8 @@ async def send_cohort_invite(
             )
 
     if async_mongo_manager.database is None:
-        await async_mongo_manager.connect()
+        # A dry run must not create indexes: the reader credential may not.
+        await async_mongo_manager.connect(ensure_indexes=apply)
 
     plan = await plan_cohort(
         cohort,
