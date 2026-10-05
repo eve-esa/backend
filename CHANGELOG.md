@@ -11,6 +11,47 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.0.0](https://github.com/eve-esa/backend/compare/v0.2.1...v1.0.0) (2026-10-05)
+
+
+### Added
+
+* **agents:** retention for LangGraph checkpoints ([#270](https://github.com/eve-esa/backend/issues/270)) ([1b957d1](https://github.com/eve-esa/backend/commit/1b957d16050e07b19c34887a4e76cca94d68d57f))
+* **bug-reports:** internal read route for the observability sink ([#261](https://github.com/eve-esa/backend/issues/261)) ([8de9178](https://github.com/eve-esa/backend/commit/8de9178b6e579b37335e6e931517803adafc2292))
+* **chat:** shed load with a 429 past an in-flight cap ([#268](https://github.com/eve-esa/backend/issues/268)) ([131e751](https://github.com/eve-esa/backend/commit/131e7511e78a5c3940b25a2fdb7b24cc4d74b6d3))
+* **identity:** cohort invite command for the launch mail ([#257](https://github.com/eve-esa/backend/issues/257)) ([bad5f5a](https://github.com/eve-esa/backend/commit/bad5f5a68f5ad71e69c8cb71c1200e1234074add))
+* **limits:** per-user request rate limiter (flag FEATURE_REQUEST_RATE_LIMIT, prod off) ([#277](https://github.com/eve-esa/backend/issues/277)) ([94f939a](https://github.com/eve-esa/backend/commit/94f939ab4f0fdbdd7805eae6a5893bf3d5837d14))
+* **observability:** export event loop lag and in-flight generations as metrics ([#272](https://github.com/eve-esa/backend/issues/272)) ([b353031](https://github.com/eve-esa/backend/commit/b353031d841c16c3b1d3b85bd7880c0e30aed3c9))
+* **users:** country and institution on the profile ([#273](https://github.com/eve-esa/backend/issues/273)) ([6eea1a8](https://github.com/eve-esa/backend/commit/6eea1a849c6123d0438ba7311b6996f37aec8f85))
+
+
+### Fixed
+
+* **collections:** release document slots with plain updates on DocumentDB ([#275](https://github.com/eve-esa/backend/issues/275)) ([caedb76](https://github.com/eve-esa/backend/commit/caedb76ba5021fe4ba435a9e72d1f59eebb69088))
+* **commands:** dry runs connect without creating indexes ([#271](https://github.com/eve-esa/backend/issues/271)) ([828d239](https://github.com/eve-esa/backend/commit/828d239c1b77c80ce0ea1f0fbd9c3a86e79198bd))
+* **deps:** patch PyJWT and pypdf advisories ([#241](https://github.com/eve-esa/backend/issues/241)) ([ff932f5](https://github.com/eve-esa/backend/commit/ff932f559b015b1ebfcd835bebd98ab3fbe1b4f6))
+* **limits:** warm the limiter pool in the background, two handshakes at a time ([#280](https://github.com/eve-esa/backend/issues/280)) ([69682a7](https://github.com/eve-esa/backend/commit/69682a70cad4fd9a69bd626969ba223e331ee08c))
+* **limits:** warm the limiter store at start and log every fail-open ([#278](https://github.com/eve-esa/backend/issues/278)) ([9cea1b7](https://github.com/eve-esa/backend/commit/9cea1b787fe047732b97070d59f6aa3aa2b712eb))
+* **limits:** warm the whole limiter pool at startup ([#279](https://github.com/eve-esa/backend/issues/279)) ([8b3d246](https://github.com/eve-esa/backend/commit/8b3d2465b7fd98817f3ec6d922001ce380ccf9f8))
+* **models:** share the endpoint breaker across workers through Valkey ([#256](https://github.com/eve-esa/backend/issues/256)) ([26f73aa](https://github.com/eve-esa/backend/commit/26f73aadbbcd44d1081a221717204f4f0b0ca2d3))
+* **retrieval:** call DeepInfra first for embeddings ([#232](https://github.com/eve-esa/backend/issues/232)) ([a122e77](https://github.com/eve-esa/backend/commit/a122e775bcaa1dd1ee9ed36a9cc1275be267f8bf))
+* **retrieval:** report placeholder source titles as missing ([#238](https://github.com/eve-esa/backend/issues/238)) ([135f92b](https://github.com/eve-esa/backend/commit/135f92b6217c60aacaae9632e7e5afa90805b100))
+
+
+### Changed
+
+* **deps:** drop packages nothing imports ([#242](https://github.com/eve-esa/backend/issues/242)) ([098c79d](https://github.com/eve-esa/backend/commit/098c79d19fd204734b53597166a029070d1e5f4a))
+* remove helpers and schemas nothing calls ([#250](https://github.com/eve-esa/backend/issues/250)) ([748b2e1](https://github.com/eve-esa/backend/commit/748b2e17868e244259799b9289ad697481894f2a))
+* remove modules that nothing imports ([#248](https://github.com/eve-esa/backend/issues/248)) ([ba6d183](https://github.com/eve-esa/backend/commit/ba6d183671fa48d7028e3f4ec9e089e412a00129))
+* **retrieval:** embed queries with an async client ([#255](https://github.com/eve-esa/backend/issues/255)) ([16e8207](https://github.com/eve-esa/backend/commit/16e82079d5c9140463e3722af32a3fadd42fcae5))
+* **retrieval:** read Qdrant with the async client ([#269](https://github.com/eve-esa/backend/issues/269)) ([86960f0](https://github.com/eve-esa/backend/commit/86960f043d70f3cb726a4b845b6703a043222c2e))
+* **retrieval:** rerank without blocking the event loop ([#258](https://github.com/eve-esa/backend/issues/258)) ([b0b22bf](https://github.com/eve-esa/backend/commit/b0b22bf48e0fd5948a2ddea2be051ef8213ca7b2))
+
+
+### Documentation
+
+* align local_setup.md with the OIDC compose stack ([#253](https://github.com/eve-esa/backend/issues/253)) ([ac25063](https://github.com/eve-esa/backend/commit/ac250631517671f4e24875a9dd1e573e8692dd02))
+
 ## [0.2.1](https://github.com/eve-esa/backend/compare/v0.2.0...v0.2.1) (2026-10-01)
 
 
