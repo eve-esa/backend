@@ -38,6 +38,7 @@ from src.services.generate_answer import (
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
+    is_terminal_event,
     persist_runner_cancel,
     raise_if_deadline_expired,
     resolve_generated_model_name,
@@ -1932,8 +1933,9 @@ async def generate_answer_agentic_stream_helper(
     except (asyncio.CancelledError, GeneratorExit) as exc:
         # GeneratorExit: the Stop landed while the consumer was publishing a
         # chunk, and it closed this generator. Only a Stop sets the event; any
-        # other close is not a stop and is left to the consumer.
-        if isinstance(exc, GeneratorExit) and not cancelled():
+        # other close is not a stop and is left to the consumer. Past the final
+        # event the answer is persisted: a Stop must not replace it.
+        if final_emitted or (isinstance(exc, GeneratorExit) and not cancelled()):
             raise
         logger.info("Agentic generation cancelled")
         cancelled_documents, cancelled_use_rag = _retrieval_state()
@@ -2100,6 +2102,7 @@ async def run_agentic_generation_to_bus(
     """
     bus = get_stream_bus()
     deadline = asyncio.timeout(deadline_seconds)
+    terminal_sent = False
     try:
         # Inside the try: a Stop that lands while waiting must still reach the
         # handler below and the cleanup in finally.
@@ -2120,12 +2123,15 @@ async def run_agentic_generation_to_bus(
                 )
             ) as chunks:
                 async for chunk in chunks:
+                    terminal_sent = is_terminal_event(chunk)
                     await bus.publish(message_id, chunk)
         raise_if_deadline_expired(deadline, deadline_seconds)
     except asyncio.CancelledError as exc:
         # Cancelled outside the generator (before it started, or on publish):
         # nothing persisted the turn yet. Idempotent when the generator did.
-        await persist_runner_cancel(message_id, cancel_event, exc)
+        # On the publish of the last event the turn is already persisted.
+        if not terminal_sent:
+            await persist_runner_cancel(message_id, cancel_event, exc)
     except Exception as exc:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.

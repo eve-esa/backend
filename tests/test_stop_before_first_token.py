@@ -9,6 +9,7 @@ SSE subscriber, or while it published a chunk. In each the message stayed
 """
 
 import asyncio
+import contextlib
 import contextvars
 import gc
 import uuid
@@ -16,15 +17,21 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from src.config import REDIS_URL
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.schemas.generation_request import GenerationRequest
-from src.services.agents.core.runner import run_agentic_generation_to_bus
+from src.services.agents.core.runner import (
+    generate_answer_agentic_stream_helper,
+    run_agentic_generation_to_bus,
+)
 from src.services.cancel_manager import CancelManager, get_cancel_manager
 from src.services.generate_answer import (
     finish_turn_if_cancelled_unstarted,
+    generate_answer_stream_generator_helper,
+    persist_message_state,
     run_generation_to_bus,
 )
 from src.services.mcp.artifact_context import (
@@ -37,7 +44,9 @@ from src.services.mcp.retrieval_context import (
     reset_retrieval_context,
     set_retrieval_context,
 )
-from src.services.stream_bus import StreamBus
+from src.services.stream_bus import RedisStreamBus, StreamBus
+from tests.test_agentic_fallback import _FakeStreamGraph, _patched_runner
+from tests.test_endpoint_failover import _FakeGraph, _patch_pipeline
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
 
@@ -292,3 +301,141 @@ async def test_stop_published_before_the_owner_subscribed_is_not_lost():
         if other._redis is not None:
             await other._redis.delete(f"cancelled:{message_id}")
             await other._redis.aclose()
+
+
+# ─── Stop against a streamed answer ───────────────────────────────────────────
+
+
+class _BlocksOnBus(StreamBus):
+    """Publishes until ``when`` matches an event, then blocks on it."""
+
+    def __init__(self, when):
+        super().__init__()
+        self.when = when
+        self.entered = asyncio.Event()
+
+    async def publish(self, key, data):
+        if self.when(data):
+            self.entered.set()
+            await asyncio.Event().wait()
+        await super().publish(key, data)
+
+
+def _is_type(kind):
+    return lambda data: f'"type": "{kind}"' in data
+
+
+_TOKENS = ("Rome ", "is here.")
+
+
+@contextlib.contextmanager
+def _answer_pipeline(kind, monkeypatch):
+    """Real stream helpers over a fake model that answers ``_TOKENS``."""
+    if kind == "agentic":
+        graph = _FakeStreamGraph(
+            messages=[
+                (AIMessage(content=token), {"langgraph_node": "agent"})
+                for token in _TOKENS
+            ]
+        )
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist_message_state,
+        ):
+            yield
+    else:
+        _patch_pipeline(monkeypatch, _FakeGraph({"eve_jsc": list(_TOKENS)}))
+        yield
+
+
+async def _stop_on(kind, turn, monkeypatch, when):
+    user, conversation, message = turn
+    bus = _BlocksOnBus(when)
+    p1, p2 = _patch_bus(bus)
+    with p1, p2, _answer_pipeline(kind, monkeypatch):
+        cm, task = _start(kind, user, conversation, message, None)
+        await asyncio.wait_for(bus.entered.wait(), timeout=5)
+        cm.cancel(message.id)
+        await asyncio.wait_for(task, timeout=5)
+    return await Message.find_by_id_on_primary(message.id)
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_stop_mid_answer_keeps_the_streamed_tokens(turn, kind, monkeypatch):
+    seen = []
+
+    def second_token(data):
+        if '"type": "token"' in data:
+            seen.append(data)
+        return len(seen) == 2
+
+    row = await _stop_on(kind, turn, monkeypatch, second_token)
+
+    assert row.stopped is True
+    assert row.output.startswith("Rome")
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_stop_on_the_final_event_keeps_the_answer(turn, kind, monkeypatch):
+    row = await _stop_on(kind, turn, monkeypatch, _is_type("final"))
+
+    assert row.stopped is False
+    assert row.output == "".join(_TOKENS)
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_a_finished_turn_stays_not_stopped(turn, kind, monkeypatch):
+    user, conversation, message = turn
+    p1, p2 = _patch_bus(StreamBus())
+    with p1, p2, _answer_pipeline(kind, monkeypatch):
+        cm, task = _start(kind, user, conversation, message, None)
+        await asyncio.wait_for(task, timeout=5)
+        cm.cancel(message.id)  # a late Stop: nothing is running any more
+        await asyncio.sleep(0.05)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is False
+    assert row.output == "".join(_TOKENS)
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_a_close_without_a_stop_leaves_the_message_alone(turn, kind, monkeypatch):
+    """GeneratorExit with the Stop event unset: not a stop, nothing persisted."""
+    user, conversation, message = turn
+    request = GenerationRequest(query="a long question", agent="react")
+    not_stopped = asyncio.Event()
+    with _answer_pipeline(kind, monkeypatch):
+        if kind == "agentic":
+            events = generate_answer_agentic_stream_helper(
+                request, conversation.id, message.id, user.id, "json", None, not_stopped
+            )
+        else:
+            events = generate_answer_stream_generator_helper(
+                request, conversation.id, message.id, "json", None, not_stopped, user.id
+            )
+        async for event in events:
+            if '"type": "token"' in event:
+                break
+        await events.aclose()
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is False
+    assert row.output == ""
+
+
+@pytest.mark.no_db
+@pytest.mark.skipif(not REDIS_URL, reason="the late subscriber case is the Redis bus")
+async def test_a_subscriber_attached_after_the_stop_gets_the_stopped_event():
+    bus = RedisStreamBus(REDIS_URL)
+    key = uuid.uuid4().hex
+    stopped = 'data: {"type": "stopped"}\n\n'
+    try:
+        await bus.stop(key, stopped)
+
+        async def _drain():
+            return [item async for item in bus.subscribe(key)]
+
+        assert await asyncio.wait_for(_drain(), timeout=3) == [stopped]
+    finally:
+        await bus._redis.delete(f"sse-stopped:{key}")
+        await bus._redis.aclose()

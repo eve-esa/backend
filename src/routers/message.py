@@ -1155,10 +1155,9 @@ async def stop_conversation(
         cancel_mgr.cancel(message_id)
         try:
             bus = get_stream_bus()
-            await bus.publish(
+            await bus.stop(
                 message_id, f"data: {json.dumps({'type': 'stopped'})}\n\n"
             )
-            await bus.close(message_id)
             logger.info(
                 "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
                 requesting_user.id,
