@@ -258,9 +258,13 @@ async def test_store_down_fails_open_and_skips_the_store(error, caplog):
         decisions = [await lim.check("user:a", "chat") for _ in range(5)]
     assert all(d.allowed and d.reason == SKIPPED_STORE_DOWN for d in decisions)
     assert store.calls == 1
-    lines = [r.getMessage() for r in caplog.records if "store_down" in r.getMessage()]
-    assert len(lines) == 1
-    assert "10.0.0.12" not in lines[0]
+    lines = [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.getMessage().startswith("rate_limit.skipped_store_down")
+    ]
+    assert lines == [(logging.WARNING, "rate_limit.skipped_store_down class=chat skip_s=30")]
+    assert "10.0.0.12" not in caplog.text
     # After the window the store is tried again, and recovers.
     store.error = None
     clock.t += 30
@@ -339,19 +343,32 @@ async def test_contract_shadow_logs_and_lets_every_request_through(install, capl
     install(limiter(mode="shadow"))
     app = _app()
     _principal_override(app, OIDC)
-    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
         responses = await _burst(app, 25)
     assert [r.status_code for r in responses] == [200] * 25
-    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("rate_limit.limited")]
-    assert len(lines) == 5
-    assert lines[0] == "rate_limit.limited subject_kind=user class=chat mode=shadow retry_after_s=1"
+    lines = [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.getMessage().startswith("rate_limit.limited")
+    ]
+    assert lines == [
+        (logging.INFO, "rate_limit.limited subject_kind=user class=chat mode=shadow retry_after_s=1")
+    ] * 5
 
 
-async def test_contract_enforce_answers_429_with_retry_after(install):
+async def test_contract_enforce_answers_429_with_retry_after(install, caplog):
     install(limiter(mode="enforce"))
     app = _app("slow")
     _principal_override(app, API_KEY)
-    responses = await _burst(app, 22)
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        responses = await _burst(app, 22)
+    assert [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.getMessage().startswith("rate_limit.limited")
+    ] == [
+        (logging.WARNING, "rate_limit.limited subject_kind=api_key class=slow mode=enforce retry_after_s=60")
+    ] * 2
     assert [r.status_code for r in responses[:20]] == [200] * 20
     for refused in responses[20:]:
         assert refused.status_code == 429
@@ -426,7 +443,7 @@ async def test_contract_subject_kind_follows_the_bearer(install, caplog):
         app = _app("slow")
         _principal_override(app, principal)
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        with caplog.at_level(logging.INFO, logger=rrl.__name__):
             await _burst(app, 21)
         assert f"subject_kind={kind} " in caplog.text
 
@@ -494,7 +511,7 @@ async def test_logs_carry_no_pii(install, caplog):
         rrl._limiter.skip_until = 0
         await check_or_raise(OIDC, "chat")
     text = caplog.text
-    assert "rate_limit.limited" in text and "store_down" in text
+    assert "rate_limit.limited" in text and "rate_limit.skipped_store_down" in text
     assert USER_ID not in text and API_KEY_ID not in text
     assert not re.search(r"@|eve_[0-9a-f]{8}|eyJ|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", text)
 

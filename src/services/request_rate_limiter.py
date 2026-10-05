@@ -13,11 +13,15 @@ and counted but the request goes through; ``enforce`` answers 429
 
 Fail open: a store error or timeout allows the request, marks it
 ``skipped_store_down`` and makes this worker skip the store for
-``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with one WARNING per window.
+``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with one WARNING per window
+(``rate_limit.skipped_store_down class=<c> skip_s=<n>``).
 ``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns that into 503 ``limiter_unavailable``
 in enforce mode.
 
-Log lines and metric attributes carry the route class and whether the caller
+A refusal logs ``rate_limit.limited subject_kind=<user|api_key> class=<c>
+mode=<shadow|enforce> retry_after_s=<n>``, INFO in shadow and WARNING in
+enforce. Both lines are matched by CloudWatch metric filters in infra: change
+them only together. Log lines and metric attributes carry the route class and whether the caller
 used a session or an API key, never a user id, key, token or address.
 """
 
@@ -125,6 +129,11 @@ def bucket_ttl_ms(rate_per_minute: int, burst: int) -> int:
     return (math.ceil(burst * 60 / rate_per_minute) + 60) * 1000
 
 
+def _format_seconds(value: float) -> str:
+    """``30`` rather than ``30.0`` for a whole number of seconds."""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
 def retry_after_seconds(retry_ms: int) -> int:
     return min(RETRY_AFTER_MAX_S, max(RETRY_AFTER_MIN_S, math.ceil(retry_ms / 1000)))
 
@@ -213,18 +222,20 @@ class RequestRateLimiter:
             allowed=not self.fail_closed, retry_after_s=0, reason=SKIPPED_STORE_DOWN
         )
 
-    def _store_failed(self, exc: BaseException) -> None:
+    def _store_failed(self, exc: BaseException, route_class: str) -> None:
         now = self.clock()
         if now < self.skip_until:
             return
         self.skip_until = now + self.skip_s
-        # The class name only: a redis error message can carry the host.
+        # Contract with the CloudWatch metric filter (infra): keep the literal
+        # token and fields. One line per skip window, no host or address.
         logger.warning(
-            "rate_limit.store_down decision=%s skip_s=%s error=%s",
-            SKIPPED_STORE_DOWN,
-            self.skip_s,
-            type(exc).__name__,
+            "rate_limit.skipped_store_down class=%s skip_s=%s",
+            route_class,
+            _format_seconds(self.skip_s),
         )
+        # The exception class only: a redis error message can carry the host.
+        logger.debug("rate_limit store error type=%s", type(exc).__name__)
 
     async def check(self, subject: str, route_class: str) -> Decision:
         """Take one token for ``subject`` in ``route_class``. Never raises."""
@@ -246,7 +257,7 @@ class RequestRateLimiter:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - any store failure fails open
-            self._store_failed(exc)
+            self._store_failed(exc, route_class)
             return self._store_down()
         if int(allowed) == 1:
             return Decision(True, 0, ALLOWED)
@@ -341,7 +352,10 @@ async def check_or_raise(principal: Principal, route_class: str) -> Optional[Dec
     record_rate_limit_decision(route_class, decision.reason, mode, kind)
     _mark_span(decision.reason)
     if decision.reason == LIMITED:
-        logger.warning(
+        # Contract with the CloudWatch metric filter (infra): keep the literal
+        # token and fields. INFO in shadow, WARNING when a request is refused.
+        logger.log(
+            logging.WARNING if mode == "enforce" else logging.INFO,
             "rate_limit.limited subject_kind=%s class=%s mode=%s retry_after_s=%d",
             kind,
             route_class,
