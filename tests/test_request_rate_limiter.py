@@ -127,13 +127,22 @@ def install(monkeypatch):
 # --- config ---------------------------------------------------------------
 
 
-def test_config_defaults_match_the_plan():
+def test_config_defaults_match_the_plan(monkeypatch):
     assert parse_request_rate_limits("") == DEFAULT_REQUEST_RATE_LIMITS
     assert DEFAULT_REQUEST_RATE_LIMITS["chat"] == {"rate": 60, "burst": 20}
     assert DEFAULT_REQUEST_RATE_LIMITS["proxy"] == {"rate": 60, "burst": 60}
-    assert config.FEATURE_REQUEST_RATE_LIMIT is False
-    assert config.REQUEST_RATE_LIMIT_FAIL_CLOSED is False
-    assert config.REQUEST_RATE_LIMIT_SKIP_S == 30
+    assert set(DEFAULT_REQUEST_RATE_LIMITS) == set(rrl.KNOWN_CLASSES)
+    # The parsers with the variables absent, whatever the process env says.
+    for name in (
+        "FEATURE_REQUEST_RATE_LIMIT",
+        "REQUEST_RATE_LIMIT_FAIL_CLOSED",
+        "REQUEST_RATE_LIMIT_SKIP_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert config.getenv_or("FEATURE_REQUEST_RATE_LIMIT").lower() != "true"
+    assert config.getenv_or("REQUEST_RATE_LIMIT_FAIL_CLOSED").lower() != "true"
+    assert config._tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30) == 30
+    assert config.REQUEST_RATE_LIMIT_SKIP_S >= 1
 
 
 @pytest.mark.parametrize(
@@ -155,11 +164,49 @@ def test_config_invalid_value_keeps_the_defaults(raw, caplog):
     assert "REQUEST_RATE_LIMITS" in caplog.text
 
 
-def test_config_valid_value_replaces_the_defaults_whole():
+def test_config_valid_value_merges_over_the_defaults_per_class():
     limits = parse_request_rate_limits(
-        '{"chat": {"rate": 30, "burst": 5}, "upload": {"rate": 0}}'
+        '{"chat": {"rate": 30, "burst": 5}, "upload": {"rate": 0}, "retrieve": {"rate": -1}}'
     )
-    assert limits == {"chat": {"rate": 30, "burst": 5}, "upload": {"rate": 0, "burst": 0}}
+    assert limits == {
+        **DEFAULT_REQUEST_RATE_LIMITS,
+        "chat": {"rate": 30, "burst": 5},
+        "upload": {"rate": 0, "burst": 0},
+    }
+
+
+def test_config_unknown_class_is_ignored_with_a_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="src.config"):
+        limits = parse_request_rate_limits('{"chats": {"rate": 1, "burst": 1}}')
+    assert limits == DEFAULT_REQUEST_RATE_LIMITS
+    assert "unknown class 'chats'" in caplog.text
+
+
+def test_startup_log_names_the_unlimited_classes(monkeypatch, caplog):
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "")
+    monkeypatch.setattr(rrl, "REQUEST_RATE_LIMIT_FAIL_CLOSED", True)
+    monkeypatch.setattr(
+        rrl,
+        "REQUEST_RATE_LIMITS",
+        {**DEFAULT_REQUEST_RATE_LIMITS, "upload": {"rate": 0, "burst": 0}},
+    )
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        rrl.log_startup_config()
+    assert "unlimited_classes=upload" in caplog.text
+    assert "fail_closed=False" in caplog.text
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and "FAIL_CLOSED ignored" in errors[0].getMessage()
+
+
+async def test_fail_closed_is_ignored_without_redis_url(monkeypatch):
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "")
+    monkeypatch.setattr(rrl, "REQUEST_RATE_LIMIT_FAIL_CLOSED", True)
+    monkeypatch.setattr(rrl, "_limiter", None)
+    lim = rrl.get_request_rate_limiter()
+    assert lim.fail_closed is False
+    assert (await lim.check("user:a", "chat")).allowed is True
 
 
 @pytest.mark.parametrize(
@@ -240,6 +287,7 @@ async def test_bucket_one_script_call_per_check_with_the_ttl():
         ("redis://127.0.0.1:6379/0", "redis://127.0.0.1:6379/1"),
         ("rediss://cache.internal:6379", "rediss://cache.internal:6379/1"),
         ("redis://h:6379/0?db=0&ssl_cert_reqs=none", "redis://h:6379/1?ssl_cert_reqs=none"),
+        ("unix:///var/run/redis.sock?db=0", "unix:///var/run/redis.sock?db=1"),
     ],
 )
 def test_store_url_points_at_database_1(url, expected):
@@ -249,8 +297,21 @@ def test_store_url_points_at_database_1(url, expected):
 # --- store down -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("error", [ConnectionError("refused by 10.0.0.12:6379"), TimeoutError()])
-async def test_store_down_fails_open_and_skips_the_store(error, caplog):
+def _redis_connection_error(message):
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    return RedisConnectionError(message)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("refused by 10.0.0.12:6379"),
+        OSError("socket closed by 10.0.0.12"),
+        _redis_connection_error("Error connecting to 10.0.0.12:6379"),
+    ],
+)
+async def test_store_connection_error_opens_the_skip_window(error, caplog):
     store, clock = FakeStore(), Clock()
     store.error = error
     lim = limiter(store, clock=clock, skip_s=30)
@@ -270,6 +331,40 @@ async def test_store_down_fails_open_and_skips_the_store(error, caplog):
     clock.t += 30
     assert (await lim.check("user:a", "chat")).reason == ALLOWED
     assert store.calls == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError(), _redis_connection_error("No connection available.")],
+)
+async def test_store_deadline_or_busy_pool_fails_open_for_that_request_only(error, caplog):
+    store, clock = FakeStore(), Clock()
+    store.error = error
+    lim = limiter(store, clock=clock)
+    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        for _ in range(2):
+            assert (await lim.check("user:a", "chat")).reason == SKIPPED_STORE_DOWN
+        store.error = None
+        assert (await lim.check("user:a", "chat")).reason == ALLOWED
+        store.error = error
+        # Two more do not open the window: the success reset the count.
+        for _ in range(2):
+            await lim.check("user:a", "chat")
+    assert store.calls == 5
+    assert lim.skip_until == 0.0
+    assert "skipped_store_down" not in caplog.text
+
+
+async def test_store_three_failures_in_a_row_open_the_window(caplog):
+    store, clock = FakeStore(), Clock()
+    store.error = TimeoutError()
+    lim = limiter(store, clock=clock, skip_s=30)
+    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        for _ in range(5):
+            await lim.check("user:a", "chat")
+    assert store.calls == 3
+    assert lim.skip_until == clock.t + 30
+    assert caplog.text.count("rate_limit.skipped_store_down class=chat skip_s=30") == 1
 
 
 async def test_store_hang_is_bounded_by_the_timeout():
@@ -351,9 +446,10 @@ async def test_contract_shadow_logs_and_lets_every_request_through(install, capl
         for r in caplog.records
         if r.getMessage().startswith("rate_limit.limited")
     ]
+    # Five refusals, one line: the first refusal of the window.
     assert lines == [
         (logging.INFO, "rate_limit.limited subject_kind=user class=chat mode=shadow retry_after_s=1")
-    ] * 5
+    ]
 
 
 async def test_contract_enforce_answers_429_with_retry_after(install, caplog):
@@ -368,7 +464,7 @@ async def test_contract_enforce_answers_429_with_retry_after(install, caplog):
         if r.getMessage().startswith("rate_limit.limited")
     ] == [
         (logging.WARNING, "rate_limit.limited subject_kind=api_key class=slow mode=enforce retry_after_s=60")
-    ] * 2
+    ]
     assert [r.status_code for r in responses[:20]] == [200] * 20
     for refused in responses[20:]:
         assert refused.status_code == 429
@@ -438,8 +534,8 @@ async def test_contract_caller_resolved_once_with_get_current_user(install, monk
 
 
 async def test_contract_subject_kind_follows_the_bearer(install, caplog):
-    install(limiter(mode="shadow"))
     for principal, kind in ((OIDC, "user"), (API_KEY, "api_key")):
+        install(limiter(mode="shadow"))
         app = _app("slow")
         _principal_override(app, principal)
         caplog.clear()
@@ -493,6 +589,31 @@ async def test_counter_attributes(install, monkeypatch):
         tuple(sorted({**base, "decision": "allowed"}.items())): 20,
         tuple(sorted({**base, "decision": "limited"}.items())): 1,
     }
+
+
+async def test_limited_line_once_per_subject_class_and_window(install, caplog):
+    clock = Clock()
+    install(limiter(mode="enforce", clock=clock))
+    other = Principal("6ac1cccccccccccccccccccc", AUTH_TYPE_OIDC)
+
+    async def refuse(principal, cls, n):
+        for _ in range(n):
+            with pytest.raises(rrl.RequestRateLimited):
+                await check_or_raise(principal, cls)
+
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        for principal in (OIDC, other):
+            for _ in range(20):
+                await check_or_raise(principal, "slow")
+        await refuse(OIDC, "slow", 50)
+        await refuse(other, "slow", 5)
+        clock.t += rrl.LIMITED_LOG_WINDOW_S - 1
+        await refuse(OIDC, "slow", 5)
+        clock.t += 1
+        await refuse(OIDC, "slow", 5)
+    lines = [r for r in caplog.records if r.getMessage().startswith("rate_limit.limited")]
+    # OIDC twice (two windows), the other user once; 65 refusals in all.
+    assert len(lines) == 3
 
 
 def test_counter_is_a_no_op_without_a_meter_provider(monkeypatch):
@@ -569,4 +690,27 @@ async def test_real_store_refills_from_the_server_clock():
     finally:
         if lim._client is not None:
             await lim._client.delete(bucket_key(subject, "fast"))
+        await lim.aclose()
+
+
+async def test_real_store_busy_pool_fails_open_without_the_window():
+    lim = await _real_limiter(limits=LIMITS, max_connections=1)
+    subject = f"user:test-{uuid.uuid4().hex}"
+    try:
+        assert (await lim.check(subject, "chat")).reason == ALLOWED
+        pool = lim._client.connection_pool
+        held = await pool.get_connection()
+        try:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            decision = await lim.check(subject, "chat")
+            assert loop.time() - started < 1.5
+            assert decision.reason == SKIPPED_STORE_DOWN and decision.allowed
+            assert lim.skip_until == 0.0
+        finally:
+            await pool.release(held)
+        assert (await lim.check(subject, "chat")).reason == ALLOWED
+    finally:
+        if lim._client is not None:
+            await lim._client.delete(bucket_key(subject, "chat"))
         await lim.aclose()

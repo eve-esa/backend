@@ -420,8 +420,8 @@ def parse_request_rate_limit_mode(raw: str) -> str:
 REQUEST_RATE_LIMIT_MODE = parse_request_rate_limit_mode(
     getenv_or("REQUEST_RATE_LIMIT_MODE", "shadow")
 )
-# Rate is tokens per minute, burst the bucket size. A class missing here or
-# with rate 0 is unlimited.
+# Rate is tokens per minute, burst the bucket size. REQUEST_RATE_LIMITS
+# overrides these per class; rate 0 makes a class unlimited.
 DEFAULT_REQUEST_RATE_LIMITS: Dict[str, Dict[str, int]] = {
     "chat": {"rate": 60, "burst": 20},
     "retrieve": {"rate": 120, "burst": 40},
@@ -433,27 +433,31 @@ DEFAULT_REQUEST_RATE_LIMITS: Dict[str, Dict[str, int]] = {
 
 
 def parse_request_rate_limits(raw: str) -> Dict[str, Dict[str, int]]:
-    """Parse REQUEST_RATE_LIMITS, keeping the defaults when the value is invalid.
+    """Parse REQUEST_RATE_LIMITS as overrides merged over the defaults per class.
 
     Tolerant like ``_tolerant_int_env``: a typo in tfvars must not crash every
-    worker at import. A valid JSON object replaces the defaults whole, so a
-    class left out of it is unlimited. Each class needs an integer ``rate`` >= 0
-    and, when the rate is above 0, an integer ``burst`` >= 1.
+    worker at import. Invalid JSON, or a value that is not an object, keeps
+    the defaults. A known class with an invalid entry keeps its default; an
+    unknown class name is ignored, both with a WARNING. Each entry needs an
+    integer ``rate`` >= 0 and, when the rate is above 0, an integer
+    ``burst`` >= 1; rate 0 makes the class unlimited.
     """
-    defaults = {k: dict(v) for k, v in DEFAULT_REQUEST_RATE_LIMITS.items()}
+    limits = {k: dict(v) for k, v in DEFAULT_REQUEST_RATE_LIMITS.items()}
     if not raw:
-        return defaults
+        return limits
     log = logging.getLogger(__name__)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
         log.warning("Ignoring invalid JSON in REQUEST_RATE_LIMITS, keeping defaults")
-        return defaults
+        return limits
     if not isinstance(parsed, dict):
         log.warning("REQUEST_RATE_LIMITS is not a JSON object, keeping defaults")
-        return defaults
-    limits: Dict[str, Dict[str, int]] = {}
+        return limits
     for cls, spec in parsed.items():
+        if cls not in DEFAULT_REQUEST_RATE_LIMITS:
+            log.warning("Ignoring unknown class %r in REQUEST_RATE_LIMITS", cls)
+            continue
         rate = spec.get("rate") if isinstance(spec, dict) else None
         burst = spec.get("burst") if isinstance(spec, dict) else None
         valid = (
@@ -467,11 +471,11 @@ def parse_request_rate_limits(raw: str) -> Dict[str, Dict[str, int]]:
         )
         if not valid:
             log.warning(
-                "Ignoring invalid REQUEST_RATE_LIMITS entry for class %r, keeping defaults",
+                "Ignoring invalid REQUEST_RATE_LIMITS entry for class %r, keeping its default",
                 cls,
             )
-            return defaults
-        limits[str(cls)] = {"rate": rate, "burst": burst if rate else 0}
+            continue
+        limits[cls] = {"rate": rate, "burst": burst if rate else 0}
     return limits
 
 
@@ -482,7 +486,9 @@ REQUEST_RATE_LIMIT_FAIL_CLOSED = (
     getenv_or("REQUEST_RATE_LIMIT_FAIL_CLOSED").lower() == "true"
 )
 # After a store error the worker skips Valkey for this many seconds.
-REQUEST_RATE_LIMIT_SKIP_S = _tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30)
+# At least 1: a zero window would make every request of an outage pay the
+# store deadline and log its own WARNING.
+REQUEST_RATE_LIMIT_SKIP_S = max(1, _tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30))
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:

@@ -487,7 +487,10 @@ class OpenAIProxyDispatcher:
 
         # Per-user request rate limit, after the allowlist (an unknown path is
         # still a 404) and before the user lookup, the body and the token
-        # budget: a refused call costs no Mongo read and reserves nothing.
+        # budget: a refused call reads no body and reserves nothing. Mongo is
+        # still touched by the principal lookup above (an API key's
+        # last_used_at stamp, the approval check); only the edge rule on API
+        # keys keeps a key flood off Mongo.
         try:
             await check_or_raise(principal, "proxy")
         except RequestRateLimited as limited:

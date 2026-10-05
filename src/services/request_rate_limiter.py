@@ -11,18 +11,25 @@ Off by default (``FEATURE_REQUEST_RATE_LIMIT``): no Redis client is built and
 and counted but the request goes through; ``enforce`` answers 429
 ``rate_limited`` with ``Retry-After``.
 
-Fail open: a store error or timeout allows the request, marks it
-``skipped_store_down`` and makes this worker skip the store for
-``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with one WARNING per window
-(``rate_limit.skipped_store_down class=<c> skip_s=<n>``).
-``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns that into 503 ``limiter_unavailable``
-in enforce mode.
+Fail open: a store failure allows the request and marks it
+``skipped_store_down``. A deadline overrun or a busy connection pool fails
+open for that request only, since event loop lag under load looks the same.
+A connection or socket error, or three failures in a row of any kind, makes
+this worker skip the store for ``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with
+one WARNING per window (``rate_limit.skipped_store_down class=<c> skip_s=<n>``).
+``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns a skipped check into 503
+``limiter_unavailable`` in enforce mode (ignored without ``REDIS_URL``).
 
 A refusal logs ``rate_limit.limited subject_kind=<user|api_key> class=<c>
 mode=<shadow|enforce> retry_after_s=<n>``, INFO in shadow and WARNING in
-enforce. Both lines are matched by CloudWatch metric filters in infra: change
-them only together. Log lines and metric attributes carry the route class and whether the caller
-used a session or an API key, never a user id, key, token or address.
+enforce, for the first refusal of a subject and class in each 60 s window of
+a worker only: a flood must not turn into one log line per request. The
+CloudWatch alarm built on that line therefore counts limited subject windows
+per worker, not refused requests; the ``eve.rate_limit.decisions`` counter
+counts every decision. Both log lines are matched by CloudWatch metric
+filters in infra: change them only together. Log lines and metric attributes
+carry the route class and whether the caller used a session or an API key,
+never a user id, key, token or address.
 """
 
 import asyncio
@@ -64,6 +71,13 @@ STORE_MAX_CONNECTIONS = 10
 RETRY_AFTER_MIN_S = 1
 RETRY_AFTER_MAX_S = 60
 SPAN_ATTRIBUTE = "eve.rate_limit.decision"
+# Failures in a row of any kind that open the skip window.
+STORE_DOWN_AFTER_FAILURES = 3
+# One rate_limit.limited line per subject and class per window, per worker.
+LIMITED_LOG_WINDOW_S = 60
+# Bound on the remembered subjects; expired entries go first.
+LIMITED_LOG_MAX_SUBJECTS = 4096
+KNOWN_CLASSES = ("chat", "retrieve", "proxy", "mcp", "upload", "errlog")
 
 ALLOWED = "allowed"
 LIMITED = "limited"
@@ -145,8 +159,34 @@ def store_url(url: str, db: int = STORE_DB) -> str:
     keyword, so the database is rewritten in the URL itself.
     """
     parts = urlsplit(url)
-    query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if k != "db"])
-    return urlunsplit((parts.scheme, parts.netloc, f"/{db}", query, parts.fragment))
+    pairs = [(k, v) for k, v in parse_qsl(parts.query) if k != "db"]
+    if parts.scheme in ("redis", "rediss"):
+        return urlunsplit(
+            (parts.scheme, parts.netloc, f"/{db}", urlencode(pairs), parts.fragment)
+        )
+    # unix://: the path is the socket, the database goes in the query.
+    # Built by hand: urlunsplit drops the empty authority of unix:///path.
+    pairs.append(("db", str(db)))
+    return f"{parts.scheme}://{parts.netloc}{parts.path}?{urlencode(pairs)}"
+
+
+def opens_skip_window(exc: BaseException) -> bool:
+    """True for a connection or socket error: the store itself is unreachable.
+
+    A deadline overrun (``asyncio.wait_for``, a socket read timeout) or a busy
+    pool ("No connection available.") is False: under load the event loop
+    alone can cause both, and skipping the store then would switch the limit
+    off exactly when a flood arrives.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import MaxConnectionsError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    if isinstance(exc, (TimeoutError, RedisTimeoutError, MaxConnectionsError)):
+        return False
+    if isinstance(exc, RedisConnectionError):
+        return "No connection available" not in str(exc)
+    return isinstance(exc, OSError)
 
 
 def _build_client(url: str, timeout_s: float, max_connections: int) -> Any:
@@ -198,8 +238,10 @@ class RequestRateLimiter:
         self.timeout_s = timeout_s
         self.max_connections = max_connections
         self.skip_until = 0.0
+        self.consecutive_failures = 0
         self._client = client
         self._script = None
+        self._limited_logged: Dict[tuple, float] = {}
 
     def _limit(self, route_class: str) -> Optional[Dict[str, int]]:
         spec = self.limits.get(route_class)
@@ -211,7 +253,7 @@ class RequestRateLimiter:
         if self._script is None:
             if self._client is None:
                 if not self.url:
-                    raise RuntimeError("REDIS_URL is not set")
+                    raise ConnectionError("REDIS_URL is not set")
                 self._client = _build_client(self.url, self.timeout_s, self.max_connections)
             # register_script reloads the script on NOSCRIPT (failover, flush).
             self._script = self._client.register_script(TOKEN_BUCKET_LUA)
@@ -223,10 +265,19 @@ class RequestRateLimiter:
         )
 
     def _store_failed(self, exc: BaseException, route_class: str) -> None:
+        self.consecutive_failures += 1
+        # The exception class only: a redis error message can carry the host.
+        logger.debug("rate_limit store error type=%s", type(exc).__name__)
+        if not (
+            opens_skip_window(exc)
+            or self.consecutive_failures >= STORE_DOWN_AFTER_FAILURES
+        ):
+            return
         now = self.clock()
         if now < self.skip_until:
             return
         self.skip_until = now + self.skip_s
+        self.consecutive_failures = 0
         # Contract with the CloudWatch metric filter (infra): keep the literal
         # token and fields. One line per skip window, no host or address.
         logger.warning(
@@ -234,8 +285,21 @@ class RequestRateLimiter:
             route_class,
             _format_seconds(self.skip_s),
         )
-        # The exception class only: a redis error message can carry the host.
-        logger.debug("rate_limit store error type=%s", type(exc).__name__)
+
+    def should_log_limited(self, subject: str, route_class: str) -> bool:
+        """True for the first refusal of ``subject`` in ``route_class`` per window."""
+        now = self.clock()
+        key = (subject, route_class)
+        if self._limited_logged.get(key, 0.0) > now:
+            return False
+        if len(self._limited_logged) >= LIMITED_LOG_MAX_SUBJECTS:
+            self._limited_logged = {
+                k: until for k, until in self._limited_logged.items() if until > now
+            }
+            if len(self._limited_logged) >= LIMITED_LOG_MAX_SUBJECTS:
+                self._limited_logged.clear()
+        self._limited_logged[key] = now + LIMITED_LOG_WINDOW_S
+        return True
 
     async def check(self, subject: str, route_class: str) -> Decision:
         """Take one token for ``subject`` in ``route_class``. Never raises."""
@@ -259,6 +323,7 @@ class RequestRateLimiter:
         except Exception as exc:  # noqa: BLE001 - any store failure fails open
             self._store_failed(exc, route_class)
             return self._store_down()
+        self.consecutive_failures = 0
         if int(allowed) == 1:
             return Decision(True, 0, ALLOWED)
         return Decision(False, retry_after_seconds(int(retry_ms)), LIMITED)
@@ -303,19 +368,49 @@ def get_request_rate_limiter() -> Optional[RequestRateLimiter]:
     if not FEATURE_REQUEST_RATE_LIMIT:
         return None
     if _limiter is None:
-        if not REDIS_URL:
-            logger.warning(
-                "FEATURE_REQUEST_RATE_LIMIT is on without REDIS_URL: every check "
-                "is skipped_store_down"
-            )
         _limiter = RequestRateLimiter(
             limits=REQUEST_RATE_LIMITS,
             mode=REQUEST_RATE_LIMIT_MODE,
-            fail_closed=REQUEST_RATE_LIMIT_FAIL_CLOSED,
+            # Without a store fail closed would refuse every covered request.
+            fail_closed=REQUEST_RATE_LIMIT_FAIL_CLOSED and bool(REDIS_URL),
             skip_s=REQUEST_RATE_LIMIT_SKIP_S,
             url=REDIS_URL,
         )
     return _limiter
+
+
+def log_startup_config() -> None:
+    """Log the limiter setup once at startup (app lifespan). Silent when off."""
+    if not FEATURE_REQUEST_RATE_LIMIT:
+        return
+    unlimited = [
+        cls
+        for cls in KNOWN_CLASSES
+        if int((REQUEST_RATE_LIMITS.get(cls) or {}).get("rate") or 0) <= 0
+    ]
+    logger.info(
+        "rate_limit.config mode=%s fail_closed=%s unlimited_classes=%s",
+        REQUEST_RATE_LIMIT_MODE,
+        REQUEST_RATE_LIMIT_FAIL_CLOSED and bool(REDIS_URL),
+        ",".join(unlimited) or "none",
+    )
+    if not REDIS_URL:
+        logger.warning(
+            "FEATURE_REQUEST_RATE_LIMIT is on without REDIS_URL: every check is "
+            "skipped_store_down"
+        )
+        if REQUEST_RATE_LIMIT_FAIL_CLOSED:
+            logger.error(
+                "REQUEST_RATE_LIMIT_FAIL_CLOSED ignored: REDIS_URL is not set, so "
+                "it would refuse every covered request"
+            )
+
+
+async def aclose_request_rate_limiter() -> None:
+    """Close the process limiter's store client (app lifespan shutdown)."""
+    limiter = _limiter
+    if limiter is not None:
+        await limiter.aclose()
 
 
 def _subject_kind(principal: Principal) -> str:
@@ -344,14 +439,15 @@ async def check_or_raise(principal: Principal, route_class: str) -> Optional[Dec
     limiter = get_request_rate_limiter()
     if limiter is None:
         return None
-    decision = await limiter.check(f"user:{principal.user_id}", route_class)
+    subject = f"user:{principal.user_id}"
+    decision = await limiter.check(subject, route_class)
     if decision.reason == UNLIMITED:
         return decision
     kind = _subject_kind(principal)
     mode = limiter.mode
     record_rate_limit_decision(route_class, decision.reason, mode, kind)
     _mark_span(decision.reason)
-    if decision.reason == LIMITED:
+    if decision.reason == LIMITED and limiter.should_log_limited(subject, route_class):
         # Contract with the CloudWatch metric filter (infra): keep the literal
         # token and fields. INFO in shadow, WARNING when a request is refused.
         logger.log(

@@ -15,7 +15,6 @@ import pytest
 
 from server import app as _root_app
 from src.database.models.api_key import ApiKey
-from src.database.models.message import Message
 from src.middlewares.auth import AUTH_TYPE_API_KEY, Principal
 from src.routers.mcp_proxy import MCPProxyDispatcher
 from src.services import load_shedding
@@ -119,9 +118,17 @@ async def test_every_covered_route_refuses_in_enforce_before_any_work(
 ):
     user, token = user_and_token
     store = rate_limit("enforce")
-    response = await async_client.post(
-        url, headers={"Authorization": f"Bearer {token}"}, **kwargs
-    )
+    # Spies on the next two steps of a chat route: a refusal must come first.
+    with patch(
+        "src.routers.message.acquire_generation_slot_or_raise", new_callable=AsyncMock
+    ) as slot, patch(
+        "src.routers.message.enforce_token_budget_or_raise", new_callable=AsyncMock
+    ) as budget:
+        response = await async_client.post(
+            url, headers={"Authorization": f"Bearer {token}"}, **kwargs
+        )
+    slot.assert_not_awaited()
+    budget.assert_not_awaited()
     assert response.status_code == 429, response.text
     assert response.json()["detail"] == {
         "code": "rate_limited",
@@ -129,8 +136,6 @@ async def test_every_covered_route_refuses_in_enforce_before_any_work(
     }
     assert response.headers["Retry-After"] == "5"
     assert store.calls == 1
-    assert load_shedding._limiter.in_flight == 0
-    assert await Message.find_all(filter_dict={"conversation_id": MISSING_ID}) == []
 
 
 @pytest.mark.parametrize("url, route_class, kwargs", COVERED, ids=[c[0] for c in COVERED])

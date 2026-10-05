@@ -48,9 +48,13 @@ Nothing is persisted and no SSE stream opens. The object codes sit in `detail.co
 On `/v1` the `rate_limited` 429 also carries the OpenAI envelope
 (`error.type` `rate_limit_error`, `error.code` `rate_limited`) and
 `x-should-retry: true`, so the OpenAI SDK waits for `Retry-After` and retries.
-Route classes: `chat` (the nine generation and hallucination routes, `/generate`,
-`/generate-llm`), `retrieve`, `proxy` (`/v1`), `mcp` (`tools/call` only),
-`upload` (documents and artifacts), `errlog` (`POST /log-error`).
+Route classes: `chat` (the nine generation and hallucination routes, `/generate`
+and `/generate-llm` included), `retrieve`, `proxy` (`/v1`), `mcp` (`tools/call`
+only), `upload` (documents and artifacts), `errlog` (`POST /log-error`).
+
+The check runs before the request body is validated, so a request that ends in
+422 still spends a token. On the two upload routes the whole multipart body is
+read and spooled before the check: the limit caps upload requests, not bytes.
 
 ## `metadata.endpoint`
 
