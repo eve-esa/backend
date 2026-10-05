@@ -31,11 +31,13 @@ deadline of ``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
 ``socket_connect_timeout``) plus 0.25 s, while the pool wait and every socket
 read (AUTH, SELECT, the script) stay bounded by 0.25 s each. On an open
 connection a check therefore still fails within 0.25 s of a stalled read; only
-a reconnect may use the extra second. At startup the lifespan opens one
-connection ahead of traffic (:func:`warm_up_request_rate_limiter`, a PING on
-database 1, retried within 3 s) and logs ``rate_limit.store_ready
-latency_ms=<n>`` at INFO, or ``rate_limit.skipped_store_down class=startup
-skip_s=0 type=<ExceptionClass>`` at WARNING; startup never fails on it.
+a reconnect may use the extra second. At startup the lifespan opens the whole
+pool ahead of traffic (:func:`warm_up_request_rate_limiter`: every connection
+at once, a PING on database 1 each, retried within 3 s), since a cold burst
+would otherwise open them all under the check deadline, and logs
+``rate_limit.store_ready latency_ms=<n> connections=<k>`` at INFO, or
+``rate_limit.skipped_store_down class=startup skip_s=0 type=<ExceptionClass>``
+at WARNING; startup never fails on it.
 
 A refusal logs ``rate_limit.limited subject_kind=<user|api_key> class=<c>
 mode=<shadow|enforce> retry_after_s=<n>``, INFO in shadow and WARNING in
@@ -381,49 +383,69 @@ class RequestRateLimiter:
             return Decision(True, 0, ALLOWED)
         return Decision(False, retry_after_seconds(int(retry_ms)), LIMITED)
 
-    async def warm_up(self, deadline_s: float = WARM_UP_DEADLINE_S) -> bool:
-        """Open one store connection ahead of traffic. Never raises.
+    async def warm_up(self, deadline_s: float = WARM_UP_DEADLINE_S) -> int:
+        """Open the whole store pool ahead of traffic. Never raises.
 
-        PINGs database 1 through the request pool, so the connection it opens
-        serves the first checks. Each attempt is bounded by the pool's connect
-        and read timeouts; failed attempts are retried until ``deadline_s``.
-        Logs ``rate_limit.store_ready`` or the startup ``skipped_store_down``
-        line and returns whether the store answered.
+        Takes ``max_connections`` connections from the request pool at once,
+        PINGs database 1 on each and releases them all, so the first burst of
+        checks finds open connections instead of opening them (TLS) under the
+        check deadline. Each connection is retried until ``deadline_s``; the
+        ones still not open then are given up. Logs ``rate_limit.store_ready
+        latency_ms=<n> connections=<k>`` when at least one opened, else the
+        startup ``skipped_store_down`` line, and returns ``k``.
         """
         loop = asyncio.get_running_loop()
         started = loop.time()
         last_exc: BaseException = TimeoutError()
+        try:
+            pool = self._get_client().connection_pool
+        except Exception as exc:  # noqa: BLE001 - startup must not fail
+            self._log_store_down("startup", 0, exc)
+            return 0
 
-        async def _ping_until_ok() -> None:
+        async def _open_one() -> Any:
             nonlocal last_exc
             while True:
                 try:
-                    await self._get_client().ping()
-                    return
+                    conn = await pool.get_connection()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - retried, then logged
                     last_exc = exc
-                    if not self.url and self._client is None:
+                else:
+                    try:
+                        await conn.send_command("PING")
+                        await conn.read_response()
+                        return conn
+                    except asyncio.CancelledError:
+                        await pool.release(conn)
                         raise
+                    except Exception as exc:  # noqa: BLE001 - retried, then logged
+                        last_exc = exc
+                        await pool.release(conn)
                 await asyncio.sleep(WARM_UP_RETRY_PAUSE_S)
 
-        try:
-            await asyncio.wait_for(_ping_until_ok(), timeout=deadline_s)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - startup must not fail
-            if isinstance(exc, asyncio.TimeoutError) and not isinstance(
-                last_exc, asyncio.TimeoutError
-            ):
-                exc = last_exc
-            self._log_store_down("startup", 0, exc)
-            return False
+        tasks = [asyncio.ensure_future(_open_one()) for _ in range(self.max_connections)]
+        done, pending = await asyncio.wait(tasks, timeout=deadline_s)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        opened = [t.result() for t in done if not t.cancelled() and t.exception() is None]
+        for conn in opened:
+            try:
+                await pool.release(conn)
+            except Exception:  # noqa: BLE001 - startup must not fail
+                pass
+        if not opened:
+            self._log_store_down("startup", 0, last_exc)
+            return 0
         logger.info(
-            "rate_limit.store_ready latency_ms=%d",
+            "rate_limit.store_ready latency_ms=%d connections=%d",
             round((loop.time() - started) * 1000),
+            len(opened),
         )
-        return True
+        return len(opened)
 
     async def aclose(self) -> None:
         client, self._client, self._script = self._client, None, None
@@ -505,7 +527,7 @@ def log_startup_config() -> None:
 
 
 async def warm_up_request_rate_limiter() -> None:
-    """Open the store connection at startup (app lifespan). Never raises.
+    """Open the store connection pool at startup (app lifespan). Never raises.
 
     Does nothing when the feature is off or ``REDIS_URL`` is unset: the
     startup config line already warns about the missing store.
