@@ -13,13 +13,29 @@ and counted but the request goes through; ``enforce`` answers 429
 
 Fail open: a store failure allows the request and marks it
 ``skipped_store_down``. A deadline overrun or a busy connection pool fails
-open for that request only, since event loop lag under load looks the same.
-A connection or socket error, or three failures in a row of any kind, makes
-this worker skip the store for ``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with
-one WARNING per window
-(``rate_limit.skipped_store_down class=<c> skip_s=<n> type=<ExceptionClass>``).
+open for that request only, since event loop lag under load looks the same;
+it logs ``rate_limit.skipped_store_down class=<c> skip_s=0
+type=<ExceptionClass>`` at WARNING, once per class and 60 s window of a
+worker. A connection or socket error, or three failures in a row of any kind,
+makes this worker skip the store for ``REQUEST_RATE_LIMIT_SKIP_S`` seconds,
+with one WARNING per window (the same line with ``skip_s=<n>``). Every fail
+open is therefore visible to the store-down metric filter in infra.
 ``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns a skipped check into 503
 ``limiter_unavailable`` in enforce mode (ignored without ``REDIS_URL``).
+
+Deadlines: a new connection to ElastiCache costs a TCP and TLS handshake,
+which alone can take longer than 0.25 s, and a check cannot know cheaply
+whether the connection the pool hands out is open (redis-py drops one whose
+command was cancelled and hands it out again). So every check runs under one
+deadline of ``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
+``socket_connect_timeout``) plus 0.25 s, while the pool wait and every socket
+read (AUTH, SELECT, the script) stay bounded by 0.25 s each. On an open
+connection a check therefore still fails within 0.25 s of a stalled read; only
+a reconnect may use the extra second. At startup the lifespan opens one
+connection ahead of traffic (:func:`warm_up_request_rate_limiter`, a PING on
+database 1, retried within 3 s) and logs ``rate_limit.store_ready
+latency_ms=<n>`` at INFO, or ``rate_limit.skipped_store_down class=startup
+skip_s=0 type=<ExceptionClass>`` at WARNING; startup never fails on it.
 
 A refusal logs ``rate_limit.limited subject_kind=<user|api_key> class=<c>
 mode=<shadow|enforce> retry_after_s=<n>``, INFO in shadow and WARNING in
@@ -47,6 +63,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from src.config import (
     FEATURE_REQUEST_RATE_LIMIT,
     REDIS_URL,
+    REQUEST_RATE_LIMIT_CONNECT_S,
     REQUEST_RATE_LIMIT_FAIL_CLOSED,
     REQUEST_RATE_LIMIT_MODE,
     REQUEST_RATE_LIMIT_SKIP_S,
@@ -68,13 +85,17 @@ logger = logging.getLogger(__name__)
 # limiter keys never mix with theirs.
 STORE_DB = 1
 STORE_TIMEOUT_S = 0.25
+# Total time the startup PING may take, retries included.
+WARM_UP_DEADLINE_S = 3.0
+WARM_UP_RETRY_PAUSE_S = 0.2
 STORE_MAX_CONNECTIONS = 10
 RETRY_AFTER_MIN_S = 1
 RETRY_AFTER_MAX_S = 60
 SPAN_ATTRIBUTE = "eve.rate_limit.decision"
 # Failures in a row of any kind that open the skip window.
 STORE_DOWN_AFTER_FAILURES = 3
-# One rate_limit.limited line per subject and class per window, per worker.
+# One rate_limit.limited line per subject and class per window, per worker;
+# the same window samples the per-request skipped_store_down line per class.
 LIMITED_LOG_WINDOW_S = 60
 # Bound on the remembered subjects; expired entries go first.
 LIMITED_LOG_MAX_SUBJECTS = 4096
@@ -190,12 +211,19 @@ def opens_skip_window(exc: BaseException) -> bool:
     return isinstance(exc, OSError)
 
 
-def _build_client(url: str, timeout_s: float, max_connections: int) -> Any:
+def _build_client(
+    url: str,
+    timeout_s: float,
+    max_connections: int,
+    connect_timeout_s: Optional[float] = None,
+) -> Any:
     """Async client with short timeouts, no retries and a bounded pool.
 
     The blocking pool waits up to ``timeout_s`` for a free connection instead
     of failing a burst past ``max_connections`` with "Too many connections",
-    which would read as a store outage. Building it opens no socket.
+    which would read as a store outage. Opening a connection (TCP, TLS
+    handshake) may take ``connect_timeout_s``; every read takes ``timeout_s``.
+    Building it opens no socket.
     """
     from redis.asyncio import BlockingConnectionPool, Redis
     from redis.asyncio.retry import Retry
@@ -207,7 +235,7 @@ def _build_client(url: str, timeout_s: float, max_connections: int) -> Any:
         store_url(url),
         max_connections=max_connections,
         timeout=timeout_s,
-        socket_connect_timeout=timeout_s,
+        socket_connect_timeout=connect_timeout_s or timeout_s,
         socket_timeout=timeout_s,
         retry=Retry(NoBackoff(), 0),
     )
@@ -228,6 +256,7 @@ class RequestRateLimiter:
         client: Any = None,
         clock: Callable[[], float] = time.monotonic,
         timeout_s: float = STORE_TIMEOUT_S,
+        connect_timeout_s: float = STORE_TIMEOUT_S,
         max_connections: int = STORE_MAX_CONNECTIONS,
     ) -> None:
         self.limits = limits
@@ -237,6 +266,7 @@ class RequestRateLimiter:
         self.url = url
         self.clock = clock
         self.timeout_s = timeout_s
+        self.connect_timeout_s = max(connect_timeout_s, timeout_s)
         self.max_connections = max_connections
         self.skip_until = 0.0
         self.consecutive_failures = 0
@@ -250,12 +280,22 @@ class RequestRateLimiter:
             return None
         return spec
 
+    def _get_client(self) -> Any:
+        if self._client is None:
+            if not self.url:
+                raise ConnectionError("REDIS_URL is not set")
+            self._client = _build_client(
+                self.url, self.timeout_s, self.max_connections, self.connect_timeout_s
+            )
+        return self._client
+
+    def _deadline_s(self) -> float:
+        """Connect plus command: the pool and socket timeouts bound the rest."""
+        return self.connect_timeout_s + self.timeout_s
+
     def _get_script(self) -> Any:
         if self._script is None:
-            if self._client is None:
-                if not self.url:
-                    raise ConnectionError("REDIS_URL is not set")
-                self._client = _build_client(self.url, self.timeout_s, self.max_connections)
+            self._get_client()
             # register_script reloads the script on NOSCRIPT (failover, flush).
             self._script = self._client.register_script(TOKEN_BUCKET_LUA)
         return self._script
@@ -263,6 +303,17 @@ class RequestRateLimiter:
     def _store_down(self) -> Decision:
         return Decision(
             allowed=not self.fail_closed, retry_after_s=0, reason=SKIPPED_STORE_DOWN
+        )
+
+    def _log_store_down(self, route_class: str, skip_s: float, exc: BaseException) -> None:
+        # Contract with the CloudWatch metric filter (infra): keep the leading
+        # token. The exception class name only, never its message, which can
+        # carry the host.
+        logger.warning(
+            "rate_limit.skipped_store_down class=%s skip_s=%s type=%s",
+            route_class,
+            _format_seconds(skip_s),
+            type(exc).__name__,
         )
 
     def _store_failed(self, exc: BaseException, route_class: str) -> None:
@@ -273,26 +324,25 @@ class RequestRateLimiter:
             opens_skip_window(exc)
             or self.consecutive_failures >= STORE_DOWN_AFTER_FAILURES
         ):
+            # Fail open for this request only: one line per class and window.
+            if self._sample(("skipped_store_down", route_class)):
+                self._log_store_down(route_class, 0, exc)
             return
         now = self.clock()
         if now < self.skip_until:
             return
         self.skip_until = now + self.skip_s
         self.consecutive_failures = 0
-        # Contract with the CloudWatch metric filter (infra): keep the leading
-        # token. One line per skip window; the exception class name only, never
-        # its message, which can carry the host.
-        logger.warning(
-            "rate_limit.skipped_store_down class=%s skip_s=%s type=%s",
-            route_class,
-            _format_seconds(self.skip_s),
-            type(exc).__name__,
-        )
+        # One line per skip window.
+        self._log_store_down(route_class, self.skip_s, exc)
 
     def should_log_limited(self, subject: str, route_class: str) -> bool:
         """True for the first refusal of ``subject`` in ``route_class`` per window."""
+        return self._sample((subject, route_class))
+
+    def _sample(self, key: tuple) -> bool:
+        """True for the first call with ``key`` in each window of this worker."""
         now = self.clock()
-        key = (subject, route_class)
         if self._limited_logged.get(key, 0.0) > now:
             return False
         if len(self._limited_logged) >= LIMITED_LOG_MAX_SUBJECTS:
@@ -319,7 +369,7 @@ class RequestRateLimiter:
                     keys=[bucket_key(subject, route_class)],
                     args=[rate, burst, bucket_ttl_ms(rate, burst)],
                 ),
-                timeout=self.timeout_s,
+                timeout=self._deadline_s(),
             )
         except asyncio.CancelledError:
             raise
@@ -330,6 +380,50 @@ class RequestRateLimiter:
         if int(allowed) == 1:
             return Decision(True, 0, ALLOWED)
         return Decision(False, retry_after_seconds(int(retry_ms)), LIMITED)
+
+    async def warm_up(self, deadline_s: float = WARM_UP_DEADLINE_S) -> bool:
+        """Open one store connection ahead of traffic. Never raises.
+
+        PINGs database 1 through the request pool, so the connection it opens
+        serves the first checks. Each attempt is bounded by the pool's connect
+        and read timeouts; failed attempts are retried until ``deadline_s``.
+        Logs ``rate_limit.store_ready`` or the startup ``skipped_store_down``
+        line and returns whether the store answered.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        last_exc: BaseException = TimeoutError()
+
+        async def _ping_until_ok() -> None:
+            nonlocal last_exc
+            while True:
+                try:
+                    await self._get_client().ping()
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - retried, then logged
+                    last_exc = exc
+                    if not self.url and self._client is None:
+                        raise
+                await asyncio.sleep(WARM_UP_RETRY_PAUSE_S)
+
+        try:
+            await asyncio.wait_for(_ping_until_ok(), timeout=deadline_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - startup must not fail
+            if isinstance(exc, asyncio.TimeoutError) and not isinstance(
+                last_exc, asyncio.TimeoutError
+            ):
+                exc = last_exc
+            self._log_store_down("startup", 0, exc)
+            return False
+        logger.info(
+            "rate_limit.store_ready latency_ms=%d",
+            round((loop.time() - started) * 1000),
+        )
+        return True
 
     async def aclose(self) -> None:
         client, self._client, self._script = self._client, None, None
@@ -378,6 +472,7 @@ def get_request_rate_limiter() -> Optional[RequestRateLimiter]:
             fail_closed=REQUEST_RATE_LIMIT_FAIL_CLOSED and bool(REDIS_URL),
             skip_s=REQUEST_RATE_LIMIT_SKIP_S,
             url=REDIS_URL,
+            connect_timeout_s=REQUEST_RATE_LIMIT_CONNECT_S,
         )
     return _limiter
 
@@ -407,6 +502,19 @@ def log_startup_config() -> None:
                 "REQUEST_RATE_LIMIT_FAIL_CLOSED ignored: REDIS_URL is not set, so "
                 "it would refuse every covered request"
             )
+
+
+async def warm_up_request_rate_limiter() -> None:
+    """Open the store connection at startup (app lifespan). Never raises.
+
+    Does nothing when the feature is off or ``REDIS_URL`` is unset: the
+    startup config line already warns about the missing store.
+    """
+    if not FEATURE_REQUEST_RATE_LIMIT or not REDIS_URL:
+        return
+    limiter = get_request_rate_limiter()
+    if limiter is not None:
+        await limiter.warm_up()
 
 
 async def aclose_request_rate_limiter() -> None:

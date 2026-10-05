@@ -1,6 +1,7 @@
 # src/config.py
 import json
 import logging
+import math
 import os
 import sys
 from typing import Any, Dict, Optional
@@ -489,6 +490,31 @@ REQUEST_RATE_LIMIT_FAIL_CLOSED = (
 # At least 1: a zero window would make every request of an outage pay the
 # store deadline and log its own WARNING.
 REQUEST_RATE_LIMIT_SKIP_S = max(1, _tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30))
+
+
+def _tolerant_positive_float_env(name: str, default: float) -> float:
+    """Like ``_tolerant_int_env`` for a positive, finite number of seconds."""
+    raw = getenv_or(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid positive number for %s: %r", name, raw
+        )
+        return default
+    return value
+
+
+# Seconds a new store connection may take to open: TCP and TLS handshake;
+# AUTH and SELECT keep the 0.25 s read timeout. At most 5: every check may
+# wait this long on a reconnect.
+REQUEST_RATE_LIMIT_CONNECT_S_MAX = 5.0
+REQUEST_RATE_LIMIT_CONNECT_S = min(
+    REQUEST_RATE_LIMIT_CONNECT_S_MAX,
+    _tolerant_positive_float_env("REQUEST_RATE_LIMIT_CONNECT_S", 1.0),
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:

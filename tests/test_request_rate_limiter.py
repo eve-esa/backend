@@ -71,6 +71,9 @@ class FakeStore:
         self.error = None
         self.hang = False
         self.scripts = []
+        self.pings = 0
+        self.ping_errors = []
+        self.ping_hang = False
 
     def register_script(self, source):
         assert "TIME" in source and "PEXPIRE" in source
@@ -95,8 +98,44 @@ class FakeStore:
         self.ttls[keys[0]] = ttl_ms
         return [allowed, retry_ms]
 
+    async def ping(self):
+        self.pings += 1
+        if self.ping_hang:
+            await asyncio.sleep(10)
+        if self.ping_errors:
+            raise self.ping_errors.pop(0)
+        return True
+
     async def aclose(self):
         pass
+
+
+class FakeConnection:
+    def __init__(self) -> None:
+        self.is_connected = False
+
+
+class FakePool:
+    def __init__(self) -> None:
+        self._available_connections = [FakeConnection()]
+
+
+class SlowConnectStore(FakeStore):
+    """A pool with one connection: opening it takes 0.6 s, a command 0.01 s."""
+
+    def __init__(self, connect_s=0.6, command_s=0.01) -> None:
+        super().__init__()
+        self.connection_pool = FakePool()
+        self.connect_s = connect_s
+        self.command_s = command_s
+
+    async def _script(self, keys, args):
+        conn = self.connection_pool._available_connections[0]
+        if not conn.is_connected:
+            await asyncio.sleep(self.connect_s)
+            conn.is_connected = True
+        await asyncio.sleep(self.command_s)
+        return await super()._script(keys, args)
 
 
 class Clock:
@@ -137,12 +176,30 @@ def test_config_defaults_match_the_plan(monkeypatch):
         "FEATURE_REQUEST_RATE_LIMIT",
         "REQUEST_RATE_LIMIT_FAIL_CLOSED",
         "REQUEST_RATE_LIMIT_SKIP_S",
+        "REQUEST_RATE_LIMIT_CONNECT_S",
     ):
         monkeypatch.delenv(name, raising=False)
     assert config.getenv_or("FEATURE_REQUEST_RATE_LIMIT").lower() != "true"
     assert config.getenv_or("REQUEST_RATE_LIMIT_FAIL_CLOSED").lower() != "true"
     assert config._tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30) == 30
     assert config.REQUEST_RATE_LIMIT_SKIP_S >= 1
+    assert config._tolerant_positive_float_env("REQUEST_RATE_LIMIT_CONNECT_S", 1.0) == 1.0
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-1", "nan", "inf", " "])
+def test_config_invalid_connect_s_keeps_the_default(raw, monkeypatch):
+    monkeypatch.setenv("REQUEST_RATE_LIMIT_CONNECT_S", raw)
+    assert config._tolerant_positive_float_env("REQUEST_RATE_LIMIT_CONNECT_S", 1.0) == 1.0
+
+
+def test_config_connect_s_accepts_a_fraction(monkeypatch):
+    monkeypatch.setenv("REQUEST_RATE_LIMIT_CONNECT_S", "1.5")
+    assert config._tolerant_positive_float_env("REQUEST_RATE_LIMIT_CONNECT_S", 1.0) == 1.5
+
+
+def test_config_connect_s_is_capped_at_5():
+    assert config.REQUEST_RATE_LIMIT_CONNECT_S_MAX == 5.0
+    assert 0 < config.REQUEST_RATE_LIMIT_CONNECT_S <= config.REQUEST_RATE_LIMIT_CONNECT_S_MAX
 
 
 @pytest.mark.parametrize(
@@ -357,7 +414,41 @@ async def test_store_deadline_or_busy_pool_fails_open_for_that_request_only(erro
             await lim.check("user:a", "chat")
     assert store.calls == 5
     assert lim.skip_until == 0.0
-    assert "skipped_store_down" not in caplog.text
+    # Visible to the store-down filter, once per class and window.
+    assert [r.getMessage() for r in caplog.records] == [
+        f"rate_limit.skipped_store_down class=chat skip_s=0 type={type(error).__name__}"
+    ]
+    assert caplog.records[0].levelno == logging.WARNING
+
+
+async def test_store_fail_open_line_is_sampled_per_class_and_window(caplog):
+    store, clock = FakeStore(), Clock()
+    store.error = TimeoutError()
+    lim = limiter(
+        store,
+        clock=clock,
+        limits={"chat": {"rate": 60, "burst": 20}, "errlog": {"rate": 30, "burst": 30}},
+    )
+
+    async def two_failures_then_success(route_class):
+        store.error = TimeoutError()
+        for _ in range(2):
+            await lim.check("user:a", route_class)
+        store.error = None
+        await lim.check("user:a", route_class)
+
+    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        for _ in range(3):
+            await two_failures_then_success("chat")
+        await two_failures_then_success("errlog")
+        clock.t += rrl.LIMITED_LOG_WINDOW_S
+        await two_failures_then_success("chat")
+    assert [r.getMessage() for r in caplog.records] == [
+        "rate_limit.skipped_store_down class=chat skip_s=0 type=TimeoutError",
+        "rate_limit.skipped_store_down class=errlog skip_s=0 type=TimeoutError",
+        "rate_limit.skipped_store_down class=chat skip_s=0 type=TimeoutError",
+    ]
+    assert lim.skip_until == 0.0
 
 
 async def test_store_three_failures_in_a_row_open_the_window(caplog):
@@ -386,6 +477,134 @@ async def test_store_hang_is_bounded_by_the_timeout():
     decision = await lim.check("user:a", "chat")
     assert loop.time() - started < 1
     assert decision.reason == SKIPPED_STORE_DOWN and decision.allowed
+
+
+async def test_store_first_connection_gets_the_connect_deadline():
+    store = SlowConnectStore(connect_s=0.6, command_s=0.01)
+    lim = limiter(store, timeout_s=0.25, connect_timeout_s=1.0)
+    assert lim._deadline_s() == 1.25
+    assert (await lim.check("user:a", "chat")).reason == ALLOWED
+    assert (await lim.check("user:a", "chat")).reason == ALLOWED
+    # Past connect plus command the check fails open.
+    store.command_s = 3.0
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert (await lim.check("user:a", "chat")).reason == SKIPPED_STORE_DOWN
+    assert loop.time() - started < 2.5
+
+
+async def test_store_first_connection_times_out_without_the_connect_deadline(caplog):
+    # The dev finding: with one 0.25 s deadline the first connection never opens.
+    store = SlowConnectStore(connect_s=0.6, command_s=0.01)
+    lim = limiter(store, timeout_s=0.25, connect_timeout_s=0.25)
+    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        assert (await lim.check("user:a", "chat")).reason == SKIPPED_STORE_DOWN
+    assert "rate_limit.skipped_store_down class=chat skip_s=0 type=TimeoutError" in caplog.text
+
+
+def test_store_client_opens_connections_with_the_connect_timeout():
+    client = rrl._build_client("rediss://cache.example.invalid:6379/0", 0.25, 10, 1.0)
+    pool = client.connection_pool
+    assert pool.connection_kwargs["socket_connect_timeout"] == 1.0
+    assert pool.connection_kwargs["socket_timeout"] == 0.25
+    assert pool.connection_kwargs["db"] == 1
+    assert pool.timeout == 0.25
+    assert pool._available_connections == []
+
+
+def test_store_connect_deadline_is_never_below_the_command_deadline():
+    lim = limiter(FakeStore(), timeout_s=0.25, connect_timeout_s=0.1)
+    assert lim.connect_timeout_s == 0.25
+
+
+def test_process_limiter_takes_the_connect_knob(monkeypatch):
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REQUEST_RATE_LIMIT_CONNECT_S", 1.5)
+    monkeypatch.setattr(rrl, "_limiter", None)
+    assert rrl.get_request_rate_limiter().connect_timeout_s == 1.5
+
+
+# --- warm-up ----------------------------------------------------------------
+
+
+async def test_warm_up_logs_store_ready(caplog):
+    store = FakeStore()
+    lim = limiter(store)
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        assert await lim.warm_up() is True
+    assert store.pings == 1
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert len(lines) == 1 and lines[0][0] == logging.INFO
+    assert re.fullmatch(r"rate_limit\.store_ready latency_ms=\d+", lines[0][1])
+
+
+async def test_warm_up_retries_within_the_deadline(caplog):
+    store = FakeStore()
+    store.ping_errors = [_redis_connection_error("Error connecting to 10.0.0.12:6379")]
+    lim = limiter(store)
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        assert await lim.warm_up(deadline_s=2.0) is True
+    assert store.pings == 2
+    assert "rate_limit.store_ready" in caplog.text
+    assert "skipped_store_down" not in caplog.text
+
+
+async def test_warm_up_failure_logs_the_startup_line_and_never_raises(caplog):
+    store = FakeStore()
+    store.ping_errors = [_redis_connection_error("Error connecting to 10.0.0.12:6379")] * 50
+    lim = limiter(store)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        assert await lim.warm_up(deadline_s=0.5) is False
+    assert loop.time() - started < 2.5
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            "rate_limit.skipped_store_down class=startup skip_s=0 type=ConnectionError",
+        )
+    ]
+    assert "10.0.0.12" not in caplog.text
+    # A failed warm-up opens no skip window: requests still try the store.
+    assert lim.skip_until == 0.0
+
+
+async def test_warm_up_hang_is_bounded_by_its_deadline(caplog):
+    store = FakeStore()
+    store.ping_hang = True
+    lim = limiter(store)
+    with caplog.at_level(logging.WARNING, logger=rrl.__name__):
+        assert await lim.warm_up(deadline_s=0.2) is False
+    assert "rate_limit.skipped_store_down class=startup skip_s=0 type=TimeoutError" in caplog.text
+
+
+@pytest.mark.parametrize("feature, url", [(False, "redis://x:6379/0"), (True, "")])
+async def test_warm_up_is_a_no_op_when_off_or_without_redis_url(feature, url, monkeypatch, caplog):
+    store = FakeStore()
+    calls = []
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", feature)
+    monkeypatch.setattr(rrl, "REDIS_URL", url)
+    monkeypatch.setattr(
+        rrl, "get_request_rate_limiter", lambda: calls.append(1) or limiter(store)
+    )
+    with caplog.at_level(logging.DEBUG, logger=rrl.__name__):
+        await rrl.warm_up_request_rate_limiter()
+    assert calls == [] and store.pings == 0
+    assert [r for r in caplog.records if r.name == rrl.__name__] == []
+
+
+def test_warm_up_deadline_is_at_most_3_s():
+    assert 0 < rrl.WARM_UP_DEADLINE_S <= 3
+
+
+async def test_warm_up_runs_for_the_process_limiter(monkeypatch, caplog):
+    store = FakeStore()
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
+    monkeypatch.setattr(rrl, "_limiter", limiter(store))
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        await rrl.warm_up_request_rate_limiter()
+    assert store.pings == 1 and "rate_limit.store_ready" in caplog.text
 
 
 async def test_store_down_fail_closed_refuses():
@@ -720,6 +939,59 @@ async def test_real_store_busy_pool_fails_open_without_the_window():
         finally:
             await pool.release(held)
         assert (await lim.check(subject, "chat")).reason == ALLOWED
+    finally:
+        if lim._client is not None:
+            await lim._client.delete(bucket_key(subject, "chat"))
+        await lim.aclose()
+
+
+async def test_real_store_warm_up_leaves_an_open_connection_for_the_first_check(caplog):
+    lim = await _real_limiter(limits=LIMITS, connect_timeout_s=1.0)
+    subject = f"user:test-{uuid.uuid4().hex}"
+    try:
+        with caplog.at_level(logging.INFO, logger=rrl.__name__):
+            assert await lim.warm_up() is True
+        assert "rate_limit.store_ready latency_ms=" in caplog.text
+        assert lim._client.connection_pool.connection_kwargs["socket_connect_timeout"] == 1.0
+        assert (await lim.check(subject, "chat")).reason == ALLOWED
+    finally:
+        if lim._client is not None:
+            await lim._client.delete(bucket_key(subject, "chat"))
+        await lim.aclose()
+
+
+async def test_real_store_dropped_connection_last_in_the_pool_reconnects_in_time():
+    # redis-py hands out the tail of the idle list and puts a connection that
+    # was dropped (command cancelled mid-read) back at the tail: with an open
+    # connection first and the dropped one last, the check must reopen it.
+    lim = await _real_limiter(limits=LIMITS, connect_timeout_s=1.0, max_connections=2)
+    lim.timeout_s = 0.25
+    subject = f"user:test-{uuid.uuid4().hex}"
+    try:
+        pool = lim._get_client().connection_pool
+        opened = await pool.get_connection()
+        dropped = await pool.get_connection()
+        await pool.release(opened)
+        await pool.release(dropped)
+        await dropped.disconnect()
+        assert pool._available_connections == [opened, dropped]
+        assert opened.is_connected and not dropped.is_connected
+        real_connect = dropped._connect
+
+        async def slow_connect():
+            # A TLS handshake slower than the 0.25 s command deadline.
+            await asyncio.sleep(0.6)
+            await real_connect()
+
+        dropped._connect = slow_connect
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        decision = await lim.check(subject, "chat")
+        elapsed = loop.time() - started
+        assert decision.reason == ALLOWED
+        assert 0.6 <= elapsed < lim._deadline_s() + 1.0
+        assert dropped.is_connected
+        assert lim.consecutive_failures == 0
     finally:
         if lim._client is not None:
             await lim._client.delete(bucket_key(subject, "chat"))
