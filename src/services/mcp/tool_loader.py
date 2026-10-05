@@ -140,11 +140,16 @@ def _build_mcp_connections(
                 headers["X-EVE-Token"] = mcp_proxy_bearer_token
             url = srv.config.url
 
-        connections[srv.name] = {
+        connection: Dict[str, Any] = {
             "transport": "streamable_http" if transport == "streamable_http" else "sse",
             "url": url,
             "headers": headers,
         }
+        if transport == "streamable_http":
+            # AgentCore issues a session id but is stateless: the DELETE that
+            # ends the session on close answers 404 and logs a WARNING.
+            connection["terminate_on_close"] = False
+        connections[srv.name] = connection
 
     return connections, uses_proxy, skipped_missing_url
 

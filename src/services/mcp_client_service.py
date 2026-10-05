@@ -147,6 +147,9 @@ class MultiServerMCPClientService:
                     continue
 
                 server_config_for_client = {"url": url, "transport": transport}
+                if transport == "streamable_http":
+                    # Stateless servers answer the closing DELETE with 404.
+                    server_config_for_client["terminate_on_close"] = False
 
                 # Add headers if present
                 headers = server_config.get("headers")
