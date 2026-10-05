@@ -64,8 +64,12 @@ def get_artifact_context() -> Optional[ArtifactRequestContext]:
 
 
 def reset_artifact_context(token: contextvars.Token) -> None:
-    """Reset the contextvar to its state before the matching ``set_artifact_context``."""
-    _artifact_context.reset(token)
+    """Reset the contextvar to its state before the matching ``set_artifact_context``.
+
+    Tolerates a token from another Context, same as ``reset_retrieval_context``.
+    """
+    with contextlib.suppress(ValueError):
+        _artifact_context.reset(token)
 
 
 @contextlib.contextmanager

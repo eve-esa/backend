@@ -32,6 +32,7 @@ from src.services.cancel_manager import get_cancel_manager
 from src.services.generate_answer import (
     build_empty_answer_payload,
     build_error_payload,
+    finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
@@ -1050,6 +1051,7 @@ async def create_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
+        finish_turn_if_cancelled_unstarted(gen_task, conversation_id, message.id)
 
         async def _gen():
             # Optional catch-up from currently saved output (usually empty right after create)
@@ -2239,6 +2241,7 @@ async def create_agentic_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
+        finish_turn_if_cancelled_unstarted(gen_task, conversation_id, message.id)
 
         bus = get_stream_bus()
 

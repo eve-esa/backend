@@ -75,8 +75,14 @@ def get_retrieval_context() -> Optional[RetrievalRequestContext]:
 
 
 def reset_retrieval_context(token: contextvars.Token) -> None:
-    """Reset the contextvar to its state before the matching ``set_retrieval_context``."""
-    _retrieval_context.reset(token)
+    """Reset the contextvar to its state before the matching ``set_retrieval_context``.
+
+    A generator closed from another task (the event loop finalising one that was
+    never closed) runs this in a different Context: there is nothing to reset
+    there, and raising would skip the rest of the caller's cleanup.
+    """
+    with contextlib.suppress(ValueError):
+        _retrieval_context.reset(token)
 
 
 @contextlib.contextmanager
