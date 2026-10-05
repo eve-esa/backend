@@ -12,8 +12,11 @@ its own copy, so concurrent requests never see each other's context.
 
 import contextlib
 import contextvars
+import logging
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,8 +67,14 @@ def get_artifact_context() -> Optional[ArtifactRequestContext]:
 
 
 def reset_artifact_context(token: contextvars.Token) -> None:
-    """Reset the contextvar to its state before the matching ``set_artifact_context``."""
-    _artifact_context.reset(token)
+    """Reset the contextvar to its state before the matching ``set_artifact_context``.
+
+    Tolerates a token from another Context, same as ``reset_retrieval_context``.
+    """
+    try:
+        _artifact_context.reset(token)
+    except ValueError:
+        logger.debug("artifact_context reset skipped: token from another Context")
 
 
 @contextlib.contextmanager

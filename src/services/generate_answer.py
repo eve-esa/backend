@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from bson import ObjectId
 from fastapi import BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
@@ -278,7 +279,10 @@ async def persist_message_state(
     - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
     """
     try:
-        message = await Message.find_by_id(message_id)
+        # On the primary: this reads then replaces the whole document, often
+        # right after Message.create, and a lagging secondary would return
+        # nothing (write lost) or a stale copy (newer fields overwritten).
+        message = await Message.find_by_id_on_primary(message_id)
         if message is None:
             return
         if stopped is not None:
@@ -1466,6 +1470,7 @@ async def _classic_stream_events(
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
     origin_query = request.query
+    final_emitted = False
 
     try:
         logger.info(
@@ -1508,6 +1513,8 @@ async def _classic_stream_events(
                     _get_conversation_history_from_db(conversation_id)
                 )
             except asyncio.CancelledError:
+                if not cancelled():
+                    raise  # not a Stop: the outer handler saves the failed turn
                 await persist_message_state(message_id, stopped=True)
                 yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
@@ -1535,6 +1542,8 @@ async def _classic_stream_events(
                 )
             )
         except asyncio.CancelledError:
+            if not cancelled():
+                raise  # not a Stop: the outer handler saves the failed turn
             await persist_message_state(message_id, stopped=True)
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
@@ -1557,6 +1566,8 @@ async def _classic_stream_events(
                 if len(results) == 0:
                     raise Exception("No RAG results found for the query")
             except asyncio.CancelledError:
+                if not cancelled():
+                    raise  # not a Stop: the outer handler saves the failed turn
                 await persist_message_state(
                     message_id,
                     trace_id=trace_id,
@@ -1979,6 +1990,7 @@ async def _classic_stream_events(
             asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
 
         # Final event
+        final_emitted = True
         if output_format == "json":
             final_payload = {
                 "type": "final",
@@ -1991,7 +2003,14 @@ async def _classic_stream_events(
         else:
             yield "data: [DONE]\n\n"
 
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, GeneratorExit) as exc:
+        # GeneratorExit: the Stop landed while the consumer was publishing a
+        # chunk, and it closed this generator. Only a Stop sets the event; any
+        # other close is not a stop and is left to the consumer. Past the final
+        # event the answer is persisted: a Stop must not replace it.
+        stop = cancel_event is not None and cancel_event.is_set()
+        if final_emitted or (isinstance(exc, GeneratorExit) and not stop):
+            raise
         logger.info("Cancelled during generation")
         await persist_message_state(
             message_id,
@@ -2006,8 +2025,13 @@ async def _classic_stream_events(
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
             generated_model_name=locals().get("generated_model_name"),
-            stopped=True,
+            stopped=stop,
+            error=None if stop else build_error_payload(exc),
         )
+        if not stop:
+            # Worker shutdown or the deadline: a failed turn with its partial
+            # output, and the cancel goes on to the caller.
+            raise
         return
     except Exception as e:
         logger.error(f"Error during generation: {e}")
@@ -2075,16 +2099,19 @@ async def generate_answer_stream_generator(
     user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM."""
-    async for chunk in generate_answer_stream_generator_helper(
-        request,
-        conversation_id,
-        message_id,
-        "plain",
-        background_tasks,
-        cancel_event,
-        user_id,
-    ):
-        yield chunk
+    async with contextlib.aclosing(
+        generate_answer_stream_generator_helper(
+            request,
+            conversation_id,
+            message_id,
+            "plain",
+            background_tasks,
+            cancel_event,
+            user_id,
+        )
+    ) as chunks:
+        async for chunk in chunks:
+            yield chunk
 
 
 async def generate_answer_json_stream_generator(
@@ -2096,16 +2123,19 @@ async def generate_answer_json_stream_generator(
     user_id: Optional[str] = None,
 ):
     """Generate streaming answer using RAG and LLM with JSON format."""
-    async for chunk in generate_answer_stream_generator_helper(
-        request,
-        conversation_id,
-        message_id,
-        "json",
-        background_tasks,
-        cancel_event,
-        user_id,
-    ):
-        yield chunk
+    async with contextlib.aclosing(
+        generate_answer_stream_generator_helper(
+            request,
+            conversation_id,
+            message_id,
+            "json",
+            background_tasks,
+            cancel_event,
+            user_id,
+        )
+    ) as chunks:
+        async for chunk in chunks:
+            yield chunk
 
 
 class GenerationDeadlineExceeded(TimeoutError):
@@ -2148,6 +2178,110 @@ def deadline_overrides(deadline: asyncio.Timeout) -> Dict[str, Any]:
     return {"stopped": False} if deadline.expired() else {}
 
 
+_TERMINAL_EVENT_TYPES = {"final", "error", "stopped"}
+
+
+def is_terminal_event(chunk: str) -> bool:
+    """True for the SSE event that ends a turn: the generator persisted the
+    turn before yielding it, so a Stop landing on its publish changes nothing."""
+    if chunk.strip() == "data: [DONE]":
+        return True
+    if not chunk.startswith('data: {"type": ') or chunk.startswith(
+        'data: {"type": "token"'
+    ):
+        return False
+    try:
+        payload = json.loads(chunk[len("data: ") :])
+    except ValueError:
+        return False
+    return payload.get("type") in _TERMINAL_EVENT_TYPES
+
+
+def release_stop_handle(conversation_id: str, message_id: str) -> None:
+    """Make the turn unreachable for the Stop route once its last event is out.
+
+    The runner still charges the tokens and closes the bus after that event: a
+    Stop landing there would cancel the charge (a free turn) and publish
+    ``stopped`` after ``final``. Idempotent with the clean-up in finally.
+    """
+    with contextlib.suppress(Exception):
+        cm = get_cancel_manager()
+        cm.clear_mapping_for(conversation_id, message_id)
+        cm.clear(message_id)
+
+
+async def mark_message_stopped(message_id: str) -> None:
+    """Set ``stopped`` with one update and no read.
+
+    Unlike ``persist_message_state`` it touches no other field, so it cannot
+    overwrite the partial output the generator saved a moment earlier.
+    """
+    try:
+        await Message.get_collection().update_one(
+            {"_id": ObjectId(message_id)}, {"$set": {"stopped": True}}
+        )
+    except Exception as e:
+        logger.error(f"Failed to mark message stopped: {e}")
+
+
+async def persist_runner_cancel(
+    message_id: str, cancel_event: Optional[asyncio.Event], exc: BaseException
+) -> None:
+    """Persist a cancel the bus runner caught outside the generator.
+
+    Only a Stop sets the event. Any other cancel is the worker going away (an
+    ECS rollover, say): the turn failed and the frontend must offer a retry.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        await mark_message_stopped(message_id)
+        return
+    with contextlib.suppress(Exception):
+        await persist_message_state(
+            message_id, error=build_error_payload(exc), stopped=False
+        )
+
+
+# Strong references to the finishers below until they end (asyncio keeps weak ones).
+_unstarted_stop_finishers: set = set()
+
+
+def finish_turn_if_cancelled_unstarted(
+    task: asyncio.Task,
+    conversation_id: str,
+    message_id: str,
+    cancel_event: Optional[asyncio.Event],
+) -> None:
+    """Persist the stop of a generation task cancelled before its first step.
+
+    A Stop that lands between ``create_task`` and the task's first step cancels
+    a coroutine that never runs: no handler, no finally. The task then ends
+    cancelled, which the bus runners never do otherwise (they absorb the
+    cancel), so this callback finishes the turn in their place. A cancel
+    without the event set is not a Stop and is left alone.
+    """
+
+    def _on_done(done: asyncio.Task) -> None:
+        if not done.cancelled():
+            return
+        if cancel_event is None or not cancel_event.is_set():
+            return
+
+        async def _finish() -> None:
+            await mark_message_stopped(message_id)
+            with contextlib.suppress(Exception):
+                await get_stream_bus().close(message_id)
+            with contextlib.suppress(Exception):
+                cm = get_cancel_manager()
+                cm.clear_mapping_for(conversation_id, message_id)
+                cm.clear(message_id)
+
+        finisher = asyncio.get_running_loop().create_task(_finish())
+        _unstarted_stop_finishers.add(finisher)
+        finisher.add_done_callback(_unstarted_stop_finishers.discard)
+
+    task.add_done_callback(_on_done)
+
+
 async def run_generation_to_bus(
     request: GenerationRequest,
     conversation_id: str,
@@ -2166,32 +2300,47 @@ async def run_generation_to_bus(
     the turn ends like any other failure: error persisted, error event, bus
     closed, so the task ends and frees its load shedding slot.
     """
-    if stream_ready is not None:
-        try:
-            await asyncio.wait_for(stream_ready.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "stream subscriber not ready within timeout message_id=%s",
-                message_id,
-            )
     bus = get_stream_bus()
     deadline = asyncio.timeout(deadline_seconds)
+    terminal_sent = False
     try:
+        # Inside the try: a Stop that lands while waiting must still reach the
+        # handler below and the cleanup in finally.
+        if stream_ready is not None:
+            try:
+                await asyncio.wait_for(stream_ready.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "stream subscriber not ready within timeout message_id=%s",
+                    message_id,
+                )
         async with deadline:
-            async for chunk in generate_answer_json_stream_generator(
-                request=request,
-                conversation_id=conversation_id,
-                message_id=message_id,
-                background_tasks=background_tasks,
-                cancel_event=cancel_event,
-                user_id=user_id,
-            ):
-                # Forward SSE-formatted chunks as-is
-                await bus.publish(message_id, chunk)
+            # aclosing: a cancel that lands on publish closes the generator in
+            # this task instead of leaving it to the event loop's finaliser.
+            async with contextlib.aclosing(
+                generate_answer_json_stream_generator(
+                    request=request,
+                    conversation_id=conversation_id,
+                    message_id=message_id,
+                    background_tasks=background_tasks,
+                    cancel_event=cancel_event,
+                    user_id=user_id,
+                )
+            ) as chunks:
+                async for chunk in chunks:
+                    terminal_sent = is_terminal_event(chunk)
+                    # Forward SSE-formatted chunks as-is
+                    await bus.publish(message_id, chunk)
+                    if terminal_sent:
+                        release_stop_handle(conversation_id, message_id)
         raise_if_deadline_expired(deadline, deadline_seconds)
-    except asyncio.CancelledError:
-        # Task was cancelled (via stop endpoint). Do not publish error; just exit.
-        pass
+    except asyncio.CancelledError as exc:
+        # Do not publish error. Cancelled outside the generator (before it
+        # started, or on publish), nothing persisted the turn yet; the stop
+        # write is idempotent when the generator did. On the publish of the
+        # last event the turn is already persisted.
+        if not terminal_sent:
+            await persist_runner_cancel(message_id, cancel_event, exc)
     except Exception as e:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.

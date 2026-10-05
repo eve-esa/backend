@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -32,8 +33,10 @@ from src.services.cancel_manager import get_cancel_manager
 from src.services.generate_answer import (
     build_empty_answer_payload,
     build_error_payload,
+    finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
+    is_terminal_event,
     maybe_rollup_and_trim_history,
     persist_message_state,
     resolve_generated_model_name,
@@ -1050,6 +1053,9 @@ async def create_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
+        finish_turn_if_cancelled_unstarted(
+            gen_task, conversation_id, message.id, cancel_event
+        )
 
         async def _gen():
             # Optional catch-up from currently saved output (usually empty right after create)
@@ -1058,8 +1064,19 @@ async def create_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id, ready=stream_ready):
-                yield data
+            # Nothing after the terminal event is forwarded (a Stop landing
+            # during the clean-up), but the stream stays open until the runner
+            # closes the bus after the token charge, so a client that refreshes
+            # its usage when the stream ends reads the charged value.
+            async with contextlib.aclosing(
+                bus.subscribe(message.id, ready=stream_ready)
+            ) as events:
+                finished = False
+                async for data in events:
+                    if finished:
+                        continue
+                    yield data
+                    finished = is_terminal_event(data)
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"
@@ -1151,10 +1168,9 @@ async def stop_conversation(
         cancel_mgr.cancel(message_id)
         try:
             bus = get_stream_bus()
-            await bus.publish(
+            await bus.stop(
                 message_id, f"data: {json.dumps({'type': 'stopped'})}\n\n"
             )
-            await bus.close(message_id)
             logger.info(
                 "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
                 requesting_user.id,
@@ -2239,6 +2255,9 @@ async def create_agentic_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
+        finish_turn_if_cancelled_unstarted(
+            gen_task, conversation_id, message.id, cancel_event
+        )
 
         bus = get_stream_bus()
 
@@ -2248,8 +2267,19 @@ async def create_agentic_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id, ready=subscriber_ready):
-                yield data
+            # Nothing after the terminal event is forwarded (a Stop landing
+            # during the clean-up), but the stream stays open until the runner
+            # closes the bus after the token charge, so a client that refreshes
+            # its usage when the stream ends reads the charged value.
+            async with contextlib.aclosing(
+                bus.subscribe(message.id, ready=subscriber_ready)
+            ) as events:
+                finished = False
+                async for data in events:
+                    if finished:
+                        continue
+                    yield data
+                    finished = is_terminal_event(data)
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"

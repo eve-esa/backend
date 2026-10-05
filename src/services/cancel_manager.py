@@ -9,6 +9,15 @@ try:
 except Exception:
     aioredis = None  # type: ignore
 
+# Pub/sub keeps nothing for a late subscriber: a Stop published before the
+# owning worker subscribed to the cancel channel would be lost. The publisher
+# also leaves this flag, and the subscriber reads it once subscribed.
+_CANCEL_FLAG_TTL_S = 600
+
+
+def _cancel_flag_key(message_id: str) -> str:
+    return f"cancelled:{message_id}"
+
 
 class CancelManager:
     def __init__(self):
@@ -45,6 +54,15 @@ class CancelManager:
             pubsub = redis.pubsub()
             await pubsub.subscribe(channel)
             self._logger.info("cancel_manager.redis_subscribed channel=%s", channel)
+            # The SUBSCRIBE reply: past it the server delivers every publish,
+            # so the flag read below cannot miss one sent in between.
+            await pubsub.get_message(timeout=1.0)
+            if await redis.get(_cancel_flag_key(message_id)):
+                ev.set()
+                self._logger.info(
+                    "cancel_manager.redis_received_cancel message_id=%s", message_id
+                )
+                return
             while True:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=None
@@ -141,6 +159,9 @@ class CancelManager:
             await self._ensure_redis()
             if self._redis is None:
                 return
+            await self._redis.set(
+                _cancel_flag_key(message_id), "1", ex=_CANCEL_FLAG_TTL_S
+            )
             await self._redis.publish(f"cancel:{message_id}", "cancel")
         except Exception as e:
             self._logger.warning("cancel_manager.redis_publish_error: %s", str(e))

@@ -29,6 +29,11 @@ class StreamBus:
                     # Drop if a slow consumer is lagging behind
                     pass
 
+    async def stop(self, key: str, event: str):
+        """Send the stopped ``event`` and end the stream."""
+        await self.publish(key, event)
+        await self.close(key)
+
     async def close(self, key: str):
         async with self._get_lock(key):
             for q in list(self._subscribers.get(key, set())):
@@ -62,6 +67,14 @@ class StreamBus:
                     self._locks.pop(key, None)
 
 
+# Long enough for a subscriber that attaches late, short enough to leave no trace.
+_STOPPED_TTL_S = 300
+
+
+def _stopped_key(key: str) -> str:
+    return f"sse-stopped:{key}"
+
+
 class RedisStreamBus:
     def __init__(self, url: str):
         if aioredis is None:
@@ -71,6 +84,17 @@ class RedisStreamBus:
     async def publish(self, key: str, data: str):
         await self._redis.publish(f"sse:{key}", data)
 
+    async def stop(self, key: str, event: str):
+        """Send the stopped ``event`` and end the stream.
+
+        Pub/sub keeps nothing, and the Stop can land before the route's
+        subscriber attached: the event is also left under a key the
+        subscriber reads once subscribed, set before the publish.
+        """
+        await self._redis.set(_stopped_key(key), event, ex=_STOPPED_TTL_S)
+        await self.publish(key, event)
+        await self.close(key)
+
     async def close(self, key: str):
         await self._redis.publish(f"sse:{key}", "[[__EOD__]]")
 
@@ -79,10 +103,19 @@ class RedisStreamBus:
     ) -> AsyncIterator[str]:
         pubsub = self._redis.pubsub()
         channel = f"sse:{key}"
-        await pubsub.subscribe(channel)
-        if ready is not None:
-            ready.set()
         try:
+            await pubsub.subscribe(channel)
+            # The SUBSCRIBE reply first: past it no later publish can be missed,
+            # so a Stop is either delivered below or already under the key.
+            await pubsub.get_message(timeout=1.0)
+            if ready is not None:
+                ready.set()
+            stopped = await self._redis.get(_stopped_key(key))
+            if stopped is not None:
+                if isinstance(stopped, bytes):
+                    stopped = stopped.decode("utf-8", errors="ignore")
+                yield stopped
+                return
             while True:
                 msg = await pubsub.get_message(
                     ignore_subscribe_messages=True, timeout=None
@@ -96,6 +129,9 @@ class RedisStreamBus:
                     break
                 yield data
         finally:
+            # A failed subscribe must not leave the producer waiting for it.
+            if ready is not None:
+                ready.set()
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(channel)
             with contextlib.suppress(Exception):
