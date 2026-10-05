@@ -444,3 +444,65 @@ async def test_e2e_jsc_429_and_deepinfra_timeout_still_answer_with_sources(wired
     assert caplog.text.count("rerank.skipped reason=all_providers_failed") == 1
     assert error_log.descriptions == ["JSC reranker failed", "DeepInfra reranker fallback timed out"]
     assert error_log.error_types == ["RequestException", "TimeoutError"]
+
+
+def _capturing_provider(seen):
+    """Records the texts it receives and ranks the longest original first."""
+
+    async def call(query, documents):
+        seen.append(list(documents))
+        return [
+            {"index": i, "reranking_score": 1.0 / (rank + 1)}
+            for rank, i in enumerate(sorted(range(len(documents)), key=lambda i: -i))
+        ]
+
+    return RerankProvider("cap", "Cap", None, call)
+
+
+LONG_DOCS = ["a" * 4000, "short", "b" * 1501, "c" * 1500]
+
+
+async def test_provider_receives_candidates_cut_to_the_cap(error_log, monkeypatch):
+    monkeypatch.setattr(rerank_module, "RERANK_MAX_CHARS_PER_CANDIDATE", 1500)
+    seen = []
+
+    await rerank_candidates(LONG_DOCS, "q", providers=[_capturing_provider(seen)])
+
+    assert len(seen) == 1
+    assert [len(t) for t in seen[0]] == [1500, 5, 1500, 1500]
+    assert [t[:1] for t in seen[0]] == ["a", "s", "b", "c"]
+
+
+async def test_trimmed_result_indexes_still_point_at_the_original_candidates(
+    error_log, monkeypatch
+):
+    monkeypatch.setattr(rerank_module, "RERANK_MAX_CHARS_PER_CANDIDATE", 1500)
+    seen = []
+    formatted = [{"id": f"r{i}", "text": t} for i, t in enumerate(LONG_DOCS)]
+
+    reranked = await rerank_candidates(LONG_DOCS, "q", providers=[_capturing_provider(seen)])
+    selected = _select_top_k_unique_results(formatted, reranked, top_k=4)
+
+    assert [r["index"] for r in reranked] == [3, 2, 1, 0]
+    assert [r["id"] for r in selected] == ["r3", "r2", "r1", "r0"]
+    assert selected[3]["text"] == "a" * 4000
+
+
+async def test_cap_zero_sends_the_full_texts(error_log, monkeypatch):
+    monkeypatch.setattr(rerank_module, "RERANK_MAX_CHARS_PER_CANDIDATE", 0)
+    seen = []
+
+    await rerank_candidates(LONG_DOCS, "q", providers=[_capturing_provider(seen)])
+
+    assert seen == [LONG_DOCS]
+
+
+async def test_one_candidates_line_per_turn_carries_the_counts(error_log, monkeypatch, caplog):
+    monkeypatch.setattr(rerank_module, "RERANK_MAX_CHARS_PER_CANDIDATE", 1500)
+    providers = [_provider("a", "A", fail=True), _capturing_provider([])]
+
+    with caplog.at_level(logging.INFO, logger="src.services.rerank"):
+        await rerank_candidates(LONG_DOCS, "q", providers=providers)
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("rerank.candidates")]
+    assert lines == ["rerank.candidates n=4 chars_p50=1500 chars_max=4000 truncated=2"]

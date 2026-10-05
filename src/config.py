@@ -102,6 +102,11 @@ JSC_RERANKER_MODEL_NAME = getenv_or(
 # turn sends (HTTP 500), so it stays as the fallback.
 DEFAULT_RERANK_PROVIDER_ORDER = "deepinfra,jsc"
 RERANK_PROVIDER_ORDER = getenv_or("RERANK_PROVIDER_ORDER", DEFAULT_RERANK_PROVIDER_ORDER)
+# Each candidate is sent to the reranker cut to this many characters (0 sends
+# the full text). Rerank latency grows with the tokens sent: DeepInfra took
+# p50 4.6 s on 43 to 60 full candidates, past the per-attempt cap, and JSC
+# answers 500 on long requests. Only the text sent changes, never the list.
+RERANK_MAX_CHARS_PER_CANDIDATE = int(getenv_or("RERANK_MAX_CHARS_PER_CANDIDATE", "1500"))
 
 # Ordered EVE endpoint chain, comma-separated llm_type names. Unconfigured
 # entries are dropped at resolution time and "fallback" is always appended
