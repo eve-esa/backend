@@ -9,6 +9,7 @@ else: other SSE streams and ``/health`` on the same worker keep running.
 import asyncio
 import json
 import logging
+import statistics
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
@@ -20,6 +21,7 @@ from src.config import (
     EVE_JSC_BASE_URL,
     JSC_RERANKER_API_KEY,
     JSC_RERANKER_MODEL_NAME,
+    RERANK_MAX_CHARS_PER_CANDIDATE,
     RERANK_PROVIDER_ORDER,
 )
 from src.utils import jsc_reranker
@@ -196,6 +198,30 @@ def configured_providers(order: Optional[str] = None) -> List[RerankProvider]:
     ]
 
 
+def trim_candidates(candidate_texts: List[str], max_chars: int) -> List[str]:
+    """The texts sent to the reranker: each cut to ``max_chars``, same order.
+
+    The list keeps its length and order, so the indexes a provider returns
+    still point at ``candidate_texts``. ``max_chars`` 0 sends the full texts.
+    One INFO line per turn carries the sizes, so the effect is readable in
+    HyperDX.
+    """
+    if not candidate_texts:
+        return candidate_texts
+    lengths = [len(text) for text in candidate_texts]
+    truncated = sum(1 for n in lengths if max_chars > 0 and n > max_chars)
+    logger.info(
+        "rerank.candidates n=%d chars_p50=%d chars_max=%d truncated=%d",
+        len(lengths),
+        int(statistics.median(lengths)),
+        max(lengths),
+        truncated,
+    )
+    if not truncated:
+        return candidate_texts
+    return [text[:max_chars] for text in candidate_texts]
+
+
 def error_type_name(error: BaseException) -> str:
     """The ``error_type`` stored on RE_RANKER rows, as the requests-based code wrote it.
 
@@ -230,10 +256,12 @@ async def rerank_candidates(
     returns every candidate in retrieval order with a ``None`` score, so the
     answer keeps its sources; the caller deduplicates and cuts to top_k.
     ``[]`` only when there is nothing to rerank. Cancellation (Stop)
-    propagates: only timeouts and provider errors are caught.
+    propagates: only timeouts and provider errors are caught. Providers see
+    each candidate cut to ``RERANK_MAX_CHARS_PER_CANDIDATE`` characters.
     """
     if not candidate_texts:
         return []
+    sent_texts = trim_candidates(candidate_texts, RERANK_MAX_CHARS_PER_CANDIDATE)
 
     error_logger = get_error_logger()
     providers = configured_providers() if providers is None else providers
@@ -276,7 +304,7 @@ async def rerank_candidates(
         budget = min(attempt_timeout, max(deadline - loop.time(), 0.0))
         try:
             async with asyncio.timeout(budget):
-                return await provider.call(query, candidate_texts)
+                return await provider.call(query, sent_texts)
         except (TimeoutError, httpx.TimeoutException) as e:
             logger.warning("%s timed out after %.1f seconds", what, budget)
             await error_logger.log_error(
