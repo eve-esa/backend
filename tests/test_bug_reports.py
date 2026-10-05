@@ -672,3 +672,19 @@ async def test_get_report_returns_the_whole_document_to_its_author_only(
     headers = {"Authorization": f"Bearer {token}"}
     assert (await async_client.get("/bug-reports/not-an-id", headers=headers)).status_code == 404
     assert (await async_client.get(f"/bug-reports/{ObjectId()}", headers=headers)).status_code == 404
+
+
+async def test_create_succeeds_while_secondaries_lag(
+    async_client, author, conversation, monkeypatch
+):
+    """The post-insert ranking reads the primary: on a lagging secondary the
+    new report is missing from the window and would be refused with 429."""
+    from tests.utils.replica_lag import lag_secondaries
+
+    user, token = author
+    lag_secondaries(monkeypatch, BugReport.collection_name)
+    resp = await _post(
+        async_client, token, context=_context(conversation_id=conversation.id)
+    )
+    assert resp.status_code == 201, resp.text
+    assert await BugReport.get_primary_collection().count_documents({"user_id": user.id}) == 1

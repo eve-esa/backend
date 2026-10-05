@@ -63,10 +63,14 @@ async def assert_user_approved(user_id: str) -> None:
     Projected read: this runs on every authenticated request, and the rest of
     the document is not needed to answer the question.
     """
-    doc = await User.get_collection().find_one(
-        {"_id": ObjectId(user_id)},
-        projection={"approval_status": 1},
-    )
+    query = {"_id": ObjectId(user_id)}
+    doc = await User.get_collection().find_one(query, projection={"approval_status": 1})
+    if doc is None:
+        # Provisioned by this same request: a secondary may not hold the row
+        # yet, and a pending account must not pass on a missing read.
+        doc = await User.get_primary_collection().find_one(
+            query, projection={"approval_status": 1}
+        )
     if doc is not None and doc.get("approval_status") == APPROVAL_PENDING:
         raise ApprovalPending("Account is awaiting approval")
 

@@ -241,3 +241,41 @@ async def test_no_save_on_the_hot_path(monkeypatch, pinned_budget):
         assert refreshed.rate_limit_tokens_used == 5
     finally:
         await cleanup_models([user])
+
+
+# ── Replica set reads ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rollover_loser_reloads_from_the_primary(monkeypatch):
+    """Two requests see an expired window and only one wins the roll. The loser
+    reloads what the winner wrote from the primary: a lagging secondary would
+    leave it on last period's usage and refuse the user with a stale 429."""
+    from src.services.token_rate_limiter import _ensure_active_window
+    from tests.utils.replica_lag import lag_secondaries
+
+    user, _ = await create_test_user_and_token()
+    try:
+        now = datetime.now(timezone.utc)
+        await User.get_collection().update_one(
+            {"_id": ObjectId(user.id)},
+            {
+                "$set": {
+                    "rate_limit_period_start": now,
+                    "rate_limit_period_end": now + timedelta(days=30),
+                    "rate_limit_tokens_used": 7,
+                }
+            },
+        )
+        # The loser's in-memory copy: last period, fully spent.
+        user.rate_limit_period_start = now - timedelta(days=31)
+        user.rate_limit_period_end = now - timedelta(days=1)
+        user.rate_limit_tokens_used = 100
+
+        lag_secondaries(monkeypatch, User.collection_name)
+        await _ensure_active_window(user, {"max_tokens": 100, "period_months": 1})
+        assert user.rate_limit_tokens_used == 7
+        assert user.rate_limit_period_end > now
+    finally:
+        monkeypatch.undo()
+        await cleanup_models([user])

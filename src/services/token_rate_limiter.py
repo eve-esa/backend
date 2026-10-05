@@ -117,8 +117,9 @@ async def _ensure_active_window(user: User, policy: Dict[str, Any]) -> None:
             user.rate_limit_tokens_used = 0
         else:
             # Another request rolled the window over first: reload what it
-            # wrote instead of trusting the stale copy still in memory.
-            doc = await User.get_collection().find_one(
+            # wrote instead of trusting the stale copy still in memory, from
+            # the primary, since a secondary may still hold the old window.
+            doc = await User.get_primary_collection().find_one(
                 {"_id": ObjectId(user.id)},
                 projection={
                     "rate_limit_period_start": 1,

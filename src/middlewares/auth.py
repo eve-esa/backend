@@ -186,6 +186,10 @@ async def get_auth_context(
 
     user = await User.find_by_id(principal.user_id)
     if not user:
+        # A first sign-in inserts the user in this same request, and a
+        # secondary may not hold the row yet: ask the primary before a 401.
+        user = await User.find_by_id_on_primary(principal.user_id)
+    if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return AuthContext(user, principal)
 

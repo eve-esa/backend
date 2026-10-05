@@ -434,7 +434,7 @@ async def test_concurrent_creates_never_exceed_the_cap(async_client, monkeypatch
 async def test_parent_revoked_between_auth_and_insert_leaves_no_row(monkeypatch):
     """The post-insert parent check catches a revoke that races the create.
 
-    Simulated by making the *second* ``ApiKey.find_by_id`` call inside the
+    Simulated by making the *second* ``ApiKey.find_by_id_on_primary`` call inside the
     service (the post-insert re-check) report the parent as revoked, without
     touching the real row.
     """
@@ -445,7 +445,7 @@ async def test_parent_revoked_between_auth_and_insert_leaves_no_row(monkeypatch)
             user=user, principal=Principal(user.id, AUTH_TYPE_API_KEY, parent.id)
         )
 
-        real_find_by_id = ApiKey.find_by_id
+        real_find_by_id = ApiKey.find_by_id_on_primary
         calls = {"n": 0}
 
         async def _flaky_find_by_id(key_id):
@@ -455,7 +455,7 @@ async def test_parent_revoked_between_auth_and_insert_leaves_no_row(monkeypatch)
                 found.revoked_at = datetime.now(timezone.utc)
             return found
 
-        monkeypatch.setattr(api_keys.ApiKey, "find_by_id", _flaky_find_by_id)
+        monkeypatch.setattr(api_keys.ApiKey, "find_by_id_on_primary", _flaky_find_by_id)
 
         with pytest.raises(HTTPException) as exc_info:
             await api_keys.create_api_key(None, auth)
@@ -921,5 +921,49 @@ async def test_audit_logs_have_no_secret_material(async_client, caplog):
             assert "key_hash" not in payload
             assert "token_suffix" not in payload
     finally:
+        await ApiKey.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+# ── Replica set reads ────────────────────────────────────────────────────────
+
+
+@pytest.mark.no_db
+def test_primary_collection_reads_the_primary(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from pymongo import ReadPreference
+
+    inner = MagicMock()
+    monkeypatch.setattr(ApiKey, "get_collection", classmethod(lambda cls: inner))
+    ApiKey.get_primary_collection()
+    inner.with_options.assert_called_once_with(read_preference=ReadPreference.PRIMARY)
+
+
+@pytest.mark.asyncio
+async def test_create_succeeds_while_secondaries_lag(monkeypatch):
+    """Staging answered 409 to a user with no keys: the post-insert ranking
+    read a secondary that did not hold the new row yet, so the key was not
+    among the survivors and got deleted. The cap and parent reads go to the
+    primary; a key created by a key exercises the parent re-read too."""
+    from src.middlewares.auth import AUTH_TYPE_OIDC
+    from tests.utils.replica_lag import lag_secondaries
+
+    monkeypatch.setattr(api_keys, "API_KEY_MAX_ACTIVE_PER_USER", 3)
+    user, _ = await create_test_user_and_token()
+    try:
+        lag_secondaries(monkeypatch, ApiKey.collection_name)
+        first = await api_keys.create_api_key(
+            None, AuthContext(user=user, principal=Principal(user.id, AUTH_TYPE_OIDC))
+        )
+        child = await api_keys.create_api_key(
+            None,
+            AuthContext(user=user, principal=Principal(user.id, AUTH_TYPE_API_KEY, first.id)),
+        )
+        assert child.created_by_key_id == first.id
+        monkeypatch.undo()
+        assert await ApiKey.count_documents({"user_id": user.id}) == 2
+    finally:
+        monkeypatch.undo()
         await ApiKey.delete_many({"user_id": user.id})
         await cleanup_models([user])
