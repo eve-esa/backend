@@ -11,6 +11,20 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.0.2](https://github.com/eve-esa/backend/compare/v1.0.1...v1.0.2) (2026-10-05)
+
+
+### Fixed
+
+* **mcp:** stop ending sessions the stateless proxy cannot end ([#285](https://github.com/eve-esa/backend/issues/285)) ([73104fb](https://github.com/eve-esa/backend/commit/73104fb155ea0449e0e9d52c9f404d750b05c367))
+* **stop:** persist a stop that lands before the first token ([#287](https://github.com/eve-esa/backend/issues/287)) ([720a880](https://github.com/eve-esa/backend/commit/720a88013c07099374be8944dbbb071284c83220))
+
+
+### Changed
+
+* **retrieval:** rerank with DeepInfra first, JSC as fallback ([#283](https://github.com/eve-esa/backend/issues/283)) ([3a4c6ff](https://github.com/eve-esa/backend/commit/3a4c6ffb765c56bcac6032fc97aecccb70166b39))
+* **retrieval:** send rerankers trimmed candidates ([#286](https://github.com/eve-esa/backend/issues/286)) ([29261f3](https://github.com/eve-esa/backend/commit/29261f325179429ec683b0773eb5bd91ed318a37))
+
 ## [1.0.1](https://github.com/eve-esa/backend/compare/v1.0.0...v1.0.1) (2026-10-05)
 
 
