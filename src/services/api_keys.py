@@ -82,7 +82,7 @@ def _audit_create_refused(
 async def _count_active(user_id: str) -> int:
     """Active means neither revoked nor expired: both must be excluded from the cap."""
     now = datetime.now(timezone.utc)
-    return await ApiKey.count_documents(
+    return await ApiKey.get_primary_collection().count_documents(
         {
             "user_id": user_id,
             "revoked_at": None,
@@ -102,7 +102,7 @@ async def _is_among_first_active(user_id: str, key_id: str, cap: int) -> bool:
         return False
     now = datetime.now(timezone.utc)
     cursor = (
-        ApiKey.get_collection()
+        ApiKey.get_primary_collection()
         .find(
             {
                 "user_id": user_id,
@@ -128,7 +128,8 @@ async def create_api_key(
     parent checks run again afterwards. A survivor that loses either check is
     deleted before the response goes out, so the table itself never holds more
     than the cap and never holds a child of an already-revoked parent for
-    longer than one round trip.
+    longer than one round trip. Every read here goes to the primary: on a
+    replica set a secondary may not hold the row just inserted yet.
     """
     user = auth.user
     req = request or CreateApiKeyRequest()
@@ -138,7 +139,7 @@ async def create_api_key(
     created_via = AUTH_TYPE_API_KEY if parent_key_id else auth.principal.auth_type
     parent: Optional[ApiKey] = None
     if parent_key_id:
-        parent = await ApiKey.find_by_id(parent_key_id)
+        parent = await ApiKey.find_by_id_on_primary(parent_key_id)
         # The calling key was valid at auth time but is gone or revoked now:
         # answer the same as an invalid credential, not a 500.
         if parent is None or parent.user_id != user.id or parent.revoked_at is not None:
@@ -152,7 +153,7 @@ async def create_api_key(
 
     if API_KEY_CREATE_MAX_PER_HOUR > 0:
         hour_ago = now - timedelta(hours=1)
-        recent = await ApiKey.count_documents(
+        recent = await ApiKey.get_primary_collection().count_documents(
             {"user_id": user.id, "timestamp": {"$gte": hour_ago}}
         )
         if recent >= API_KEY_CREATE_MAX_PER_HOUR:
@@ -190,7 +191,7 @@ async def create_api_key(
     # min(active count, cap) rows survive and the earliest inserts win.
     parent_still_active = True
     if parent is not None:
-        fresh_parent = await ApiKey.find_by_id(parent.id)
+        fresh_parent = await ApiKey.find_by_id_on_primary(parent.id)
         parent_still_active = fresh_parent is not None and fresh_parent.revoked_at is None
 
     within_cap = await _is_among_first_active(user.id, api_key.id, API_KEY_MAX_ACTIVE_PER_USER)

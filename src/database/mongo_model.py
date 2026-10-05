@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List, TypeVar, Generic, Type, ClassVar
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ReadPreference
 from pymongo.errors import DuplicateKeyError
 import logging
 from datetime import datetime, timezone
@@ -65,6 +66,16 @@ class MongoModel(BaseModel):
     def get_collection(cls) -> AsyncIOMotorCollection:
         """Get the MongoDB collection for this model."""
         return get_collection(cls.collection_name)
+
+    @classmethod
+    def get_primary_collection(cls) -> AsyncIOMotorCollection:
+        """The collection with reads pinned to the primary.
+
+        ``MONGO_PARAMS`` sets ``readPreference=secondaryPreferred`` on replica
+        sets, so a read can miss a write made a moment earlier. Use this for a
+        read that decides the response from rows the same request just wrote.
+        """
+        return cls.get_collection().with_options(read_preference=ReadPreference.PRIMARY)
 
     @classmethod
     async def get_database(cls) -> AsyncIOMotorDatabase:
@@ -157,6 +168,17 @@ class MongoModel(BaseModel):
         except Exception as e:
             cls.logger.error(f"Error finding document by ID {document_id}: {e}")
             return None
+
+    @classmethod
+    async def find_by_id_on_primary(cls: Type[T], document_id: str) -> Optional[T]:
+        """``find_by_id`` read on the primary, for a row the same request may have just written."""
+        try:
+            oid = ObjectId(document_id)
+        except Exception as e:
+            cls.logger.error(f"Error finding document by ID {document_id}: {e}")
+            return None
+        doc = await cls.get_primary_collection().find_one({"_id": oid})
+        return cls.from_dict(doc) if doc else None
 
     @classmethod
     async def count_documents(cls, filter_dict: Optional[Dict[str, Any]] = None) -> int:

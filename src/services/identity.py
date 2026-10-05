@@ -141,6 +141,7 @@ async def _claim_identity(
     Written before the user row on purpose. A duplicate key means another worker
     got there first for the same ``(issuer, subject)``, and the answer is to
     adopt its user id rather than create a second account for the same person.
+    The winner is read on the primary: a secondary may not hold its row yet.
     """
     identity = ExternalIdentity(
         user_id=user_id,
@@ -152,12 +153,12 @@ async def _claim_identity(
     try:
         await identity.save()
     except ValueError:
-        winner = await ExternalIdentity.find_one(
-            {"issuer": issuer, "subject": subject}
+        winner = await ExternalIdentity.get_primary_collection().find_one(
+            {"issuer": issuer, "subject": subject}, projection={"user_id": 1}
         )
         if winner is None:
             raise
-        return winner.user_id
+        return winner["user_id"]
     return user_id
 
 

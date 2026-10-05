@@ -92,7 +92,9 @@ async def enforce_rate_limit(user_id: str, now: Optional[datetime] = None) -> No
     if cap <= 0:
         return
     now = now or datetime.now(timezone.utc)
-    recent = await BugReport.count_documents(_window_filter(user_id, now))
+    recent = await BugReport.get_primary_collection().count_documents(
+        _window_filter(user_id, now)
+    )
     if recent >= cap:
         raise _throttled()
 
@@ -106,10 +108,11 @@ async def _is_among_first_in_window(user_id: str, report_id: str, now: datetime)
     ``api_keys``. It narrows the race, it does not close it: ``_id`` is minted
     before the insert commits, so a row with a lower id that becomes visible
     after a higher one has already passed can let a burst overshoot by one or
-    two. Fine for a throttle whose job is to stop a flood.
+    two. Fine for a throttle whose job is to stop a flood. Read on the primary:
+    a secondary may not hold the row just inserted yet.
     """
     cursor = (
-        BugReport.get_collection()
+        BugReport.get_primary_collection()
         .find(_window_filter(user_id, now), {"_id": 1})
         .sort("_id", 1)
         .limit(_rate_limit_cap())

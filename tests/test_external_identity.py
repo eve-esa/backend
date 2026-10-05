@@ -430,3 +430,51 @@ async def test_linking_never_gates_the_adopted_account(monkeypatch):
         await drop_identities(subject)
         await cleanup_models([legacy, occupant])
         await User.delete_many({"approval_status": {"$ne": None}})
+
+
+# ── replica set reads ─────────────────────────────────────────────────────────
+
+
+async def test_claim_adopts_the_winner_while_secondaries_lag(monkeypatch):
+    """A concurrent first sign-in loses the insert and reads the winner on the
+    primary; on a lagging secondary it would find nothing and fail."""
+    from tests.utils.replica_lag import lag_secondaries
+
+    subject = f"lag-{uuid.uuid4().hex}"
+    winner_id = str(ObjectId())
+    await ExternalIdentity(user_id=winner_id, issuer=ISSUER, subject=subject).save()
+    try:
+        lag_secondaries(monkeypatch, ExternalIdentity.collection_name)
+        adopted = await identity._claim_identity(
+            issuer=ISSUER, subject=subject, email=None, user_id=str(ObjectId())
+        )
+        assert adopted == winner_id
+    finally:
+        monkeypatch.undo()
+        await drop_identities(subject)
+
+
+async def test_first_sign_in_finds_the_new_user_while_secondaries_lag(monkeypatch):
+    """The request that provisions a user reads it right after the insert:
+    the approval gate and the user load fall back to the primary on a miss
+    instead of passing a pending account or answering 401."""
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from src.middlewares.auth import get_auth_context
+    from tests.utils.replica_lag import lag_secondaries
+    from tests.utils.utils import create_test_user_and_token
+
+    approved, token = await create_test_user_and_token()
+    pending, _ = await create_test_user_and_token(approval_status=approval.APPROVAL_PENDING)
+    try:
+        lag_secondaries(monkeypatch, User.collection_name)
+        ctx = await get_auth_context(
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        )
+        assert ctx.user.id == approved.id
+        with pytest.raises(approval.ApprovalPending):
+            await approval.assert_user_approved(pending.id)
+    finally:
+        monkeypatch.undo()
+        await cleanup_models([approved, pending])
