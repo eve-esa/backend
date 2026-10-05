@@ -61,6 +61,12 @@ from src.middlewares.auth import (
 from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.oidc import IdentityProviderUnavailable
 from src.services.openai_usage import track_usage
+from src.services.request_rate_limiter import (
+    LIMITER_UNAVAILABLE_DETAIL,
+    RateLimiterUnavailable,
+    RequestRateLimited,
+    check_or_raise,
+)
 from src.services.token_rate_limiter import (
     TokenBudgetExceeded,
     count_tokens_for_texts,
@@ -479,6 +485,23 @@ class OpenAIProxyDispatcher:
             response_started["value"] = True
             return
 
+        # Per-user request rate limit, after the allowlist (an unknown path is
+        # still a 404) and before the user lookup, the body and the token
+        # budget: a refused call reads no body and reserves nothing. Mongo is
+        # still touched by the principal lookup above (an API key's
+        # last_used_at stamp, the approval check); only the edge rule on API
+        # keys keeps a key flood off Mongo.
+        try:
+            await check_or_raise(principal, "proxy")
+        except RequestRateLimited as limited:
+            await self._send_rate_limited(send, limited)
+            response_started["value"] = True
+            return
+        except RateLimiterUnavailable:
+            await self._send_limiter_unavailable(send)
+            response_started["value"] = True
+            return
+
         user = await User.find_by_id(principal.user_id)
         if not user:
             raise PermissionError("User not found")
@@ -668,6 +691,45 @@ class OpenAIProxyDispatcher:
             },
         }).encode()
         await send({"type": "http.response.start", "status": 429, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _send_rate_limited(send, limited: RequestRateLimited) -> None:
+        """429 in the OpenAI envelope, so the SDK honours Retry-After and retries."""
+        detail = limited.detail
+        headers = [
+            [b"content-type", b"application/json"],
+            [b"x-should-retry", b"true"],
+            [b"retry-after", str(limited.retry_after_s).encode()],
+        ]
+        body = json.dumps({
+            "detail": detail,
+            "error": {
+                "message": detail["message"],
+                "type": "rate_limit_error",
+                "code": detail["code"],
+                "param": None,
+            },
+        }).encode()
+        await send({"type": "http.response.start", "status": 429, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    async def _send_limiter_unavailable(send) -> None:
+        headers = [
+            [b"content-type", b"application/json"],
+            [b"x-should-retry", b"true"],
+        ]
+        body = json.dumps({
+            "detail": LIMITER_UNAVAILABLE_DETAIL,
+            "error": {
+                "message": LIMITER_UNAVAILABLE_DETAIL["message"],
+                "type": "api_error",
+                "code": LIMITER_UNAVAILABLE_DETAIL["code"],
+                "param": None,
+            },
+        }).encode()
+        await send({"type": "http.response.start", "status": 503, "headers": headers})
         await send({"type": "http.response.body", "body": body})
 
     @staticmethod

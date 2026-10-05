@@ -34,6 +34,7 @@ from src.services.storage import (
     sniff_artifact_type,
     storage_service,
 )
+from src.services.request_rate_limiter import enforce_request_rate
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -94,7 +95,10 @@ async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifac
     return artifact
 
 
-@router.post("/artifacts")
+@router.post(
+    "/artifacts",
+    dependencies=[Depends(enforce_request_rate("upload"))],
+)
 async def upload_artifact(
     file: UploadFile = File(...),
     requesting_user: User = Depends(get_current_user),

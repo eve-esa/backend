@@ -55,6 +55,7 @@ from src.services.hallucination_detector import (
 from src.services.langfuse_scores import schedule_feedback_scores
 from src.services.llm_inference import invoke_llm_and_consume_tokens
 from src.services.load_shedding import acquire_generation_slot_or_raise
+from src.services.request_rate_limiter import enforce_request_rate
 from src.services.stream_bus import get_stream_bus
 from src.services.token_rate_limiter import (
     consume_tokens_for_user,
@@ -89,6 +90,12 @@ logger = logging.getLogger(__name__)
 AGENTIC_STREAM_DEADLINE_SECONDS = 2 * AGENTIC_TIMEOUT
 
 router = APIRouter()
+
+# Per-user request rate limit (src/services/request_rate_limiter.py): resolved
+# after get_current_user (cached per request) and before the body runs, so a
+# refused request takes no generation slot and spends no token budget.
+CHAT_RATE_LIMIT = Depends(enforce_request_rate("chat"))
+RETRIEVE_RATE_LIMIT = Depends(enforce_request_rate("retrieve"))
 
 
 async def resolve_artifact_attachments(
@@ -442,7 +449,8 @@ async def get_my_message_stats(
 
 
 @router.post(
-    "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse
+    "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def create_message(
     request: GenerationRequest,
@@ -615,7 +623,10 @@ async def create_message(
         slot.release()
 
 
-@router.post("/conversations/{conversation_id}/messages/{message_id}/retry")
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/retry",
+    dependencies=[CHAT_RATE_LIMIT],
+)
 async def retry(
     conversation_id: str,
     message_id: str,
@@ -919,6 +930,7 @@ async def update_message(
 @router.post(
     "/conversations/{conversation_id}/stream_messages",
     response_class=StreamingResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def create_message_stream(
     request: GenerationRequest,
@@ -1227,6 +1239,7 @@ async def get_source_logs(
 @router.post(
     "/conversations/{conversation_id}/messages/{message_id}/hallucination",
     response_model=HallucinationDetectResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def hallucination_detect(
     conversation_id: str,
@@ -1336,6 +1349,7 @@ async def hallucination_detect(
 @router.post(
     "/conversations/{conversation_id}/messages/{message_id}/stream-hallucination",
     response_class=StreamingResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def stream_hallucination(
     conversation_id: str,
@@ -1646,7 +1660,10 @@ async def stream_hallucination(
 
 
 # Not load shed yet, with /generate: see the note above hallucination_detect.
-@router.post("/generate-llm")
+@router.post(
+    "/generate-llm",
+    dependencies=[CHAT_RATE_LIMIT],
+)
 async def generate_llm(
     request: GenerateLLMRequest,
     requesting_user: User = Depends(get_current_user),
@@ -1671,7 +1688,10 @@ async def generate_llm(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/generate")
+@router.post(
+    "/generate",
+    dependencies=[CHAT_RATE_LIMIT],
+)
 async def generate(
     request: GenerationRequest,
     requesting_user: User = Depends(get_current_user),
@@ -1772,7 +1792,10 @@ async def generate(
 # Uncapped on purpose: inside an agentic turn the eve_retrieval tool on AgentCore
 # calls back into /retrieve while the turn holds a generation slot, so a cap
 # here would deadlock every worker at the limit.
-@router.post("/retrieve")
+@router.post(
+    "/retrieve",
+    dependencies=[RETRIEVE_RATE_LIMIT],
+)
 async def retrieve(
     request: GenerationRequest, requesting_user: User = Depends(get_current_user)
 ) -> dict:
@@ -1952,6 +1975,7 @@ async def _prepare_agentic_request(
 @router.post(
     "/conversations/{conversation_id}/generate-agentic",
     response_model=CreateMessageResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def create_agentic_message(
     request: GenerationRequest,
@@ -2108,6 +2132,7 @@ async def create_agentic_message(
 @router.post(
     "/conversations/{conversation_id}/stream-generate-agentic",
     response_class=StreamingResponse,
+    dependencies=[CHAT_RATE_LIMIT],
 )
 async def create_agentic_message_stream(
     request: GenerationRequest,

@@ -31,6 +31,10 @@ from src.routers import (
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 from src.services.rerank import aclose_rerank_clients
 from src.core.vector_store_manager import aclose_qdrant_read_clients
+from src.services.request_rate_limiter import (
+    aclose_request_rate_limiter,
+    log_startup_config as log_rate_limit_config,
+)
 from src.utils.error_logger import get_error_logger
 
 # src.config ran load_dotenv on import. Telemetry goes first so the log
@@ -98,9 +102,14 @@ def create_app(debug=False, **kwargs):
         await ensure_provider_catalog_seeded()
         logging.info("Database connection established")
         observability.start_runtime_metrics()
+        log_rate_limit_config()
         try:
             yield
         finally:
+            try:
+                await aclose_request_rate_limiter()
+            except Exception:
+                logging.exception("Request rate limiter shutdown failed")
             try:
                 await shutdown_mcp_proxy_lifespans()
             except Exception:
