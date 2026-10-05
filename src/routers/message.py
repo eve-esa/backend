@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -35,6 +36,7 @@ from src.services.generate_answer import (
     finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
+    is_terminal_event,
     maybe_rollup_and_trim_history,
     persist_message_state,
     resolve_generated_model_name,
@@ -1062,8 +1064,15 @@ async def create_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id, ready=stream_ready):
-                yield data
+            # The turn ends at its terminal event: anything after it (a Stop
+            # landing during the clean-up) is not forwarded.
+            async with contextlib.aclosing(
+                bus.subscribe(message.id, ready=stream_ready)
+            ) as events:
+                async for data in events:
+                    yield data
+                    if is_terminal_event(data):
+                        break
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"
@@ -2254,8 +2263,15 @@ async def create_agentic_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            async for data in bus.subscribe(message.id, ready=subscriber_ready):
-                yield data
+            # The turn ends at its terminal event: anything after it (a Stop
+            # landing during the clean-up) is not forwarded.
+            async with contextlib.aclosing(
+                bus.subscribe(message.id, ready=subscriber_ready)
+            ) as events:
+                async for data in events:
+                    yield data
+                    if is_terminal_event(data):
+                        break
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"

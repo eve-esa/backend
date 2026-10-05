@@ -1470,6 +1470,7 @@ async def _classic_stream_events(
     llm_manager = get_shared_llm_manager()
     llm_manager.set_selected_llm_type(request.llm_type)
     origin_query = request.query
+    final_emitted = False
 
     try:
         logger.info(
@@ -1512,6 +1513,8 @@ async def _classic_stream_events(
                     _get_conversation_history_from_db(conversation_id)
                 )
             except asyncio.CancelledError:
+                if not cancelled():
+                    raise  # not a Stop: the outer handler saves the failed turn
                 await persist_message_state(message_id, stopped=True)
                 yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                 return
@@ -1539,6 +1542,8 @@ async def _classic_stream_events(
                 )
             )
         except asyncio.CancelledError:
+            if not cancelled():
+                raise  # not a Stop: the outer handler saves the failed turn
             await persist_message_state(message_id, stopped=True)
             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
             return
@@ -1561,6 +1566,8 @@ async def _classic_stream_events(
                 if len(results) == 0:
                     raise Exception("No RAG results found for the query")
             except asyncio.CancelledError:
+                if not cancelled():
+                    raise  # not a Stop: the outer handler saves the failed turn
                 await persist_message_state(
                     message_id,
                     trace_id=trace_id,
@@ -2001,10 +2008,8 @@ async def _classic_stream_events(
         # chunk, and it closed this generator. Only a Stop sets the event; any
         # other close is not a stop and is left to the consumer. Past the final
         # event the answer is persisted: a Stop must not replace it.
-        if locals().get("final_emitted") or (
-            isinstance(exc, GeneratorExit)
-            and not (cancel_event is not None and cancel_event.is_set())
-        ):
+        stop = cancel_event is not None and cancel_event.is_set()
+        if final_emitted or (isinstance(exc, GeneratorExit) and not stop):
             raise
         logger.info("Cancelled during generation")
         await persist_message_state(
@@ -2020,8 +2025,13 @@ async def _classic_stream_events(
             prompts=locals().get("prompts") or {},
             retrieved_docs=locals().get("retrieved_docs") or [],
             generated_model_name=locals().get("generated_model_name"),
-            stopped=True,
+            stopped=stop,
+            error=None if stop else build_error_payload(exc),
         )
+        if not stop:
+            # Worker shutdown or the deadline: a failed turn with its partial
+            # output, and the cancel goes on to the caller.
+            raise
         return
     except Exception as e:
         logger.error(f"Error during generation: {e}")
@@ -2187,6 +2197,19 @@ def is_terminal_event(chunk: str) -> bool:
     return payload.get("type") in _TERMINAL_EVENT_TYPES
 
 
+def release_stop_handle(conversation_id: str, message_id: str) -> None:
+    """Make the turn unreachable for the Stop route once its last event is out.
+
+    The runner still charges the tokens and closes the bus after that event: a
+    Stop landing there would cancel the charge (a free turn) and publish
+    ``stopped`` after ``final``. Idempotent with the clean-up in finally.
+    """
+    with contextlib.suppress(Exception):
+        cm = get_cancel_manager()
+        cm.clear_mapping_for(conversation_id, message_id)
+        cm.clear(message_id)
+
+
 async def mark_message_stopped(message_id: str) -> None:
     """Set ``stopped`` with one update and no read.
 
@@ -2241,8 +2264,6 @@ def finish_turn_if_cancelled_unstarted(
         if not done.cancelled():
             return
         if cancel_event is None or not cancel_event.is_set():
-            return
-        if done.get_loop().is_closed():
             return
 
         async def _finish() -> None:
@@ -2310,6 +2331,8 @@ async def run_generation_to_bus(
                     terminal_sent = is_terminal_event(chunk)
                     # Forward SSE-formatted chunks as-is
                     await bus.publish(message_id, chunk)
+                    if terminal_sent:
+                        release_stop_handle(conversation_id, message_id)
         raise_if_deadline_expired(deadline, deadline_seconds)
     except asyncio.CancelledError as exc:
         # Do not publish error. Cancelled outside the generator (before it

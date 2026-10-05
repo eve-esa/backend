@@ -176,12 +176,6 @@ class CancelManager:
                 task.cancel()
             except Exception:
                 pass
-        if self._is_redis_enabled():
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._del_cancel_flag(message_id))
-            except Exception:
-                pass
         # Also clear any conversation mapping pointing to this message
         try:
             to_delete = []
@@ -274,15 +268,6 @@ class CancelManager:
                 )
             except Exception:
                 pass
-
-    async def _del_cancel_flag(self, message_id: str):
-        try:
-            await self._ensure_redis()
-            if self._redis is None:
-                return
-            await self._redis.delete(_cancel_flag_key(message_id))
-        except Exception as e:
-            self._logger.warning("cancel_manager.redis_del_error: %s", str(e))
 
     async def _hset_mapping(self, conversation_id: str, message_id: str):
         try:

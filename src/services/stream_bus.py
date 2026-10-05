@@ -103,13 +103,13 @@ class RedisStreamBus:
     ) -> AsyncIterator[str]:
         pubsub = self._redis.pubsub()
         channel = f"sse:{key}"
-        await pubsub.subscribe(channel)
-        # The SUBSCRIBE reply first: past it no later publish can be missed,
-        # so a Stop is either delivered below or already under the key.
-        await pubsub.get_message(timeout=1.0)
-        if ready is not None:
-            ready.set()
         try:
+            await pubsub.subscribe(channel)
+            # The SUBSCRIBE reply first: past it no later publish can be missed,
+            # so a Stop is either delivered below or already under the key.
+            await pubsub.get_message(timeout=1.0)
+            if ready is not None:
+                ready.set()
             stopped = await self._redis.get(_stopped_key(key))
             if stopped is not None:
                 if isinstance(stopped, bytes):
@@ -129,6 +129,9 @@ class RedisStreamBus:
                     break
                 yield data
         finally:
+            # A failed subscribe must not leave the producer waiting for it.
+            if ready is not None:
+                ready.set()
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(channel)
             with contextlib.suppress(Exception):

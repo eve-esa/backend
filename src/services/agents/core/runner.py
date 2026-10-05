@@ -40,6 +40,7 @@ from src.services.generate_answer import (
     persist_message_state,
     is_terminal_event,
     persist_runner_cancel,
+    release_stop_handle,
     raise_if_deadline_expired,
     resolve_generated_model_name,
 )
@@ -1935,7 +1936,8 @@ async def generate_answer_agentic_stream_helper(
         # chunk, and it closed this generator. Only a Stop sets the event; any
         # other close is not a stop and is left to the consumer. Past the final
         # event the answer is persisted: a Stop must not replace it.
-        if final_emitted or (isinstance(exc, GeneratorExit) and not cancelled()):
+        stop = cancelled()
+        if final_emitted or (isinstance(exc, GeneratorExit) and not stop):
             raise
         logger.info("Agentic generation cancelled")
         cancelled_documents, cancelled_use_rag = _retrieval_state()
@@ -1945,9 +1947,14 @@ async def generate_answer_agentic_stream_helper(
             output="".join(accumulated),
             documents=cancelled_documents,
             use_rag=cancelled_use_rag,
-            stopped=True,
+            stopped=stop,
+            error=None if stop else build_error_payload(exc),
             artifact_ids=_collected_artifact_ids(),
         )
+        if not stop:
+            # Worker shutdown or the deadline: a failed turn with its partial
+            # output, and the cancel goes on to the caller.
+            raise
         return
 
     except TimeoutError as exc:
@@ -2125,6 +2132,8 @@ async def run_agentic_generation_to_bus(
                 async for chunk in chunks:
                     terminal_sent = is_terminal_event(chunk)
                     await bus.publish(message_id, chunk)
+                    if terminal_sent:
+                        release_stop_handle(conversation_id, message_id)
         raise_if_deadline_expired(deadline, deadline_seconds)
     except asyncio.CancelledError as exc:
         # Cancelled outside the generator (before it started, or on publish):

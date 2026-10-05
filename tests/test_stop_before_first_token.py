@@ -80,7 +80,7 @@ async def turn():
     await cleanup_models([user, conversation])
 
 
-def _start(kind, user, conversation, message, ready):
+def _start(kind, user, conversation, message, ready, deadline=None):
     """What the stream route does after Message.create, minus the response."""
     cm = get_cancel_manager()
     cancel_event = cm.create(message.id)
@@ -91,6 +91,7 @@ def _start(kind, user, conversation, message, ready):
         message_id=message.id,
         user_id=user.id,
         cancel_event=cancel_event,
+        deadline_seconds=deadline,
     )
     if kind == "agentic":
         coro = run_agentic_generation_to_bus(subscriber_ready=ready, **common)
@@ -328,15 +329,42 @@ def _is_type(kind):
 _TOKENS = ("Rome ", "is here.")
 
 
+class _HangingAgentGraph:
+    """Agentic model that streams the first token, then never answers again."""
+
+    async def astream(self, *args, **kwargs):
+        yield "messages", (AIMessage(content=_TOKENS[0]), {"langgraph_node": "agent"})
+        await asyncio.Event().wait()
+
+
+class _HangingGraph:
+    """Classic twin of ``_HangingAgentGraph``."""
+
+    def astream(self, state, config=None, stream_mode=None):
+        async def _stream():
+            yield SimpleNamespace(content=_TOKENS[0]), {}
+            await asyncio.Event().wait()
+
+        return _stream()
+
+    async def aclose(self):
+        return None
+
+
 @contextlib.contextmanager
-def _answer_pipeline(kind, monkeypatch):
-    """Real stream helpers over a fake model that answers ``_TOKENS``."""
+def _answer_pipeline(kind, monkeypatch, hang=False):
+    """Real stream helpers over a fake model that answers ``_TOKENS``, or with
+    ``hang`` its first token only."""
     if kind == "agentic":
-        graph = _FakeStreamGraph(
-            messages=[
-                (AIMessage(content=token), {"langgraph_node": "agent"})
-                for token in _TOKENS
-            ]
+        graph = (
+            _HangingAgentGraph()
+            if hang
+            else _FakeStreamGraph(
+                messages=[
+                    (AIMessage(content=token), {"langgraph_node": "agent"})
+                    for token in _TOKENS
+                ]
+            )
         )
         with _patched_runner(
             _build_react_graph=MagicMock(return_value=graph),
@@ -344,7 +372,8 @@ def _answer_pipeline(kind, monkeypatch):
         ):
             yield
     else:
-        _patch_pipeline(monkeypatch, _FakeGraph({"eve_jsc": list(_TOKENS)}))
+        graph = _HangingGraph() if hang else _FakeGraph({"eve_jsc": list(_TOKENS)})
+        _patch_pipeline(monkeypatch, graph)
         yield
 
 
@@ -384,18 +413,80 @@ async def test_stop_on_the_final_event_keeps_the_answer(turn, kind, monkeypatch)
 
 
 @pytest.mark.parametrize("kind", ["agentic", "classic"])
-async def test_a_finished_turn_stays_not_stopped(turn, kind, monkeypatch):
+async def test_a_stop_after_the_final_event_still_charges_the_turn(
+    turn, kind, monkeypatch
+):
+    """The Stop lands while the runner charges the tokens, after ``final``."""
     user, conversation, message = turn
+    in_charge, charged = asyncio.Event(), asyncio.Event()
+
+    async def _slow_charge(_user, _count):
+        in_charge.set()
+        await asyncio.sleep(0.1)
+        charged.set()
+
     p1, p2 = _patch_bus(StreamBus())
-    with p1, p2, _answer_pipeline(kind, monkeypatch):
+    with p1, p2, _answer_pipeline(kind, monkeypatch), patch(
+        f"{_RUNNER}.consume_tokens_for_user", _slow_charge
+    ), patch(f"{_CLASSIC}.consume_tokens_for_user", _slow_charge):
         cm, task = _start(kind, user, conversation, message, None)
+        await asyncio.wait_for(in_charge.wait(), timeout=5)
+        # What the Stop route does.
+        target = await cm.get_message_for_conversation_async(conversation.id)
+        if target:
+            cm.cancel(target)
         await asyncio.wait_for(task, timeout=5)
-        cm.cancel(message.id)  # a late Stop: nothing is running any more
-        await asyncio.sleep(0.05)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert charged.is_set(), "the Stop cancelled the token charge"
+    assert row.stopped is False
+    assert row.output == "".join(_TOKENS)
+
+
+class _TokenSeenBus(StreamBus):
+    def __init__(self):
+        super().__init__()
+        self.token_seen = asyncio.Event()
+
+    async def publish(self, key, data):
+        if '"type": "token"' in data:
+            self.token_seen.set()
+        await super().publish(key, data)
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_a_shutdown_mid_answer_is_a_failed_turn_with_its_output(
+    turn, kind, monkeypatch
+):
+    """Cancel without the Stop event while the model streams (ECS rollover)."""
+    user, conversation, message = turn
+    bus = _TokenSeenBus()
+    p1, p2 = _patch_bus(bus)
+    with p1, p2, _answer_pipeline(kind, monkeypatch, hang=True):
+        cm, task = _start(kind, user, conversation, message, None)
+        await asyncio.wait_for(bus.token_seen.wait(), timeout=5)
+        await asyncio.sleep(0.05)  # parked in the model stream
+        task.cancel()
+        await asyncio.wait_for(task, timeout=5)
 
     row = await Message.find_by_id_on_primary(message.id)
     assert row.stopped is False
-    assert row.output == "".join(_TOKENS)
+    assert row.output == _TOKENS[0]
+    assert row.metadata["error"]["type"] == "CancelledError"
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_the_deadline_keeps_the_partial_output(turn, kind, monkeypatch):
+    user, conversation, message = turn
+    p1, p2 = _patch_bus(StreamBus())
+    with p1, p2, _answer_pipeline(kind, monkeypatch, hang=True):
+        cm, task = _start(kind, user, conversation, message, None, deadline=0.3)
+        await asyncio.wait_for(task, timeout=5)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is False
+    assert row.output == _TOKENS[0]
+    assert row.metadata["error"]["code"] == "timeout"
 
 
 @pytest.mark.parametrize("kind", ["agentic", "classic"])
@@ -439,3 +530,68 @@ async def test_a_subscriber_attached_after_the_stop_gets_the_stopped_event():
     finally:
         await bus._redis.delete(f"sse-stopped:{key}")
         await bus._redis.aclose()
+
+
+class _OrderRecordingRedis:
+    """Records SUBSCRIBE, its reply and GET in the order the code issues them."""
+
+    def __init__(self, value):
+        self.calls = []
+        self.value = value
+
+    def pubsub(self):
+        calls = self.calls
+
+        class _PubSub:
+            async def subscribe(self, channel):
+                calls.append("subscribe")
+
+            async def get_message(self, **kwargs):
+                calls.append("subscribe-reply")
+                return {"type": "subscribe"}
+
+            async def unsubscribe(self, channel):
+                return None
+
+            async def close(self):
+                return None
+
+            async def aclose(self):
+                return None
+
+        return _PubSub()
+
+    async def get(self, key):
+        self.calls.append("get")
+        return self.value
+
+    async def aclose(self):
+        return None
+
+
+@pytest.mark.no_db
+async def test_the_stream_reads_the_stop_key_after_the_subscribe_reply():
+    fake = _OrderRecordingRedis(b'data: {"type": "stopped"}\n\n')
+    bus = RedisStreamBus.__new__(RedisStreamBus)
+    bus._redis = fake
+
+    items = [item async for item in bus.subscribe("m1")]
+
+    assert fake.calls == ["subscribe", "subscribe-reply", "get"]
+    assert items == ['data: {"type": "stopped"}\n\n']
+
+
+@pytest.mark.no_db
+async def test_the_cancel_channel_reads_the_flag_after_the_subscribe_reply(monkeypatch):
+    from src.services import cancel_manager
+
+    fake = _OrderRecordingRedis(b"1")
+    monkeypatch.setattr(
+        cancel_manager.aioredis.Redis, "from_url", MagicMock(return_value=fake)
+    )
+    event = asyncio.Event()
+
+    await CancelManager()._subscribe_cancel_channel("m1", event)
+
+    assert fake.calls == ["subscribe", "subscribe-reply", "get"]
+    assert event.is_set()
