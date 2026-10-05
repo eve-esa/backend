@@ -488,6 +488,10 @@ async def test_trimmed_result_indexes_still_point_at_the_original_candidates(
     assert selected[3]["text"] == "a" * 4000
 
 
+def test_trim_candidates_accepts_an_empty_list():
+    assert rerank_module.trim_candidates([], 1500) == []
+
+
 async def test_cap_zero_sends_the_full_texts(error_log, monkeypatch):
     monkeypatch.setattr(rerank_module, "RERANK_MAX_CHARS_PER_CANDIDATE", 0)
     seen = []

@@ -206,6 +206,8 @@ def trim_candidates(candidate_texts: List[str], max_chars: int) -> List[str]:
     One INFO line per turn carries the sizes, so the effect is readable in
     HyperDX.
     """
+    if not candidate_texts:
+        return candidate_texts
     lengths = [len(text) for text in candidate_texts]
     truncated = sum(1 for n in lengths if max_chars > 0 and n > max_chars)
     logger.info(
