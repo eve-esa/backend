@@ -8,11 +8,13 @@ concurrency.
 """
 
 import asyncio
+import inspect
 import logging
 import math
 import os
 import re
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -114,15 +116,19 @@ class FakeStore:
 class CountingConnection:
     """A pool connection whose PING answers like ``FakeStore.ping``."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, pool) -> None:
         self.store = store
+        self.pool = pool
         self.sent = []
 
     async def send_command(self, *args):
         self.sent.append(args)
 
     async def read_response(self):
-        return await self.store.ping()
+        try:
+            return await self.store.ping()
+        finally:
+            self.pool.in_flight -= 1
 
 
 class CountingPool:
@@ -132,22 +138,32 @@ class CountingPool:
     that accepts only so many TLS handshakes in time.
     """
 
-    def __init__(self, store, open_limit=None) -> None:
+    def __init__(self, store, open_limit=None, connect_s=0.0) -> None:
         self.store = store
         self.open_limit = open_limit
+        self.connect_s = connect_s
         self.opened = 0
         self.released = 0
         self.in_use = 0
         self.max_in_use = 0
+        # Connections between the start of the open and the PING answer.
+        self.in_flight = 0
+        self.max_in_flight = 0
 
     async def get_connection(self):
-        await asyncio.sleep(0)
-        if self.open_limit is not None and self.opened >= self.open_limit:
-            raise _redis_connection_error("Error connecting to 10.0.0.12:6379")
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.connect_s)
+            if self.open_limit is not None and self.opened >= self.open_limit:
+                raise _redis_connection_error("Error connecting to 10.0.0.12:6379")
+        except BaseException:
+            self.in_flight -= 1
+            raise
         self.opened += 1
         self.in_use += 1
         self.max_in_use = max(self.max_in_use, self.in_use)
-        return CountingConnection(self.store)
+        return CountingConnection(self.store, self)
 
     async def release(self, connection):
         self.released += 1
@@ -654,24 +670,101 @@ async def test_warm_up_is_a_no_op_when_off_or_without_redis_url(feature, url, mo
         rrl, "get_request_rate_limiter", lambda: calls.append(1) or limiter(store)
     )
     with caplog.at_level(logging.DEBUG, logger=rrl.__name__):
-        await rrl.warm_up_request_rate_limiter()
+        assert rrl.start_request_rate_limiter_warm_up() is None
+        await rrl.stop_request_rate_limiter_warm_up(None)
     assert calls == [] and store.pings == 0
     assert [r for r in caplog.records if r.name == rrl.__name__] == []
 
 
-def test_warm_up_deadline_is_at_most_3_s():
-    assert 0 < rrl.WARM_UP_DEADLINE_S <= 3
+def test_warm_up_deadline_is_10_s():
+    assert rrl.WARM_UP_DEADLINE_S == 10
+    default = inspect.signature(RequestRateLimiter.warm_up).parameters["deadline_s"].default
+    assert default == rrl.WARM_UP_DEADLINE_S
 
 
-async def test_warm_up_runs_for_the_process_limiter(monkeypatch, caplog):
+async def test_warm_up_opens_at_most_2_connections_at_a_time():
+    store = FakeStore()
+    store.connection_pool = CountingPool(store, connect_s=0.02)
+    lim = limiter(store, max_connections=10)
+    assert await lim.warm_up() == 10
+    pool = store.connection_pool
+    assert rrl.WARM_UP_CONCURRENCY == 2
+    assert pool.max_in_flight == 2
+    # Still the whole pool, held together before the release.
+    assert pool.opened == 10 and pool.max_in_use == 10 and pool.in_use == 0
+
+
+async def test_warm_up_runs_in_the_background_for_the_process_limiter(monkeypatch, caplog):
     store = FakeStore()
     monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
     monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
     monkeypatch.setattr(rrl, "_limiter", limiter(store))
     with caplog.at_level(logging.INFO, logger=rrl.__name__):
-        await rrl.warm_up_request_rate_limiter()
+        task = rrl.start_request_rate_limiter_warm_up()
+        assert task is not None and not task.done()
+        assert await task == rrl.STORE_MAX_CONNECTIONS
+        await rrl.stop_request_rate_limiter_warm_up(task)
     assert store.pings == rrl.STORE_MAX_CONNECTIONS
     assert f"connections={rrl.STORE_MAX_CONNECTIONS}" in caplog.text
+
+
+async def test_warm_up_stop_cancels_it_and_gives_the_connections_back(monkeypatch, caplog):
+    store = FakeStore()
+    store.ping_hang = True
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
+    monkeypatch.setattr(rrl, "_limiter", limiter(store))
+    task = rrl.start_request_rate_limiter_warm_up()
+    await asyncio.sleep(0.05)
+    assert store.connection_pool.in_use == 2
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        await rrl.stop_request_rate_limiter_warm_up(task)
+    assert task.cancelled()
+    assert store.connection_pool.in_use == 0
+    assert "rate_limit." not in caplog.text
+
+
+async def test_lifespan_does_not_await_the_warm_up(monkeypatch):
+    import server
+    from src import observability as observability_module
+
+    async def noop(*args, **kwargs):
+        return None
+
+    store = FakeStore()
+    store.ping_hang = True
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
+    monkeypatch.setattr(rrl, "_limiter", limiter(store))
+    outer = server.create_app()
+    app = observability_module._find_fastapi_app(outer)
+    # Only the warm-up is real: the rest of the lifespan is stubbed.
+    monkeypatch.setattr(server, "async_mongo_manager", SimpleNamespace(connect=noop, close=noop))
+    for name in (
+        "ensure_indexes",
+        "ensure_provider_catalog_seeded",
+        "shutdown_mcp_proxy_lifespans",
+        "aclose_rerank_clients",
+        "aclose_qdrant_read_clients",
+    ):
+        monkeypatch.setattr(server, name, noop)
+    monkeypatch.setattr(
+        server,
+        "observability",
+        SimpleNamespace(start_runtime_metrics=lambda: None, shutdown=lambda: None),
+    )
+    monkeypatch.setattr(
+        server, "get_error_logger", lambda: SimpleNamespace(flush=noop)
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with app.router.lifespan_context(app):
+        # Ready at once although every PING hangs for 10 s.
+        assert loop.time() - started < 1.0
+        task = app.state.rate_limit_warm_up
+        assert task is not None and not task.done()
+    assert task.cancelled()
+    assert store.connection_pool.in_use == 0
 
 
 async def test_store_down_fail_closed_refuses():

@@ -31,13 +31,16 @@ deadline of ``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
 ``socket_connect_timeout``) plus 0.25 s, while the pool wait and every socket
 read (AUTH, SELECT, the script) stay bounded by 0.25 s each. On an open
 connection a check therefore still fails within 0.25 s of a stalled read; only
-a reconnect may use the extra second. At startup the lifespan opens the whole
-pool ahead of traffic (:func:`warm_up_request_rate_limiter`: every connection
-at once, a PING on database 1 each, retried within 3 s), since a cold burst
-would otherwise open them all under the check deadline, and logs
-``rate_limit.store_ready latency_ms=<n> connections=<k>`` at INFO, or
+a reconnect may use the extra second. At startup the lifespan starts a
+background task that opens the whole pool ahead of traffic
+(:func:`start_request_rate_limiter_warm_up`: a PING on database 1 per
+connection, at most two handshakes in flight per worker so the workers of a
+small task do not pile TLS handshakes onto one vCPU, retried within 10 s),
+since a cold burst would otherwise open them all under the check deadline. It
+logs ``rate_limit.store_ready latency_ms=<n> connections=<k>`` at INFO, or
 ``rate_limit.skipped_store_down class=startup skip_s=0 type=<ExceptionClass>``
-at WARNING; startup never fails on it.
+at WARNING. Readiness never waits for it, and a check that arrives meanwhile
+runs under the usual connect plus command deadline.
 
 A refusal logs ``rate_limit.limited subject_kind=<user|api_key> class=<c>
 mode=<shadow|enforce> retry_after_s=<n>``, INFO in shadow and WARNING in
@@ -87,8 +90,10 @@ logger = logging.getLogger(__name__)
 # limiter keys never mix with theirs.
 STORE_DB = 1
 STORE_TIMEOUT_S = 0.25
-# Total time the startup PING may take, retries included.
-WARM_UP_DEADLINE_S = 3.0
+# Total time the startup warm-up may take, retries included.
+WARM_UP_DEADLINE_S = 10.0
+# Connections the warm-up opens at the same time, per worker.
+WARM_UP_CONCURRENCY = 2
 WARM_UP_RETRY_PAUSE_S = 0.2
 STORE_MAX_CONNECTIONS = 10
 RETRY_AFTER_MIN_S = 1
@@ -386,13 +391,16 @@ class RequestRateLimiter:
     async def warm_up(self, deadline_s: float = WARM_UP_DEADLINE_S) -> int:
         """Open the whole store pool ahead of traffic. Never raises.
 
-        Takes ``max_connections`` connections from the request pool at once,
-        PINGs database 1 on each and releases them all, so the first burst of
-        checks finds open connections instead of opening them (TLS) under the
-        check deadline. Each connection is retried until ``deadline_s``; the
-        ones still not open then are given up. Logs ``rate_limit.store_ready
-        latency_ms=<n> connections=<k>`` when at least one opened, else the
-        startup ``skipped_store_down`` line, and returns ``k``.
+        Takes ``max_connections`` connections from the request pool, opening
+        at most ``WARM_UP_CONCURRENCY`` at a time, PINGs database 1 on each,
+        holds them until all are open (or the deadline) and then releases
+        them all, so the first burst of checks finds open connections instead
+        of opening them (TLS) under the check deadline. Each connection is
+        retried until ``deadline_s``; the ones still not open then are given
+        up. Logs ``rate_limit.store_ready latency_ms=<n> connections=<k>``
+        when at least one opened, else the startup ``skipped_store_down``
+        line, and returns ``k``. Cancelled (shutdown), it gives back every
+        connection it holds and re-raises.
         """
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -403,40 +411,46 @@ class RequestRateLimiter:
             self._log_store_down("startup", 0, exc)
             return 0
 
+        in_flight = asyncio.Semaphore(WARM_UP_CONCURRENCY)
+
         async def _open_one() -> Any:
             nonlocal last_exc
             while True:
-                try:
-                    conn = await pool.get_connection()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - retried, then logged
-                    last_exc = exc
-                else:
+                async with in_flight:
                     try:
-                        await conn.send_command("PING")
-                        await conn.read_response()
-                        return conn
+                        conn = await pool.get_connection()
                     except asyncio.CancelledError:
-                        await pool.release(conn)
                         raise
                     except Exception as exc:  # noqa: BLE001 - retried, then logged
                         last_exc = exc
-                        await pool.release(conn)
+                    else:
+                        try:
+                            await conn.send_command("PING")
+                            await conn.read_response()
+                            return conn
+                        except asyncio.CancelledError:
+                            await pool.release(conn)
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - retried, then logged
+                            last_exc = exc
+                            await pool.release(conn)
                 await asyncio.sleep(WARM_UP_RETRY_PAUSE_S)
 
         tasks = [asyncio.ensure_future(_open_one()) for _ in range(self.max_connections)]
-        done, pending = await asyncio.wait(tasks, timeout=deadline_s)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        opened = [t.result() for t in done if not t.cancelled() and t.exception() is None]
-        for conn in opened:
-            try:
-                await pool.release(conn)
-            except Exception:  # noqa: BLE001 - startup must not fail
-                pass
+        try:
+            await asyncio.wait(tasks, timeout=deadline_s)
+        finally:
+            # Also on cancellation: no connection stays held by the warm-up.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            opened = [r for r in results if not isinstance(r, BaseException)]
+            for conn in opened:
+                try:
+                    await pool.release(conn)
+                except Exception:  # noqa: BLE001 - startup must not fail
+                    pass
         if not opened:
             self._log_store_down("startup", 0, last_exc)
             return 0
@@ -526,17 +540,35 @@ def log_startup_config() -> None:
             )
 
 
-async def warm_up_request_rate_limiter() -> None:
-    """Open the store connection pool at startup (app lifespan). Never raises.
+def start_request_rate_limiter_warm_up() -> Optional["asyncio.Task[int]"]:
+    """Start the pool warm-up in the background (app lifespan). Never raises.
 
-    Does nothing when the feature is off or ``REDIS_URL`` is unset: the
-    startup config line already warns about the missing store.
+    Returns the task, for :func:`stop_request_rate_limiter_warm_up` at
+    shutdown, or None when the feature is off or ``REDIS_URL`` is unset (the
+    startup config line already warns about the missing store). The lifespan
+    does not await it: readiness never waits for the store.
     """
     if not FEATURE_REQUEST_RATE_LIMIT or not REDIS_URL:
-        return
+        return None
     limiter = get_request_rate_limiter()
-    if limiter is not None:
-        await limiter.warm_up()
+    if limiter is None:
+        return None
+    return asyncio.create_task(limiter.warm_up(), name="rate_limit_warm_up")
+
+
+async def stop_request_rate_limiter_warm_up(task: Optional["asyncio.Task[int]"]) -> None:
+    """Cancel the warm-up if still running and wait for it (app lifespan)."""
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - shutdown must not fail
+        # The class only: a redis error message can carry the host.
+        logger.warning("rate_limit warm-up failed type=%s", type(exc).__name__)
 
 
 async def aclose_request_rate_limiter() -> None:
