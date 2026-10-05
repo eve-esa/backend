@@ -32,12 +32,14 @@ deadline of ``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
 read (AUTH, SELECT, the script) stay bounded by 0.25 s each. On an open
 connection a check therefore still fails within 0.25 s of a stalled read; only
 a reconnect may use the extra second. At startup the lifespan starts a
-background task that opens the whole pool ahead of traffic
+background task that opens the pool ahead of traffic but for two slots
 (:func:`start_request_rate_limiter_warm_up`: a PING on database 1 per
-connection, each put idle in the pool at once so it never holds a slot a check
-needs, at most two handshakes in flight per worker so the workers of a small
-task do not pile TLS handshakes onto one vCPU, retried within 10 s),
-since a cold burst would otherwise open them all under the check deadline. It
+connection, at most two handshakes in flight per worker so the workers of a
+small task do not pile TLS handshakes onto one vCPU, retried within 10 s),
+since a cold burst would otherwise open them all under the check deadline.
+The warm-up holds its connections until it is done, because the pool hands an
+idle connection back before it opens a new one; the two slots it leaves free
+are the ones a check arriving meanwhile takes. It
 logs ``rate_limit.store_ready latency_ms=<n> connections=<k>`` at INFO, or
 ``rate_limit.skipped_store_down class=startup skip_s=0 type=<ExceptionClass>``
 at WARNING. Readiness never waits for it, and a check that arrives meanwhile
@@ -95,6 +97,8 @@ STORE_TIMEOUT_S = 0.25
 WARM_UP_DEADLINE_S = 10.0
 # Connections the warm-up opens at the same time, per worker.
 WARM_UP_CONCURRENCY = 2
+# Pool slots the warm-up leaves free for checks while it holds the rest.
+WARM_UP_FREE_SLOTS = 2
 WARM_UP_RETRY_PAUSE_S = 0.2
 STORE_MAX_CONNECTIONS = 10
 RETRY_AFTER_MIN_S = 1
@@ -390,22 +394,19 @@ class RequestRateLimiter:
         return Decision(False, retry_after_seconds(int(retry_ms)), LIMITED)
 
     async def warm_up(self, deadline_s: float = WARM_UP_DEADLINE_S) -> int:
-        """Open the whole store pool ahead of traffic. Never raises.
+        """Open the store pool but for two slots ahead of traffic. Never raises.
 
-        Opens connections built by the pool (``make_connection``, so with its
-        database, timeouts and TLS settings), at most ``WARM_UP_CONCURRENCY``
-        at a time, PINGs database 1 on each and puts each one straight into
-        the pool's idle list, until the pool holds ``max_connections``. The
-        warm-up never takes a pool slot, so a check arriving meanwhile always
-        finds one. Taking connections from the pool and releasing them cannot
-        do this: the pool hands an idle connection back before it creates a
-        new one, so it would only grow by holding every connection at once.
-        The idle list is a redis-py 8.1 internal, touched under the pool's
-        own condition lock. Each connection is retried until ``deadline_s``.
-        Logs ``rate_limit.store_ready latency_ms=<n> connections=<k>`` when
-        at least one was added, else the startup ``skipped_store_down`` line,
-        and returns ``k``. Cancelled (shutdown), it closes the connection it
-        is opening and re-raises.
+        Takes ``max_connections - WARM_UP_FREE_SLOTS`` connections from the
+        request pool, opening at most ``WARM_UP_CONCURRENCY`` at a time, PINGs
+        database 1 on each, holds them until all are open (or the deadline)
+        and then releases them all; the free slots let a check arriving
+        meanwhile take a connection without waiting, so the first burst of checks finds open connections instead
+        of opening them (TLS) under the check deadline. Each connection is
+        retried until ``deadline_s``; the ones still not open then are given
+        up. Logs ``rate_limit.store_ready latency_ms=<n> connections=<k>``
+        when at least one opened, else the startup ``skipped_store_down``
+        line, and returns ``k``. Cancelled (shutdown), it gives back every
+        connection it holds and re-raises.
         """
         loop = asyncio.get_running_loop()
         started = loop.time()
@@ -418,58 +419,45 @@ class RequestRateLimiter:
 
         in_flight = asyncio.Semaphore(WARM_UP_CONCURRENCY)
 
-        def _pool_full() -> bool:
-            held = len(pool._available_connections) + len(pool._in_use_connections)
-            return held >= pool.max_connections
-
-        async def _close(conn: Any) -> None:
-            try:
-                await conn.disconnect()
-            except Exception:  # noqa: BLE001 - startup must not fail
-                pass
-
-        async def _hand_to_pool(conn: Any) -> bool:
-            async with pool._condition:
-                if _pool_full():
-                    return False
-                pool._available_connections.append(conn)
-                # A check waiting for a free connection can take this one.
-                pool._condition.notify()
-                return True
-
         async def _open_one() -> Any:
             nonlocal last_exc
             while True:
                 async with in_flight:
-                    if _pool_full():
-                        return None
-                    conn = pool.make_connection()
                     try:
-                        await conn.connect()
-                        await conn.send_command("PING")
-                        await conn.read_response()
+                        conn = await pool.get_connection()
                     except asyncio.CancelledError:
-                        await _close(conn)
                         raise
                     except Exception as exc:  # noqa: BLE001 - retried, then logged
                         last_exc = exc
-                        await _close(conn)
                     else:
-                        if await _hand_to_pool(conn):
+                        try:
+                            await conn.send_command("PING")
+                            await conn.read_response()
                             return conn
-                        await _close(conn)
-                        return None
+                        except asyncio.CancelledError:
+                            await pool.release(conn)
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - retried, then logged
+                            last_exc = exc
+                            await pool.release(conn)
                 await asyncio.sleep(WARM_UP_RETRY_PAUSE_S)
 
-        tasks = [asyncio.ensure_future(_open_one()) for _ in range(self.max_connections)]
+        target = max(1, self.max_connections - WARM_UP_FREE_SLOTS)
+        tasks = [asyncio.ensure_future(_open_one()) for _ in range(target)]
         try:
             await asyncio.wait(tasks, timeout=deadline_s)
         finally:
+            # Also on cancellation: no connection stays held by the warm-up.
             for task in tasks:
                 if not task.done():
                     task.cancel()
             results = await asyncio.gather(*tasks, return_exceptions=True)
-        opened = [r for r in results if r is not None and not isinstance(r, BaseException)]
+            opened = [r for r in results if not isinstance(r, BaseException)]
+            for conn in opened:
+                try:
+                    await pool.release(conn)
+                except Exception:  # noqa: BLE001 - startup must not fail
+                    pass
         if not opened:
             self._log_store_down("startup", 0, last_exc)
             return 0
