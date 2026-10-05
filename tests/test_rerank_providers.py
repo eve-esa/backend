@@ -9,6 +9,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from src import config
 from src.services import rerank as rerank_module
 from src.services.generate_answer import _select_top_k_unique_results
 from src.services.rerank import (
@@ -83,6 +84,12 @@ async def test_order_setting_is_honoured_and_normalised():
     assert parse_provider_order("deepinfra,jsc") == ("deepinfra", "jsc")
     assert parse_provider_order(" JSC , jsc,deepinfra ,") == ("jsc", "deepinfra")
     assert [p.name for p in configured_providers("deepinfra,jsc")] == ["deepinfra", "jsc"]
+
+
+def test_default_order_reranks_with_deepinfra_first_and_jsc_as_fallback(monkeypatch):
+    monkeypatch.setattr(rerank_module, "RERANK_PROVIDER_ORDER", config.DEFAULT_RERANK_PROVIDER_ORDER)
+
+    assert [p.name for p in configured_providers()] == ["deepinfra", "jsc"]
 
 
 async def test_timeout_falls_to_the_next_provider_within_the_budget(error_log):

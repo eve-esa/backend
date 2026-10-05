@@ -98,7 +98,10 @@ JSC_RERANKER_MODEL_NAME = getenv_or(
 # and "deepinfra" (DEEPINFRA_API_TOKEN). Unknown names are skipped with a
 # warning, unconfigured providers are skipped. When no provider answers, the
 # candidates keep their retrieval order so the answer keeps its sources.
-RERANK_PROVIDER_ORDER = getenv_or("RERANK_PROVIDER_ORDER", "jsc,deepinfra")
+# DeepInfra goes first: JSC /v1/rerank refuses the 25 to 45 long candidates a
+# turn sends (HTTP 500), so it stays as the fallback.
+DEFAULT_RERANK_PROVIDER_ORDER = "deepinfra,jsc"
+RERANK_PROVIDER_ORDER = getenv_or("RERANK_PROVIDER_ORDER", DEFAULT_RERANK_PROVIDER_ORDER)
 
 # Ordered EVE endpoint chain, comma-separated llm_type names. Unconfigured
 # entries are dropped at resolution time and "fallback" is always appended

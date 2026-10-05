@@ -251,9 +251,10 @@ async def rerank_candidates(
             logger.debug("%s reranker in backoff, skipped", provider.label)
             continue
 
-        # The first provider in the order keeps today's wording ("JSC reranker
-        # failed"); any later one is a fallback ("DeepInfra reranker fallback
-        # failed"), so the stored error descriptions do not change meaning.
+        # The first provider in the order is "<label> reranker", any later one
+        # "<label> reranker fallback" (with the default order: "DeepInfra
+        # reranker failed", "JSC reranker fallback failed"). The back office
+        # stats classify these rows by provider name, not by position.
         what = f"{provider.label} reranker" + (" fallback" if position else "")
         remaining = deadline - loop.time()
         if remaining <= 0:

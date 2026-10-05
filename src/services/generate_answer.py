@@ -1044,7 +1044,7 @@ async def setup_rag_and_context(
                 if text_str and "API call failed" not in text_str:
                     candidate_texts.append(text_str)
 
-        # Rerank through RERANK_PROVIDER_ORDER (JSC, then DeepInfra by default).
+        # Rerank through RERANK_PROVIDER_ORDER (DeepInfra, then JSC by default).
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         latency = time.perf_counter()
