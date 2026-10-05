@@ -967,3 +967,36 @@ async def test_create_succeeds_while_secondaries_lag(monkeypatch):
         monkeypatch.undo()
         await ApiKey.delete_many({"user_id": user.id})
         await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_list_reads_the_primary_right_after_a_change(monkeypatch):
+    """Staging listed a deleted key as active for up to 450 ms: the list read a
+    secondary that had not replicated the revoke yet. The page and the parent
+    lookup both go to the primary, so a create or a revoke shows at once."""
+    from src.middlewares.auth import AUTH_TYPE_OIDC
+    from tests.utils.replica_lag import lag_secondaries
+
+    user, _ = await create_test_user_and_token()
+    try:
+        _, parent = await create_key_row(user.id, name="parent")
+        _, child = await create_key_row(user.id, name="child", created_by_key_id=parent.id)
+        auth = AuthContext(user=user, principal=Principal(user.id, AUTH_TYPE_OIDC))
+        lag_secondaries(monkeypatch, ApiKey.collection_name)
+
+        listed = await api_keys.list_api_keys(auth, include_revoked=False)
+        assert {k.id for k in listed} == {parent.id, child.id}
+
+        # A raw write: the revoke route's own tree read stays on the default preference.
+        await ApiKey.get_collection().update_many(
+            {"user_id": user.id}, {"$set": {"revoked_at": datetime.now(timezone.utc)}}
+        )
+        assert await api_keys.list_api_keys(auth, include_revoked=False) == []
+
+        listed = await api_keys.list_api_keys(auth, include_revoked=True)
+        assert {k.id for k in listed} == {parent.id, child.id}
+        assert all(k.status == "revoked" for k in listed)
+    finally:
+        monkeypatch.undo()
+        await ApiKey.delete_many({"user_id": user.id})
+        await cleanup_models([user])
