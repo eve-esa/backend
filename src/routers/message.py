@@ -1064,15 +1064,19 @@ async def create_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            # The turn ends at its terminal event: anything after it (a Stop
-            # landing during the clean-up) is not forwarded.
+            # Nothing after the terminal event is forwarded (a Stop landing
+            # during the clean-up), but the stream stays open until the runner
+            # closes the bus after the token charge, so a client that refreshes
+            # its usage when the stream ends reads the charged value.
             async with contextlib.aclosing(
                 bus.subscribe(message.id, ready=stream_ready)
             ) as events:
+                finished = False
                 async for data in events:
+                    if finished:
+                        continue
                     yield data
-                    if is_terminal_event(data):
-                        break
+                    finished = is_terminal_event(data)
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"
@@ -2263,15 +2267,19 @@ async def create_agentic_message_stream(
                     yield f"data: {json.dumps({'type': 'partial', 'content': message.output})}\n\n"
             except Exception:
                 pass
-            # The turn ends at its terminal event: anything after it (a Stop
-            # landing during the clean-up) is not forwarded.
+            # Nothing after the terminal event is forwarded (a Stop landing
+            # during the clean-up), but the stream stays open until the runner
+            # closes the bus after the token charge, so a client that refreshes
+            # its usage when the stream ends reads the charged value.
             async with contextlib.aclosing(
                 bus.subscribe(message.id, ready=subscriber_ready)
             ) as events:
+                finished = False
                 async for data in events:
+                    if finished:
+                        continue
                     yield data
-                    if is_terminal_event(data):
-                        break
+                    finished = is_terminal_event(data)
 
         response = StreamingResponse(
             with_sse_keepalive(_gen()), media_type="text/event-stream"
