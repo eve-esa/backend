@@ -402,6 +402,87 @@ MAX_INFLIGHT_GENERATIONS_PER_WORKER = _tolerant_int_env(
 # retrieval, embedding or a model hangs, and ends the stream with a timeout
 # error. <=0 disables it.
 CLASSIC_GENERATION_TIMEOUT = _tolerant_int_env("CLASSIC_GENERATION_TIMEOUT", 300)
+
+# Per-principal request rate limit (src/services/request_rate_limiter.py). One
+# token bucket per user and route class in Valkey (REDIS_URL, database 1). Off:
+# no Redis client is built and the dependency does nothing.
+FEATURE_REQUEST_RATE_LIMIT = getenv_or("FEATURE_REQUEST_RATE_LIMIT").lower() == "true"
+
+
+def parse_request_rate_limit_mode(raw: str) -> str:
+    """shadow evaluates, logs and counts but never refuses; enforce answers 429.
+
+    Anything else is read as shadow, the mode that cannot refuse a request.
+    """
+    return "enforce" if raw.strip().lower() == "enforce" else "shadow"
+
+
+REQUEST_RATE_LIMIT_MODE = parse_request_rate_limit_mode(
+    getenv_or("REQUEST_RATE_LIMIT_MODE", "shadow")
+)
+# Rate is tokens per minute, burst the bucket size. A class missing here or
+# with rate 0 is unlimited.
+DEFAULT_REQUEST_RATE_LIMITS: Dict[str, Dict[str, int]] = {
+    "chat": {"rate": 60, "burst": 20},
+    "retrieve": {"rate": 120, "burst": 40},
+    "proxy": {"rate": 60, "burst": 60},
+    "mcp": {"rate": 120, "burst": 40},
+    "upload": {"rate": 10, "burst": 10},
+    "errlog": {"rate": 30, "burst": 30},
+}
+
+
+def parse_request_rate_limits(raw: str) -> Dict[str, Dict[str, int]]:
+    """Parse REQUEST_RATE_LIMITS, keeping the defaults when the value is invalid.
+
+    Tolerant like ``_tolerant_int_env``: a typo in tfvars must not crash every
+    worker at import. A valid JSON object replaces the defaults whole, so a
+    class left out of it is unlimited. Each class needs an integer ``rate`` >= 0
+    and, when the rate is above 0, an integer ``burst`` >= 1.
+    """
+    defaults = {k: dict(v) for k, v in DEFAULT_REQUEST_RATE_LIMITS.items()}
+    if not raw:
+        return defaults
+    log = logging.getLogger(__name__)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("Ignoring invalid JSON in REQUEST_RATE_LIMITS, keeping defaults")
+        return defaults
+    if not isinstance(parsed, dict):
+        log.warning("REQUEST_RATE_LIMITS is not a JSON object, keeping defaults")
+        return defaults
+    limits: Dict[str, Dict[str, int]] = {}
+    for cls, spec in parsed.items():
+        rate = spec.get("rate") if isinstance(spec, dict) else None
+        burst = spec.get("burst") if isinstance(spec, dict) else None
+        valid = (
+            isinstance(rate, int)
+            and not isinstance(rate, bool)
+            and rate >= 0
+            and (
+                rate == 0
+                or (isinstance(burst, int) and not isinstance(burst, bool) and burst >= 1)
+            )
+        )
+        if not valid:
+            log.warning(
+                "Ignoring invalid REQUEST_RATE_LIMITS entry for class %r, keeping defaults",
+                cls,
+            )
+            return defaults
+        limits[str(cls)] = {"rate": rate, "burst": burst if rate else 0}
+    return limits
+
+
+REQUEST_RATE_LIMITS = parse_request_rate_limits(getenv_or("REQUEST_RATE_LIMITS"))
+# On a store error the request is allowed (fail open). True answers 503
+# limiter_unavailable instead, in enforce mode only.
+REQUEST_RATE_LIMIT_FAIL_CLOSED = (
+    getenv_or("REQUEST_RATE_LIMIT_FAIL_CLOSED").lower() == "true"
+)
+# After a store error the worker skips Valkey for this many seconds.
+REQUEST_RATE_LIMIT_SKIP_S = _tolerant_int_env("REQUEST_RATE_LIMIT_SKIP_S", 30)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def redis_client_kwargs() -> Dict[str, Any]:

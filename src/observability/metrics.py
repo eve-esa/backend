@@ -13,6 +13,13 @@ Two observable gauges, both read on the exporter thread at each collection:
   bound parse) shows up here as seconds; a healthy loop stays in milliseconds.
 - ``eve.generations.in_flight``: the slots held in this worker's generation
   limiter (:mod:`src.services.load_shedding`), next to its cap.
+
+One counter, added to on the request path:
+
+- ``eve.rate_limit.decisions``: one per request rate limit decision
+  (:mod:`src.services.request_rate_limiter`), with ``class``, ``decision``
+  (allowed, limited, skipped_store_down), ``mode`` and ``subject_kind``. No
+  user, key or address ever goes into an attribute.
 """
 
 import asyncio
@@ -26,6 +33,7 @@ logger = logging.getLogger(__name__)
 METER_NAME = "eve.backend"
 LOOP_LAG_METRIC = "eve.event_loop.lag_seconds"
 IN_FLIGHT_METRIC = "eve.generations.in_flight"
+RATE_LIMIT_METRIC = "eve.rate_limit.decisions"
 EXPORT_INTERVAL_MILLIS = 15_000
 # The probe sleeps this long and records how late it woke. Short on purpose: a
 # block only shows when it covers a wake-up, so a 1 s probe would miss most
@@ -103,6 +111,31 @@ def get_loop_lag_monitor() -> LoopLagMonitor:
     return _monitor
 
 
+# Set by register_instruments; None while metrics are off, so recording is a no-op.
+_rate_limit_counter = None
+
+
+def record_rate_limit_decision(
+    route_class: str, decision: str, mode: str, subject_kind: str
+) -> None:
+    """Count one rate limit decision. No-op without a meter provider; never raises."""
+    counter = _rate_limit_counter
+    if counter is None:
+        return
+    try:
+        counter.add(
+            1,
+            {
+                "class": route_class,
+                "decision": decision,
+                "mode": mode,
+                "subject_kind": subject_kind,
+            },
+        )
+    except Exception:  # noqa: BLE001 - a metric must never fail a request
+        logger.debug("rate limit counter add failed", exc_info=True)
+
+
 def _default_limiter():
     from src.services.load_shedding import get_generation_limiter
 
@@ -114,7 +147,8 @@ def register_instruments(
     monitor: Optional[LoopLagMonitor] = None,
     limiter_getter: Optional[Callable[[], object]] = None,
 ) -> None:
-    """Create the two gauges on ``meter_provider``. Tests pass their own sources."""
+    """Create the gauges and the counter on ``meter_provider``. Tests pass their own sources."""
+    global _rate_limit_counter
     from opentelemetry.metrics import CallbackOptions, Observation
 
     monitor = monitor or _monitor
@@ -142,6 +176,11 @@ def register_instruments(
         callbacks=[in_flight],
         unit="{generation}",
         description="Answer generations holding a load-shedding slot in this worker",
+    )
+    _rate_limit_counter = meter.create_counter(
+        RATE_LIMIT_METRIC,
+        unit="{request}",
+        description="Request rate limit decisions by class, decision, mode and subject kind",
     )
 
 
