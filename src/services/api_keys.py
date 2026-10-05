@@ -249,7 +249,11 @@ def _parent_summary(parent: ApiKey, now: datetime) -> ApiKeyParent:
 
 
 async def list_api_keys(auth: AuthContext, *, include_revoked: bool) -> list[ApiKeyItem]:
-    """One query for the page, plus at most one ``$in`` for parents not on it."""
+    """One query for the page, plus at most one ``$in`` for parents not on it.
+
+    Both read the primary: clients refetch the list right after a create or a
+    revoke, and a lagging secondary would still show the old list.
+    """
     user = auth.user
     now = datetime.now(timezone.utc)
 
@@ -257,7 +261,7 @@ async def list_api_keys(auth: AuthContext, *, include_revoked: bool) -> list[Api
     if not include_revoked:
         query["revoked_at"] = None
     docs = (
-        await ApiKey.get_collection()
+        await ApiKey.get_primary_collection()
         .find(query)
         .sort("timestamp", -1)
         .limit(_LIST_MAX)
@@ -271,7 +275,7 @@ async def list_api_keys(auth: AuthContext, *, include_revoked: bool) -> list[Api
     }
     parents: dict[str, ApiKey] = {}
     if missing_parent_ids:
-        parent_docs = await ApiKey.get_collection().find(
+        parent_docs = await ApiKey.get_primary_collection().find(
             {"_id": {"$in": [ObjectId(pid) for pid in missing_parent_ids]}, "user_id": user.id}
         ).to_list(length=None)
         parents = {p.id: p for p in (ApiKey.from_dict(d) for d in parent_docs)}
@@ -304,7 +308,8 @@ async def list_api_keys(auth: AuthContext, *, include_revoked: bool) -> list[Api
 
 
 async def _load_user_keys(user_id: str) -> dict[str, dict]:
-    rows = await ApiKey.get_collection().find(
+    """The key tree on the primary: a key created a moment ago must be found and cascaded."""
+    rows = await ApiKey.get_primary_collection().find(
         {"user_id": user_id}, projection={"created_by_key_id": 1, "revoked_at": 1}
     ).to_list(length=None)
     return {str(r["_id"]): r for r in rows}
