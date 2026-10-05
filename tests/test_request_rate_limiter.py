@@ -8,11 +8,13 @@ concurrency.
 """
 
 import asyncio
+import inspect
 import logging
 import math
 import os
 import re
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -114,15 +116,19 @@ class FakeStore:
 class CountingConnection:
     """A pool connection whose PING answers like ``FakeStore.ping``."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, pool) -> None:
         self.store = store
+        self.pool = pool
         self.sent = []
 
     async def send_command(self, *args):
         self.sent.append(args)
 
     async def read_response(self):
-        return await self.store.ping()
+        try:
+            return await self.store.ping()
+        finally:
+            self.pool.in_flight -= 1
 
 
 class CountingPool:
@@ -132,22 +138,32 @@ class CountingPool:
     that accepts only so many TLS handshakes in time.
     """
 
-    def __init__(self, store, open_limit=None) -> None:
+    def __init__(self, store, open_limit=None, connect_s=0.0) -> None:
         self.store = store
         self.open_limit = open_limit
+        self.connect_s = connect_s
         self.opened = 0
         self.released = 0
         self.in_use = 0
         self.max_in_use = 0
+        # Connections between the start of the open and the PING answer.
+        self.in_flight = 0
+        self.max_in_flight = 0
 
     async def get_connection(self):
-        await asyncio.sleep(0)
-        if self.open_limit is not None and self.opened >= self.open_limit:
-            raise _redis_connection_error("Error connecting to 10.0.0.12:6379")
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.connect_s)
+            if self.open_limit is not None and self.opened >= self.open_limit:
+                raise _redis_connection_error("Error connecting to 10.0.0.12:6379")
+        except BaseException:
+            self.in_flight -= 1
+            raise
         self.opened += 1
         self.in_use += 1
         self.max_in_use = max(self.max_in_use, self.in_use)
-        return CountingConnection(self.store)
+        return CountingConnection(self.store, self)
 
     async def release(self, connection):
         self.released += 1
@@ -571,20 +587,22 @@ def test_process_limiter_takes_the_connect_knob(monkeypatch):
 # --- warm-up ----------------------------------------------------------------
 
 
-async def test_warm_up_opens_the_whole_pool_at_once_and_releases_it(caplog):
+async def test_warm_up_opens_the_pool_but_two_slots_and_releases_it(caplog):
     store = FakeStore()
     lim = limiter(store, max_connections=10)
     with caplog.at_level(logging.INFO, logger=rrl.__name__):
-        assert await lim.warm_up() == 10
+        assert await lim.warm_up() == 8
     pool = store.connection_pool
-    # Ten connections held together, one PING each, all back in the pool.
-    assert pool.opened == 10 and pool.max_in_use == 10
-    assert pool.released == 10 and pool.in_use == 0
-    assert store.pings == 10
+    # Eight connections held together, one PING each, all back in the pool:
+    # two slots stay free for checks during the whole warm-up.
+    assert rrl.WARM_UP_FREE_SLOTS == 2
+    assert pool.opened == 8 and pool.max_in_use == 8
+    assert pool.released == 8 and pool.in_use == 0
+    assert store.pings == 8
     lines = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert len(lines) == 1 and lines[0][0] == logging.INFO
     assert re.fullmatch(
-        r"rate_limit\.store_ready latency_ms=\d+ connections=10", lines[0][1]
+        r"rate_limit\.store_ready latency_ms=\d+ connections=8", lines[0][1]
     )
 
 
@@ -605,8 +623,8 @@ async def test_warm_up_retries_within_the_deadline(caplog):
     store.ping_errors = [_redis_connection_error("Error connecting to 10.0.0.12:6379")]
     lim = limiter(store)
     with caplog.at_level(logging.INFO, logger=rrl.__name__):
-        assert await lim.warm_up(deadline_s=2.0) == lim.max_connections
-    assert store.pings == lim.max_connections + 1
+        assert await lim.warm_up(deadline_s=2.0) == lim.max_connections - 2
+    assert store.pings == lim.max_connections - 1
     assert store.connection_pool.in_use == 0
     assert "rate_limit.store_ready" in caplog.text
     assert "skipped_store_down" not in caplog.text
@@ -654,24 +672,101 @@ async def test_warm_up_is_a_no_op_when_off_or_without_redis_url(feature, url, mo
         rrl, "get_request_rate_limiter", lambda: calls.append(1) or limiter(store)
     )
     with caplog.at_level(logging.DEBUG, logger=rrl.__name__):
-        await rrl.warm_up_request_rate_limiter()
+        assert rrl.start_request_rate_limiter_warm_up() is None
+        await rrl.stop_request_rate_limiter_warm_up(None)
     assert calls == [] and store.pings == 0
     assert [r for r in caplog.records if r.name == rrl.__name__] == []
 
 
-def test_warm_up_deadline_is_at_most_3_s():
-    assert 0 < rrl.WARM_UP_DEADLINE_S <= 3
+def test_warm_up_deadline_is_10_s():
+    assert rrl.WARM_UP_DEADLINE_S == 10
+    default = inspect.signature(RequestRateLimiter.warm_up).parameters["deadline_s"].default
+    assert default == rrl.WARM_UP_DEADLINE_S
 
 
-async def test_warm_up_runs_for_the_process_limiter(monkeypatch, caplog):
+async def test_warm_up_opens_at_most_2_connections_at_a_time():
+    store = FakeStore()
+    store.connection_pool = CountingPool(store, connect_s=0.02)
+    lim = limiter(store, max_connections=10)
+    assert await lim.warm_up() == 8
+    pool = store.connection_pool
+    assert rrl.WARM_UP_CONCURRENCY == 2
+    assert pool.max_in_flight == 2
+    # Never more than eight slots held, so two stay free for checks.
+    assert pool.opened == 8 and pool.max_in_use == 8 and pool.in_use == 0
+
+
+async def test_warm_up_runs_in_the_background_for_the_process_limiter(monkeypatch, caplog):
     store = FakeStore()
     monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
     monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
     monkeypatch.setattr(rrl, "_limiter", limiter(store))
     with caplog.at_level(logging.INFO, logger=rrl.__name__):
-        await rrl.warm_up_request_rate_limiter()
-    assert store.pings == rrl.STORE_MAX_CONNECTIONS
-    assert f"connections={rrl.STORE_MAX_CONNECTIONS}" in caplog.text
+        task = rrl.start_request_rate_limiter_warm_up()
+        assert task is not None and not task.done()
+        assert await task == rrl.STORE_MAX_CONNECTIONS - 2
+        await rrl.stop_request_rate_limiter_warm_up(task)
+    assert store.pings == rrl.STORE_MAX_CONNECTIONS - 2
+    assert f"connections={rrl.STORE_MAX_CONNECTIONS - 2}" in caplog.text
+
+
+async def test_warm_up_stop_cancels_it_and_gives_the_connections_back(monkeypatch, caplog):
+    store = FakeStore()
+    store.ping_hang = True
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
+    monkeypatch.setattr(rrl, "_limiter", limiter(store))
+    task = rrl.start_request_rate_limiter_warm_up()
+    await asyncio.sleep(0.05)
+    assert store.connection_pool.in_use == 2
+    with caplog.at_level(logging.INFO, logger=rrl.__name__):
+        await rrl.stop_request_rate_limiter_warm_up(task)
+    assert task.cancelled()
+    assert store.connection_pool.in_use == 0
+    assert "rate_limit." not in caplog.text
+
+
+async def test_lifespan_does_not_await_the_warm_up(monkeypatch):
+    import server
+    from src import observability as observability_module
+
+    async def noop(*args, **kwargs):
+        return None
+
+    store = FakeStore()
+    store.ping_hang = True
+    monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+    monkeypatch.setattr(rrl, "REDIS_URL", "redis://x:6379/0")
+    monkeypatch.setattr(rrl, "_limiter", limiter(store))
+    outer = server.create_app()
+    app = observability_module._find_fastapi_app(outer)
+    # Only the warm-up is real: the rest of the lifespan is stubbed.
+    monkeypatch.setattr(server, "async_mongo_manager", SimpleNamespace(connect=noop, close=noop))
+    for name in (
+        "ensure_indexes",
+        "ensure_provider_catalog_seeded",
+        "shutdown_mcp_proxy_lifespans",
+        "aclose_rerank_clients",
+        "aclose_qdrant_read_clients",
+    ):
+        monkeypatch.setattr(server, name, noop)
+    monkeypatch.setattr(
+        server,
+        "observability",
+        SimpleNamespace(start_runtime_metrics=lambda: None, shutdown=lambda: None),
+    )
+    monkeypatch.setattr(
+        server, "get_error_logger", lambda: SimpleNamespace(flush=noop)
+    )
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    async with app.router.lifespan_context(app):
+        # Ready at once although every PING hangs for 10 s.
+        assert loop.time() - started < 1.0
+        task = app.state.rate_limit_warm_up
+        assert task is not None and not task.done()
+    assert task.cancelled()
+    assert store.connection_pool.in_use == 0
 
 
 async def test_store_down_fail_closed_refuses():
@@ -1012,17 +1107,17 @@ async def test_real_store_busy_pool_fails_open_without_the_window():
         await lim.aclose()
 
 
-async def test_real_store_warm_up_leaves_the_whole_pool_open(caplog):
+async def test_real_store_warm_up_leaves_eight_open_idle_connections(caplog):
     lim = await _real_limiter(limits=LIMITS, connect_timeout_s=1.0, max_connections=10)
     subject = f"user:test-{uuid.uuid4().hex}"
     try:
         with caplog.at_level(logging.INFO, logger=rrl.__name__):
-            assert await lim.warm_up() == 10
-        assert "connections=10" in caplog.text
+            assert await lim.warm_up() == 8
+        assert "connections=8" in caplog.text
         pool = lim._client.connection_pool
         assert pool.connection_kwargs["socket_connect_timeout"] == 1.0
         idle = list(pool._available_connections)
-        assert len(idle) == 10 and all(c.is_connected for c in idle)
+        assert len(idle) == 8 and all(c.is_connected for c in idle)
         assert len(pool._in_use_connections) == 0
         assert (await lim.check(subject, "chat")).reason == ALLOWED
     finally:
@@ -1062,6 +1157,44 @@ async def test_real_store_dropped_connection_last_in_the_pool_reconnects_in_time
         assert decision.reason == ALLOWED
         assert 0.6 <= elapsed < lim._deadline_s() + 1.0
         assert dropped.is_connected
+        assert lim.consecutive_failures == 0
+    finally:
+        if lim._client is not None:
+            await lim._client.delete(bucket_key(subject, "chat"))
+        await lim.aclose()
+
+
+async def test_real_store_check_during_the_warm_up_takes_a_free_slot():
+    lim = await _real_limiter(limits=LIMITS, connect_timeout_s=1.0, max_connections=10)
+    lim.timeout_s = 0.25
+    subject = f"user:test-{uuid.uuid4().hex}"
+    try:
+        pool = lim._get_client().connection_pool
+        original_get = pool.get_connection
+        holding = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def warm_up_get():
+            conn = await original_get()
+            # Freeze the warm-up once it holds every slot it may take.
+            if len(pool._in_use_connections) == 8:
+                holding.set()
+                await resume.wait()
+            return conn
+
+        pool.get_connection = warm_up_get
+        warm = asyncio.ensure_future(lim.warm_up())
+        await asyncio.wait_for(holding.wait(), 5)
+        assert len(pool._in_use_connections) == 8
+        pool.get_connection = original_get
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        decision = await lim.check(subject, "chat")
+        # A free slot: no 0.25 s pool wait and no fail open.
+        assert decision.reason == ALLOWED
+        assert loop.time() - started < 0.25
+        resume.set()
+        assert await warm == 8
         assert lim.consecutive_failures == 0
     finally:
         if lim._client is not None:
