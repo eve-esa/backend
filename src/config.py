@@ -507,10 +507,13 @@ def _tolerant_positive_float_env(name: str, default: float) -> float:
     return value
 
 
-# Seconds a new store connection may take to open (TLS handshake plus AUTH to
-# ElastiCache). The 0.25 s command deadline holds once a connection is open.
-REQUEST_RATE_LIMIT_CONNECT_S = _tolerant_positive_float_env(
-    "REQUEST_RATE_LIMIT_CONNECT_S", 1.0
+# Seconds a new store connection may take to open: TCP and TLS handshake;
+# AUTH and SELECT keep the 0.25 s read timeout. At most 5: every check may
+# wait this long on a reconnect.
+REQUEST_RATE_LIMIT_CONNECT_S_MAX = 5.0
+REQUEST_RATE_LIMIT_CONNECT_S = min(
+    REQUEST_RATE_LIMIT_CONNECT_S_MAX,
+    _tolerant_positive_float_env("REQUEST_RATE_LIMIT_CONNECT_S", 1.0),
 )
 # ──────────────────────────────────────────────────────────────────────────────
 

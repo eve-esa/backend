@@ -23,14 +23,15 @@ open is therefore visible to the store-down metric filter in infra.
 ``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns a skipped check into 503
 ``limiter_unavailable`` in enforce mode (ignored without ``REDIS_URL``).
 
-Deadlines: a command gets 0.25 s once the pool holds an idle open
-connection. A new connection to ElastiCache costs a TLS handshake plus AUTH,
-which alone can take longer than that, so a check that has to open one (no
-idle connected connection in the pool: the first request of a worker, or the
-first after redis-py dropped a timed-out connection) gets
-``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
-``socket_connect_timeout``) on top of the command deadline. Waiting for a busy
-pool stays bounded by 0.25 s either way. At startup the lifespan opens one
+Deadlines: a new connection to ElastiCache costs a TCP and TLS handshake,
+which alone can take longer than 0.25 s, and a check cannot know cheaply
+whether the connection the pool hands out is open (redis-py drops one whose
+command was cancelled and hands it out again). So every check runs under one
+deadline of ``REQUEST_RATE_LIMIT_CONNECT_S`` (default 1 s, also the pool's
+``socket_connect_timeout``) plus 0.25 s, while the pool wait and every socket
+read (AUTH, SELECT, the script) stay bounded by 0.25 s each. On an open
+connection a check therefore still fails within 0.25 s of a stalled read; only
+a reconnect may use the extra second. At startup the lifespan opens one
 connection ahead of traffic (:func:`warm_up_request_rate_limiter`, a PING on
 database 1, retried within 3 s) and logs ``rate_limit.store_ready
 latency_ms=<n>`` at INFO, or ``rate_limit.skipped_store_down class=startup
@@ -272,8 +273,6 @@ class RequestRateLimiter:
         self._client = client
         self._script = None
         self._limited_logged: Dict[tuple, float] = {}
-        # For a client without a redis-py pool (tests): set by a success.
-        self._ready = False
 
     def _limit(self, route_class: str) -> Optional[Dict[str, int]]:
         spec = self.limits.get(route_class)
@@ -290,25 +289,8 @@ class RequestRateLimiter:
             )
         return self._client
 
-    def _has_idle_connection(self) -> bool:
-        """True when the pool holds an idle connection that is already open.
-
-        Only then can a command run within ``timeout_s``: otherwise the check
-        opens a connection (or waits for one) first. Reads redis-py pool
-        internals; on any surprise it answers False, which costs a longer
-        deadline, never a wrong decision.
-        """
-        pool = getattr(self._client, "connection_pool", None)
-        if pool is None:
-            return self._ready
-        try:
-            return any(c.is_connected for c in list(pool._available_connections))
-        except Exception:  # noqa: BLE001 - internals moved: assume a connect
-            return False
-
     def _deadline_s(self) -> float:
-        if self._has_idle_connection():
-            return self.timeout_s
+        """Connect plus command: the pool and socket timeouts bound the rest."""
         return self.connect_timeout_s + self.timeout_s
 
     def _get_script(self) -> Any:
@@ -336,7 +318,6 @@ class RequestRateLimiter:
 
     def _store_failed(self, exc: BaseException, route_class: str) -> None:
         self.consecutive_failures += 1
-        self._ready = False
         # The exception class only: a redis error message can carry the host.
         logger.debug("rate_limit store error type=%s", type(exc).__name__)
         if not (
@@ -396,7 +377,6 @@ class RequestRateLimiter:
             self._store_failed(exc, route_class)
             return self._store_down()
         self.consecutive_failures = 0
-        self._ready = True
         if int(allowed) == 1:
             return Decision(True, 0, ALLOWED)
         return Decision(False, retry_after_seconds(int(retry_ms)), LIMITED)
@@ -439,7 +419,6 @@ class RequestRateLimiter:
                 exc = last_exc
             self._log_store_down("startup", 0, exc)
             return False
-        self._ready = True
         logger.info(
             "rate_limit.store_ready latency_ms=%d",
             round((loop.time() - started) * 1000),

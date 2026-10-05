@@ -106,8 +106,11 @@ def create_app(debug=False, **kwargs):
         log_rate_limit_config()
         try:
             await warm_up_request_rate_limiter()
-        except Exception:
-            logging.exception("Request rate limiter warm-up failed")
+        except Exception as exc:
+            # The class only: a redis error message can carry the host.
+            logging.error(
+                "Request rate limiter warm-up failed type=%s", type(exc).__name__
+            )
         try:
             yield
         finally:
