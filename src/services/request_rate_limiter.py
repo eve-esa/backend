@@ -16,7 +16,8 @@ Fail open: a store failure allows the request and marks it
 open for that request only, since event loop lag under load looks the same.
 A connection or socket error, or three failures in a row of any kind, makes
 this worker skip the store for ``REQUEST_RATE_LIMIT_SKIP_S`` seconds, with
-one WARNING per window (``rate_limit.skipped_store_down class=<c> skip_s=<n>``).
+one WARNING per window
+(``rate_limit.skipped_store_down class=<c> skip_s=<n> type=<ExceptionClass>``).
 ``REQUEST_RATE_LIMIT_FAIL_CLOSED`` turns a skipped check into 503
 ``limiter_unavailable`` in enforce mode (ignored without ``REDIS_URL``).
 
@@ -278,12 +279,14 @@ class RequestRateLimiter:
             return
         self.skip_until = now + self.skip_s
         self.consecutive_failures = 0
-        # Contract with the CloudWatch metric filter (infra): keep the literal
-        # token and fields. One line per skip window, no host or address.
+        # Contract with the CloudWatch metric filter (infra): keep the leading
+        # token. One line per skip window; the exception class name only, never
+        # its message, which can carry the host.
         logger.warning(
-            "rate_limit.skipped_store_down class=%s skip_s=%s",
+            "rate_limit.skipped_store_down class=%s skip_s=%s type=%s",
             route_class,
             _format_seconds(self.skip_s),
+            type(exc).__name__,
         )
 
     def should_log_limited(self, subject: str, route_class: str) -> bool:

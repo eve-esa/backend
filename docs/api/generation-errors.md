@@ -53,8 +53,10 @@ and `/generate-llm` included), `retrieve`, `proxy` (`/v1`), `mcp` (`tools/call`
 only), `upload` (documents and artifacts), `errlog` (`POST /log-error`).
 
 The check runs before the request body is validated, so a request that ends in
-422 still spends a token. On the two upload routes the whole multipart body is
-read and spooled before the check: the limit caps upload requests, not bytes.
+422 still spends a token. On the two upload routes the limiter runs after
+FastAPI has read and spooled the whole multipart body: it protects the
+embeddings, Qdrant and S3 work behind an upload, not task memory, disk or
+bandwidth. Byte caps belong to the edge.
 
 ## `metadata.endpoint`
 

@@ -324,7 +324,12 @@ async def test_store_connection_error_opens_the_skip_window(error, caplog):
         for r in caplog.records
         if r.getMessage().startswith("rate_limit.skipped_store_down")
     ]
-    assert lines == [(logging.WARNING, "rate_limit.skipped_store_down class=chat skip_s=30")]
+    assert lines == [
+        (
+            logging.WARNING,
+            f"rate_limit.skipped_store_down class=chat skip_s=30 type={type(error).__name__}",
+        )
+    ]
     assert "10.0.0.12" not in caplog.text
     # After the window the store is tried again, and recovers.
     store.error = None
@@ -364,7 +369,12 @@ async def test_store_three_failures_in_a_row_open_the_window(caplog):
             await lim.check("user:a", "chat")
     assert store.calls == 3
     assert lim.skip_until == clock.t + 30
-    assert caplog.text.count("rate_limit.skipped_store_down class=chat skip_s=30") == 1
+    assert (
+        caplog.text.count(
+            "rate_limit.skipped_store_down class=chat skip_s=30 type=TimeoutError"
+        )
+        == 1
+    )
 
 
 async def test_store_hang_is_bounded_by_the_timeout():
