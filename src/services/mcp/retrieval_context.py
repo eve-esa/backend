@@ -10,8 +10,11 @@ Same pattern as ``artifact_context.py``.
 
 import contextlib
 import contextvars
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -81,8 +84,10 @@ def reset_retrieval_context(token: contextvars.Token) -> None:
     never closed) runs this in a different Context: there is nothing to reset
     there, and raising would skip the rest of the caller's cleanup.
     """
-    with contextlib.suppress(ValueError):
+    try:
         _retrieval_context.reset(token)
+    except ValueError:
+        logger.debug("retrieval_context reset skipped: token from another Context")
 
 
 @contextlib.contextmanager

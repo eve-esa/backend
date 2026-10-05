@@ -54,6 +54,9 @@ class CancelManager:
             pubsub = redis.pubsub()
             await pubsub.subscribe(channel)
             self._logger.info("cancel_manager.redis_subscribed channel=%s", channel)
+            # The SUBSCRIBE reply: past it the server delivers every publish,
+            # so the flag read below cannot miss one sent in between.
+            await pubsub.get_message(timeout=1.0)
             if await redis.get(_cancel_flag_key(message_id)):
                 ev.set()
                 self._logger.info(

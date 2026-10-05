@@ -89,7 +89,7 @@ def _start(kind, user, conversation, message, ready):
         coro = run_generation_to_bus(stream_ready=ready, **common)
     task = asyncio.create_task(coro)
     cm.set_task(message.id, task)
-    finish_turn_if_cancelled_unstarted(task, conversation.id, message.id)
+    finish_turn_if_cancelled_unstarted(task, conversation.id, message.id, cancel_event)
     return cm, task
 
 
@@ -168,6 +168,97 @@ async def test_stop_while_publishing_the_first_event(turn, kind):
 
     assert row.stopped is True
     assert loop_errors == []
+
+
+def _lagging_secondary(snapshot):
+    """Reads off the primary see ``snapshot``: None (the row has not replicated
+    yet) or the row as it was at Message.create."""
+    return patch.object(Message, "find_by_id", AsyncMock(return_value=snapshot))
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_stop_is_kept_when_the_secondary_has_not_the_row_yet(turn, kind):
+    user, conversation, message = turn
+    p1, p2 = _patch_bus(StreamBus())
+    with p1, p2, _lagging_secondary(None):
+        cm, task = _start(kind, user, conversation, message, asyncio.Event())
+        await asyncio.sleep(0.05)
+        cm.cancel(message.id)
+        await asyncio.wait_for(task, timeout=5)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is True
+
+
+@pytest.mark.parametrize(
+    "kind,stream",
+    [
+        ("agentic", f"{_RUNNER}.generate_answer_agentic_json_stream"),
+        ("classic", f"{_CLASSIC}.generate_answer_json_stream_generator"),
+    ],
+)
+async def test_partial_output_saved_by_the_generator_survives_the_stop_write(
+    turn, kind, stream
+):
+    """Stop on publish: the generator saves its partial answer while it is
+    closed, then the runner marks the stop. The second write must not put back
+    the stale copy a lagging secondary returns."""
+    from src.services.generate_answer import persist_message_state
+
+    async def _stream(*, message_id, **kwargs):
+        try:
+            yield 'data: {"type": "token", "content": "partial"}\n\n'
+        except GeneratorExit:
+            await persist_message_state(
+                message_id, output="partial answer", stopped=True
+            )
+            raise
+
+    user, conversation, message = turn
+    bus = _PublishBlocksBus()
+    p1, p2 = _patch_bus(bus)
+    with p1, p2, patch(stream, _stream), _lagging_secondary(message):
+        cm, task = _start(kind, user, conversation, message, None)
+        await asyncio.wait_for(bus.entered.wait(), timeout=5)
+        cm.cancel(message.id)
+        await asyncio.wait_for(task, timeout=5)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is True
+    assert row.output == "partial answer"
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_a_cancel_that_is_not_a_stop_is_a_failed_turn(turn, kind):
+    """Worker shutdown cancels the task without setting the Stop event."""
+    user, conversation, message = turn
+    p1, p2 = _patch_bus(StreamBus())
+    with p1, p2:
+        cm, task = _start(kind, user, conversation, message, asyncio.Event())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.wait_for(task, timeout=5)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is False
+    assert row.metadata["error"]["type"] == "CancelledError"
+
+
+@pytest.mark.parametrize("kind", ["agentic", "classic"])
+async def test_a_shutdown_cancel_before_the_first_step_is_not_a_stop(turn, kind):
+    user, conversation, message = turn
+    p1, p2 = _patch_bus(StreamBus())
+    with p1, p2:
+        cm, task = _start(kind, user, conversation, message, asyncio.Event())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.1)
+        cm.clear_mapping_for(conversation.id, message.id)
+        cm.clear(message.id)
+
+    row = await Message.find_by_id_on_primary(message.id)
+    assert row.stopped is False
 
 
 @pytest.mark.no_db

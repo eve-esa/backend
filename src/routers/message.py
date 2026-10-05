@@ -1051,7 +1051,9 @@ async def create_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
-        finish_turn_if_cancelled_unstarted(gen_task, conversation_id, message.id)
+        finish_turn_if_cancelled_unstarted(
+            gen_task, conversation_id, message.id, cancel_event
+        )
 
         async def _gen():
             # Optional catch-up from currently saved output (usually empty right after create)
@@ -2241,7 +2243,9 @@ async def create_agentic_message_stream(
         )
         slot.release_when_done(gen_task)
         cancel_mgr.set_task(message.id, gen_task)
-        finish_turn_if_cancelled_unstarted(gen_task, conversation_id, message.id)
+        finish_turn_if_cancelled_unstarted(
+            gen_task, conversation_id, message.id, cancel_event
+        )
 
         bus = get_stream_bus()
 

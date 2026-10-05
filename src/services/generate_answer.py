@@ -7,6 +7,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from bson import ObjectId
 from fastapi import BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
@@ -278,7 +279,10 @@ async def persist_message_state(
     - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
     """
     try:
-        message = await Message.find_by_id(message_id)
+        # On the primary: this reads then replaces the whole document, often
+        # right after Message.create, and a lagging secondary would return
+        # nothing (write lost) or a stale copy (newer fields overwritten).
+        message = await Message.find_by_id_on_primary(message_id)
         if message is None:
             return
         if stopped is not None:
@@ -2161,28 +2165,64 @@ def deadline_overrides(deadline: asyncio.Timeout) -> Dict[str, Any]:
     return {"stopped": False} if deadline.expired() else {}
 
 
+async def mark_message_stopped(message_id: str) -> None:
+    """Set ``stopped`` with one update and no read.
+
+    Unlike ``persist_message_state`` it touches no other field, so it cannot
+    overwrite the partial output the generator saved a moment earlier.
+    """
+    try:
+        await Message.get_collection().update_one(
+            {"_id": ObjectId(message_id)}, {"$set": {"stopped": True}}
+        )
+    except Exception as e:
+        logger.error(f"Failed to mark message stopped: {e}")
+
+
+async def persist_runner_cancel(
+    message_id: str, cancel_event: Optional[asyncio.Event], exc: BaseException
+) -> None:
+    """Persist a cancel the bus runner caught outside the generator.
+
+    Only a Stop sets the event. Any other cancel is the worker going away (an
+    ECS rollover, say): the turn failed and the frontend must offer a retry.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        await mark_message_stopped(message_id)
+        return
+    with contextlib.suppress(Exception):
+        await persist_message_state(
+            message_id, error=build_error_payload(exc), stopped=False
+        )
+
+
 # Strong references to the finishers below until they end (asyncio keeps weak ones).
 _unstarted_stop_finishers: set = set()
 
 
 def finish_turn_if_cancelled_unstarted(
-    task: asyncio.Task, conversation_id: str, message_id: str
+    task: asyncio.Task,
+    conversation_id: str,
+    message_id: str,
+    cancel_event: Optional[asyncio.Event],
 ) -> None:
     """Persist the stop of a generation task cancelled before its first step.
 
     A Stop that lands between ``create_task`` and the task's first step cancels
     a coroutine that never runs: no handler, no finally. The task then ends
     cancelled, which the bus runners never do otherwise (they absorb the
-    cancel), so this callback finishes the turn in their place.
+    cancel), so this callback finishes the turn in their place. A cancel
+    without the event set is not a Stop and is left alone.
     """
 
     def _on_done(done: asyncio.Task) -> None:
         if not done.cancelled():
             return
+        if cancel_event is None or not cancel_event.is_set():
+            return
 
         async def _finish() -> None:
-            with contextlib.suppress(Exception):
-                await persist_message_state(message_id, stopped=True)
+            await mark_message_stopped(message_id)
             with contextlib.suppress(Exception):
                 await get_stream_bus().close(message_id)
             with contextlib.suppress(Exception):
@@ -2245,12 +2285,11 @@ async def run_generation_to_bus(
                     # Forward SSE-formatted chunks as-is
                     await bus.publish(message_id, chunk)
         raise_if_deadline_expired(deadline, deadline_seconds)
-    except asyncio.CancelledError:
-        # Task was cancelled (via stop endpoint). Do not publish error. Stopped
-        # outside the generator (before it started, or on publish), nothing
-        # persisted the stop yet; idempotent when the generator did.
-        with contextlib.suppress(Exception):
-            await persist_message_state(message_id, stopped=True)
+    except asyncio.CancelledError as exc:
+        # Do not publish error. Cancelled outside the generator (before it
+        # started, or on publish), nothing persisted the turn yet; the stop
+        # write is idempotent when the generator did.
+        await persist_runner_cancel(message_id, cancel_event, exc)
     except Exception as e:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.

@@ -38,6 +38,7 @@ from src.services.generate_answer import (
     get_shared_llm_manager,
     maybe_rollup_and_trim_history,
     persist_message_state,
+    persist_runner_cancel,
     raise_if_deadline_expired,
     resolve_generated_model_name,
 )
@@ -2121,11 +2122,10 @@ async def run_agentic_generation_to_bus(
                 async for chunk in chunks:
                     await bus.publish(message_id, chunk)
         raise_if_deadline_expired(deadline, deadline_seconds)
-    except asyncio.CancelledError:
-        # Stopped outside the generator (before it started, or on publish):
-        # nothing persisted the stop yet. Idempotent when the generator did.
-        with contextlib.suppress(Exception):
-            await persist_message_state(message_id, stopped=True)
+    except asyncio.CancelledError as exc:
+        # Cancelled outside the generator (before it started, or on publish):
+        # nothing persisted the turn yet. Idempotent when the generator did.
+        await persist_runner_cancel(message_id, cancel_event, exc)
     except Exception as exc:
         # Outer safety net: it fires exactly when the inner handlers did not,
         # so it must persist the marker itself or the turn stays a blank shell.
