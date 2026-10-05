@@ -33,6 +33,25 @@ only, never from `message` or `type`.
 The set is extensible and additive; codes are never renamed. Clients MUST
 treat unknown codes as `upstream_error`.
 
+## Refused before generation
+
+Some requests are refused with an HTTP status before any generation starts.
+Nothing is persisted and no SSE stream opens. The object codes sit in `detail.code`.
+
+| status | `detail.code` | Meaning | Retry |
+|---|---|---|---|
+| 429 | `rate_limited` | The user spent the request rate of this route class (`FEATURE_REQUEST_RATE_LIMIT` in enforce mode); one bucket per user, shared by the session and every API key | after `Retry-After`, 1 to 60 s |
+| 429 | `overloaded` | This worker is at `MAX_INFLIGHT_GENERATIONS_PER_WORKER` | after `Retry-After: 10` |
+| 429 | none, `detail` is a string | The monthly token budget is spent | at the window reset, `Retry-After` when known |
+| 503 | `limiter_unavailable` | The rate limit store is down and `REQUEST_RATE_LIMIT_FAIL_CLOSED` is on (enforce mode only) | in a few seconds |
+
+On `/v1` the `rate_limited` 429 also carries the OpenAI envelope
+(`error.type` `rate_limit_error`, `error.code` `rate_limited`) and
+`x-should-retry: true`, so the OpenAI SDK waits for `Retry-After` and retries.
+Route classes: `chat` (the nine generation and hallucination routes, `/generate`,
+`/generate-llm`), `retrieve`, `proxy` (`/v1`), `mcp` (`tools/call` only),
+`upload` (documents and artifacts), `errlog` (`POST /log-error`).
+
 ## `metadata.endpoint`
 
 A streaming turn walks an ordered chain of model endpoints

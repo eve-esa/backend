@@ -5,11 +5,15 @@ from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.schemas.error_log import FrontendErrorLogRequest
 from src.utils.redaction import redact_secrets, redact_value
+from src.services.request_rate_limiter import enforce_request_rate
 
 router = APIRouter()
 
 
-@router.post("/log-error")
+@router.post(
+    "/log-error",
+    dependencies=[Depends(enforce_request_rate("errlog"))],
+)
 async def log_error(
     request: FrontendErrorLogRequest,
     requesting_user: User = Depends(get_current_user),

@@ -30,6 +30,12 @@ from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
 from src.services.oidc import IdentityProviderUnavailable
+from src.services.request_rate_limiter import (
+    LIMITER_UNAVAILABLE_DETAIL,
+    RateLimiterUnavailable,
+    RequestRateLimited,
+    check_or_raise,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +417,23 @@ class MCPProxyDispatcher:
                 return
 
             tool_name, arguments = tool_call
+            # Per-user request rate limit on tools/call only (it is what bills
+            # AgentCore), before forwarding: a refusal records no usage row.
+            try:
+                await check_or_raise(principal, "mcp")
+            except RequestRateLimited as limited:
+                await self._send_json(
+                    send,
+                    429,
+                    {"detail": limited.detail},
+                    extra_headers=[
+                        [b"retry-after", str(limited.retry_after_s).encode()]
+                    ],
+                )
+                return
+            except RateLimiterUnavailable:
+                await self._send_json(send, 503, {"detail": LIMITER_UNAVAILABLE_DETAIL})
+                return
             caller_type = principal.caller_type()
 
             status_holder: dict[str, int] = {}
@@ -533,13 +556,14 @@ class MCPProxyDispatcher:
         await MCPProxyDispatcher._send_json(send, status, {"detail": detail})
 
     @staticmethod
-    async def _send_json(send, status: int, payload: dict):
+    async def _send_json(send, status: int, payload: dict, extra_headers=None):
         body = json.dumps(payload).encode()
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
-                "headers": [[b"content-type", b"application/json"]],
+                "headers": [[b"content-type", b"application/json"]]
+                + list(extra_headers or []),
             }
         )
         await send({"type": "http.response.body", "body": body})

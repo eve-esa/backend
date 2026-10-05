@@ -24,6 +24,7 @@ from src.services.private_document_limit import (
     reserve_private_document_slots,
     release_private_document_slots,
 )
+from src.services.request_rate_limiter import enforce_request_rate
 
 # Setup
 router = APIRouter()
@@ -152,7 +153,10 @@ async def get_document(
     return document
 
 
-@router.post("/collections/{collection_id}/documents")
+@router.post(
+    "/collections/{collection_id}/documents",
+    dependencies=[Depends(enforce_request_rate("upload"))],
+)
 async def upload_documents(
     collection_id: str = Path(..., description="Collection ID"),
     files: List[UploadFile] = File(...),
