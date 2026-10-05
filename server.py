@@ -34,6 +34,7 @@ from src.core.vector_store_manager import aclose_qdrant_read_clients
 from src.services.request_rate_limiter import (
     aclose_request_rate_limiter,
     log_startup_config as log_rate_limit_config,
+    warm_up_request_rate_limiter,
 )
 from src.utils.error_logger import get_error_logger
 
@@ -103,6 +104,10 @@ def create_app(debug=False, **kwargs):
         logging.info("Database connection established")
         observability.start_runtime_metrics()
         log_rate_limit_config()
+        try:
+            await warm_up_request_rate_limiter()
+        except Exception:
+            logging.exception("Request rate limiter warm-up failed")
         try:
             yield
         finally:
