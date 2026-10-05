@@ -1000,3 +1000,35 @@ async def test_list_reads_the_primary_right_after_a_change(monkeypatch):
         monkeypatch.undo()
         await ApiKey.delete_many({"user_id": user.id})
         await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_revoke_right_after_create_cascades_while_secondaries_lag(monkeypatch):
+    """Deleting a key created a moment ago answered 404 on a lagging secondary,
+    and the cascade could miss a child created just before. The tree read goes
+    to the primary."""
+    from src.middlewares.auth import AUTH_TYPE_OIDC
+    from tests.utils.replica_lag import lag_secondaries
+
+    user, _ = await create_test_user_and_token()
+    try:
+        _, parent = await create_key_row(user.id, name="parent")
+        _, child = await create_key_row(user.id, name="child", created_by_key_id=parent.id)
+        _, grandchild = await create_key_row(
+            user.id, name="grandchild", created_by_key_id=child.id
+        )
+        _, other = await create_key_row(user.id, name="other")
+        auth = AuthContext(user=user, principal=Principal(user.id, AUTH_TYPE_OIDC))
+        lag_secondaries(monkeypatch, ApiKey.collection_name)
+
+        await api_keys.revoke_api_key(parent.id, auth)
+
+        monkeypatch.undo()
+        rows = await ApiKey.find_all(filter_dict={"user_id": user.id})
+        revoked = {k.id for k in rows if k.revoked_at is not None}
+        assert revoked == {parent.id, child.id, grandchild.id}
+        assert other.id not in revoked
+    finally:
+        monkeypatch.undo()
+        await ApiKey.delete_many({"user_id": user.id})
+        await cleanup_models([user])

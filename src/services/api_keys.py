@@ -308,7 +308,8 @@ async def list_api_keys(auth: AuthContext, *, include_revoked: bool) -> list[Api
 
 
 async def _load_user_keys(user_id: str) -> dict[str, dict]:
-    rows = await ApiKey.get_collection().find(
+    """The key tree on the primary: a key created a moment ago must be found and cascaded."""
+    rows = await ApiKey.get_primary_collection().find(
         {"user_id": user_id}, projection={"created_by_key_id": 1, "revoked_at": 1}
     ).to_list(length=None)
     return {str(r["_id"]): r for r in rows}
