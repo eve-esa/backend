@@ -93,3 +93,46 @@ async def test_dynamic_bearer_omits_x_eve_token_when_no_user_token():
             await gen.asend(httpx.Response(200))
     finally:
         _user_eve_token_var.reset(token_reset)
+
+
+# ── No session DELETE upstream ─────────────────────────────────────────────────
+# AgentCore hands out an ``Mcp-Session-Id`` but is stateless: the DELETE the MCP
+# client sends on close answers 404 and logs a WARNING on every proxied call.
+
+
+@pytest.mark.asyncio
+async def test_upstream_client_does_not_delete_the_session_on_close():
+    """A stateful upstream (one that issues a session id) gets no DELETE."""
+    from fastmcp import Client, FastMCP
+    from fastmcp.client.transports.http import StreamableHttpTransport
+
+    upstream = FastMCP("upstream")
+
+    @upstream.tool
+    def ping() -> str:
+        return "pong"
+
+    app = upstream.http_app(stateless_http=False)
+    methods: list[str] = []
+
+    async def record(request: httpx.Request) -> None:
+        methods.append(request.method)
+
+    def client_factory(**kwargs) -> httpx.AsyncClient:
+        kwargs.pop("follow_redirects", None)
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            event_hooks={"request": [record]},
+            **kwargs,
+        )
+
+    transport = StreamableHttpTransport(
+        "http://upstream.test/mcp", httpx_client_factory=client_factory
+    )
+    async with app.lifespan(app):
+        async with Client(transport) as client:
+            await client.list_tools()
+            assert transport.get_session_id(), "upstream must issue a session id"
+
+    assert "POST" in methods
+    assert "DELETE" not in methods

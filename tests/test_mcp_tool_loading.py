@@ -155,6 +155,34 @@ class TestLoadMcpToolsForServers:
         )
 
     @pytest.mark.asyncio
+    async def test_streamable_http_connection_does_not_terminate_on_close(self):
+        """AgentCore and the proxy are stateless: the closing DELETE answers 404."""
+        captured_connections: dict = {}
+
+        def make_client(connections, **kwargs):
+            captured_connections.update(connections)
+            mock_client = MagicMock()
+            mock_client.get_tools = AsyncMock(return_value=[])
+            return mock_client
+
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient", side_effect=make_client
+        ), patch(
+            f"{_LOADER}.backend_mcp_proxy_url",
+            return_value="http://127.0.0.1:8000/mcp/effis",
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.ErrorLoggingInterceptor", return_value=MagicMock()), patch(
+            f"{_LOADER}.logger"
+        ):
+            await _load_mcp_tools_for_servers(
+                [_mcp_server("effis", "https://agentcore.example/mcp")],
+                mcp_proxy_bearer_token="user-jwt",
+            )
+
+        assert captured_connections["effis"]["terminate_on_close"] is False
+
+    @pytest.mark.asyncio
     async def test_direct_path_forwards_user_token_as_x_eve_token(self):
         """When the proxy is not configured, the agentic runner connects to
         the MCP server directly with a Cognito M2M token. The caller's EVE

@@ -58,7 +58,14 @@ async def seed_demo_artifacts(email: str) -> None:
     # Hold `client` for the whole run: the tool wrappers don't keep a strong
     # reference to it and the interceptor only holds a weakref.
     client = MultiServerMCPClient(
-        {"dummy": {"transport": "streamable_http", "url": DUMMY_MCP_URL, "headers": {}}},
+        {
+            "dummy": {
+                "transport": "streamable_http",
+                "url": DUMMY_MCP_URL,
+                "headers": {},
+                "terminate_on_close": False,
+            }
+        },
         tool_name_prefix=True,
         tool_interceptors=[
             latency_interceptor_cls(),

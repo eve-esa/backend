@@ -5,6 +5,7 @@ https://gofastmcp.com/servers/providers/proxy
 """
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -13,12 +14,14 @@ from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from typing import Any
 
+import fastmcp.client.transports.http as fastmcp_http_transport
 import httpx
 from fastmcp import settings as fastmcp_settings
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
+from mcp.client.streamable_http import streamable_http_client
 from src.config import MCP_TOOLS_CACHE_TTL
 from src.database.mongo import get_collection
 from src.middlewares.auth import (
@@ -38,6 +41,16 @@ from src.services.request_rate_limiter import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ``ProxyClient`` opens a fresh upstream session per proxied request and, on
+# close, sends a DELETE for the ``Mcp-Session-Id`` AgentCore hands out.
+# AgentCore runtimes are stateless and answer 404, logged as a WARNING by
+# ``mcp.client.streamable_http`` on every tool call. ``StreamableHttpTransport``
+# (fastmcp 3.x) takes no ``terminate_on_close``, so rebind the name it calls.
+# The proxy is the only fastmcp client in this process.
+fastmcp_http_transport.streamable_http_client = functools.partial(
+    streamable_http_client, terminate_on_close=False
+)
 
 _proxy_apps: dict[str, Any] = {}
 _proxy_lifespan_stacks: dict[str, AsyncExitStack] = {}
