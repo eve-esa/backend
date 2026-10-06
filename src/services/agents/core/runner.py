@@ -75,6 +75,7 @@ from src.utils.helpers import (
 from src.observability.context import (
     add_span_event,
     agent_span,
+    cancel_is_stop,
     current_trace_id,
     set_llm_attributes,
     span_trace_id,
@@ -1692,139 +1693,146 @@ async def generate_answer_agentic_stream_helper(
                     "eve.stream": True,
                     "eve.agent_graph": agent_graph_type,
                 },
-            ) as root_span:
+                stop_event=cancel_event,
+            ) as root_span, cancel_is_stop():
                 trace_id = span_trace_id(root_span) or trace_id
                 set_llm_attributes(root_span, endpoint_metadata, include_answered=False)
-                async for mode, payload in graph.astream(
-                    {"messages": _build_initial_messages(request, tools, history)},
-                    config=config,
-                    stream_mode=["messages", "updates"],
-                ):
-                    if cancelled():
-                        cancel_documents, cancel_use_rag = _retrieval_state()
-                        await persist_message_state(
-                            message_id,
-                            trace_id=trace_id,
-                            stopped=True,
-                            output="".join(accumulated),
-                            documents=cancel_documents,
-                            use_rag=cancel_use_rag,
-                            artifact_ids=_collected_artifact_ids(),
-                        )
-                        yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
-                        return
-
-                    if mode == "updates":
-                        if "agent_fallback" in payload:
-                            in_graph_fallback_used = True
-                        # An agent step is traced from its node update, not from
-                        # the streamed chunks: the first chunk carrying a tool
-                        # call has no arguments yet when the provider streams
-                        # them, and no chunk carries the model or usage.
-                        for update_node, node_output in payload.items():
-                            msgs = (
-                                node_output.get("messages", [])
-                                if isinstance(node_output, dict)
-                                else []
+                # aclosing: a Stop returns from inside the loop, and the stream
+                # must close in this task, where the Stop binding is visible to
+                # the spans it ends, not in the loop's finaliser.
+                async with contextlib.aclosing(
+                    graph.astream(
+                        {"messages": _build_initial_messages(request, tools, history)},
+                        config=config,
+                        stream_mode=["messages", "updates"],
+                    )
+                ) as graph_stream:
+                    async for mode, payload in graph_stream:
+                        if cancelled():
+                            cancel_documents, cancel_use_rag = _retrieval_state()
+                            await persist_message_state(
+                                message_id,
+                                trace_id=trace_id,
+                                stopped=True,
+                                output="".join(accumulated),
+                                documents=cancel_documents,
+                                use_rag=cancel_use_rag,
+                                artifact_ids=_collected_artifact_ids(),
                             )
-                            if not isinstance(msgs, list):
-                                msgs = [msgs]
-                            for msg in msgs:
-                                if not (
-                                    AIMessage
-                                    and isinstance(msg, AIMessage)
-                                    and getattr(msg, "tool_calls", None)
-                                ):
-                                    continue
-                                started_at_s, entry_latency_s = (
-                                    trace_timeline.agent_step(
-                                        msg.tool_calls, at=time.perf_counter()
-                                    )
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            return
+
+                        if mode == "updates":
+                            if "agent_fallback" in payload:
+                                in_graph_fallback_used = True
+                            # An agent step is traced from its node update, not from
+                            # the streamed chunks: the first chunk carrying a tool
+                            # call has no arguments yet when the provider streams
+                            # them, and no chunk carries the model or usage.
+                            for update_node, node_output in payload.items():
+                                msgs = (
+                                    node_output.get("messages", [])
+                                    if isinstance(node_output, dict)
+                                    else []
                                 )
-                                trace_entries.append(
-                                    _serialise_trace_entry(
-                                        msg,
-                                        node=update_node,
-                                        latency_s=entry_latency_s,
-                                        started_at_s=started_at_s,
+                                if not isinstance(msgs, list):
+                                    msgs = [msgs]
+                                for msg in msgs:
+                                    if not (
+                                        AIMessage
+                                        and isinstance(msg, AIMessage)
+                                        and getattr(msg, "tool_calls", None)
+                                    ):
+                                        continue
+                                    started_at_s, entry_latency_s = (
+                                        trace_timeline.agent_step(
+                                            msg.tool_calls, at=time.perf_counter()
+                                        )
                                     )
+                                    trace_entries.append(
+                                        _serialise_trace_entry(
+                                            msg,
+                                            node=update_node,
+                                            latency_s=entry_latency_s,
+                                            started_at_s=started_at_s,
+                                        )
+                                    )
+                            continue
+
+                        chunk, metadata = payload
+                        node = metadata.get("langgraph_node", "")
+                        if node != current_node:
+                            if current_node:
+                                elapsed_s = time.perf_counter() - node_start_time
+                                node_latencies[current_node] = (
+                                    node_latencies.get(current_node, 0.0) + elapsed_s
                                 )
-                        continue
+                            for event in _flush_turn_buffer_to_events():
+                                yield event
+                            node_start_time = time.perf_counter()
+                            current_node = node
 
-                    chunk, metadata = payload
-                    node = metadata.get("langgraph_node", "")
-                    if node != current_node:
-                        if current_node:
-                            elapsed_s = time.perf_counter() - node_start_time
-                            node_latencies[current_node] = (
-                                node_latencies.get(current_node, 0.0) + elapsed_s
-                            )
-                        for event in _flush_turn_buffer_to_events():
-                            yield event
-                        node_start_time = time.perf_counter()
-                        current_node = node
-
-                    if ToolMessage and isinstance(chunk, ToolMessage):
-                        graph_messages.append(chunk)
-                        preview = stringify_tool_content(chunk.content)[:200]
-                        started_at_s, entry_latency_s = trace_timeline.tool_step(
-                            getattr(chunk, "tool_call_id", None),
-                            at=time.perf_counter(),
-                        )
-                        trace_entries.append(
-                            _serialise_trace_entry(
-                                chunk,
-                                node=node,
-                                latency_s=entry_latency_s,
-                                started_at_s=started_at_s,
-                            )
-                        )
-                        yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok'})}\n\n"
-                        continue
-
-                    if AIMessage and isinstance(chunk, AIMessage):
-                        if getattr(chunk, "tool_calls", None):
-                            # Kept only so a ToolMessage without a name can be
-                            # traced back to the tool it answered.
+                        if ToolMessage and isinstance(chunk, ToolMessage):
                             graph_messages.append(chunk)
-                            tc = chunk.tool_calls[0]
-                            tname = (
-                                tc.get("name", "tool")
-                                if isinstance(tc, dict)
-                                else getattr(tc, "name", "tool")
+                            preview = stringify_tool_content(chunk.content)[:200]
+                            started_at_s, entry_latency_s = trace_timeline.tool_step(
+                                getattr(chunk, "tool_call_id", None),
+                                at=time.perf_counter(),
                             )
-                            args = (
-                                tc.get("args", {})
-                                if isinstance(tc, dict)
-                                else getattr(tc, "args", {})
+                            trace_entries.append(
+                                _serialise_trace_entry(
+                                    chunk,
+                                    node=node,
+                                    latency_s=entry_latency_s,
+                                    started_at_s=started_at_s,
+                                )
                             )
-                            query_used = args.get("query", "")
-                            label = (
-                                tool_call_label(tname)
-                                if tool_call_label
-                                else f"Calling {tname}"
-                            )
-                            msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                            yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
+                            yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok'})}\n\n"
                             continue
 
-                        content = chunk.content
-                        if isinstance(content, list):
-                            content = "".join(
-                                c.get("text", "") if isinstance(c, dict) else str(c)
-                                for c in content
-                            )
-                        if not content:
-                            continue
+                        if AIMessage and isinstance(chunk, AIMessage):
+                            if getattr(chunk, "tool_calls", None):
+                                # Kept only so a ToolMessage without a name can be
+                                # traced back to the tool it answered.
+                                graph_messages.append(chunk)
+                                tc = chunk.tool_calls[0]
+                                tname = (
+                                    tc.get("name", "tool")
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "name", "tool")
+                                )
+                                args = (
+                                    tc.get("args", {})
+                                    if isinstance(tc, dict)
+                                    else getattr(tc, "args", {})
+                                )
+                                query_used = args.get("query", "")
+                                label = (
+                                    tool_call_label(tname)
+                                    if tool_call_label
+                                    else f"Calling {tname}"
+                                )
+                                msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                                yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
+                                continue
 
-                        turn_buffer.append(content)
-                        joined = "".join(turn_buffer)
-                        if might_be_incomplete_text_tool_call and (
-                            might_be_incomplete_text_tool_call(joined)
-                        ):
-                            continue
-                        for event in _flush_turn_buffer_to_events():
-                            yield event
+                            content = chunk.content
+                            if isinstance(content, list):
+                                content = "".join(
+                                    c.get("text", "") if isinstance(c, dict) else str(c)
+                                    for c in content
+                                )
+                            if not content:
+                                continue
+
+                            turn_buffer.append(content)
+                            joined = "".join(turn_buffer)
+                            if might_be_incomplete_text_tool_call and (
+                                might_be_incomplete_text_tool_call(joined)
+                            ):
+                                continue
+                            for event in _flush_turn_buffer_to_events():
+                                yield event
 
                 if current_node:
                     elapsed_s = time.perf_counter() - node_start_time

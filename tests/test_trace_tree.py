@@ -29,7 +29,6 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langgraph.checkpoint.memory import InMemorySaver
 from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from src import observability
 from src.schemas.generation_request import GenerationRequest
@@ -185,26 +184,18 @@ def _connections(asgi_app) -> Dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def otel():
-    """One provider and one OpenLLMetry instrumentation for the whole module.
+def otel(genai_otel):
+    """The run's one OpenLLMetry provider (``genai_otel``), for this module.
 
-    Production instruments once per worker. OpenLLMetry 0.62.3 does not
-    survive uninstrument then instrument in one process: callbacks keep going
-    to the first handler and its (by then shut down) provider. So this module
-    instruments once and clears the exporter per test. Nothing global is
-    registered: the provider reaches the context helpers through
-    ``observability._state`` and OpenLLMetry directly.
+    The provider reaches the context helpers through ``observability._state``
+    and OpenLLMetry directly; the exporter is cleared per test.
     """
-    exporter = InMemorySpanExporter()
-    provider = observability.build_tracer_provider(exporter, batch=False)
     previous = observability._state.get("tracer_provider")
-    observability._state["tracer_provider"] = provider
+    observability._state["tracer_provider"] = genai_otel.provider
     try:
-        yield SimpleNamespace(exporter=exporter, provider=provider)
+        yield genai_otel
     finally:
-        observability.uninstrument_genai()
         observability._state["tracer_provider"] = previous
-        provider.shutdown()
 
 
 @pytest.fixture

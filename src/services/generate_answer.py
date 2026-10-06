@@ -40,7 +40,9 @@ from src.observability.context import (
     add_span_event,
     agent_span,
     child_span,
+    context_without_stop,
     mark_error,
+    mark_turn_stopped,
     set_llm_attributes,
     span_trace_id,
 )
@@ -278,6 +280,9 @@ async def persist_message_state(
     - Sets Message.artifact_ids (MCP-produced artifacts from this run) if provided.
     - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
     """
+    if stopped:
+        # The answer's root span reads it: a stopped turn, not a failed one.
+        mark_turn_stopped()
     try:
         # On the primary: this reads then replaces the whole document, often
         # right after Message.create, and a lagging secondary would return
@@ -1435,6 +1440,7 @@ async def generate_answer_stream_generator_helper(
         user_id=user_id,
         message_id=message_id,
         attributes={"eve.pipeline": "classic", "eve.stream": True},
+        stop_event=cancel_event,
     ) as root_span:
         async with contextlib.aclosing(
             _classic_stream_events(
@@ -1987,7 +1993,10 @@ async def _classic_stream_events(
         if background_tasks:
             background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
         else:
-            asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
+            asyncio.create_task(
+                maybe_rollup_and_trim_history(conversation_id),
+                context=context_without_stop(),
+            )
 
         # Final event
         final_emitted = True
