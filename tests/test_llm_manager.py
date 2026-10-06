@@ -201,3 +201,21 @@ def test_legacy_names_in_endpoint_order_are_canonicalised(monkeypatch):
         "src.core.llm_manager.EVE_ENDPOINT_ORDER", "runpod,mistral"
     )
     assert manager.resolve_chain(None) == ["main", "fallback"]
+
+
+def test_missing_satcom_urls_warn_once_per_process(monkeypatch, caplog):
+    monkeypatch.setattr("src.core.llm_manager.SATCOM_SMALL_BASE_URL", "")
+    monkeypatch.setattr("src.core.llm_manager.SATCOM_LARGE_BASE_URL", "")
+    monkeypatch.setattr("src.core.llm_manager._satcom_missing_warned", False)
+
+    with caplog.at_level("WARNING", logger="src.core.llm_manager"):
+        first = LLMManager()
+        second = LLMManager()
+
+    warnings = [r for r in caplog.records if "Satcom clients not available" in r.message]
+    assert len(warnings) == 1
+    for manager in (first, second):
+        assert manager._satcom_small_base_url is None
+        assert manager._satcom_large_base_url is None
+        assert manager._satcom_small_chat_openai is None
+        assert manager._satcom_large_chat_openai is None
