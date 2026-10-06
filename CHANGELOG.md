@@ -11,6 +11,21 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.0.3](https://github.com/eve-esa/backend/compare/v1.0.2...v1.0.3) (2026-10-06)
+
+
+### Fixed
+
+* **api-keys:** list keys from the primary right after a change ([#288](https://github.com/eve-esa/backend/issues/288)) ([1ad9182](https://github.com/eve-esa/backend/commit/1ad91829925b186f4da921dc965e7acdaaf58993))
+* **documents:** index document ids on the private collection so deletes work ([#297](https://github.com/eve-esa/backend/issues/297)) ([e026767](https://github.com/eve-esa/backend/commit/e026767306c2b21ffaa8aee228bc8068409bc185))
+* **llm:** warn about the missing Satcom models once per process ([#291](https://github.com/eve-esa/backend/issues/291)) ([77ac8fc](https://github.com/eve-esa/backend/commit/77ac8fca22b239d5df37777cd50aafba8fb5cbbf))
+* **mcp:** shut the proxy sub-apps down without an error on rollover ([#292](https://github.com/eve-esa/backend/issues/292)) ([1e2160d](https://github.com/eve-esa/backend/commit/1e2160de77caebc85a7a5eeec710bf10bf6b0680))
+* **messages:** only the owner can log a source click ([#296](https://github.com/eve-esa/backend/issues/296)) ([b707835](https://github.com/eve-esa/backend/commit/b7078356e6b458e8a07a3febf3f365f78fa66aa6))
+* **observability:** export each span and log record once ([#298](https://github.com/eve-esa/backend/issues/298)) ([c047d20](https://github.com/eve-esa/backend/commit/c047d201f2734cafd4e8bf3dfe9cbd4b7f0400ce))
+* **observability:** keep a user Stop out of the error spans ([#293](https://github.com/eve-esa/backend/issues/293)) ([0624586](https://github.com/eve-esa/backend/commit/062458655f681d71eedd7eaaa65f79a56172b490))
+* **retrieval:** log a recovered embedding provider failure as a warning ([#295](https://github.com/eve-esa/backend/issues/295)) ([d11c580](https://github.com/eve-esa/backend/commit/d11c580970cadea8627b047d13ee77e64e3d2818))
+* **retrieval:** search private collections without the year filter ([#294](https://github.com/eve-esa/backend/issues/294)) ([c0a8c14](https://github.com/eve-esa/backend/commit/c0a8c141a935477844284e9633b177e77edf1383))
+
 ## [1.0.2](https://github.com/eve-esa/backend/compare/v1.0.1...v1.0.2) (2026-10-05)
 
 
