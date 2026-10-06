@@ -2,7 +2,10 @@
 
 import os
 import logging
+from functools import partial
 from typing import List, Optional
+
+import anyio
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Path
 from bson import ObjectId
 
@@ -57,10 +60,13 @@ async def _rollback_uploaded_docs(
     vector_store = VectorStoreManager()
     for doc in created_docs:
         try:
-            vector_store.delete_private_docs(
-                user_id=user_id,
-                collection_id=collection_id,
-                metadata={"metadata.document_id": doc.id},
+            await anyio.to_thread.run_sync(
+                partial(
+                    vector_store.delete_private_docs,
+                    user_id=user_id,
+                    collection_id=collection_id,
+                    metadata={"metadata.document_id": doc.id},
+                )
             )
         except Exception:
             logger.warning(
@@ -314,10 +320,13 @@ async def delete_document(
 
     vector_store = VectorStoreManager()
     try:
-        vector_store.delete_private_docs(
-            user_id=requesting_user.id,
-            collection_id=collection_id,
-            metadata={"metadata.document_id": document_id},
+        await anyio.to_thread.run_sync(
+            partial(
+                vector_store.delete_private_docs,
+                user_id=requesting_user.id,
+                collection_id=collection_id,
+                metadata={"metadata.document_id": document_id},
+            )
         )
     except HTTPException as e:
         raise e
