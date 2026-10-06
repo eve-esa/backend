@@ -280,6 +280,127 @@ async def test_update_feedback_not_owner(async_client, monkeypatch):
 
 
 
+async def _owner_conversation_with_message(async_client, owner_token):
+    conv_id = (
+        await async_client.post(
+            "/conversations",
+            json={"name": "Owner Conv"},
+            headers=_auth_headers(owner_token),
+        )
+    ).json()["id"]
+    msg_id = (
+        await async_client.post(
+            f"/conversations/{conv_id}/messages",
+            json={"query": "hi"},
+            headers=_auth_headers(owner_token),
+        )
+    ).json()["id"]
+    return conv_id, msg_id
+
+
+SOURCE_LOG = {
+    "source_id": "doc-1",
+    "source_url": "https://example.com/doc-1",
+    "source_title": "Doc 1",
+    "source_collection_name": "public",
+}
+
+
+@pytest.mark.asyncio
+async def test_source_logs_not_owner_is_not_found(async_client, monkeypatch):
+    """Another user's conversation answers 404 like a missing one and stays unchanged."""
+
+    monkeypatch.setattr("src.routers.message.generate_answer", mock_generate_answer)
+
+    owner, owner_token = await create_test_user_and_token()
+    intruder, intr_token = await create_test_user_and_token()
+    try:
+        conv_id, msg_id = await _owner_conversation_with_message(
+            async_client, owner_token
+        )
+        before = (await Message.find_by_id(msg_id)).metadata
+
+        resp = await async_client.post(
+            f"/conversations/{conv_id}/messages/{msg_id}/source_logs",
+            json=SOURCE_LOG,
+            headers=_auth_headers(intr_token),
+        )
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Conversation not found"
+
+        after = (await Message.find_by_id(msg_id)).metadata
+        assert after == before
+        assert not (after or {}).get("source_logs")
+
+        await async_client.delete(
+            f"/conversations/{conv_id}", headers=_auth_headers(owner_token)
+        )
+    finally:
+        await cleanup_models([owner, intruder])
+
+
+@pytest.mark.asyncio
+async def test_source_logs_owner_appends(async_client, monkeypatch):
+    """The owner appends one entry per call, attributed to them."""
+
+    monkeypatch.setattr("src.routers.message.generate_answer", mock_generate_answer)
+
+    owner, owner_token = await create_test_user_and_token()
+    try:
+        conv_id, msg_id = await _owner_conversation_with_message(
+            async_client, owner_token
+        )
+        for _ in range(2):
+            resp = await async_client.post(
+                f"/conversations/{conv_id}/messages/{msg_id}/source_logs",
+                json=SOURCE_LOG,
+                headers=_auth_headers(owner_token),
+            )
+            assert resp.status_code == 200
+
+        logs = (await Message.find_by_id(msg_id)).metadata["source_logs"]
+        assert len(logs) == 2
+        assert logs[0]["source_id"] == "doc-1"
+        assert logs[0]["user_id"] == owner.id
+
+        await async_client.delete(
+            f"/conversations/{conv_id}", headers=_auth_headers(owner_token)
+        )
+    finally:
+        await cleanup_models([owner])
+
+
+@pytest.mark.asyncio
+async def test_source_logs_server_error_does_not_leak(async_client, monkeypatch):
+    """An internal failure answers a generic 500 without the exception text."""
+
+    monkeypatch.setattr("src.routers.message.generate_answer", mock_generate_answer)
+
+    owner, owner_token = await create_test_user_and_token()
+    try:
+        conv_id, msg_id = await _owner_conversation_with_message(
+            async_client, owner_token
+        )
+
+        async def _boom(self, *args, **kwargs):
+            raise RuntimeError("internal detail mongodb://secret-host")
+
+        with patch.object(Message, "save", _boom):
+            resp = await async_client.post(
+                f"/conversations/{conv_id}/messages/{msg_id}/source_logs",
+                json=SOURCE_LOG,
+                headers=_auth_headers(owner_token),
+            )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Server error"
+
+        await async_client.delete(
+            f"/conversations/{conv_id}", headers=_auth_headers(owner_token)
+        )
+    finally:
+        await cleanup_models([owner])
+
+
 @pytest.mark.asyncio
 async def test_generate_llm_requires_auth(async_client):
     resp = await async_client.post(
