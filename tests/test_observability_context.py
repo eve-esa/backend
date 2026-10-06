@@ -6,6 +6,7 @@ redacting exporter the server uses.
 """
 
 import asyncio
+import contextvars
 import os
 import re
 
@@ -18,7 +19,9 @@ from src.observability.context import (
     ContextAttributesSpanProcessor,
     agent_span,
     child_span,
+    context_without_stop,
     current_trace_id,
+    mark_turn_stopped,
     set_llm_attributes,
     span_trace_id,
     stop_requested,
@@ -219,12 +222,18 @@ def _library_span(exc):
     span.end()
 
 
-def _turn(exporter, exc, stop=None, stopped=True):
-    """One answer root with a library span that ends on ``exc``; returns both."""
+def _turn(exporter, exc, stop=None, stopped=True, saved_stopped=True):
+    """One answer root with a library span that ends on ``exc``; returns both.
+
+    ``stopped`` sets the Stop event, ``saved_stopped`` then persists the turn as
+    stopped, as the stop branches of the stream helpers do.
+    """
     with agent_span("generation_stream", stop_event=stop):
         if stop is not None and stopped:
             stop.set()
         _library_span(exc)
+        if stop is not None and stopped and saved_stopped:
+            mark_turn_stopped()
     library, root = exporter.get_finished_spans()
     return library, root
 
@@ -238,6 +247,16 @@ def test_a_stop_leaves_no_error_and_marks_the_spans_stopped(exporter, exc):
         assert span.attributes["eve.stopped"] is True
         assert [e for e in span.events if e.name == "exception"] == []
     assert "error.type" not in library.attributes
+
+
+def test_a_stop_on_a_finished_answer_leaves_the_root_alone(exporter):
+    """The Stop landed on the final event: the answer is saved complete."""
+    library, root = _turn(
+        exporter, GeneratorExit(), stop=asyncio.Event(), saved_stopped=False
+    )
+
+    assert library.status.status_code == trace.StatusCode.UNSET
+    assert "eve.stopped" not in root.attributes
 
 
 @pytest.mark.parametrize(
@@ -255,7 +274,7 @@ def test_a_cancel_that_is_not_a_stop_keeps_its_error(exporter, stop, stopped):
     assert "eve.stopped" not in root.attributes
 
 
-def test_a_failure_before_the_stop_keeps_its_error(exporter):
+def test_a_failure_during_a_stopped_turn_keeps_its_error(exporter):
     library, _root = _turn(exporter, RuntimeError("model down"), stop=asyncio.Event())
 
     assert library.status.status_code == trace.StatusCode.ERROR
@@ -268,6 +287,7 @@ def test_the_stop_binding_ends_with_the_answer(exporter):
     stop.set()
     with agent_span("generation_stream", stop_event=stop):
         assert stop_requested()
+        assert contextvars.Context.run(context_without_stop(), stop_requested) is False
     assert not stop_requested()
 
 

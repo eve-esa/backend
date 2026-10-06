@@ -20,8 +20,8 @@ caller.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import logging
-from contextvars import ContextVar
 from typing import Any, Dict, Iterator, Optional
 
 from opentelemetry import context as otel_context
@@ -43,8 +43,22 @@ STOPPED = "eve.stopped"
 # the turn was iterating. Matched on the last segment of ``exception.type``.
 _CANCEL_TYPES = frozenset({"CancelledError", "GeneratorExit"})
 
-# Stop event of the answer whose spans are ending, bound by agent_span.
-_stop_event: ContextVar[Any] = ContextVar("eve_stop_event", default=None)
+
+
+class _TurnStop:
+    """The Stop event of one answer, and whether the answer was saved as stopped."""
+
+    __slots__ = ("event", "persisted")
+
+    def __init__(self, event: Any) -> None:
+        self.event = event
+        self.persisted = False
+
+
+# The answer whose spans are ending, bound by agent_span.
+_turn_stop: contextvars.ContextVar[Optional[_TurnStop]] = contextvars.ContextVar(
+    "eve_turn_stop", default=None
+)
 
 # Keys of ``extra`` copied onto a kind event, same set the Mongo log keeps.
 _KIND_EXTRA_KEYS = ("signal", "tool", "server", "attempt")
@@ -230,7 +244,8 @@ def agent_span(
     ``agent_name`` goes to ``gen_ai.agent.name``; the ids are set explicitly
     because the span may start before the router has set every contextvar.
     ``stop_event`` is the turn's Stop event: every span that ends inside this
-    one reads it through :class:`StoppedTurnSpanProcessor`.
+    one reads it through :class:`StoppedTurnSpanProcessor`, and the root is
+    marked stopped only after :func:`mark_turn_stopped`.
     """
     span_attributes: Dict[str, Any] = {
         "gen_ai.operation.name": "invoke_agent",
@@ -238,7 +253,7 @@ def agent_span(
         **context_attributes(conversation_id, message_id, user_id),
         **(attributes or {}),
     }
-    token = _stop_event.set(stop_event) if stop_event is not None else None
+    token = _turn_stop.set(_TurnStop(stop_event)) if stop_event is not None else None
     try:
         with child_span(ROOT_SPAN_NAME, span_attributes) as span:
             yield span
@@ -246,30 +261,76 @@ def agent_span(
         if token is not None:
             # A stream closed by the loop's finaliser ends in another context.
             with contextlib.suppress(ValueError):
-                _stop_event.reset(token)
+                _turn_stop.reset(token)
 
 
 # ─── a user Stop is not an error ─────────────────────────────────────────────
 
 
 def stop_requested() -> bool:
-    """True when the answer whose span is ending was stopped by the user."""
+    """True when the user pressed Stop on the answer whose span is ending."""
     try:
-        event = _stop_event.get()
-        return event is not None and event.is_set()
+        turn = _turn_stop.get()
+        return turn is not None and turn.event.is_set()
     except Exception:  # pragma: no cover - defensive
         return False
+
+
+def mark_turn_stopped() -> None:
+    """Record that the current answer is saved as stopped (root ``eve.stopped``).
+
+    Called where the turn persists ``stopped=True``: a Stop that lands on the
+    final event leaves the answer complete, and its root is not a stopped one.
+    """
+    turn = _turn_stop.get()
+    if turn is not None:
+        turn.persisted = True
+
+
+@contextlib.contextmanager
+def cancel_is_stop() -> Iterator[None]:
+    """Inside an answer root that emits no final event: a cancel during a Stop
+    is a stopped turn.
+
+    For a helper that persists the stop after its root span has ended (the
+    agentic stream): the mark must land before the root ends.
+    """
+    try:
+        yield
+    except Exception:
+        raise
+    except BaseException:
+        if stop_requested():
+            mark_turn_stopped()
+        raise
+
+
+def _turn_persisted_stopped() -> bool:
+    turn = _turn_stop.get()
+    return turn is not None and turn.persisted
+
+
+def context_without_stop() -> contextvars.Context:
+    """A copy of the current context without the answer's Stop binding.
+
+    For a task that outlives the answer (the history rollup): its spans are
+    not the turn's, whatever the Stop does.
+    """
+    ctx = contextvars.copy_context()
+    ctx.run(_turn_stop.set, None)
+    return ctx
 
 
 def _is_cancel_type(value: Any) -> bool:
     return str(value or "").rsplit(".", 1)[-1] in _CANCEL_TYPES
 
 
-def stopped_span(span: Any) -> Any:
+def stopped_span(span: Any, root_stopped: bool = False) -> Any:
     """``span`` as a stopped one, or ``span`` itself when the Stop did not end it.
 
     The Stop ended it when its only exceptions are cancellations, or when it
-    carries ``eve.cancelled``, or when it is the answer root. The copy drops
+    carries ``eve.cancelled``; the answer root only when ``root_stopped`` (the
+    turn was saved as stopped). The copy drops
     the cancellation exception events and ``error.type``, clears an error
     status and sets ``eve.stopped``. A span with any other exception keeps its
     error: a model that failed before the Stop still failed.
@@ -287,7 +348,10 @@ def stopped_span(span: Any) -> Any:
         span.name == ROOT_SPAN_NAME
         and getattr(span.instrumentation_scope, "name", None) == TRACER_NAME
     )
-    if not (cancels or attributes.get(CANCELLED) or is_root):
+    if is_root:
+        if not root_stopped:
+            return span
+    elif not (cancels or attributes.get(CANCELLED)):
         return span
     if _is_cancel_type(attributes.get("error.type")):
         del attributes["error.type"]
@@ -336,7 +400,7 @@ class StoppedTurnSpanProcessor:
     def on_end(self, span: Any) -> None:
         try:
             if stop_requested():
-                span = stopped_span(span)
+                span = stopped_span(span, root_stopped=_turn_persisted_stopped())
         except Exception as exc:  # pragma: no cover - the span still goes out
             logger.debug("stopped span rewrite failed: %s", exc)
         self._inner.on_end(span)
