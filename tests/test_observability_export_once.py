@@ -22,6 +22,8 @@ from collections import Counter
 
 import pytest
 
+pytestmark = pytest.mark.no_db
+
 _CHILD = textwrap.dedent(
     """
     import asyncio, contextlib, io, json, logging
@@ -59,7 +61,8 @@ _CHILD = textwrap.dedent(
     fastapi_app.router.lifespan_context = no_startup
 
     async def log_once():
-        logging.getLogger("eve.test.export_once").warning("export once marker")
+        with trace.get_tracer("eve.test").start_as_current_span("export once work"):
+            logging.getLogger("eve.test.export_once").warning("export once marker")
         return {"ok": True}
 
     fastapi_app.add_api_route("/otel-test/export-once", log_once, methods=["GET"])
@@ -116,10 +119,17 @@ _CHILD = textwrap.dedent(
                 "status": s.status.status_code.name,
                 "stopped": bool((s.attributes or {}).get("eve.stopped")),
                 "events": [e.name for e in s.events],
+                "trace": format(s.context.trace_id, "032x"),
             }
             for s in spans.get_finished_spans()
         ],
-        "logs": [str(d.log_record.body) for d in logs.get_finished_logs()],
+        "logs": [
+            {
+                "body": str(d.log_record.body),
+                "trace": format(d.log_record.trace_id or 0, "032x"),
+            }
+            for d in logs.get_finished_logs()
+        ],
     }))
     """
 )
@@ -163,8 +173,21 @@ def test_the_request_server_span_is_exported_once(exported):
     assert [s for s in exported["spans"] if s["scope"] == "fastapi"] == []
 
 
+def test_the_request_work_shares_the_server_span_trace(exported):
+    """No second root trace: the route's spans and logs sit under the server span."""
+    (server_span,) = [
+        s for s in exported["spans"] if s["name"] == "GET /otel-test/export-once"
+    ]
+    (work,) = [s for s in exported["spans"] if s["name"] == "export once work"]
+    (marker,) = [l for l in exported["logs"] if l["body"] == "export once marker"]
+
+    assert server_span["trace"] != "0" * 32
+    assert work["trace"] == server_span["trace"]
+    assert marker["trace"] == server_span["trace"]
+
+
 def test_each_log_record_is_exported_once(exported):
-    assert exported["logs"].count("export once marker") == 1
+    assert [l["body"] for l in exported["logs"]].count("export once marker") == 1
 
 
 def test_a_stopped_span_is_exported_once_and_rewritten(exported):
