@@ -17,7 +17,9 @@ The agent root span, the request ids on every span and kind events live in
 :mod:`src.observability.context`. Not requests or urllib3 (the
 exporter itself travels there and URLs carry keys), not openai (LangChain
 covers LLM calls), not FastAPIInstrumentor (misses the /v1 and /mcp
-dispatchers and would double the server span). Metrics: two gauges per
+dispatchers and would double the server span), not FastAPI's native
+telemetry (``create_app`` switches it off: it would add a second exporter to
+these providers and a second server span). Metrics: two gauges per
 worker, event loop lag and in-flight generations (:mod:`src.observability.metrics`);
 the lag probe starts with :func:`start_runtime_metrics` from the app lifespan.
 """
