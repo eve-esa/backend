@@ -5,12 +5,12 @@ https://gofastmcp.com/servers/providers/proxy
 """
 
 import asyncio
+import contextvars
 import functools
 import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from typing import Any
 
@@ -53,7 +53,11 @@ fastmcp_http_transport.streamable_http_client = functools.partial(
 )
 
 _proxy_apps: dict[str, Any] = {}
-_proxy_lifespan_stacks: dict[str, AsyncExitStack] = {}
+# One owner task per sub-app holds its lifespan: (stop event, task).
+_proxy_lifespans: dict[str, tuple[asyncio.Event, asyncio.Task]] = {}
+# Total bound for closing every sub-app, then for the cancelled leftovers.
+_PROXY_SHUTDOWN_TIMEOUT_S = 5.0
+_PROXY_CANCEL_GRACE_S = 1.0
 _proxy_build_lock = asyncio.Lock()
 
 # Per-request bearer token of the authenticated caller (an EVE access token or
@@ -196,21 +200,114 @@ async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
             )
         )
         http_app = proxy.http_app(stateless_http=True)
-        stack = AsyncExitStack()
-        await stack.enter_async_context(http_app.lifespan(http_app))
-        _proxy_lifespan_stacks[cache_key] = stack
+        # The lifespan must be exited by the task and context that entered it
+        # (anyio cancel scopes, fastmcp context variables). Entered in the
+        # request task and exited from the server lifespan it raised on every
+        # rollover, so a dedicated task with a fresh context owns it.
+        started = asyncio.get_running_loop().create_future()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            _hold_proxy_lifespan(http_app, started, stop),
+            name=f"mcp-proxy-lifespan-{cache_key[-8:]}",
+            context=contextvars.Context(),
+        )
+        try:
+            await started
+        except BaseException:
+            stop.set()
+            raise
+        _proxy_lifespans[cache_key] = (stop, task)
         _proxy_apps[cache_key] = http_app
+        task.add_done_callback(functools.partial(_evict_dead_proxy, cache_key))
         logger.info("MCP proxy sub-app started (lifespan): %s", cache_key[:64])
         return http_app
 
 
+async def _hold_proxy_lifespan(
+    http_app: Any, started: asyncio.Future, stop: asyncio.Event
+) -> None:
+    """Enter ``http_app``'s lifespan, report it started, hold it until ``stop``."""
+    try:
+        async with http_app.lifespan(http_app):
+            if started.done():
+                # The request that started it was cancelled: close again.
+                return
+            started.set_result(None)
+            await stop.wait()
+    except asyncio.CancelledError:
+        if not started.done():
+            started.cancel()
+        raise
+    except Exception as exc:
+        if not started.done():
+            started.set_exception(exc)
+            return
+        if started.cancelled():
+            return
+        raise
+
+
+def _task_failure(task: asyncio.Task) -> str | None:
+    """Exception class name a finished owner task ended with, or ``None``."""
+    if task.cancelled():
+        return "CancelledError"
+    exc = task.exception()
+    return type(exc).__name__ if exc is not None else None
+
+
+def _evict_dead_proxy(cache_key: str, task: asyncio.Task) -> None:
+    """Drop a sub-app whose owner task ended outside a shutdown.
+
+    Its task group is gone, so every later call would fail until the worker
+    restarts; the next request starts a fresh sub-app instead.
+    """
+    entry = _proxy_lifespans.get(cache_key)
+    if entry is None or entry[1] is not task:
+        # Taken by shutdown_mcp_proxy_lifespans, which reports it.
+        return
+    del _proxy_lifespans[cache_key]
+    _proxy_apps.pop(cache_key, None)
+    logger.warning(
+        "MCP proxy sub-app stopped unexpectedly type=%s server=%s",
+        _task_failure(task) or "exited",
+        cache_key[:64],
+    )
+
+
 async def shutdown_mcp_proxy_lifespans() -> None:
-    """Close all FastMCP ``http_app()`` lifespans (StreamableHTTPSessionManager task groups)."""
+    """Close all FastMCP ``http_app()`` lifespans (StreamableHTTPSessionManager task groups).
+
+    Never raises: a sub-app that fails to close logs one WARNING with the
+    exception class and the others still close.
+    """
     async with _proxy_build_lock:
-        for stack in _proxy_lifespan_stacks.values():
-            await stack.aclose()
-        _proxy_lifespan_stacks.clear()
+        lifespans = list(_proxy_lifespans.items())
+        _proxy_lifespans.clear()
         _proxy_apps.clear()
+        if not lifespans:
+            return
+        for _key, (stop, _task) in lifespans:
+            stop.set()
+        tasks = {task: key for key, (_stop, task) in lifespans}
+        _, pending = await asyncio.wait(set(tasks), timeout=_PROXY_SHUTDOWN_TIMEOUT_S)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=_PROXY_CANCEL_GRACE_S)
+        for task, key in tasks.items():
+            if task in pending:
+                if task.done() and not task.cancelled():
+                    task.exception()  # retrieved, so asyncio does not log it
+                failure = "TimeoutError"
+            else:
+                failure = _task_failure(task)
+            if failure is None:
+                continue
+            logger.warning(
+                "MCP proxy sub-app shutdown failed type=%s server=%s",
+                failure,
+                key[:64],
+            )
 
 
 def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
