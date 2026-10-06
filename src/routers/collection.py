@@ -185,9 +185,11 @@ async def create_collection(
     await collection.save()
 
     try:
-        VectorStoreManager(
-            embeddings_model=request.embeddings_model
-        ).ensure_private_collection()
+        await anyio.to_thread.run_sync(
+            VectorStoreManager(
+                embeddings_model=request.embeddings_model
+            ).ensure_private_collection
+        )
     except HTTPException as e:
         raise e
     except Exception as e:

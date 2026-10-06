@@ -11,8 +11,11 @@ from qdrant_client.http.models import (
     IsEmptyCondition,
     MatchAny,
     MatchValue,
+    KeywordIndexParams,
+    KeywordIndexType,
     MinShould,
-    PayloadSchemaType,
+    UpdateResult,
+    UpdateStatus,
 )
 
 from src.config import PRIVATE_COLLECTION_NAME
@@ -467,17 +470,25 @@ def test_private_indexes_include_document_id_keyword():
     assert set(calls) == {"user_id", "collection_id", "metadata.document_id"}
     doc_call = calls["metadata.document_id"]
     assert doc_call["collection_name"] == PRIVATE_COLLECTION_NAME
-    assert doc_call["field_schema"] == PayloadSchemaType.KEYWORD
+    assert doc_call["timeout"] == 10
+    schema = doc_call["field_schema"]
+    assert isinstance(schema, KeywordIndexParams)
+    assert schema.type == KeywordIndexType.KEYWORD
+    # The private collection has m=0: no payload HNSW links for this field.
+    assert schema.enable_hnsw is False
 
 
-def test_existing_private_indexes_raise_nothing(caplog):
+def test_existing_document_id_index_is_a_success(caplog):
+    # Qdrant answers 200 to a second create with the same schema.
     manager = _manager_with_mock_client()
-    manager.client.create_payload_index.side_effect = RuntimeError(
-        "Index already exists"
+    manager.client.create_payload_index.return_value = UpdateResult(
+        operation_id=1, status=UpdateStatus.COMPLETED
     )
     with caplog.at_level(logging.WARNING, logger=vsm.__name__):
-        manager._ensure_private_payload_indexes()
-    assert "metadata.document_id" in _index_calls(manager)
+        assert manager._ensure_private_document_id_index() is True
+        invalidate_qdrant_read_cache()
+        assert manager._ensure_private_document_id_index() is True
+    assert manager.client.create_payload_index.call_count == 2
     assert "payload_index_failed" not in caplog.text
 
 
@@ -503,10 +514,16 @@ def test_document_id_index_is_ensured_once_per_process():
     manager.client.create_payload_index.assert_called_once()
 
 
-def test_document_id_index_failure_is_retried_next_time():
+def test_document_id_index_failure_is_not_retried_for_a_minute(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(vsm.time, "monotonic", lambda: now[0])
     manager = _manager_with_mock_client()
     manager.client.create_payload_index.side_effect = [TimeoutError(), None]
     assert manager._ensure_private_document_id_index() is False
+    now[0] += 59
+    assert manager._ensure_private_document_id_index() is False
+    assert manager.client.create_payload_index.call_count == 1
+    now[0] += 2
     assert manager._ensure_private_document_id_index() is True
     assert manager.client.create_payload_index.call_count == 2
 
@@ -521,9 +538,7 @@ def test_document_delete_ensures_the_index_first():
     )
     names = [name for name, _, _ in manager.client.mock_calls]
     assert names.index("create_payload_index") < names.index("delete")
-    assert _index_calls(manager)["metadata.document_id"]["field_schema"] == (
-        PayloadSchemaType.KEYWORD
-    )
+    assert "metadata.document_id" in _index_calls(manager)
 
 
 def test_document_delete_runs_when_the_index_cannot_be_ensured():
