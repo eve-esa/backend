@@ -1323,9 +1323,8 @@ class VectorStoreManager:
             return [conv for conv in converted if conv is not None]
 
         async def _search_private(collection_id: str) -> List[Any]:
-            private_filter = merge_must_filters(
-                build_private_tenant_filter(user_id, [collection_id]), year_conditions
-            )
+            # Uploads carry no year, so the year filter does not apply here.
+            private_filter = build_private_tenant_filter(user_id, [collection_id])
             try:
                 async with asyncio.timeout_at(deadline):
                     points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
