@@ -62,6 +62,10 @@ class LLMType(Enum):
 _LEGACY_LLM_TYPES = {"runpod": LLMType.Main.value, "mistral": LLMType.Fallback.value}
 _KNOWN_LLM_TYPES = {member.value for member in LLMType}
 
+# The Satcom models are optional and unset in every env (D03), and LLMManager is built
+# per turn by the hallucination paths: warn about the missing URLs once per process.
+_satcom_missing_warned = False
+
 
 def canonical_llm_type(llm_type: Optional[str]) -> Optional[str]:
     """Map a requested llm_type, legacy spelling included, onto its canonical name."""
@@ -165,7 +169,10 @@ class LLMManager:
             self._satcom_small_chat_openai: ChatOpenAI | None = None
             self._satcom_large_chat_openai: ChatOpenAI | None = None
         except Exception as e:
-            logger.warning(f"Satcom clients not available (optional): {e}")
+            global _satcom_missing_warned
+            if not _satcom_missing_warned:
+                _satcom_missing_warned = True
+                logger.warning(f"Satcom clients not available (optional): {e}")
             self._satcom_small_base_url = None
             self._satcom_large_base_url = None
             self._satcom_small_model_name = None
