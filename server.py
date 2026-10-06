@@ -150,6 +150,17 @@ def create_app(debug=False, **kwargs):
     # Surfaces the running version in /docs and in the OpenAPI document. setdefault so an
     # explicit version= from a caller still wins.
     kwargs.setdefault("version", APP_VERSION)
+    # FastAPI's native telemetry stays off: src.observability owns the providers. On, it
+    # adds its own OTLP span and log processors to them at lifespan startup (every span
+    # and log record went out twice, one copy past the Stop rewrite), opens a second
+    # server span per request in a trace of its own, and emits log records that skip
+    # the redaction filter.
+    kwargs["telemetry"] = {
+        "auto_configure": False,
+        "tracing": False,
+        "metrics": False,
+        "logs": False,
+    }
 
     app = FastAPI(debug=debug, lifespan=lifespan, **kwargs)
 
