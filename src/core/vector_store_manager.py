@@ -1562,7 +1562,9 @@ class VectorStoreManager:
                 return vectors, None if first_error is None else str(first_error)
             except Exception as e:
                 first_error = first_error or e
-                logger.error(f"Failed to generate embeddings via {name}: {e}")
+                # ERROR only when no provider is left to answer.
+                log = logger.warning if index < len(providers) - 1 else logger.error
+                log(f"Failed to generate embeddings via {name}: {e}")
                 await error_logger.log_error_sync(
                     error=e,
                     component=(
