@@ -1,5 +1,6 @@
 """Unit tests for public env filters and private tenant partitioning."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +12,7 @@ from qdrant_client.http.models import (
     MatchAny,
     MatchValue,
     MinShould,
+    PayloadSchemaType,
 )
 
 from src.config import PRIVATE_COLLECTION_NAME
@@ -19,6 +21,7 @@ from src.constants import (
     PUBLIC_ENV_PROD,
     PUBLIC_ENV_STAGING,
 )
+import src.core.vector_store_manager as vsm
 from src.core.vector_store_manager import (
     VectorStoreManager,
     build_private_tenant_filter,
@@ -447,3 +450,100 @@ async def test_year_filter_skips_private_collections():
     private_keys = [cond.key for cond in by_name[PRIVATE_COLLECTION_NAME].must]
     assert private_keys == ["user_id", "collection_id"]
     assert [cond.key for cond in by_name["wikipedia-512"].must] == ["year"]
+
+
+def _index_calls(manager) -> dict:
+    return {
+        call.kwargs["field_name"]: call.kwargs
+        for call in manager.client.create_payload_index.call_args_list
+    }
+
+
+def test_private_indexes_include_document_id_keyword():
+    # Strict mode refuses a delete filtered on an unindexed metadata.document_id.
+    manager = _manager_with_mock_client()
+    manager._ensure_private_payload_indexes()
+    calls = _index_calls(manager)
+    assert set(calls) == {"user_id", "collection_id", "metadata.document_id"}
+    doc_call = calls["metadata.document_id"]
+    assert doc_call["collection_name"] == PRIVATE_COLLECTION_NAME
+    assert doc_call["field_schema"] == PayloadSchemaType.KEYWORD
+
+
+def test_existing_private_indexes_raise_nothing(caplog):
+    manager = _manager_with_mock_client()
+    manager.client.create_payload_index.side_effect = RuntimeError(
+        "Index already exists"
+    )
+    with caplog.at_level(logging.WARNING, logger=vsm.__name__):
+        manager._ensure_private_payload_indexes()
+    assert "metadata.document_id" in _index_calls(manager)
+    assert "payload_index_failed" not in caplog.text
+
+
+def test_document_id_index_failure_is_logged_not_raised(caplog):
+    manager = _manager_with_mock_client()
+
+    def _create(**kwargs):
+        if kwargs["field_name"] == "metadata.document_id":
+            raise TimeoutError("qdrant down")
+
+    manager.client.create_payload_index.side_effect = _create
+    with caplog.at_level(logging.WARNING, logger=vsm.__name__):
+        manager._ensure_private_payload_indexes()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "field=metadata.document_id type=TimeoutError" in warnings[0].getMessage()
+
+
+def test_document_id_index_is_ensured_once_per_process():
+    manager = _manager_with_mock_client()
+    assert manager._ensure_private_document_id_index() is True
+    assert manager._ensure_private_document_id_index() is True
+    manager.client.create_payload_index.assert_called_once()
+
+
+def test_document_id_index_failure_is_retried_next_time():
+    manager = _manager_with_mock_client()
+    manager.client.create_payload_index.side_effect = [TimeoutError(), None]
+    assert manager._ensure_private_document_id_index() is False
+    assert manager._ensure_private_document_id_index() is True
+    assert manager.client.create_payload_index.call_count == 2
+
+
+def test_document_delete_ensures_the_index_first():
+    manager = _manager_with_mock_client()
+    manager.client.count.return_value = SimpleNamespace(count=0)
+    manager.delete_private_docs(
+        user_id="user-1",
+        collection_id=PRIVATE_ID,
+        metadata={"metadata.document_id": "doc-1"},
+    )
+    names = [name for name, _, _ in manager.client.mock_calls]
+    assert names.index("create_payload_index") < names.index("delete")
+    assert _index_calls(manager)["metadata.document_id"]["field_schema"] == (
+        PayloadSchemaType.KEYWORD
+    )
+
+
+def test_document_delete_runs_when_the_index_cannot_be_ensured():
+    manager = _manager_with_mock_client()
+    manager.client.create_payload_index.side_effect = TimeoutError()
+    manager.client.count.side_effect = [
+        SimpleNamespace(count=1),
+        SimpleNamespace(count=0),
+    ]
+    result = manager.delete_private_docs(
+        user_id="user-1",
+        collection_id=PRIVATE_ID,
+        metadata={"metadata.document_id": "doc-1"},
+    )
+    assert result.deleted == 1
+    manager.client.delete.assert_called_once()
+
+
+def test_collection_delete_skips_the_document_index():
+    manager = _manager_with_mock_client()
+    manager.client.count.return_value = SimpleNamespace(count=0)
+    manager.delete_points_for_collection("user-1", PRIVATE_ID)
+    manager.client.create_payload_index.assert_not_called()

@@ -443,6 +443,11 @@ _qdrant_read_cache_generation = 0
 
 # Qdrant URLs whose private collection had its payload indexes ensured.
 _private_indexes_ensured: set[str] = set()
+# Qdrant URLs whose private collection has the metadata.document_id index.
+_private_document_index_ensured: set[str] = set()
+
+# Strict mode refuses a filter on an unindexed field: per-document deletes need this one.
+PRIVATE_DOCUMENT_ID_FIELD = "metadata.document_id"
 
 
 def invalidate_qdrant_read_cache() -> None:
@@ -452,6 +457,7 @@ def invalidate_qdrant_read_cache() -> None:
         _qdrant_read_cache_generation += 1
         _qdrant_read_cache.clear()
         _private_indexes_ensured.clear()
+        _private_document_index_ensured.clear()
 
 
 def _consume_task_exception(task: "asyncio.Task[Any]") -> None:
@@ -713,6 +719,35 @@ class VectorStoreManager:
                     f"Failed to create payload index '{field_name}' on "
                     f"'{PRIVATE_COLLECTION_NAME}'"
                 ) from e
+        self._ensure_private_document_id_index()
+
+    def _ensure_private_document_id_index(self) -> bool:
+        """Idempotently index metadata.document_id; never raises.
+
+        Without it Qdrant strict mode refuses the per-document delete
+        (upload rollback, single document delete) and the points stay.
+        Runs once per process per Qdrant URL; a failure is retried next time.
+        """
+        url = getattr(self, "qdrant_url", QDRANT_URL)
+        if url in _private_document_index_ensured:
+            return True
+        try:
+            self.client.create_payload_index(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                field_name=PRIVATE_DOCUMENT_ID_FIELD,
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception as e:
+            if not _is_already_exists_error(e):
+                logger.warning(
+                    "qdrant.payload_index_failed collection=%s field=%s type=%s",
+                    PRIVATE_COLLECTION_NAME,
+                    PRIVATE_DOCUMENT_ID_FIELD,
+                    type(e).__name__,
+                )
+                return False
+        _private_document_index_ensured.add(url)
+        return True
 
     def create_collection(self, collection_name: str) -> bool:
         """
@@ -952,7 +987,12 @@ class VectorStoreManager:
         collection_id: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Delete private points matching tenant keys plus optional metadata."""
+        """Delete private points matching tenant keys plus optional metadata.
+
+        Blocking: async callers run it in a worker thread.
+        """
+        if metadata and PRIVATE_DOCUMENT_ID_FIELD in metadata:
+            self._ensure_private_document_id_index()
         extra = self._qdrant_filter_from_dict(metadata)
         extra_must = list(getattr(extra, "must", None) or []) if extra else []
         filter_obj = merge_must_filters(
@@ -1019,7 +1059,7 @@ class VectorStoreManager:
         if not user_id or not collection_id:
             raise ValueError("user_id and collection_id are required to upsert private points")
 
-        self.ensure_private_collection()
+        await asyncio.to_thread(self.ensure_private_collection)
         uuids = [str(uuid4()) for _ in range(len(document_list))]
 
         try:

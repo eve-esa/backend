@@ -1,5 +1,6 @@
 """RESTful document endpoints for collections."""
 
+import asyncio
 import os
 import logging
 from typing import List, Optional
@@ -57,7 +58,8 @@ async def _rollback_uploaded_docs(
     vector_store = VectorStoreManager()
     for doc in created_docs:
         try:
-            vector_store.delete_private_docs(
+            await asyncio.to_thread(
+                vector_store.delete_private_docs,
                 user_id=user_id,
                 collection_id=collection_id,
                 metadata={"metadata.document_id": doc.id},
@@ -314,7 +316,8 @@ async def delete_document(
 
     vector_store = VectorStoreManager()
     try:
-        vector_store.delete_private_docs(
+        await asyncio.to_thread(
+            vector_store.delete_private_docs,
             user_id=requesting_user.id,
             collection_id=collection_id,
             metadata={"metadata.document_id": document_id},
