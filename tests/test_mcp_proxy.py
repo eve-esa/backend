@@ -136,3 +136,84 @@ async def test_upstream_client_does_not_delete_the_session_on_close():
 
     assert "POST" in methods
     assert "DELETE" not in methods
+
+
+# The first proxied request starts the sub-app lifespan; the server lifespan
+# closes it on shutdown, from another task. Exiting the lifespan outside the
+# task and context that entered it raised ``ValueError`` (fastmcp context
+# variable reset) and logged an ERROR with a traceback on every rollover.
+
+
+@pytest.fixture
+def proxy_registry():
+    from src.routers import mcp_proxy
+
+    yield mcp_proxy
+    mcp_proxy._proxy_lifespans.clear()
+    mcp_proxy._proxy_apps.clear()
+
+
+@pytest.mark.no_db
+async def test_shutdown_from_another_task_logs_nothing_at_error(proxy_registry, caplog):
+    """A real sub-app started in a request task closes from the lifespan task."""
+    import asyncio
+    import logging
+
+    provider = MagicMock()
+    await asyncio.create_task(
+        proxy_registry.build_proxy_app("http://agentcore.invalid/a/mcp", provider)
+    )
+    await asyncio.create_task(
+        proxy_registry.build_proxy_app("http://agentcore.invalid/b/mcp", provider)
+    )
+    (_, task_a), (_, task_b) = proxy_registry._proxy_lifespans.values()
+
+    with caplog.at_level(logging.DEBUG, logger=proxy_registry.__name__):
+        await proxy_registry.shutdown_mcp_proxy_lifespans()
+        await proxy_registry.shutdown_mcp_proxy_lifespans()
+
+    assert task_a.done() and task_a.exception() is None
+    assert task_b.done() and task_b.exception() is None
+    assert not proxy_registry._proxy_apps
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.no_db
+async def test_one_failing_sub_app_logs_one_warning_and_the_others_close(
+    proxy_registry, caplog
+):
+    import asyncio
+    import logging
+    from contextlib import asynccontextmanager
+
+    closed: list[str] = []
+
+    def fake_app(name: str, fail: bool):
+        @asynccontextmanager
+        async def lifespan(_app):
+            yield
+            if fail:
+                raise RuntimeError("boom")
+            closed.append(name)
+
+        return MagicMock(lifespan=lifespan)
+
+    for name, fail in (("a", False), ("b", True), ("c", False)):
+        started = asyncio.get_running_loop().create_future()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            proxy_registry._hold_proxy_lifespan(fake_app(name, fail), started, stop)
+        )
+        await started
+        proxy_registry._proxy_lifespans[f"http://agentcore.invalid/{name}"] = (stop, task)
+
+    with caplog.at_level(logging.DEBUG, logger=proxy_registry.__name__):
+        await proxy_registry.shutdown_mcp_proxy_lifespans()
+
+    assert closed == ["a", "c"]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert "type=RuntimeError" in warnings[0].getMessage()
+    assert "/b" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
