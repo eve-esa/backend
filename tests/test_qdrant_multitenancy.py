@@ -425,3 +425,25 @@ def test_is_private_qdrant_collection_helper():
         assert is_private_qdrant_collection(name)
     assert not is_private_qdrant_collection(PROD_PUBLIC)
     assert not is_private_qdrant_collection("")
+
+
+async def test_year_filter_skips_private_collections():
+    # Uploads carry no year, and strict mode answers 400 on an unindexed key.
+    manager = _manager_with_mock_client()
+    year = FieldCondition(key="year", match=MatchValue(value=2020))
+    await manager._search_across_collections(
+        collection_names=["wikipedia-512", PRIVATE_ID],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[year]),
+        limit_per_collection=3,
+        private_collections_map={PRIVATE_ID: "Docs A"},
+        user_id="user-1",
+    )
+    by_name = {
+        call.kwargs["collection_name"]: call.kwargs["query_filter"]
+        for call in manager.aclient.query_points.call_args_list
+    }
+    private_keys = [cond.key for cond in by_name[PRIVATE_COLLECTION_NAME].must]
+    assert private_keys == ["user_id", "collection_id"]
+    assert [cond.key for cond in by_name["wikipedia-512"].must] == ["year"]
