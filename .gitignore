@@ -4,7 +4,7 @@ src/.DS_Store
 .vscode
 # Secrets / stray artifacts — never commit
 .jsc.env
-core
+/core
 # Local LLM fault-injection fixtures (not shipped)
 tests/e2e/dummy_llm_server/
 docker-compose.fault-test.yml
