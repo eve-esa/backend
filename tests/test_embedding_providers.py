@@ -113,6 +113,38 @@ async def test_falls_back_to_jsc_and_reports_the_first_error(manager):
     assert [url for url, *_ in _FakeOpenAI.calls] == ["deepinfra", "jsc"]
 
 
+def _embedding_failure_levels(caplog):
+    return [
+        (record.levelname, record.getMessage().split(":")[0])
+        for record in caplog.records
+        if record.getMessage().startswith("Failed to generate embeddings via")
+    ]
+
+
+async def test_recovered_provider_failure_is_a_warning(manager, caplog):
+    _FakeOpenAI.failing = {"deepinfra"}
+
+    with caplog.at_level("WARNING", logger=vsm.logger.name):
+        await manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
+
+    assert _embedding_failure_levels(caplog) == [
+        ("WARNING", "Failed to generate embeddings via deepinfra")
+    ]
+
+
+async def test_last_provider_failure_is_an_error(manager, caplog):
+    _FakeOpenAI.failing = {"deepinfra", "jsc"}
+
+    with caplog.at_level("WARNING", logger=vsm.logger.name):
+        with pytest.raises(RuntimeError):
+            await manager.generate_query_vector("sentinel", JSC_DEFAULT_EMBEDDING_MODEL)
+
+    assert _embedding_failure_levels(caplog) == [
+        ("WARNING", "Failed to generate embeddings via deepinfra"),
+        ("ERROR", "Failed to generate embeddings via jsc"),
+    ]
+
+
 async def test_order_is_configurable(manager, monkeypatch):
     monkeypatch.setattr(vsm, "EMBEDDING_PROVIDER_ORDER", ["jsc", "deepinfra"])
 
