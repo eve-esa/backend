@@ -1,6 +1,6 @@
 # Workflows
 
-The CI and delivery graph for `eve-esa/backend`. Seven workflow files: five you can trigger,
+The CI and delivery graph for `eve-esa/backend`. Eight workflow files: six you can trigger,
 one that only ever runs when another workflow calls it, and one that decides when a release
 exists at all.
 
@@ -15,6 +15,7 @@ exists at all.
 | `promote-staging.yml` | `promote: staging` | `workflow_dispatch` at a `v*` tag, dispatched by `release.yml` | entry point |
 | `promote-prod.yml` | `promote: prod` | `workflow_dispatch` at a `v*` tag, one approval | entry point |
 | `release.yml` | `release: draft or cut` | push to `main` | entry point |
+| `e2e-dev.yml` | `e2e: dev` | `workflow_run` of a successful `deploy: dev`; calls the frontend suite at `eve-esa/frontend` `main` | entry point |
 
 ## The graph
 
@@ -28,6 +29,10 @@ push to main
 ├── deploy-dev.yml             "deploy: dev"        only when the path filter matches
 │   ├── build                  builds and pushes sha-<short> and latest to the dev registry
 │   └── deploy ──calls──> deploy-ecs.yml (environment: dev)
+│       │
+│       v  on success
+│   e2e-dev.yml            "e2e: dev"           calls eve-esa/frontend e2e-dev.yml@main,
+│                                               Playwright against dev, esa-eve-dev test account
 └── release.yml                "release: draft or cut"
     └── release-please         rewrites the open "chore(main): release x.y.z" PR
 
