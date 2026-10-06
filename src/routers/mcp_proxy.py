@@ -55,7 +55,9 @@ fastmcp_http_transport.streamable_http_client = functools.partial(
 _proxy_apps: dict[str, Any] = {}
 # One owner task per sub-app holds its lifespan: (stop event, task).
 _proxy_lifespans: dict[str, tuple[asyncio.Event, asyncio.Task]] = {}
+# Total bound for closing every sub-app, then for the cancelled leftovers.
 _PROXY_SHUTDOWN_TIMEOUT_S = 5.0
+_PROXY_CANCEL_GRACE_S = 1.0
 _proxy_build_lock = asyncio.Lock()
 
 # Per-request bearer token of the authenticated caller (an EVE access token or
@@ -216,6 +218,7 @@ async def build_proxy_app(agentcore_url: str, provider: CognitoTokenProvider):
             raise
         _proxy_lifespans[cache_key] = (stop, task)
         _proxy_apps[cache_key] = http_app
+        task.add_done_callback(functools.partial(_evict_dead_proxy, cache_key))
         logger.info("MCP proxy sub-app started (lifespan): %s", cache_key[:64])
         return http_app
 
@@ -226,6 +229,9 @@ async def _hold_proxy_lifespan(
     """Enter ``http_app``'s lifespan, report it started, hold it until ``stop``."""
     try:
         async with http_app.lifespan(http_app):
+            if started.done():
+                # The request that started it was cancelled: close again.
+                return
             started.set_result(None)
             await stop.wait()
     except asyncio.CancelledError:
@@ -236,7 +242,36 @@ async def _hold_proxy_lifespan(
         if not started.done():
             started.set_exception(exc)
             return
+        if started.cancelled():
+            return
         raise
+
+
+def _task_failure(task: asyncio.Task) -> str | None:
+    """Exception class name a finished owner task ended with, or ``None``."""
+    if task.cancelled():
+        return "CancelledError"
+    exc = task.exception()
+    return type(exc).__name__ if exc is not None else None
+
+
+def _evict_dead_proxy(cache_key: str, task: asyncio.Task) -> None:
+    """Drop a sub-app whose owner task ended outside a shutdown.
+
+    Its task group is gone, so every later call would fail until the worker
+    restarts; the next request starts a fresh sub-app instead.
+    """
+    entry = _proxy_lifespans.get(cache_key)
+    if entry is None or entry[1] is not task:
+        # Taken by shutdown_mcp_proxy_lifespans, which reports it.
+        return
+    del _proxy_lifespans[cache_key]
+    _proxy_apps.pop(cache_key, None)
+    logger.warning(
+        "MCP proxy sub-app stopped unexpectedly type=%s server=%s",
+        _task_failure(task) or "exited",
+        cache_key[:64],
+    )
 
 
 async def shutdown_mcp_proxy_lifespans() -> None:
@@ -249,19 +284,24 @@ async def shutdown_mcp_proxy_lifespans() -> None:
         lifespans = list(_proxy_lifespans.items())
         _proxy_lifespans.clear()
         _proxy_apps.clear()
+        if not lifespans:
+            return
         for _key, (stop, _task) in lifespans:
             stop.set()
-        for key, (_stop, task) in lifespans:
-            await asyncio.wait({task}, timeout=_PROXY_SHUTDOWN_TIMEOUT_S)
-            if not task.done():
-                task.cancel()
+        tasks = {task: key for key, (_stop, task) in lifespans}
+        _, pending = await asyncio.wait(set(tasks), timeout=_PROXY_SHUTDOWN_TIMEOUT_S)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=_PROXY_CANCEL_GRACE_S)
+        for task, key in tasks.items():
+            if task in pending:
+                if task.done() and not task.cancelled():
+                    task.exception()  # retrieved, so asyncio does not log it
                 failure = "TimeoutError"
-            elif task.cancelled():
-                # Already torn down by the event loop: nothing left to close.
-                continue
-            elif task.exception() is not None:
-                failure = type(task.exception()).__name__
             else:
+                failure = _task_failure(task)
+            if failure is None:
                 continue
             logger.warning(
                 "MCP proxy sub-app shutdown failed type=%s server=%s",

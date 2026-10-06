@@ -217,3 +217,153 @@ async def test_one_failing_sub_app_logs_one_warning_and_the_others_close(
     assert "type=RuntimeError" in warnings[0].getMessage()
     assert "/b" in warnings[0].getMessage()
     assert warnings[0].exc_info is None
+
+
+def _fake_proxies(monkeypatch, proxy_registry, lifespans):
+    """``create_proxy`` returns sub-apps whose lifespans come from ``lifespans``, in order."""
+    apps = []
+
+    def create_proxy(*_args, **_kwargs):
+        app = MagicMock(lifespan=lifespans.pop(0))
+        apps.append(app)
+        return MagicMock(http_app=MagicMock(return_value=app))
+
+    monkeypatch.setattr(proxy_registry, "create_proxy", create_proxy)
+    return apps
+
+
+@pytest.mark.no_db
+async def test_hung_sub_apps_share_one_shutdown_deadline(
+    proxy_registry, monkeypatch, caplog
+):
+    """Three sub-apps that never close cost one timeout in total, not three."""
+    import asyncio
+    import logging
+    import time
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def hangs_on_close(_app):
+        yield
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(proxy_registry, "_PROXY_SHUTDOWN_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(proxy_registry, "_PROXY_CANCEL_GRACE_S", 0.3)
+    _fake_proxies(monkeypatch, proxy_registry, [hangs_on_close] * 3)
+    for name in "abc":
+        await proxy_registry.build_proxy_app(f"http://agentcore.invalid/{name}", MagicMock())
+    tasks = [task for _stop, task in proxy_registry._proxy_lifespans.values()]
+
+    with caplog.at_level(logging.DEBUG, logger=proxy_registry.__name__):
+        began = time.monotonic()
+        await proxy_registry.shutdown_mcp_proxy_lifespans()
+        elapsed = time.monotonic() - began
+
+    assert elapsed < 0.6  # sequential waits would take 0.9 s
+    assert all(task.done() for task in tasks)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 3
+    assert all("type=TimeoutError" in message for message in warnings)
+
+
+@pytest.mark.no_db
+async def test_a_request_cancelled_during_startup_leaves_no_owner_error(
+    proxy_registry, monkeypatch, caplog
+):
+    import asyncio
+    import logging
+    from contextlib import asynccontextmanager
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    @asynccontextmanager
+    async def slow_start(_app):
+        entered.set()
+        await release.wait()
+        yield
+        closed.set()
+
+    _fake_proxies(monkeypatch, proxy_registry, [slow_start])
+    request = asyncio.create_task(
+        proxy_registry.build_proxy_app("http://agentcore.invalid/a", MagicMock())
+    )
+    await entered.wait()
+    owner = next(
+        t for t in asyncio.all_tasks() if t.get_name().startswith("mcp-proxy-lifespan-")
+    )
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    with caplog.at_level(logging.DEBUG):
+        release.set()
+        await asyncio.wait_for(owner, 1)
+
+    assert closed.is_set()
+    assert not owner.cancelled() and owner.exception() is None
+    assert not proxy_registry._proxy_apps and not proxy_registry._proxy_lifespans
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.no_db
+async def test_a_dead_owner_is_evicted_and_the_next_request_starts_a_fresh_sub_app(
+    proxy_registry, monkeypatch, caplog
+):
+    import asyncio
+    import logging
+    from contextlib import asynccontextmanager
+
+    import anyio
+
+    crash = asyncio.Event()
+
+    async def session_manager():
+        await crash.wait()
+        raise RuntimeError("task group crashed")
+
+    @asynccontextmanager
+    async def crashes_later(_app):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(session_manager)
+            yield
+
+    @asynccontextmanager
+    async def healthy(_app):
+        yield
+
+    apps = _fake_proxies(monkeypatch, proxy_registry, [crashes_later, healthy])
+    url = "http://agentcore.invalid/a"
+    first = await proxy_registry.build_proxy_app(url, MagicMock())
+    (_stop, owner), = proxy_registry._proxy_lifespans.values()
+
+    with caplog.at_level(logging.DEBUG, logger=proxy_registry.__name__):
+        crash.set()
+        await asyncio.wait({owner}, timeout=1)
+        await asyncio.sleep(0)  # done callbacks run on the next loop step
+
+    assert url not in proxy_registry._proxy_apps
+    assert url not in proxy_registry._proxy_lifespans
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "stopped unexpectedly" in warnings[0]
+
+    second = await proxy_registry.build_proxy_app(url, MagicMock())
+    assert second is not first and second is apps[1]
+    await proxy_registry.shutdown_mcp_proxy_lifespans()
+
+
+@pytest.mark.no_db
+async def test_a_cancelled_owner_is_reported_at_shutdown(proxy_registry, caplog):
+    import asyncio
+    import logging
+
+    owner = asyncio.create_task(asyncio.sleep(3600))
+    owner.cancel()
+    await asyncio.wait({owner})
+    proxy_registry._proxy_lifespans["http://agentcore.invalid/a"] = (asyncio.Event(), owner)
+
+    with caplog.at_level(logging.DEBUG, logger=proxy_registry.__name__):
+        await proxy_registry.shutdown_mcp_proxy_lifespans()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "type=CancelledError" in warnings[0]
