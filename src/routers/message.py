@@ -1213,11 +1213,13 @@ async def get_source_logs(
         Confirmation message upon successful append.
 
     Raises:
-        HTTPException: 404 if conversation/message not found or mismatched; 500 for server errors.
+        HTTPException: 404 if conversation/message not found or mismatched, or if the conversation belongs to another user; 500 for server errors.
     """
     try:
         conversation = await Conversation.find_by_id(conversation_id)
-        if not conversation:
+        # Another user's conversation answers like a missing one: a 403 would
+        # confirm that the id exists.
+        if not conversation or conversation.user_id != requesting_user.id:
             raise HTTPException(status_code=404, detail="Conversation not found")
 
         message = await Message.find_by_id(message_id)
@@ -1245,8 +1247,9 @@ async def get_source_logs(
         return {"message": "Source logs stored successfully"}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    except Exception:
+        logger.exception("source_logs failed message_id=%s", message_id)
+        raise HTTPException(status_code=500, detail="Server error")
 
 
 # Not load shed yet: the hallucination routes below, /generate and /generate-llm
