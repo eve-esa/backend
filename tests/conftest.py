@@ -169,3 +169,38 @@ def _per_process_endpoint_breaker(monkeypatch):
     import src.config
 
     monkeypatch.setattr(src.config, "ENDPOINT_BREAKER_SHARED", False)
+
+
+@pytest.fixture(scope="session")
+def genai_otel():
+    """One provider and one OpenLLMetry instrumentation for the whole run.
+
+    Production instruments once per worker. OpenLLMetry 0.62 does not survive
+    uninstrument then instrument in one process: callbacks keep going to the
+    first handler and its (by then shut down) provider. So every module that
+    needs real LangChain and LangGraph spans shares this one and clears the
+    exporter per test. Nothing global is registered: a test hands the provider
+    to the context helpers through ``observability._state``.
+    """
+    from types import SimpleNamespace
+
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from src import observability
+
+    content_switch = os.environ.get("TRACELOOP_TRACE_CONTENT")
+    exporter = InMemorySpanExporter()
+    provider = observability.build_tracer_provider(exporter, batch=False)
+    assert observability.instrument_genai(provider) is True
+    # instrument_genai writes the content switch; the tests set their own.
+    if content_switch is None:
+        os.environ.pop("TRACELOOP_TRACE_CONTENT", None)
+    else:
+        os.environ["TRACELOOP_TRACE_CONTENT"] = content_switch
+    try:
+        yield SimpleNamespace(exporter=exporter, provider=provider)
+    finally:
+        observability.uninstrument_genai()
+        provider.shutdown()

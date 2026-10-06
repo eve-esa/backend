@@ -21,6 +21,7 @@ from src.observability.context import (
     current_trace_id,
     set_llm_attributes,
     span_trace_id,
+    stop_requested,
 )
 from src.services.generate_answer import build_endpoint_metadata
 from src.utils.error_logger import (
@@ -201,6 +202,73 @@ def test_llm_attributes_from_endpoint_metadata(exporter):
     assert done.attributes["eve.fallback_used"] is True
     assert "eve.llm.answered" not in started.attributes
     assert "eve.fallback_used" not in started.attributes
+
+
+# ─── a user Stop is not an error ─────────────────────────────────────────────
+
+
+def _library_span(exc):
+    """What OpenLLMetry does with any BaseException through a LangGraph stream."""
+    tracer = observability._state["tracer_provider"].get_tracer(
+        "opentelemetry.instrumentation.langchain"
+    )
+    span = tracer.start_span("invoke_agent LangGraph")
+    span.set_attribute("error.type", type(exc).__name__)
+    span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+    span.record_exception(exc)
+    span.end()
+
+
+def _turn(exporter, exc, stop=None, stopped=True):
+    """One answer root with a library span that ends on ``exc``; returns both."""
+    with agent_span("generation_stream", stop_event=stop):
+        if stop is not None and stopped:
+            stop.set()
+        _library_span(exc)
+    library, root = exporter.get_finished_spans()
+    return library, root
+
+
+@pytest.mark.parametrize("exc", [asyncio.CancelledError(), GeneratorExit()])
+def test_a_stop_leaves_no_error_and_marks_the_spans_stopped(exporter, exc):
+    library, root = _turn(exporter, exc, stop=asyncio.Event())
+
+    for span in (library, root):
+        assert span.status.status_code == trace.StatusCode.UNSET
+        assert span.attributes["eve.stopped"] is True
+        assert [e for e in span.events if e.name == "exception"] == []
+    assert "error.type" not in library.attributes
+
+
+@pytest.mark.parametrize(
+    "stop,stopped", [(None, False), (asyncio.Event(), False)], ids=["no-event", "not-set"]
+)
+def test_a_cancel_that_is_not_a_stop_keeps_its_error(exporter, stop, stopped):
+    """A shutdown or the deadline cancels without the Stop: the turn failed."""
+    library, root = _turn(exporter, asyncio.CancelledError(), stop, stopped)
+
+    assert library.status.status_code == trace.StatusCode.ERROR
+    assert [e.attributes["exception.type"] for e in library.events] == [
+        "asyncio.exceptions.CancelledError"
+    ]
+    assert "eve.stopped" not in library.attributes
+    assert "eve.stopped" not in root.attributes
+
+
+def test_a_failure_before_the_stop_keeps_its_error(exporter):
+    library, _root = _turn(exporter, RuntimeError("model down"), stop=asyncio.Event())
+
+    assert library.status.status_code == trace.StatusCode.ERROR
+    assert [e.name for e in library.events] == ["exception"]
+    assert "eve.stopped" not in library.attributes
+
+
+def test_the_stop_binding_ends_with_the_answer(exporter):
+    stop = asyncio.Event()
+    stop.set()
+    with agent_span("generation_stream", stop_event=stop):
+        assert stop_requested()
+    assert not stop_requested()
 
 
 def test_without_telemetry_trace_ids_are_none_and_nothing_breaks(monkeypatch):

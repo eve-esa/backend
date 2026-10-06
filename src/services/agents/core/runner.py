@@ -1692,6 +1692,7 @@ async def generate_answer_agentic_stream_helper(
                     "eve.stream": True,
                     "eve.agent_graph": agent_graph_type,
                 },
+                stop_event=cancel_event,
             ) as root_span:
                 trace_id = span_trace_id(root_span) or trace_id
                 set_llm_attributes(root_span, endpoint_metadata, include_answered=False)

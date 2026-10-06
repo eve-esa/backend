@@ -149,14 +149,19 @@ def build_tracer_provider(exporter, *, batch: bool = True):
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 
-    from src.observability.context import ContextAttributesSpanProcessor
+    from src.observability.context import (
+        ContextAttributesSpanProcessor,
+        StoppedTurnSpanProcessor,
+    )
     from src.observability.redaction import RedactingSpanExporter
 
     provider = TracerProvider(resource=build_resource(), span_limits=_span_limits())
     # First, so the ids are on the span before any exporter sees it.
     provider.add_span_processor(ContextAttributesSpanProcessor())
     processor_cls = BatchSpanProcessor if batch else SimpleSpanProcessor
-    provider.add_span_processor(processor_cls(RedactingSpanExporter(exporter)))
+    provider.add_span_processor(
+        StoppedTurnSpanProcessor(processor_cls(RedactingSpanExporter(exporter)))
+    )
     return provider
 
 

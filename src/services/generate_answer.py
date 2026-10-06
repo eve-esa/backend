@@ -1435,6 +1435,7 @@ async def generate_answer_stream_generator_helper(
         user_id=user_id,
         message_id=message_id,
         attributes={"eve.pipeline": "classic", "eve.stream": True},
+        stop_event=cancel_event,
     ) as root_span:
         async with contextlib.aclosing(
             _classic_stream_events(
