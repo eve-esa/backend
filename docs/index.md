@@ -92,7 +92,8 @@ headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 3. **Conversation lifecycle**
     - `POST /conversations` to get `conversation_id`
 4. **Message generation**
-    - `POST /conversations/{conversation_id}/messages` or `/stream_messages`
+    - `POST /conversations/{conversation_id}/generate-agentic` or `/stream-generate-agentic` ([agentic generation](api/routers-message.md#agentic-generation))
+    - The classic `/messages` and `/stream_messages` routes are deprecated since 1.2 and will be removed in a later release
 5. **Optional ingestion for private retrieval**
     - `POST /collections` -> get private `collection_id`
     - `POST /collections/{collection_id}/documents`

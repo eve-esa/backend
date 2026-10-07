@@ -454,6 +454,7 @@ async def get_my_message_stats(
 @router.post(
     "/conversations/{conversation_id}/messages", response_model=CreateMessageResponse,
     dependencies=[CHAT_RATE_LIMIT],
+    deprecated=True,
 )
 async def create_message(
     request: GenerationRequest,
@@ -463,6 +464,8 @@ async def create_message(
 ) -> CreateMessageResponse:
     """
     Create a new message in a conversation and generate an answer.
+
+    Deprecated since 1.2 and removed in a later release: use `POST /conversations/{conversation_id}/generate-agentic` instead.
 
     Validates conversation ownership, normalizes requested public collections, persists a placeholder `Message`, runs generation, updates the message with answer and retrieval metadata, and schedules rollup/trimming of history.
 
@@ -934,6 +937,7 @@ async def update_message(
     "/conversations/{conversation_id}/stream_messages",
     response_class=StreamingResponse,
     dependencies=[CHAT_RATE_LIMIT],
+    deprecated=True,
 )
 async def create_message_stream(
     request: GenerationRequest,
@@ -943,6 +947,8 @@ async def create_message_stream(
 ) -> StreamingResponse:
     """
     Create a new message and stream generation via Server-Sent Events (SSE).
+
+    Deprecated since 1.2 and removed in a later release: use `POST /conversations/{conversation_id}/stream-generate-agentic` instead.
 
     Sets up a per-message stream bus and runs generation in a decoupled task. Yields SSE-formatted chunks including status updates, tokens, and final payloads.
 
