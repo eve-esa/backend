@@ -21,14 +21,8 @@ Release and promotes staging. Production is promoted from there by an explicit d
 
 ### Fixed
 
-* **agents:** search the selected collections before answering ([#304](https://github.com/eve-esa/backend/issues/304)) ([29fe264](https://github.com/eve-esa/backend/commit/29fe26456986def4cd9b11884a928728397bb1f4))
 * **agents:** send the tool query with the tool call event ([#303](https://github.com/eve-esa/backend/issues/303)) ([b405ceb](https://github.com/eve-esa/backend/commit/b405ceb71e66cb58e342772ac309a1aa9b8b7f14))
 * **mcp-servers:** list only rows the caller can use ([#301](https://github.com/eve-esa/backend/issues/301)) ([9b8bed1](https://github.com/eve-esa/backend/commit/9b8bed1d2de0d8c839aef80689617356ea76fb6a))
-
-
-### Removed
-
-* search the selected collections before answering ([#306](https://github.com/eve-esa/backend/issues/306)) ([3053315](https://github.com/eve-esa/backend/commit/3053315ba5ec5b289177e1d5d0cc39e484c4f52c))
 
 ## [1.0.3](https://github.com/eve-esa/backend/compare/v1.0.2...v1.0.3) (2026-10-06)
 
