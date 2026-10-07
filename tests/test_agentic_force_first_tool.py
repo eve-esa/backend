@@ -12,10 +12,13 @@ trace, and a Stop during it leaves a thread the next turn can read.
 import asyncio
 import contextlib
 import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import agents
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
@@ -48,6 +51,7 @@ def _request(
     servers=("eve_retrieval",),
     public=("Wiley AI Gateway",),
     private=(),
+    owned=None,
 ) -> GenerationRequest:
     request = GenerationRequest(
         query=query,
@@ -55,6 +59,10 @@ def _request(
         private_collections=list(private),
     )
     request.mcp_server_configs = [SimpleNamespace(name=name) for name in servers]
+    # What the request preparation resolves: the selected ids the user owns.
+    request.private_collections_map = {
+        cid: f"collection {cid}" for cid in (private if owned is None else owned)
+    }
     return request
 
 
@@ -68,6 +76,11 @@ class TestForceFirstTool:
     def test_a_private_collection_alone_is_a_selection(self):
         request = _request(public=(), private=("6aa28720dafbcdc730a04acd",))
         assert _force_first_tool(request, [_tool()]) == RETRIEVE
+
+    def test_a_private_id_the_user_does_not_own_is_no_selection(self):
+        # Deleted while still selected in the browser, or another user's id.
+        request = _request(public=(), private=("6aa28720dafbcdc730a04acd",), owned=())
+        assert _force_first_tool(request, [_tool()]) is None
 
     def test_toolkit_off_forces_nothing(self):
         request = _request(servers=("geocode",))
@@ -86,19 +99,34 @@ class TestForceFirstTool:
         query = f"Explain the Doppler effect, {phrase.upper()} please"
         assert _force_first_tool(_request(query), [_tool()]) is None
 
-    def test_opt_out_survives_a_typographic_apostrophe_and_extra_spaces(self):
-        query = "Explain the Doppler effect but don’t   retrieve anything"
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Explain the Doppler effect but don’t   retrieve anything",
+            "Doppler effect.\nNo   RAG.",
+            "no retrieval: what is SAR?",
+        ],
+    )
+    def test_opt_out_survives_apostrophes_spaces_and_punctuation(self, query):
         assert _force_first_tool(_request(query), [_tool()]) is None
 
-    def test_the_opt_out_list_is_the_prompt_list(self):
-        assert set(RETRIEVAL_OPT_OUT_PHRASES) == {
-            "no rag",
-            "do not use tools",
-            "don't use tools",
-            "without sources",
-            "do not retrieve",
-            "don't retrieve",
-        }
+    @pytest.mark.parametrize(
+        "query",
+        ["Is the volcano raging near Etna?", "Why don't retrievers like water?"],
+    )
+    def test_a_phrase_inside_other_words_is_no_opt_out(self, query):
+        assert _force_first_tool(_request(query), [_tool()]) == RETRIEVE
+
+    def test_every_restriction_of_the_prompt_is_an_opt_out(self):
+        prompts = Path(agents.__file__).parent / "graphs" / "react" / "prompts.yaml"
+        line = next(
+            line
+            for line in prompts.read_text().splitlines()
+            if "Respect explicit restrictions:" in line
+        )
+        quoted = [phrase.lower() for phrase in re.findall(r'"([^"]+)"', line)]
+        assert quoted
+        assert set(quoted) <= set(RETRIEVAL_OPT_OUT_PHRASES)
 
 
 # ─── the run config the runner hands to the graph ─────────────────────────────
@@ -310,8 +338,12 @@ async def test_a_stop_during_the_forced_call_leaves_a_thread_the_next_turn_reads
         turn = asyncio.create_task(
             _stream(_request(), "thread-2", "m1", cancel_event=cancel_event)
         )
-        while not received:
-            await asyncio.sleep(0.01)
+        async def _tool_started():
+            while not received:
+                await asyncio.sleep(0.01)
+
+        # A regression that never forces the call fails here instead of hanging.
+        await asyncio.wait_for(_tool_started(), timeout=5)
         # What the Stop path does: set the event, then cancel the running turn.
         cancel_event.set()
         turn.cancel()

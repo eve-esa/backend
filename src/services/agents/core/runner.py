@@ -11,6 +11,7 @@ import copy
 import inspect
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -450,20 +451,28 @@ _FORCED_RETRIEVAL_SERVER = "eve_retrieval"
 _FORCED_RETRIEVAL_TOOL = "eve_retrieval_retrieve"
 
 # The react prompt's explicit restrictions (agents prompts.yaml, "Respect
-# explicit restrictions"). A message carrying one is left to the model.
+# explicit restrictions") plus their common spellings, English only. A message
+# carrying one, as whole words, is left to the model.
 RETRIEVAL_OPT_OUT_PHRASES = (
     "no rag",
+    "no retrieval",
+    "without retrieval",
+    "without sources",
     "do not use tools",
     "don't use tools",
-    "without sources",
+    "dont use tools",
     "do not retrieve",
     "don't retrieve",
+    "dont retrieve",
+)
+_RETRIEVAL_OPT_OUT = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in RETRIEVAL_OPT_OUT_PHRASES) + r")\b"
 )
 
 
 def _opts_out_of_retrieval(query: Optional[str]) -> bool:
-    text = " ".join(str(query or "").replace("’", "'").lower().split())
-    return any(phrase in text for phrase in RETRIEVAL_OPT_OUT_PHRASES)
+    text = " ".join(str(query or "").replace("\u2019", "'").lower().split())
+    return _RETRIEVAL_OPT_OUT.search(text) is not None
 
 
 def _force_first_tool(request: GenerationRequest, tools: Any) -> Optional[str]:
@@ -486,7 +495,9 @@ def _force_first_tool(request: GenerationRequest, tools: Any) -> Optional[str]:
         getattr(tool, "name", None) == _FORCED_RETRIEVAL_TOOL for tool in tools or []
     ):
         return None
-    if not (request.public_collections or request.private_collections):
+    # Only the private collections this user owns, as the request preparation
+    # resolved them: a stale or foreign id alone is no selection.
+    if not (request.public_collections or request.private_collections_map):
         return None
     if _opts_out_of_retrieval(request.query):
         return None
