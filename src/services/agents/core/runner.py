@@ -11,7 +11,6 @@ import copy
 import inspect
 import json
 import logging
-import re
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -445,75 +444,6 @@ def _rag_tool_names(tools: Any) -> set[str]:
         if name:
             names.add(name)
     return names
-
-
-_FORCED_RETRIEVAL_SERVER = "eve_retrieval"
-_FORCED_RETRIEVAL_TOOL = "eve_retrieval_retrieve"
-
-# The react prompt's explicit restrictions (agents prompts.yaml, "Respect
-# explicit restrictions") plus their common spellings, English only. A message
-# carrying one, as whole words, is left to the model.
-RETRIEVAL_OPT_OUT_PHRASES = (
-    "no rag",
-    "no retrieval",
-    "without retrieval",
-    "without sources",
-    "do not use tools",
-    "don't use tools",
-    "dont use tools",
-    "do not retrieve",
-    "don't retrieve",
-    "dont retrieve",
-)
-_RETRIEVAL_OPT_OUT = re.compile(
-    r"\b(?:" + "|".join(re.escape(p) for p in RETRIEVAL_OPT_OUT_PHRASES) + r")\b"
-)
-
-
-def _opts_out_of_retrieval(query: Optional[str]) -> bool:
-    text = " ".join(str(query or "").replace("\u2019", "'").lower().split())
-    return _RETRIEVAL_OPT_OUT.search(text) is not None
-
-
-def _force_first_tool(request: GenerationRequest, tools: Any) -> Optional[str]:
-    """Tool the react graph calls before the model answers, or None.
-
-    Retrieval goes first when the ``eve_retrieval`` toolkit is on and its tool
-    loaded, at least one collection is selected (a search over nothing finds
-    nothing) and the message does not opt out. The forced call goes through
-    the tool wrapped by ``_with_request_rag_defaults``, so it searches the
-    user's collections with the user's filters.
-    """
-    servers = {
-        str(getattr(server, "name", "") or "")
-        for server in getattr(request, "mcp_server_configs", None) or []
-    }
-    if _FORCED_RETRIEVAL_SERVER not in servers:
-        return None
-    # The graph matches the exact name of a bound tool.
-    if not any(
-        getattr(tool, "name", None) == _FORCED_RETRIEVAL_TOOL for tool in tools or []
-    ):
-        return None
-    # Only the private collections this user owns, as the request preparation
-    # resolved them: a stale or foreign id alone is no selection.
-    if not (request.public_collections or request.private_collections_map):
-        return None
-    if _opts_out_of_retrieval(request.query):
-        return None
-    return _FORCED_RETRIEVAL_TOOL
-
-
-def _run_config(
-    thread_id: str, request: GenerationRequest, tools: Any
-) -> Dict[str, Any]:
-    """LangGraph run config for one agentic turn."""
-    configurable: Dict[str, Any] = {"thread_id": thread_id}
-    forced = _force_first_tool(request, tools)
-    if forced:
-        configurable["force_first_tool"] = forced
-    logger.info("Agentic turn force_first_tool=%s", forced)
-    return {"configurable": configurable}
 
 
 def _collect_retrieval_documents(
@@ -1330,7 +1260,7 @@ async def generate_answer_agentic(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = _run_config(conversation_id or "default", request, tools)
+        config = {"configurable": {"thread_id": conversation_id or "default"}}
 
         async def _run_graph(
             g: Any,
@@ -1666,7 +1596,7 @@ async def generate_answer_agentic_stream_helper(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = _run_config(conversation_id, request, tools)
+        config = {"configurable": {"thread_id": conversation_id}}
 
         gen_start = time.perf_counter()
         first_token_latency: Optional[float] = None
