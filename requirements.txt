@@ -64,4 +64,4 @@ boto3>=1.43.67
 # cancel_manager.py calls aclose(), which does not exist before 5.0.1. 8.1.0 is
 # the version inside the tested dev image.
 redis==8.1.0
-qdrant-client>=1.19.0,<2.0
+qdrant-client>=1.19.1,<2.0
