@@ -17,7 +17,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 from src.config import AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMManager
@@ -973,6 +973,119 @@ class TestStructuredToolEvents:
             "tool_call": "Calling dummy search…",
             "tool_result": "result",
         }
+
+
+class TestToolCallQuery:
+    """A provider that streams tool arguments sends the tool name first and the
+    arguments later, so the first chunk has empty args. The chip must show the
+    query, and one call must open one chip: the frontend appends a chip per
+    ``tool_call`` event.
+    """
+
+    @staticmethod
+    def _streamed_call_turn(name, args, call_id="call-1"):
+        chunk = AIMessageChunk(
+            content="",
+            tool_call_chunks=[{"name": name, "args": "", "id": call_id, "index": 0}],
+        )
+        full = AIMessage(
+            content="", tool_calls=[{"name": name, "args": args, "id": call_id}]
+        )
+        return [
+            ("messages", (chunk, {"langgraph_node": "agent"})),
+            ("updates", {"agent": {"messages": [full]}}),
+        ]
+
+    @staticmethod
+    def _tool_answer(name, call_id="call-1"):
+        msg = ToolMessage(content="result", name=name, tool_call_id=call_id)
+        return [
+            ("messages", (msg, {"langgraph_node": "tools"})),
+            ("updates", {"tools": {"messages": [msg]}}),
+        ]
+
+    async def test_streamed_call_announces_the_query_from_the_update(self):
+        graph = _FakeStreamGraph(
+            events=[
+                *self._streamed_call_turn(
+                    "eve_retrieval_retrieve", {"query": "Doppler effect"}
+                ),
+                *self._tool_answer("eve_retrieval_retrieve"),
+                ("messages", (AIMessage(content="done"), {"langgraph_node": "agent"})),
+            ]
+        )
+
+        events = await _stream_events(graph)
+
+        calls = [e for e in events if e["type"] == "tool_call"]
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "eve_retrieval_retrieve"
+        assert calls[0]["query"] == "Doppler effect"
+        assert calls[0]["content"].endswith(": Doppler effect")
+        types = [e["type"] for e in events]
+        assert types.index("tool_call") < types.index("tool_result")
+
+    async def test_complete_message_and_update_announce_once(self):
+        call = {"name": "dummy_search", "args": {"query": "sea ice"}, "id": "call-1"}
+        graph = _FakeStreamGraph(
+            events=[
+                (
+                    "messages",
+                    (AIMessage(content="", tool_calls=[call]), {"langgraph_node": "agent"}),
+                ),
+                (
+                    "updates",
+                    {"agent": {"messages": [AIMessage(content="", tool_calls=[call])]}},
+                ),
+                *self._tool_answer("dummy_search"),
+            ]
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e["query"] for e in events if e["type"] == "tool_call"] == ["sea ice"]
+
+    async def test_text_call_parsed_by_the_graph_announces_once(self):
+        """The `[TOOL_CALLS]` text is buffered until the node changes, so its
+        flush comes after the update in which the graph already parsed it."""
+        parsed = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "dummy_search",
+                    "args": {"query": "sea ice"},
+                    "id": "call_0_dummy_search",
+                }
+            ],
+        )
+        text = AIMessageChunk(content='[TOOL_CALLS]dummy_search{"query": "sea ice"}')
+        graph = _FakeStreamGraph(
+            events=[
+                ("messages", (text, {"langgraph_node": "agent"})),
+                ("updates", {"agent": {"messages": [parsed]}}),
+                *self._tool_answer("dummy_search", "call_0_dummy_search"),
+            ]
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e["query"] for e in events if e["type"] == "tool_call"] == ["sea ice"]
+
+    async def test_same_call_id_in_the_next_step_opens_a_new_chip(self):
+        """Parsed text calls are numbered per step, so `call_0_<tool>` comes
+        back in the next agent step and must not be taken for a repeat."""
+        graph = _FakeStreamGraph(
+            events=[
+                *self._streamed_call_turn("dummy_search", {"query": "a"}, "call_0"),
+                *self._tool_answer("dummy_search", "call_0"),
+                *self._streamed_call_turn("dummy_search", {"query": "b"}, "call_0"),
+                *self._tool_answer("dummy_search", "call_0"),
+            ]
+        )
+
+        events = await _stream_events(graph)
+
+        assert [e["query"] for e in events if e["type"] == "tool_call"] == ["a", "b"]
 
 
 class TestTraceTiming:
