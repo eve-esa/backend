@@ -40,7 +40,7 @@ Creates a user-owned conversation thread.
 
 ### Notes
 
-- Required before calling `POST /conversations/{conversation_id}/messages`.
+- Required before calling `POST /conversations/{conversation_id}/generate-agentic` or `/stream-generate-agentic` ([agentic generation](./routers-message.md#agentic-generation)). The classic `/messages` and `/stream_messages` routes are deprecated since 1.2 and will be removed in a later release.
 
 ## List my conversations
 

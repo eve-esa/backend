@@ -7,7 +7,7 @@ This page covers chat generation, streaming, retry, feedback, and testing endpoi
 1. Authenticate first (`/signup` + `/verify` + `/login`).
 2. Create conversation with `POST /conversations`.
 3. Get valid collection names via `GET /collections/public` (and/or private collection names you own).
-4. Call message or generate endpoints with `conversation_id` and collection names.
+4. Call the [agentic generation](#agentic-generation) endpoints with `conversation_id` and collection names.
 5. Optionally run retry, feedback, hallucination, and stats endpoints.
 
 Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).
@@ -24,6 +24,8 @@ See [Collection API](./routers-collection.md) for endpoint details and examples.
 ## Create message (non-streaming)
 
 `POST /conversations/{conversation_id}/messages`
+
+Deprecated since 1.2 and removed in a later release: use `POST /conversations/{conversation_id}/generate-agentic` ([Agentic generation](#agentic-generation)) instead.
 
 ::: routers.message.create_message
     options:
@@ -77,6 +79,8 @@ Runs retrieval + generation and stores the response in the conversation.
 ## Create message (SSE streaming)
 
 `POST /conversations/{conversation_id}/stream_messages`
+
+Deprecated since 1.2 and removed in a later release: use `POST /conversations/{conversation_id}/stream-generate-agentic` ([Agentic generation](#agentic-generation)) instead.
 
 ::: routers.message.create_message_stream
     options:
