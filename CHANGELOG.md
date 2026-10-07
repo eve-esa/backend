@@ -11,6 +11,18 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.2.0](https://github.com/eve-esa/backend/compare/v1.1.0...v1.2.0) (2026-10-07)
+
+
+### Added
+
+* **api:** deprecate the classic message routes ([#307](https://github.com/eve-esa/backend/issues/307)) ([86193c1](https://github.com/eve-esa/backend/commit/86193c1fdaf5a29d04a599d19a697173b4f9c657))
+
+
+### Fixed
+
+* **agents:** retrieve first and drop unused tools in the react prompt ([#309](https://github.com/eve-esa/backend/issues/309)) ([eef9a88](https://github.com/eve-esa/backend/commit/eef9a88e948ee10bb646c7b7b5167466aa81c58b))
+
 ## [1.1.0](https://github.com/eve-esa/backend/compare/v1.0.3...v1.1.0) (2026-10-07)
 
 
