@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import AsyncMock, patch
 
@@ -28,24 +29,61 @@ async def test_list_mcp_servers_requires_auth(async_client):
 
 
 @pytest.mark.asyncio
-async def test_list_mcp_servers_returns_catalog_for_authenticated_user(async_client):
-    owner, owner_token = await create_test_user_and_token()
-    other, other_token = await create_test_user_and_token()
-    owner_server = _mcp_server(user_id=owner.id, name="owner-server")
+async def test_list_mcp_servers_returns_only_global_and_own_rows(async_client):
+    me, my_token = await create_test_user_and_token()
+    other, _ = await create_test_user_and_token()
+    mine = _mcp_server(user_id=me.id, name="my-server")
+    mine.enabled = False
     global_server = _mcp_server(user_id=None, name="global-server")
-    await owner_server.save()
-    await global_server.save()
+    others = _mcp_server(user_id=other.id, name="other-users-server")
+    deleted = _mcp_server(user_id=me.id, name="my-deleted-server")
+    deleted.deleted_at = datetime.now(timezone.utc)
+    rows = [mine, global_server, others, deleted]
+    for row in rows:
+        await row.save()
     try:
         response = await async_client.get(
             "/mcp-servers",
-            headers={"Authorization": f"Bearer {other_token}"},
+            headers={"Authorization": f"Bearer {my_token}"},
         )
         assert response.status_code == 200
-        names = {item["name"] for item in response.json()["data"]}
-        assert "owner-server" in names
+        body = response.json()
+        names = {item["name"] for item in body["data"]}
+        assert "my-server" in names
         assert "global-server" in names
+        assert "other-users-server" not in names
+        assert "my-deleted-server" not in names
+        # Disabled rows stay listed: the client greys them out.
+        assert next(i for i in body["data"] if i["name"] == "my-server")["enabled"] is False
+        visible = await MCPServer.count_documents(
+            {"deleted_at": None, "$or": [{"user_id": me.id}, {"user_id": None}]}
+        )
+        assert body["meta"]["total_count"] == visible
     finally:
-        await cleanup_models([owner_server, global_server, owner, other])
+        await cleanup_models([*rows, me, other])
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_servers_meta_counts_only_visible_rows(async_client):
+    me, my_token = await create_test_user_and_token()
+    other, _ = await create_test_user_and_token()
+    rows = [_mcp_server(user_id=me.id, name=f"mine-{i}") for i in range(2)]
+    rows += [_mcp_server(user_id=other.id, name=f"theirs-{i}") for i in range(3)]
+    for row in rows:
+        await row.save()
+    try:
+        response = await async_client.get(
+            "/mcp-servers?limit=100&page=1",
+            headers={"Authorization": f"Bearer {my_token}"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        names = {item["name"] for item in body["data"]}
+        assert {"mine-0", "mine-1"} <= names
+        assert not names & {"theirs-0", "theirs-1", "theirs-2"}
+        assert body["meta"]["total_count"] == len(body["data"])
+    finally:
+        await cleanup_models([*rows, me, other])
 
 
 @pytest.mark.asyncio
@@ -63,21 +101,88 @@ async def test_get_mcp_server_requires_auth(mock_load_tools, async_client):
 
 @pytest.mark.asyncio
 @patch(f"{_ROUTER}._load_mcp_tools_for_servers", new_callable=AsyncMock, return_value=[])
-async def test_get_mcp_server_allows_any_authenticated_user(mock_load_tools, async_client):
+async def test_get_mcp_server_returns_404_for_another_users_row(mock_load_tools, async_client):
     owner, _ = await create_test_user_and_token()
     other, other_token = await create_test_user_and_token()
-    server = _mcp_server(user_id=owner.id, name="shared-catalog-server")
+    server = _mcp_server(user_id=owner.id, name="owners-server")
     await server.save()
     try:
         response = await async_client.get(
             f"/mcp-servers/{server.id}",
             headers={"Authorization": f"Bearer {other_token}"},
         )
-        assert response.status_code == 200
-        assert response.json()["name"] == "shared-catalog-server"
-        mock_load_tools.assert_awaited_once()
+        assert response.status_code == 404
+        mock_load_tools.assert_not_called()
     finally:
         await cleanup_models([server, owner, other])
+
+
+@pytest.mark.asyncio
+@patch(f"{_ROUTER}._load_mcp_tools_for_servers", new_callable=AsyncMock, return_value=[])
+async def test_get_mcp_server_reads_a_global_row(mock_load_tools, async_client):
+    user, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=None, name="global-read")
+    await server.save()
+    try:
+        response = await async_client.get(
+            f"/mcp-servers/{server.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["name"] == "global-read"
+        mock_load_tools.assert_awaited_once()
+    finally:
+        await cleanup_models([server, user])
+
+
+@pytest.mark.asyncio
+@patch(f"{_ROUTER}._load_mcp_tools_for_servers", new_callable=AsyncMock, return_value=[])
+async def test_get_mcp_server_returns_404_for_a_deleted_or_malformed_id(
+    mock_load_tools, async_client
+):
+    owner, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=owner.id, name="deleted-own")
+    server.deleted_at = datetime.now(timezone.utc)
+    await server.save()
+    try:
+        for server_id in (server.id, "not-an-object-id"):
+            response = await async_client.get(
+                f"/mcp-servers/{server_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 404
+        mock_load_tools.assert_not_called()
+    finally:
+        await cleanup_models([server, owner])
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_return_404_for_rows_the_caller_does_not_own(
+    async_client, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.routers.mcp_server.config.FEATURE_MCP_SERVER_REGISTRATION", True
+    )
+    owner, _ = await create_test_user_and_token()
+    other, other_token = await create_test_user_and_token()
+    owned = _mcp_server(user_id=owner.id, name="owned-row")
+    global_server = _mcp_server(user_id=None, name="global-row")
+    await owned.save()
+    await global_server.save()
+    headers = {"Authorization": f"Bearer {other_token}"}
+    try:
+        for server in (owned, global_server):
+            patched = await async_client.patch(
+                f"/mcp-servers/{server.id}", json={"name": "hijacked"}, headers=headers
+            )
+            assert patched.status_code == 404
+            deleted = await async_client.delete(f"/mcp-servers/{server.id}", headers=headers)
+            assert deleted.status_code == 404
+            stored = await MCPServer.find_by_id(server.id)
+            assert stored is not None
+            assert stored.name == server.name
+    finally:
+        await cleanup_models([owned, global_server, owner, other])
 
 
 @pytest.mark.asyncio
