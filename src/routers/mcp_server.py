@@ -1,7 +1,9 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException
 
 from src import config
@@ -76,21 +78,48 @@ def _require_registration_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not Found")
 
 
-async def _get_owned_mcp_server(
-    server_id: str, requesting_user: User, action: str = "access"
-) -> MCPServer:
-    mcp_server = await MCPServer.find_by_id(server_id)
+def _visible_filter(user_id: str) -> Dict[str, Any]:
+    """Rows a user may see: globally managed ones and their own, never soft-deleted.
+
+    The same ownership clause as the send path (routers/message.py) and the MCP
+    proxy (routers/mcp_proxy.py). ``enabled`` is not filtered: the client shows
+    disabled rows greyed out.
+    """
+    return {
+        "deleted_at": None,
+        "$or": [{"user_id": user_id}, {"user_id": None}],
+    }
+
+
+def _object_id_or_404(server_id: str) -> ObjectId:
+    try:
+        return ObjectId(server_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="MCP server not found")
+
+
+async def _get_owned_mcp_server(server_id: str, requesting_user: User) -> MCPServer:
+    """A row the caller owns, else 404.
+
+    404 rather than 403 for another user's row or a global one, so a probe
+    cannot learn that an id exists.
+    """
+    mcp_server = await MCPServer.find_one(
+        {
+            "_id": _object_id_or_404(server_id),
+            "user_id": requesting_user.id,
+            "deleted_at": None,
+        }
+    )
     if not mcp_server:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    if mcp_server.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail=f"Not allowed to {action} this MCP server"
-        )
     return mcp_server
 
 
-async def _get_mcp_server_by_id(server_id: str) -> MCPServer:
-    mcp_server = await MCPServer.find_by_id(server_id)
+async def _get_visible_mcp_server(server_id: str, requesting_user: User) -> MCPServer:
+    mcp_server = await MCPServer.find_one(
+        {"_id": _object_id_or_404(server_id), **_visible_filter(requesting_user.id)}
+    )
     if not mcp_server:
         raise HTTPException(status_code=404, detail="MCP server not found")
     return mcp_server
@@ -102,7 +131,7 @@ async def list_mcp_servers(
     requesting_user: User = Depends(get_current_user),
 ):
     """
-    List all MCP servers visible to registered users.
+    List the MCP servers the current user can use: global ones and their own.
 
     :param pagination: Pagination parameters.\n
     :type pagination: Pagination\n
@@ -115,6 +144,7 @@ async def list_mcp_servers(
         limit=pagination.limit,
         page=pagination.page,
         sort=[("timestamp", -1)],
+        filter_dict=_visible_filter(requesting_user.id),
     )
     return PaginatedResponse[MCPServerPublic](
         data=[_to_public_mcp_server(server) for server in result.data],
@@ -170,7 +200,8 @@ async def get_mcp_server(
     """
     Get an MCP server by id.
 
-    Any authenticated user may read MCP servers from the shared catalog.
+    Global servers are readable by every user; a user-owned server only by its
+    owner. Anything else answers 404.
 
     :param server_id: MCP server identifier.\n
     :type server_id: str\n
@@ -182,7 +213,7 @@ async def get_mcp_server(
         - 401: Missing or invalid authentication.
         - 404: MCP server not found.
     """
-    mcp_server = await _get_mcp_server_by_id(server_id)
+    mcp_server = await _get_visible_mcp_server(server_id, requesting_user)
     tools = []
     tools_error: Optional[str] = None
     try:
@@ -237,13 +268,11 @@ async def update_mcp_server(
     :return: Updated MCP server (sanitized).\n
     :rtype: MCPServerPublic\n
     :raises HTTPException:\n
-        - 404: MCP server not found, or registration is disabled in this environment.
-        - 403: Not allowed to update this MCP server.
+        - 404: MCP server not found or not owned by the caller, or registration is
+          disabled in this environment.
     """
     _require_registration_enabled()
-    mcp_server = await _get_owned_mcp_server(
-        server_id, requesting_user, action="update"
-    )
+    mcp_server = await _get_owned_mcp_server(server_id, requesting_user)
 
     if request.name is not None:
         mcp_server.name = request.name
@@ -291,12 +320,9 @@ async def delete_mcp_server(
     :return: Confirmation message.\n
     :rtype: dict\n
     :raises HTTPException:\n
-        - 404: MCP server not found.
-        - 403: Not allowed to delete this MCP server.
+        - 404: MCP server not found or not owned by the caller.
     """
-    mcp_server = await _get_owned_mcp_server(
-        server_id, requesting_user, action="delete"
-    )
+    mcp_server = await _get_owned_mcp_server(server_id, requesting_user)
 
     await mcp_server.delete()
     return {"message": "MCP server deleted successfully"}
