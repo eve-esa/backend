@@ -16,7 +16,7 @@ langgraph==1.2.12
 # Standalone agent graphs (import package ``agents``). Pinned to a commit, not
 # @main: the release image is built from this SHA. 6875621 (0.5.4) names the
 # tools in the react prompt by their exposed names (eve_retrieval_retrieve).
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@687562107a0fca0442b146025dacc95a1edd9b32
+eve-esa-agents @ git+https://github.com/eve-esa/agents.git@d993305789b2670fbe7a1d9059fc1260df901159
 # OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
 # released in lockstep with the SDK (1.44.0); bump them together.
 opentelemetry-api==1.45.0
