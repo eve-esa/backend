@@ -172,6 +172,24 @@ def build_private_tenant_filter(
     return Filter(must=must)
 
 
+def client_filter_index_keys(query_filter: Optional[Filter]) -> frozenset:
+    """Payload field names a client filter needs an index for.
+
+    Qdrant Cloud strict mode rejects a filter on a field that has no payload
+    index. ``payload_schema`` lists the indexed fields.
+    See https://qdrant.tech/documentation/concepts/collections/
+    """
+    if query_filter is None:
+        return frozenset()
+    keys = set()
+    for group_name in ("must", "should", "must_not"):
+        for condition in getattr(query_filter, group_name, None) or []:
+            key = getattr(condition, "key", None)
+            if isinstance(key, str) and key:
+                keys.add(key)
+    return frozenset(keys)
+
+
 def merge_must_filters(
     base: Optional[Filter], extra_must: List[Any]
 ) -> Optional[Filter]:
@@ -620,7 +638,7 @@ class VectorStoreManager:
         self.aclient: Optional[AsyncQdrantClient] = None
         self.embeddings_model = embeddings_model
         self.embeddings_size = EMBEDDING_SIZE
-        self._env_payload_cache: Dict[str, bool] = {}
+        self._env_payload_cache: Dict[str, frozenset] = {}
         logger.debug(f"Initialized VectorStoreManager with model: {embeddings_model}")
 
     def ensure_private_collection(self) -> None:
@@ -1240,37 +1258,34 @@ class VectorStoreManager:
         except Exception:
             return None
 
-    async def _collection_has_env_payload(
+    async def _collection_payload_fields(
         self, collection_name: str
-    ) -> Optional[bool]:
-        """True when Qdrant lists an ``env`` payload field on the collection.
+    ) -> Optional[frozenset]:
+        """Indexed payload field names, or None when the schema cannot be read.
 
-        Uses ``CollectionInfo.payload_schema``, which reports indexed payload
-        fields. Collections without an ``env`` index are left unfiltered.
+        ``CollectionInfo.payload_schema`` reports indexed fields.
         See https://qdrant.tech/documentation/concepts/collections/
-        Answers are cached per process. None when the schema cannot be read:
-        the caller skips the collection rather than search it without the env
-        filter.
+        Answers are cached per process.
         """
         cache = getattr(self, "_env_payload_cache", None)
         if cache is None:
             cache = {}
             self._env_payload_cache = cache
         cached = cache.get(collection_name)
-        if cached is not None:
+        if isinstance(cached, frozenset):
             return cached
 
-        async def _fetch() -> bool:
+        async def _fetch() -> frozenset:
             client, slots = await self._read_handle()
             async with _qdrant_read_slot(slots):
                 info = await client.get_collection(collection_name)
             schema = getattr(info, "payload_schema", None) or {}
-            return "env" in schema
+            return frozenset(schema)
 
         url = getattr(self, "qdrant_url", QDRANT_URL)
         try:
-            has_env = await _cached_qdrant_read(
-                (url, f"env_payload:{collection_name}"), _fetch
+            fields = await _cached_qdrant_read(
+                (url, f"payload_fields:{collection_name}"), _fetch
             )
         except Exception as e:
             if _is_timeout_error(e):
@@ -1282,8 +1297,43 @@ class VectorStoreManager:
                 e,
             )
             return None
-        cache[collection_name] = has_env
-        return has_env
+        if not isinstance(fields, frozenset):
+            fields = frozenset(fields)
+        cache[collection_name] = fields
+        return fields
+
+    async def _collection_has_env_payload(
+        self, collection_name: str
+    ) -> Optional[bool]:
+        """True when Qdrant lists an ``env`` payload field on the collection.
+
+        Collections without an ``env`` index are left unfiltered. None when the
+        schema cannot be read: the caller skips the collection rather than
+        search it without the env filter.
+        """
+        fields = await self._collection_payload_fields(collection_name)
+        return None if fields is None else "env" in fields
+
+    async def _missing_client_filter_index(
+        self, collection_name: str, query_filter: Optional[Filter]
+    ) -> bool:
+        """True when the collection must be skipped instead of queried.
+
+        A requested filter whose field is not indexed would be rejected by
+        Qdrant Cloud strict mode. An unreadable schema is treated the same way.
+        """
+        keys = client_filter_index_keys(query_filter)
+        if not keys:
+            return False
+        fields = await self._collection_payload_fields(collection_name)
+        if fields is None or not keys.issubset(fields):
+            logger.info(
+                "Skipping collection %s; no payload index for %s",
+                collection_name,
+                sorted(keys - (fields or frozenset())),
+            )
+            return True
+        return False
 
     async def _search_across_collections(
         self,
@@ -1298,9 +1348,11 @@ class VectorStoreManager:
         """
         Search public named collections and the shared private collection.
 
-        The full client filter is sent to every collection. A ``must`` condition
-        matches only points that store a value of the right type, so a
-        collection that lacks the field contributes no documents
+        The full client filter is sent to a collection only when its payload
+        schema indexes every filtered field. A collection that lacks one of
+        those indexes is not queried, so Qdrant Cloud strict mode does not
+        reject the search. When the index exists, a ``must`` condition matches
+        only points that store a value of the right type
         (https://qdrant.tech/documentation/concepts/filtering/#must). Public
         ``env`` filtering is skipped for Wiley and for collections that do not
         advertise an ``env`` payload field; a collection whose payload schema
@@ -1345,6 +1397,10 @@ class VectorStoreManager:
             extra_must: List[Any] = []
             try:
                 async with asyncio.timeout_at(deadline):
+                    if await self._missing_client_filter_index(
+                        collection_name, query_filter
+                    ):
+                        return []
                     if not is_wiley_public_collection(collection_name):
                         has_env = await self._collection_has_env_payload(
                             collection_name
@@ -1375,6 +1431,10 @@ class VectorStoreManager:
             private_filter = merge_must_filters(query_filter, list(tenant.must or []))
             try:
                 async with asyncio.timeout_at(deadline):
+                    if await self._missing_client_filter_index(
+                        PRIVATE_COLLECTION_NAME, query_filter
+                    ):
+                        return []
                     points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
             except Exception as e:
                 if _is_timeout_error(e):
