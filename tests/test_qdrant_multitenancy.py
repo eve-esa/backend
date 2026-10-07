@@ -14,6 +14,7 @@ from qdrant_client.http.models import (
     KeywordIndexParams,
     KeywordIndexType,
     MinShould,
+    Range,
     UpdateResult,
     UpdateStatus,
 )
@@ -119,7 +120,10 @@ def test_mongo_id_heuristic():
 PRIVATE_ID_B = "aaaaaaaaaaaaaaaaaaaaaaaa"
 
 
-def _manager_with_mock_client(env_collections: set[str] | None = None) -> VectorStoreManager:
+def _manager_with_mock_client(
+    env_collections: set[str] | None = None,
+    indexed_fields: dict[str, set[str]] | None = None,
+) -> VectorStoreManager:
     # Aliases and payload schemas are cached per process: start each test cold.
     invalidate_qdrant_read_cache()
     manager = VectorStoreManager.__new__(VectorStoreManager)
@@ -131,9 +135,12 @@ def _manager_with_mock_client(env_collections: set[str] | None = None) -> Vector
     # Missing, so the search path runs the (mocked) sync ensure.
     aclient.collection_exists = AsyncMock(return_value=False)
     env_collections = env_collections or set()
+    indexed_fields = indexed_fields or {}
 
     def _get_collection(name: str):
-        schema = {"env": object()} if name in env_collections else {}
+        schema = {field: object() for field in indexed_fields.get(name, set())}
+        if name in env_collections:
+            schema["env"] = object()
         return SimpleNamespace(payload_schema=schema)
 
     aclient.get_collection = AsyncMock(side_effect=_get_collection)
@@ -293,15 +300,22 @@ def test_merge_must_filters_preserves_min_should():
     assert extra in merged.must
 
 
-async def test_year_filter_applies_to_all_public_collections():
-    manager = _manager_with_mock_client()
+async def test_client_filters_apply_to_every_public_collection():
+    indexed = {"year", "journal", "n_citations"}
+    manager = _manager_with_mock_client(
+        indexed_fields={
+            "qwen-512-filtered": set(indexed),
+            "wikipedia-512": set(indexed),
+        }
+    )
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     journal = FieldCondition(key="journal", match=MatchValue(value="Nature"))
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
     await manager._search_across_collections(
         collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
-        query_filter=Filter(must=[year, journal]),
+        query_filter=Filter(must=[year, journal, citations]),
         limit_per_collection=3,
         private_collections_map={},
         user_id="user-1",
@@ -314,17 +328,31 @@ async def test_year_filter_applies_to_all_public_collections():
         "qwen-512-filtered",
         "wikipedia-512",
     }
-    filt = by_name["qwen-512-filtered"]
-    must_keys = [
-        getattr(cond, "key", None) for cond in (filt.must or [])
-    ]
-    assert set(must_keys) == {"year", "journal"}
-    wiki_filter = by_name["wikipedia-512"]
-    wiki_must_keys = [
-        getattr(cond, "key", None)
-        for cond in ((wiki_filter.must if wiki_filter is not None else None) or [])
-    ]
-    assert wiki_must_keys == ["year"]
+    for name in ("qwen-512-filtered", "wikipedia-512"):
+        must_keys = [
+            getattr(cond, "key", None) for cond in (by_name[name].must or [])
+        ]
+        assert set(must_keys) == {"year", "journal", "n_citations"}
+
+
+async def test_client_filters_apply_to_private_collections():
+    manager = _manager_with_mock_client(
+        indexed_fields={PRIVATE_COLLECTION_NAME: {"year", "n_citations"}}
+    )
+    year = FieldCondition(key="year", range=Range(gte=2015, lte=2024))
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
+    await manager._search_across_collections(
+        collection_names=[PRIVATE_ID],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[year, citations]),
+        limit_per_collection=3,
+        private_collections_map={PRIVATE_ID: "Docs A"},
+        user_id="user-1",
+    )
+    filt = manager.aclient.query_points.call_args.kwargs["query_filter"]
+    must_keys = [cond.key for cond in filt.must]
+    assert must_keys == ["user_id", "collection_id", "year", "n_citations"]
 
 
 async def test_missing_public_collection_raises():
@@ -433,9 +461,13 @@ def test_is_private_qdrant_collection_helper():
     assert not is_private_qdrant_collection("")
 
 
-async def test_year_filter_skips_private_collections():
-    # Uploads carry no year, and strict mode answers 400 on an unindexed key.
-    manager = _manager_with_mock_client()
+async def test_year_filter_reaches_private_collections():
+    manager = _manager_with_mock_client(
+        indexed_fields={
+            "wikipedia-512": {"year"},
+            PRIVATE_COLLECTION_NAME: {"year"},
+        }
+    )
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     await manager._search_across_collections(
         collection_names=["wikipedia-512", PRIVATE_ID],
@@ -451,8 +483,61 @@ async def test_year_filter_skips_private_collections():
         for call in manager.aclient.query_points.call_args_list
     }
     private_keys = [cond.key for cond in by_name[PRIVATE_COLLECTION_NAME].must]
-    assert private_keys == ["user_id", "collection_id"]
+    assert private_keys == ["user_id", "collection_id", "year"]
     assert [cond.key for cond in by_name["wikipedia-512"].must] == ["year"]
+
+
+async def test_collection_without_citation_index_is_skipped_not_scanned():
+    manager = _manager_with_mock_client(
+        indexed_fields={
+            "qwen-512-filtered": {"year", "n_citations"},
+            "wikipedia-512": {"year"},
+            PRIVATE_COLLECTION_NAME: {"year"},
+        }
+    )
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
+    await manager._search_across_collections(
+        collection_names=["qwen-512-filtered", "wikipedia-512", PRIVATE_ID],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[citations]),
+        limit_per_collection=3,
+        private_collections_map={PRIVATE_ID: "Docs A"},
+        user_id="user-1",
+    )
+    searched = [
+        call.kwargs["collection_name"]
+        for call in manager.aclient.query_points.call_args_list
+    ]
+    assert searched == ["qwen-512-filtered"]
+
+
+async def test_collection_with_citation_index_is_searched():
+    manager = _manager_with_mock_client(
+        indexed_fields={
+            "wikipedia-512": {"n_citations"},
+            PRIVATE_COLLECTION_NAME: {"n_citations"},
+        }
+    )
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
+    await manager._search_across_collections(
+        collection_names=["wikipedia-512", PRIVATE_ID],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[citations]),
+        limit_per_collection=3,
+        private_collections_map={PRIVATE_ID: "Docs A"},
+        user_id="user-1",
+    )
+    by_name = {
+        call.kwargs["collection_name"]: call.kwargs["query_filter"]
+        for call in manager.aclient.query_points.call_args_list
+    }
+    assert set(by_name) == {"wikipedia-512", PRIVATE_COLLECTION_NAME}
+    assert "n_citations" in [cond.key for cond in by_name["wikipedia-512"].must]
+    assert "n_citations" in [
+        cond.key for cond in by_name[PRIVATE_COLLECTION_NAME].must
+    ]
 
 
 def _index_calls(manager) -> dict:

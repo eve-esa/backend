@@ -704,6 +704,37 @@ def _select_top_k_unique_results(
     return _deduplicate_results(ranked_results)[:top_k]
 
 
+# Wiley semanticSearch can express a publication-year window and nothing else.
+# start_year / end_year are the tool arguments for a ``year`` condition.
+_WILEY_SUPPORTED_FILTER_KEYS = frozenset({"year"})
+
+
+def wiley_supports_all_filters(filters: Any) -> bool:
+    """True when Wiley semanticSearch can apply every requested filter.
+
+    A missing or empty filter is supported. Any clause Wiley cannot express,
+    including a ``must`` key other than ``year``, means the search must be
+    skipped so Wiley does not return documents that ignore that filter.
+    """
+    try:
+        if not isinstance(filters, dict) or not filters:
+            return True
+        for top_key, value in filters.items():
+            if top_key != "must" and value:
+                return False
+        conditions = filters.get("must") or []
+        if not isinstance(conditions, list):
+            return False
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                return False
+            if cond.get("key") not in _WILEY_SUPPORTED_FILTER_KEYS:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -712,27 +743,7 @@ async def get_mcp_context(
     error_logger = get_error_logger()
     mcp_client = MultiServerMCPClientService.get_shared()
 
-    # If frontend provided filters that include anything other than year,
-    # we must NOT call Wiley MCP. In that case, return empty context/results.
-    def _has_non_year_filters(filters: Any) -> bool:
-        try:
-            if not isinstance(filters, dict) or not filters:
-                return False
-            for top_key, value in filters.items():
-                if top_key != "must" and value:
-                    return True
-            conditions = filters.get("must") or []
-            if not isinstance(conditions, list):
-                return True
-            for cond in conditions:
-                key = cond.get("key")
-                if key != "year":
-                    return True
-            return False
-        except Exception:
-            return True
-
-    if _has_non_year_filters(getattr(request, "filters", None)):
+    if not wiley_supports_all_filters(getattr(request, "filters", None)):
         return (
             [],
             {
