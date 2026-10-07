@@ -14,6 +14,7 @@ from qdrant_client.http.models import (
     KeywordIndexParams,
     KeywordIndexType,
     MinShould,
+    Range,
     UpdateResult,
     UpdateStatus,
 )
@@ -293,15 +294,16 @@ def test_merge_must_filters_preserves_min_should():
     assert extra in merged.must
 
 
-async def test_year_filter_applies_to_all_public_collections():
+async def test_client_filters_apply_to_every_public_collection():
     manager = _manager_with_mock_client()
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     journal = FieldCondition(key="journal", match=MatchValue(value="Nature"))
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
     await manager._search_across_collections(
         collection_names=["qwen-512-filtered", "wikipedia-512"],
         query_vector=[0.1],
         score_threshold=0.0,
-        query_filter=Filter(must=[year, journal]),
+        query_filter=Filter(must=[year, journal, citations]),
         limit_per_collection=3,
         private_collections_map={},
         user_id="user-1",
@@ -314,17 +316,29 @@ async def test_year_filter_applies_to_all_public_collections():
         "qwen-512-filtered",
         "wikipedia-512",
     }
-    filt = by_name["qwen-512-filtered"]
-    must_keys = [
-        getattr(cond, "key", None) for cond in (filt.must or [])
-    ]
-    assert set(must_keys) == {"year", "journal"}
-    wiki_filter = by_name["wikipedia-512"]
-    wiki_must_keys = [
-        getattr(cond, "key", None)
-        for cond in ((wiki_filter.must if wiki_filter is not None else None) or [])
-    ]
-    assert wiki_must_keys == ["year"]
+    for name in ("qwen-512-filtered", "wikipedia-512"):
+        must_keys = [
+            getattr(cond, "key", None) for cond in (by_name[name].must or [])
+        ]
+        assert set(must_keys) == {"year", "journal", "n_citations"}
+
+
+async def test_client_filters_apply_to_private_collections():
+    manager = _manager_with_mock_client()
+    year = FieldCondition(key="year", range=Range(gte=2015, lte=2024))
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
+    await manager._search_across_collections(
+        collection_names=[PRIVATE_ID],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[year, citations]),
+        limit_per_collection=3,
+        private_collections_map={PRIVATE_ID: "Docs A"},
+        user_id="user-1",
+    )
+    filt = manager.aclient.query_points.call_args.kwargs["query_filter"]
+    must_keys = [cond.key for cond in filt.must]
+    assert must_keys == ["user_id", "collection_id", "year", "n_citations"]
 
 
 async def test_missing_public_collection_raises():
@@ -433,8 +447,7 @@ def test_is_private_qdrant_collection_helper():
     assert not is_private_qdrant_collection("")
 
 
-async def test_year_filter_skips_private_collections():
-    # Uploads carry no year, and strict mode answers 400 on an unindexed key.
+async def test_year_filter_reaches_private_collections():
     manager = _manager_with_mock_client()
     year = FieldCondition(key="year", match=MatchValue(value=2020))
     await manager._search_across_collections(
@@ -451,7 +464,7 @@ async def test_year_filter_skips_private_collections():
         for call in manager.aclient.query_points.call_args_list
     }
     private_keys = [cond.key for cond in by_name[PRIVATE_COLLECTION_NAME].must]
-    assert private_keys == ["user_id", "collection_id"]
+    assert private_keys == ["user_id", "collection_id", "year"]
     assert [cond.key for cond in by_name["wikipedia-512"].must] == ["year"]
 
 

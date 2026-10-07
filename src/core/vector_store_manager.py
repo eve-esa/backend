@@ -196,19 +196,6 @@ def merge_must_filters(
     )
 
 
-def must_conditions_for_key(
-    query_filter: Optional[Filter], key: str
-) -> List[Any]:
-    """Select mandatory payload conditions for one metadata key."""
-    if query_filter is None:
-        return []
-    return [
-        condition
-        for condition in (getattr(query_filter, "must", None) or [])
-        if getattr(condition, "key", None) == key
-    ]
-
-
 def _jsc_embedding_model_name(model: str) -> str:
     if model in {DEFAULT_EMBEDDING_MODEL, DEEPINFRA_DEFAULT_EMBEDDING_MODEL}:
         return JSC_EMBEDDING_MODEL_NAME
@@ -1311,11 +1298,15 @@ class VectorStoreManager:
         """
         Search public named collections and the shared private collection.
 
-        Public ``env`` filtering is skipped for Wiley and for collections that
-        do not advertise an ``env`` payload field in Qdrant; a collection whose
-        payload schema cannot be read is skipped for the turn. Collections are
-        searched concurrently under one budget, ``QDRANT_RETRIEVAL_BUDGET_S``,
-        and a collection that times out is skipped.
+        The full client filter is sent to every collection. A ``must`` condition
+        matches only points that store a value of the right type, so a
+        collection that lacks the field contributes no documents
+        (https://qdrant.tech/documentation/concepts/filtering/#must). Public
+        ``env`` filtering is skipped for Wiley and for collections that do not
+        advertise an ``env`` payload field; a collection whose payload schema
+        cannot be read is skipped for the turn. Collections are searched
+        concurrently under one budget, ``QDRANT_RETRIEVAL_BUDGET_S``, and a
+        collection that times out is skipped.
         """
         logger.debug("private_collections_map: %s", private_collections_map)
         deadline = asyncio.get_running_loop().time() + QDRANT_RETRIEVAL_BUDGET_S
@@ -1330,7 +1321,6 @@ class VectorStoreManager:
         public_names, private_ids = split_public_and_private_collections(
             collection_names, private_collections_map
         )
-        year_conditions = must_conditions_for_key(query_filter, "year")
 
         async def _query(collection_name: str, collection_filter: Any) -> List[Any]:
             async with _qdrant_read_slot(slots):
@@ -1352,9 +1342,6 @@ class VectorStoreManager:
             return getattr(qp_response, "points", []) or []
 
         async def _search_public(collection_name: str) -> List[Any]:
-            client_filter = query_filter if is_eve_public_collection(
-                collection_name
-            ) else (Filter(must=year_conditions) if year_conditions else None)
             extra_must: List[Any] = []
             try:
                 async with asyncio.timeout_at(deadline):
@@ -1367,7 +1354,7 @@ class VectorStoreManager:
                         if has_env:
                             extra_must.append(build_public_env_filter(IS_PROD))
                     points = await _query(
-                        collection_name, merge_must_filters(client_filter, extra_must)
+                        collection_name, merge_must_filters(query_filter, extra_must)
                     )
             except Exception as e:
                 if _is_timeout_error(e):
@@ -1384,8 +1371,8 @@ class VectorStoreManager:
             return [conv for conv in converted if conv is not None]
 
         async def _search_private(collection_id: str) -> List[Any]:
-            # Uploads carry no year, so the year filter does not apply here.
-            private_filter = build_private_tenant_filter(user_id, [collection_id])
+            tenant = build_private_tenant_filter(user_id, [collection_id])
+            private_filter = merge_must_filters(query_filter, list(tenant.must or []))
             try:
                 async with asyncio.timeout_at(deadline):
                     points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
