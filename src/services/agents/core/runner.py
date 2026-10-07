@@ -446,6 +446,65 @@ def _rag_tool_names(tools: Any) -> set[str]:
     return names
 
 
+_FORCED_RETRIEVAL_SERVER = "eve_retrieval"
+_FORCED_RETRIEVAL_TOOL = "eve_retrieval_retrieve"
+
+# The react prompt's explicit restrictions (agents prompts.yaml, "Respect
+# explicit restrictions"). A message carrying one is left to the model.
+RETRIEVAL_OPT_OUT_PHRASES = (
+    "no rag",
+    "do not use tools",
+    "don't use tools",
+    "without sources",
+    "do not retrieve",
+    "don't retrieve",
+)
+
+
+def _opts_out_of_retrieval(query: Optional[str]) -> bool:
+    text = " ".join(str(query or "").replace("’", "'").lower().split())
+    return any(phrase in text for phrase in RETRIEVAL_OPT_OUT_PHRASES)
+
+
+def _force_first_tool(request: GenerationRequest, tools: Any) -> Optional[str]:
+    """Tool the react graph calls before the model answers, or None.
+
+    Retrieval goes first when the ``eve_retrieval`` toolkit is on and its tool
+    loaded, at least one collection is selected (a search over nothing finds
+    nothing) and the message does not opt out. The forced call goes through
+    the tool wrapped by ``_with_request_rag_defaults``, so it searches the
+    user's collections with the user's filters.
+    """
+    servers = {
+        str(getattr(server, "name", "") or "")
+        for server in getattr(request, "mcp_server_configs", None) or []
+    }
+    if _FORCED_RETRIEVAL_SERVER not in servers:
+        return None
+    # The graph matches the exact name of a bound tool.
+    if not any(
+        getattr(tool, "name", None) == _FORCED_RETRIEVAL_TOOL for tool in tools or []
+    ):
+        return None
+    if not (request.public_collections or request.private_collections):
+        return None
+    if _opts_out_of_retrieval(request.query):
+        return None
+    return _FORCED_RETRIEVAL_TOOL
+
+
+def _run_config(
+    thread_id: str, request: GenerationRequest, tools: Any
+) -> Dict[str, Any]:
+    """LangGraph run config for one agentic turn."""
+    configurable: Dict[str, Any] = {"thread_id": thread_id}
+    forced = _force_first_tool(request, tools)
+    if forced:
+        configurable["force_first_tool"] = forced
+    logger.info("Agentic turn force_first_tool=%s", forced)
+    return {"configurable": configurable}
+
+
 def _collect_retrieval_documents(
     all_messages: Any, rag_tool_names: set[str]
 ) -> tuple[List[Dict[str, Any]], int, int]:
@@ -1260,7 +1319,7 @@ async def generate_answer_agentic(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = {"configurable": {"thread_id": conversation_id or "default"}}
+        config = _run_config(conversation_id or "default", request, tools)
 
         async def _run_graph(
             g: Any,
@@ -1596,7 +1655,7 @@ async def generate_answer_agentic_stream_helper(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = {"configurable": {"thread_id": conversation_id}}
+        config = _run_config(conversation_id, request, tools)
 
         gen_start = time.perf_counter()
         first_token_latency: Optional[float] = None
