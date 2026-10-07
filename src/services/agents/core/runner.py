@@ -89,6 +89,7 @@ _langgraph_available = False
 try:
     from langchain_core.messages import (
         AIMessage,
+        AIMessageChunk,
         HumanMessage,
         SystemMessage,
         ToolMessage,
@@ -97,7 +98,7 @@ try:
 
     _langgraph_available = True
 except Exception:
-    AIMessage = HumanMessage = SystemMessage = ToolMessage = None  # type: ignore
+    AIMessage = AIMessageChunk = HumanMessage = SystemMessage = ToolMessage = None  # type: ignore
     MongoDBSaver = None  # type: ignore
 
 try:
@@ -1611,6 +1612,34 @@ async def generate_answer_agentic_stream_helper(
 
         turn_buffer: List[str] = []
         current_node: Optional[str] = None
+        # Tool calls already announced in the current agent step, keyed by
+        # call id. One call can reach the stream up to three times (a complete
+        # message, the node update, the `[TOOL_CALLS]` text flushed after the
+        # update) and must open one chip only. Cleared when a tool answers.
+        announced_tool_calls: set = set()
+
+        def _tool_call_events(tool_calls: List[Any]) -> List[str]:
+            events: List[str] = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    tname = tc.get("name", "tool")
+                    args = tc.get("args") or {}
+                    call_id = tc.get("id")
+                else:
+                    tname = getattr(tc, "name", "tool")
+                    args = getattr(tc, "args", None) or {}
+                    call_id = getattr(tc, "id", None)
+                key = call_id or f"{tname}:{json.dumps(args, sort_keys=True, default=str)}"
+                if key in announced_tool_calls:
+                    continue
+                announced_tool_calls.add(key)
+                query_used = args.get("query", "")
+                label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
+                msg = f"{label}: {query_used}" if query_used else f"{label}…"
+                events.append(
+                    f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
+                )
+            return events
 
         def _flush_turn_buffer_to_events() -> List[str]:
             nonlocal tokens_yielded, first_token_latency
@@ -1638,15 +1667,7 @@ async def generate_answer_agentic_stream_helper(
                 )
                 if not calls:
                     return []
-                for tc in calls:
-                    tname = tc.get("name", "tool")
-                    args = tc.get("args", {})
-                    query_used = args.get("query", "")
-                    label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
-                    msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                    events.append(
-                        f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
-                    )
+                events.extend(_tool_call_events(calls))
                 if not answer_text:
                     return events
                 # Streaming granularity is inherently lost for this leftover
@@ -1757,6 +1778,10 @@ async def generate_answer_agentic_stream_helper(
                                             started_at_s=started_at_s,
                                         )
                                     )
+                                    # The update carries the complete arguments,
+                                    # so the tool call is announced from here.
+                                    for event in _tool_call_events(msg.tool_calls):
+                                        yield event
                             continue
 
                         chunk, metadata = payload
@@ -1774,6 +1799,7 @@ async def generate_answer_agentic_stream_helper(
 
                         if ToolMessage and isinstance(chunk, ToolMessage):
                             graph_messages.append(chunk)
+                            announced_tool_calls.clear()
                             preview = stringify_tool_content(chunk.content)[:200]
                             started_at_s, entry_latency_s = trace_timeline.tool_step(
                                 getattr(chunk, "tool_call_id", None),
@@ -1795,25 +1821,15 @@ async def generate_answer_agentic_stream_helper(
                                 # Kept only so a ToolMessage without a name can be
                                 # traced back to the tool it answered.
                                 graph_messages.append(chunk)
-                                tc = chunk.tool_calls[0]
-                                tname = (
-                                    tc.get("name", "tool")
-                                    if isinstance(tc, dict)
-                                    else getattr(tc, "name", "tool")
-                                )
-                                args = (
-                                    tc.get("args", {})
-                                    if isinstance(tc, dict)
-                                    else getattr(tc, "args", {})
-                                )
-                                query_used = args.get("query", "")
-                                label = (
-                                    tool_call_label(tname)
-                                    if tool_call_label
-                                    else f"Calling {tname}"
-                                )
-                                msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                                yield f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
+                                # A streamed chunk is partial: the first one has
+                                # the tool name and no arguments yet, so the call
+                                # waits for the node update. A complete message
+                                # (a model that does not stream) is announced now.
+                                if not (
+                                    AIMessageChunk and isinstance(chunk, AIMessageChunk)
+                                ):
+                                    for event in _tool_call_events(chunk.tool_calls):
+                                        yield event
                                 continue
 
                             content = chunk.content
