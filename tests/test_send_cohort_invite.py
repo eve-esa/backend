@@ -136,6 +136,26 @@ def test_render_default_text_is_english_and_neutral():
 
 
 @pytest.mark.no_db
+def test_render_uses_the_base_layout(monkeypatch):
+    from src.services import account_notifications
+
+    monkeypatch.setattr(account_notifications, "FRONTEND_URL", "https://eve.example.org")
+    _, html, text = render_cohort_invite(
+        "erin@example.org", sign_in_url="https://eve-chat.philab.esa.int"
+    )
+    assert "background-color:#003247" in html
+    assert '<img src="https://eve.example.org/branding/eve-logo.png"' in html
+    assert 'href="https://eve-chat.philab.esa.int"' in html
+    assert 'European Space Agency. <a href="https://eve.example.org"' in html
+    for gone in ("website-files.com", "box-shadow", "&#127757;"):
+        assert gone not in html
+    assert not any(ord(char) > 0x1F000 for char in html + text)
+    footer = "You are receiving this message because"
+    assert footer in html
+    assert footer in text
+
+
+@pytest.mark.no_db
 def test_cli_rejects_emails_file_with_slicing():
     with pytest.raises(SystemExit):
         command._parse_args(["--cohort", "x", "--emails-file", "a.txt", "--limit", "5"])
