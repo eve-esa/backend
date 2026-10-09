@@ -148,6 +148,7 @@ def render_cohort_invite(
     context = {
         "email": email,
         "app_url": FRONTEND_URL,
+        "logo_url": f"{FRONTEND_URL}/branding/eve-logo.png",
         "sign_in_url": (sign_in_url or FRONTEND_URL).strip(),
         "paragraphs": _paragraphs(text_block or COHORT_INVITE_TEXT),
     }

@@ -112,6 +112,40 @@ def test_welcome_mail_drops_what_only_the_pilot_needed():
     assert "\u2014" not in text
 
 
+def test_welcome_mail_links_the_privacy_notice():
+    _, html, text = render_account_mail(KIND_APPROVED, "person@example.com")
+
+    privacy = "https://eve.philab.esa.int/privacy-notice/"
+    assert f'<a href="{privacy}"' in html
+    assert ">Privacy Policy</a>" in html
+    # The text part keeps the mandated sentence as it is, with no URL.
+    assert privacy not in text
+    assert (
+        "You understand that your information is stored according to the "
+        "Privacy Policy." in text
+    )
+
+
+@pytest.mark.parametrize("after_hold", [True, False])
+def test_every_account_mail_shares_the_base_layout(after_hold):
+    """One frame for every mail: dark banner, environment logo, footer link."""
+    for kind in (KIND_PENDING, KIND_APPROVED):
+        _, html, text = render_account_mail(
+            kind, "person@example.com", after_hold=after_hold
+        )
+
+        assert "background-color:#003247" in html
+        assert f'<img src="{FRONTEND}/branding/eve-logo.png"' in html
+        assert (
+            f'EVE - Earth Virtual Expert - European Space Agency. <a href="{FRONTEND}"'
+            in html
+        )
+        for gone in ("website-files.com", "box-shadow", "&#127757;", "&#128073;"):
+            assert gone not in html
+        # No emoji in either part, as characters or as entities.
+        assert not any(ord(char) > 0x1F000 for char in html + text)
+
+
 @pytest.mark.parametrize("after_hold", [True, False])
 def test_only_a_queued_account_is_thanked_for_its_patience(after_hold):
     _, html, text = render_account_mail(
