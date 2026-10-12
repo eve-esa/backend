@@ -3,6 +3,10 @@
 # and workflow_call from release.yml for the release commit.
 # The deploy half is delegated to deploy-ecs.yml.
 name: "deploy: dev"
+# Fixed when the run starts, before agents main is resolved to a SHA. A push or an
+# empty dispatch therefore says "agents main". The build job is named with the SHA
+# once that lookup finishes. A dispatch that passes a ref shows that ref here.
+run-name: ${{ github.event_name == 'push' && format('deploy dev · agents main · {0}', github.event.head_commit.message) || format('deploy dev · agents {0}', inputs.agents-ref || 'main') }}
 
 # Application code plus this pipeline's own files: dev is where a pipeline change gets
 # exercised. paths-ignore alone was too broad, it rebuilt and redeployed on every
@@ -49,8 +53,36 @@ concurrency:
   queue: max
 
 jobs:
+  agents:
+    name: Resolve agents ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ref: ${{ steps.agents.outputs.ref }}
+    steps:
+      # A SHA, not the branch name. The Dockerfile caches the agents install on this
+      # string, so "main" would reuse a stale layer after agents main moved.
+      - name: Resolve the agents ref
+        id: agents
+        env:
+          AGENTS_REF: ${{ inputs.agents-ref || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AGENTS_REF}" ]; then
+            REF="${AGENTS_REF}"
+          else
+            REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
+          fi
+          if [ -z "${REF}" ]; then
+            echo "ERROR: could not resolve an agents ref"
+            exit 1
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Installing eve-esa-agents @ ${REF}"
+
   build:
-    name: Build and push
+    name: Build · agents ${{ needs.agents.outputs.ref }}
+    needs: agents
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: esa-eve-dev
@@ -74,26 +106,6 @@ jobs:
           SHORT_SHA="${SHORT_SHA:0:7}"
           echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
-      # A SHA, not the branch name. The Dockerfile caches the agents install on this
-      # string, so "main" would reuse a stale layer after agents main moved.
-      - name: Resolve the agents ref
-        id: agents
-        env:
-          AGENTS_REF: ${{ inputs.agents-ref || '' }}
-        run: |
-          set -euo pipefail
-          if [ -n "${AGENTS_REF}" ]; then
-            REF="${AGENTS_REF}"
-          else
-            REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
-          fi
-          if [ -z "${REF}" ]; then
-            echo "ERROR: could not resolve an agents ref"
-            exit 1
-          fi
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "Installing eve-esa-agents @ ${REF}"
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -114,7 +126,7 @@ jobs:
           # exists yet at this point, so deploy-ecs.yml injects it as APP_VERSION instead.
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.short-sha }}
-            AGENTS_REF=${{ steps.agents.outputs.ref }}
+            AGENTS_REF=${{ needs.agents.outputs.ref }}
           tags: |
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:sha-${{ steps.meta.outputs.short-sha }}
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:latest
@@ -123,8 +135,8 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Deploy
-    needs: build
+    name: Deploy dev · agents ${{ needs.agents.outputs.ref }}
+    needs: [build, agents]
     # The called workflow's job requests id-token; a caller job must grant at least that.
     permissions:
       id-token: write
