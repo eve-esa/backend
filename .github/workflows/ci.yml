@@ -125,6 +125,20 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
 
+      # eve-esa-agents is not in requirements.txt. The image installs it from
+      # AGENTS_REF. The suite imports it at collection, so CI installs the same
+      # ref a dev build resolves: the agents main SHA.
+      - name: Install eve-esa-agents
+        run: |
+          set -euo pipefail
+          REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
+          if [ -z "$REF" ]; then
+            echo "ERROR: could not resolve agents main"
+            exit 1
+          fi
+          echo "Installing eve-esa-agents @ ${REF}"
+          pip install "eve-esa-agents @ git+https://github.com/eve-esa/agents.git@${REF}"
+
       - name: Run tests
         # e2e is excluded on purpose: those tests talk to real deployed services and
         # would make this check depend on an environment being up, which is exactly

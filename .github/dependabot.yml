@@ -1,6 +1,7 @@
 # Dependabot configuration.
-# Note: the git-URL dependency (eve-esa-agents) is not updatable by Dependabot;
-# pin it to a tag/commit and bump it manually.
+# eve-esa-agents is installed from the AGENTS_REF build-arg, not from
+# requirements.txt, so Dependabot does not see it. agents.ref is updated by a
+# pull request from the agents repo when that repo cuts a tag.
 version: 2
 updates:
   # Python runtime and dev dependencies (requirements.txt, requirements-dev.txt).

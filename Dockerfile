@@ -10,6 +10,14 @@ RUN python -m venv $VIRTUAL_ENV
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
+# Own layer so a new agents ref does not rebuild the requirements above it.
+# The ARG has to be a commit SHA or a tag. Docker caches this RUN on the ARG
+# text, so the branch name "main" would keep serving a stale install. The dev
+# workflow resolves main to a SHA before it passes the build-arg. Default is
+# only for a local compose build that does not pass one.
+ARG AGENTS_REF=main
+RUN pip install --no-cache-dir "eve-esa-agents @ git+https://github.com/eve-esa/agents.git@${AGENTS_REF}"
+
 # Runtime layout shared by the production image and the local dev image.
 FROM python:3.12-slim-bookworm AS runtime
 ENV VIRTUAL_ENV=/opt/venv
@@ -35,7 +43,9 @@ CMD ["./start.sh"]
 
 # Local development only: the test suite and the docs toolchain on top of the runtime. Built only
 # when asked for by name (compose build.target: dev); a build without a target builds the last stage.
-# git: requirements-dev.txt includes requirements.txt, and pip re-checks its git dependency.
+# git: a requirements git URL reinstalled by the line below still needs it.
+# eve-esa-agents itself is installed in the builder stage, and this stage
+# inherits that venv.
 FROM runtime AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt requirements-dev.txt /tmp/requirements/
@@ -51,3 +61,7 @@ FROM runtime AS prod
 # dependency or source layers above it.
 ARG GIT_SHA
 ENV APP_GIT_SHA=${GIT_SHA}
+# Same ref the builder installed. Redeclared here because an ARG does not cross
+# stages, and it has to stay beside GIT_SHA so it does not bust the layers above.
+ARG AGENTS_REF=main
+ENV APP_AGENTS_REF=${AGENTS_REF}

@@ -47,6 +47,32 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  # The image deploy-dev builds below is the one staging promotes, so it installs the
+  # tag in agents.ref rather than whatever agents main is at that moment.
+  agents-ref:
+    name: Read the agents pin
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ref: ${{ steps.pin.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read agents.ref
+        id: pin
+        run: |
+          set -euo pipefail
+          REF=$(tr -d '[:space:]' < agents.ref)
+          if [ -z "$REF" ]; then
+            echo "ERROR: agents.ref is empty"
+            exit 1
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Release image will install eve-esa-agents @ ${REF}"
+
   # The release commit changes only version.txt and CHANGELOG.md, which are outside deploy-dev's
   # path filter, so nothing builds it on its own. The staging promotion looks the image up by the
   # tagged commit's short SHA, so that image has to exist first. Calling the build here rather
@@ -54,12 +80,14 @@ jobs:
   # build and this workflow on the same push, racing each other.
   deploy-dev:
     name: Build the release commit
-    needs: release-please
+    needs: [release-please, agents-ref]
     if: needs.release-please.outputs.released == 'true'
     permissions:
       id-token: write
       contents: read
     uses: ./.github/workflows/deploy-dev.yml
+    with:
+      agents-ref: ${{ needs.agents-ref.outputs.ref }}
     secrets: inherit
 
   # Dispatched rather than called. A reusable-workflow call would run under this workflow's ref,

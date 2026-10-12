@@ -256,6 +256,11 @@ WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
 #     version tag exists yet when the image is built.
 APP_VERSION = os.getenv("APP_VERSION", "").strip() or "unknown"
 APP_GIT_SHA = os.getenv("APP_GIT_SHA", "").strip() or "unknown"
+# Which eve-esa-agents ref this image installed. A dev image carries a commit SHA
+# of agents main. A release image carries the tag from agents.ref. Baked at build
+# time, same moment as APP_GIT_SHA, because staging and prod promote that image
+# by digest and never rebuild it.
+APP_AGENTS_REF = os.getenv("APP_AGENTS_REF", "").strip() or "unknown"
 
 # Which environment this is. Terraform has always known the answer (var.environment, one of
 # dev/staging/prod, with no default), but it used to reach the container collapsed into a
