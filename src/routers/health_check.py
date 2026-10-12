@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from src.config import APP_ENVIRONMENT, APP_GIT_SHA, APP_VERSION
+from src.config import APP_AGENTS_REF, APP_ENVIRONMENT, APP_GIT_SHA, APP_VERSION
 
 router = APIRouter()
 
@@ -12,6 +12,7 @@ def health_check():
     "status" keeps its exact value and shape: the ALB target group health check and the
     post-deploy verification both read it. The build identity is additive, and every value
     falls back to "unknown" rather than raising when the variable is not set.
+    "agents_ref" is the eve-esa-agents git ref baked into the image.
 
     Returns:
         dict: Service health plus the identity of the running build.
@@ -21,4 +22,5 @@ def health_check():
         "version": APP_VERSION,
         "commit": APP_GIT_SHA,
         "environment": APP_ENVIRONMENT,
+        "agents_ref": APP_AGENTS_REF,
     }

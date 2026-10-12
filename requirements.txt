@@ -13,10 +13,10 @@ langchain-mcp-adapters==0.3.2
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.8
 langgraph==1.2.12
-# Standalone agent graphs (import package ``agents``). Pinned to a commit, not
-# @main: the release image is built from this SHA. 6875621 (0.5.4) names the
-# tools in the react prompt by their exposed names (eve_retrieval_retrieve).
-eve-esa-agents @ git+https://github.com/eve-esa/agents.git@d993305789b2670fbe7a1d9059fc1260df901159
+# eve-esa-agents is not listed here. The image installs it from the AGENTS_REF
+# build-arg (see the Dockerfile). A dev build resolves agents main to a commit
+# SHA. A release build passes the tag in agents.ref, and that image is what
+# staging and prod promote. pip install -r this file alone does not install it.
 # OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
 # released in lockstep with the SDK (1.44.0); bump them together.
 opentelemetry-api==1.45.0

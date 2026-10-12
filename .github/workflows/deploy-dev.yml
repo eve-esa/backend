@@ -20,13 +20,28 @@ on:
       - "Dockerfile"
       - "start.sh"
       - "create_user.sh"
+      - "agents.ref"
       - ".github/workflows/deploy-dev.yml"
       - ".github/workflows/deploy-ecs.yml"
   workflow_dispatch:
+    inputs:
+      agents-ref:
+        description: "agents git ref to install (SHA or tag). Empty resolves the agents main SHA."
+        required: false
+        type: string
+        default: ""
   # release.yml calls this for the release commit, which touches only version.txt and
   # CHANGELOG.md and so falls outside the path filter above. The staging promotion resolves the
   # image from the tagged commit's short SHA, so that commit has to be built before it runs.
+  # It passes agents-ref from agents.ref. A push or a dispatch with an empty input installs
+  # the current agents main SHA instead, which is what dev tracks.
   workflow_call:
+    inputs:
+      agents-ref:
+        description: "agents git ref to install. Empty resolves the agents main SHA."
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: deploy-dev
@@ -59,6 +74,26 @@ jobs:
           SHORT_SHA="${SHORT_SHA:0:7}"
           echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
 
+      # A SHA, not the branch name. The Dockerfile caches the agents install on this
+      # string, so "main" would reuse a stale layer after agents main moved.
+      - name: Resolve the agents ref
+        id: agents
+        env:
+          AGENTS_REF: ${{ inputs.agents-ref || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AGENTS_REF}" ]; then
+            REF="${AGENTS_REF}"
+          else
+            REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
+          fi
+          if [ -z "${REF}" ]; then
+            echo "ERROR: could not resolve an agents ref"
+            exit 1
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Installing eve-esa-agents @ ${REF}"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -79,6 +114,7 @@ jobs:
           # exists yet at this point, so deploy-ecs.yml injects it as APP_VERSION instead.
           build-args: |
             GIT_SHA=${{ steps.meta.outputs.short-sha }}
+            AGENTS_REF=${{ steps.agents.outputs.ref }}
           tags: |
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:sha-${{ steps.meta.outputs.short-sha }}
             ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-1.amazonaws.com/esa-eve-dev-app-backend:latest

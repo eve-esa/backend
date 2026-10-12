@@ -37,7 +37,8 @@ Returns a status payload for liveness checks, plus the identity of the running b
   "status": "healthy",
   "version": "v0.1.0",
   "commit": "1a2b3c4",
-  "environment": "prod"
+  "environment": "prod",
+  "agents_ref": "v0.5.4"
 }
 ```
 
@@ -49,6 +50,8 @@ Returns a status payload for liveness checks, plus the identity of the running b
   value never changes.
 - `commit` is baked into the image at build time, `version` is injected at deploy time. Either
   reads `unknown` when the corresponding variable is not set, for example in local development.
+- `agents_ref` is the eve-esa-agents git ref baked into the image at build time. Dev reports a
+  commit SHA of agents `main`. Staging and prod report the tag from `agents.ref`.
 
 ## Full API reference
 
