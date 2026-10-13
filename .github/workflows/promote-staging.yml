@@ -13,7 +13,7 @@
 #
 # release.yml dispatches this by filename (promote-staging.yml), so renaming the file breaks it.
 name: "promote: staging"
-run-name: promote staging ${{ inputs.version }}
+run-name: promote staging · backend ${{ inputs.version }}
 
 on:
   workflow_dispatch:
