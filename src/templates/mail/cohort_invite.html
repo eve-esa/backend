@@ -1,33 +1,20 @@
 {#
   The launch mail to accounts that existed before the public opening (decision
-  D16). Same look as account_approved.html, the welcome message: same banner,
-  same palette, same card. Not framed by base.html for the same reason.
+  D16), framed by base.html like every other mail.
 
   ``paragraphs`` is the approved text block, already split on blank lines.
   ``sign_in_url`` is the button target. Tables and inline styles only.
 #}
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#ffffff;margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;color:#012B3C;">
-  <tr><td align="center" style="padding:40px 12px;">
-    <table role="presentation" width="700" cellpadding="0" cellspacing="0" style="width:100%;max-width:700px;border-collapse:separate;background-color:#ffffff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-      <tr><td style="padding:0;line-height:0;">
-        <img src="https://cdn.prod.website-files.com/66755cab0b1a9a549e0126ee/68f9f32283a7fa25a4b68091_ESA%CE%A6-lab_DS_700px_width.png" width="700" alt="ESA Phi-lab logo" style="display:block;border:0;width:100%;max-width:700px;height:auto;" />
-      </td></tr>
-      <tr><td style="padding:30px;color:#012B3C;font-size:15px;line-height:22px;text-align:left;">
-        <h1 style="margin:0 0 24px 0;text-align:center;color:#012B3C;font-size:26px;line-height:1.3;">&#127757; The new EVE is here &#127757;</h1>
+{% extends "base.html" %}
+{% block title %}The new EVE is here{% endblock %}
+{% block body %}
         {% for paragraph in paragraphs %}
         <p style="margin:0 0 20px 0;">{{ paragraph }}</p>
         {% endfor %}
-        <p style="margin:0;"><a href="{{ sign_in_url }}" style="color:#ffffff;background-color:#012B3C;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;">Sign in to EVE</a></p>
+        <p style="margin:0 0 24px 0;"><a href="{{ sign_in_url }}" style="color:#ffffff;background-color:#003247;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;">Sign in to EVE</a></p>
 
-        <hr style="border:none;border-top:1px solid #cccccc;margin:30px 0;">
+        <p style="margin:0 0 24px 0;"><strong>Kind regards,</strong><br><strong>The EVE Team</strong></p>
 
-        <p style="margin:0;"><strong>Kind regards,</strong><br><strong>The EVE Team</strong></p>
-
-        <hr style="border:none;border-top:1px solid #cccccc;margin:30px 0;">
-
-        <p style="margin:0;font-size:12px;line-height:18px;color:#335e6f;">You receive this message because <strong>{{ email }}</strong> has an EVE account. If you wish to unregister from the system, please use the contact form:
-        <a href="https://eve.philab.esa.int/contact" style="color:#00B8C4;text-decoration:none;">https://eve.philab.esa.int/contact</a></p>
-      </td></tr>
-    </table>
-  </td></tr>
-</table>
+        <p style="margin:0;padding-top:16px;border-top:1px solid #d2dadc;font-size:12px;line-height:18px;color:#335e6f;">You are receiving this message because <strong>{{ email }}</strong> has an EVE account. If you wish to unregister from the system, please use the contact form:
+        <a href="https://eve.philab.esa.int/contact" style="color:#003247;">https://eve.philab.esa.int/contact</a></p>
+{% endblock %}

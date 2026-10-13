@@ -9,5 +9,5 @@ Sign in to EVE: {{ sign_in_url }}
 Kind regards,
 The EVE Team
 
-You receive this message because {{ email }} has an EVE account. If you wish to unregister from the system, please use the contact form:
+You are receiving this message because {{ email }} has an EVE account. If you wish to unregister from the system, please use the contact form:
 https://eve.philab.esa.int/contact
