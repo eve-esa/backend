@@ -27,8 +27,8 @@ from tests.utils.utils import create_test_user_and_token
 
 _PINNED_SETTINGS = {
     "enabled": True,
-    "default_group": "eve_free",
-    "groups": {"eve_free": {"max_tokens": 100, "period_months": 1}},
+    "default_group": "free",
+    "groups": {"free": {"max_tokens": 100, "period_months": 1}},
 }
 
 
@@ -174,7 +174,7 @@ async def test_check_token_budget_reports_group_and_used_tokens(pinned_budget):
         await seed_active_window(user, used_tokens=100)
         exceeded = await check_token_budget(user)
         assert exceeded is not None
-        assert exceeded.group == "eve_free"
+        assert exceeded.group == "free"
         assert exceeded.max_tokens == 100
         assert exceeded.used_tokens == 100
     finally:
@@ -195,7 +195,7 @@ async def test_enforce_keeps_detail_text_and_adds_retry_after(pinned_budget):
 
         exc = exc_info.value
         assert exc.status_code == 429
-        assert exc.detail.startswith("Token budget exceeded for group 'eve_free'.")
+        assert exc.detail.startswith("Token budget exceeded for group 'free'.")
         assert exc.headers is not None
         assert int(exc.headers["Retry-After"]) >= 1
     finally:

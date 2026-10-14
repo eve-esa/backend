@@ -85,7 +85,7 @@ jobs:
       FALLBACK_MODEL_API_KEY: ci-only-not-a-real-key
 
       # The token budget for the free group. config.yaml enables token_rate_limit
-      # but defines no `groups`, so without this eve_free has no max_tokens, the
+      # but defines no `groups`, so without this free has no max_tokens, the
       # limit can never trigger, and the eight tests that assert a 429 get a 200.
       # They have been read as "known failures that need Redis", they do not.
       # They need a budget, and 100 is enough for a test that spends 1000.

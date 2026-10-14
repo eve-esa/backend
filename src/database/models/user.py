@@ -34,7 +34,7 @@ class User(MongoModel):
         default=None, description="6-character activation code for email verification"
     )
     rate_limit_group: RateLimitGroup = Field(
-        default=RateLimitGroup.EVE_FREE,
+        default=RateLimitGroup.FREE,
         description="Rate limit group used to select token policy from config",
     )
     rate_limit_tokens_used: int = Field(

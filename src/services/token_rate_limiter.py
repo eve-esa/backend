@@ -15,6 +15,7 @@ from src.database.models.user import User
 from src.schemas.rate_limit import (
     RateLimitGroup,
     apply_yaml_aliases,
+    config_keys_for_group,
     normalize_rate_limit_group,
 )
 from src.utils.helpers import str_token_counter
@@ -45,6 +46,15 @@ def _to_utc_datetime(value: Any) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
+def _policy_for_group(groups: Dict[str, Any], group: RateLimitGroup) -> Optional[Dict[str, Any]]:
+    """Prefer the plan id. Fall back to the old ``eve_*`` key for that same plan."""
+    for key in config_keys_for_group(group):
+        policy = groups.get(key)
+        if isinstance(policy, dict):
+            return policy
+    return None
+
+
 def _resolve_policy_for_user(user: User) -> Tuple[Optional[RateLimitGroup], Optional[Dict[str, Any]]]:
     settings = _rate_limit_settings()
     if not settings.get("enabled", False):
@@ -54,7 +64,7 @@ def _resolve_policy_for_user(user: User) -> Tuple[Optional[RateLimitGroup], Opti
     yaml_aliases = _str_dict(settings.get("aliases"))
 
     default_group = normalize_rate_limit_group(
-        settings.get("default_group", RateLimitGroup.EVE_FREE.value)
+        settings.get("default_group", RateLimitGroup.FREE.value)
     )
 
     raw = str(user.rate_limit_group.value)
@@ -63,12 +73,12 @@ def _resolve_policy_for_user(user: User) -> Tuple[Optional[RateLimitGroup], Opti
     after_yaml = apply_yaml_aliases(raw, yaml_aliases)
     canonical = normalize_rate_limit_group(after_yaml)
 
-    policy = groups.get(canonical.value)
-    if isinstance(policy, dict):
+    policy = _policy_for_group(groups, canonical)
+    if policy is not None:
         return canonical, policy
 
-    fallback = groups.get(default_group.value)
-    if isinstance(fallback, dict):
+    fallback = _policy_for_group(groups, default_group)
+    if fallback is not None:
         return default_group, fallback
 
     return None, None

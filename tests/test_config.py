@@ -106,10 +106,11 @@ def test_token_rate_limit_flat_group_env_overrides(tmp_path, monkeypatch):
     cfg = Config(str(config_file))
     token_cfg = cfg.get("token_rate_limit", default={})
 
-    assert token_cfg["groups"]["eve_free"]["max_tokens"] == 1234
-    assert token_cfg["groups"]["eve_free"]["period_months"] == 2
-    assert token_cfg["groups"]["eve_advanced"]["max_tokens"] == 9999
-    assert token_cfg["groups"]["eve_advanced"]["period_months"] == 3
+    assert token_cfg["groups"]["free"]["max_tokens"] == 1234
+    assert token_cfg["groups"]["free"]["period_months"] == 2
+    assert token_cfg["groups"]["eve_free"]["max_tokens"] == 100
+    assert token_cfg["groups"]["pro_plus"]["max_tokens"] == 9999
+    assert token_cfg["groups"]["pro_plus"]["period_months"] == 3
 
 
 # ── Blank-vs-absent env values ────────────────────────────────────────────────
