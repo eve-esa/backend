@@ -788,10 +788,10 @@ class Config:
         if groups_override is not None:
             groups = groups_override
 
-        self._merge_flat_group_env(groups, "FREE", "eve_free", "Free")
-        self._merge_flat_group_env(groups, "PRO", "eve_standard", "Pro")
-        self._merge_flat_group_env(groups, "PRO_PLUS", "eve_advanced", "Pro+")
-        self._merge_flat_group_env(groups, "ULTRA", "eve_enterprise", "Ultra")
+        self._merge_flat_group_env(groups, "FREE", "free", "Free")
+        self._merge_flat_group_env(groups, "PRO", "pro", "Pro")
+        self._merge_flat_group_env(groups, "PRO_PLUS", "pro_plus", "Pro+")
+        self._merge_flat_group_env(groups, "ULTRA", "ultra", "Ultra")
 
         if groups:
             token_cfg["groups"] = groups

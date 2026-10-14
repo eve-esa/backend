@@ -3,34 +3,49 @@ from typing import Any, Mapping
 
 
 class RateLimitGroup(str, Enum):
-    """Canonical EVE rate-limit tiers (stored on user and used as config keys)."""
+    """Token plans. The value is the same word as the env prefix.
 
-    EVE_FREE = "eve_free"
-    EVE_STANDARD = "eve_standard"
-    EVE_ADVANCED = "eve_advanced"
-    EVE_ENTERPRISE = "eve_enterprise"
+    ``FREE_TOKENS`` is ``free``, ``PRO_TOKENS`` is ``pro``,
+    ``PRO_PLUS_TOKENS`` is ``pro_plus``, ``ULTRA_TOKENS`` is ``ultra``.
+    """
+
+    FREE = "free"
+    PRO = "pro"
+    PRO_PLUS = "pro_plus"
+    ULTRA = "ultra"
 
 
-# Short / legacy / marketing labels → canonical enum (code defaults; YAML may extend).
-_GROUP_ALIASES: dict[str, RateLimitGroup] = {
-    "default": RateLimitGroup.EVE_FREE,
-    "free": RateLimitGroup.EVE_FREE,
-    "pro": RateLimitGroup.EVE_STANDARD,
-    "pro+": RateLimitGroup.EVE_ADVANCED,
-    "ultra": RateLimitGroup.EVE_ENTERPRISE,
+# Older rows and configs still use these. Read them as the plan above.
+# Do not write them back: the next full document replace stores the enum value.
+_LEGACY_GROUP_NAMES: dict[str, RateLimitGroup] = {
+    "default": RateLimitGroup.FREE,
+    "eve_free": RateLimitGroup.FREE,
+    "eve_standard": RateLimitGroup.PRO,
+    "eve_advanced": RateLimitGroup.PRO_PLUS,
+    "eve_enterprise": RateLimitGroup.ULTRA,
+    "pro+": RateLimitGroup.PRO_PLUS,
 }
 
 
+def config_keys_for_group(group: RateLimitGroup) -> tuple[str, ...]:
+    """Canonical key first, then the old ``eve_*`` config key for that plan."""
+    legacy = tuple(
+        name
+        for name, target in _LEGACY_GROUP_NAMES.items()
+        if target is group and name.startswith("eve_")
+    )
+    return (group.value, *legacy)
+
+
 def _alias_lookup(key: str) -> RateLimitGroup | None:
-    k = key.strip().lower()
-    return _GROUP_ALIASES.get(k)
+    return _LEGACY_GROUP_NAMES.get(key.strip().lower())
 
 
 def normalize_rate_limit_group(value: object) -> RateLimitGroup:
-    """Map storage/config strings to a canonical group; unknown → EVE_FREE."""
+    """Map storage or config strings to a plan. Unknown values become ``free``."""
     s = str(value or "").strip()
     if not s:
-        return RateLimitGroup.EVE_FREE
+        return RateLimitGroup.FREE
     lowered = s.lower()
     mapped = _alias_lookup(lowered)
     if mapped is not None:
@@ -38,7 +53,7 @@ def normalize_rate_limit_group(value: object) -> RateLimitGroup:
     try:
         return RateLimitGroup(lowered)
     except ValueError:
-        return RateLimitGroup.EVE_FREE
+        return RateLimitGroup.FREE
 
 
 def apply_yaml_aliases(raw: str, yaml_aliases: Mapping[str, Any] | None) -> str:

@@ -35,8 +35,8 @@ _proxy = _root_app.main_app
 
 _PINNED_SETTINGS = {
     "enabled": True,
-    "default_group": "eve_free",
-    "groups": {"eve_free": {"max_tokens": 100, "period_months": 1}},
+    "default_group": "free",
+    "groups": {"free": {"max_tokens": 100, "period_months": 1}},
 }
 
 
@@ -50,7 +50,7 @@ def _reset_openai_proxy_http_client():
 
 @pytest.fixture
 def pinned_budget(monkeypatch):
-    """Pin the eve_free group to a known, small cap so charges are exact."""
+    """Pin the free plan to a known, small cap so charges are exact."""
     monkeypatch.setattr(
         "src.services.token_rate_limiter._rate_limit_settings", lambda: _PINNED_SETTINGS
     )
@@ -84,7 +84,7 @@ async def test_exhausted_budget_via_session_returns_429(async_client, monkeypatc
 
         assert resp.status_code == 429
         data = resp.json()
-        assert data["detail"].startswith("Token budget exceeded for group 'eve_free'.")
+        assert data["detail"].startswith("Token budget exceeded for group 'free'.")
         assert data["error"] == {
             "message": data["detail"],
             "type": "insufficient_quota",
