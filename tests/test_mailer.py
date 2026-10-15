@@ -10,6 +10,7 @@ Config is read once at import, so the knobs are monkeypatched on
 ``src.services.mailer`` rather than in the environment.
 """
 
+import email.utils
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +26,8 @@ def _sane_defaults(monkeypatch):
     monkeypatch.setattr(mailer, "EMAIL_FROM_ADDRESS", "no-reply@eve.test")
     monkeypatch.setattr(mailer, "EMAIL_FROM_NAME", "EVE")
     monkeypatch.setattr(mailer, "SES_CONFIGURATION_SET", "")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", "")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", "")
     mailer._reset_ses_client_for_tests()
     yield
     mailer._reset_ses_client_for_tests()
@@ -188,3 +191,159 @@ async def test_an_unknown_transport_is_refused(monkeypatch):
         await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
     assert "carrier-pigeon" in str(excinfo.value)
+
+
+CANARY_TAG = "+eve-mail-canary"
+SMTP_SENDER = "EVE by ESA Phi Lab <eve@mail.example.org>"
+
+
+@pytest.fixture
+def both_transports(monkeypatch):
+    """SMTP and SES both mocked, so a test can see which one carried the mail."""
+    monkeypatch.setattr(mailer, "SMTP_HOST", "relay.example.net")
+    monkeypatch.setattr(mailer, "SMTP_PORT", 587)
+    monkeypatch.setattr(mailer, "SMTP_USERNAME", "mailer")
+    monkeypatch.setattr(mailer, "SMTP_PASSWORD", "secret")
+    smtp = MagicMock()
+    monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
+    ses = MagicMock()
+    monkeypatch.setattr(mailer, "_get_ses_client", lambda: ses)
+    return smtp, ses
+
+
+def _smtp_message(smtp):
+    return smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_canary_recipient_goes_through_smtp_with_the_smtp_sender(
+    monkeypatch, both_transports
+):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(
+        to="person+eve-mail-canary-1@example.com",
+        subject="Hi",
+        html="<p>Hi</p>",
+        text="Hi",
+    )
+
+    ses.send_email.assert_not_called()
+    sent = _smtp_message(smtp)
+    assert sent["From"] == SMTP_SENDER
+    assert sent["To"] == "person+eve-mail-canary-1@example.com"
+
+
+@pytest.mark.asyncio
+async def test_the_canary_tag_matches_regardless_of_case(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+
+    await send_mail(
+        to="Person+EVE-Mail-Canary@Example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    ses.send_email.assert_not_called()
+    smtp.return_value.__enter__.return_value.send_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_every_other_recipient_stays_on_ses(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    smtp.assert_not_called()
+    # SES keeps its own sender: the SMTP one is for the SMTP path only.
+    assert ses.send_email.call_args.kwargs["FromEmailAddress"] == "EVE <no-reply@eve.test>"
+
+
+@pytest.mark.asyncio
+async def test_without_a_tag_a_tagged_address_stays_on_ses(monkeypatch, both_transports):
+    """An empty tag would match every address; it must match none."""
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", "")
+
+    await send_mail(
+        to="person+eve-mail-canary@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    smtp.assert_not_called()
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_the_tag_never_turns_off_into_a_send(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "off")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+
+    await send_mail(
+        to="person+eve-mail-canary@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    smtp.assert_not_called()
+    ses.send_email.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_smtp_transport_uses_the_smtp_sender_when_set(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    ses.send_email.assert_not_called()
+    assert _smtp_message(smtp)["From"] == SMTP_SENDER
+
+
+@pytest.mark.asyncio
+async def test_smtp_message_carries_date_and_a_message_id_on_the_sender_domain(
+    monkeypatch, both_transports
+):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    sent = _smtp_message(smtp)
+    assert sent["Date"]
+    assert email.utils.parsedate_to_datetime(sent["Date"]).tzinfo is not None
+    assert sent["Message-ID"].startswith("<")
+    assert sent["Message-ID"].endswith("@mail.example.org>")
+    assert sent["Reply-To"] is None
+
+
+@pytest.mark.asyncio
+async def test_one_info_line_names_the_transport_and_the_domain_only(
+    monkeypatch, both_transports, caplog
+):
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(
+            to="person+eve-mail-canary@example.com",
+            subject="Hi",
+            html="<p>Hi</p>",
+            text="Hi",
+        )
+
+    records = [r for r in caplog.records if r.name == mailer.logger.name]
+    assert len(records) == 1
+    line = records[0].getMessage()
+    assert records[0].levelname == "INFO"
+    assert "via smtp" in line
+    assert "recipient_domain=example.com" in line
+    assert "person" not in line
+    assert "canary" not in line
