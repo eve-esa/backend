@@ -12,6 +12,11 @@ must not be is *quietly* silent: the suppressed path logs, and any transport
 other than "off" refuses to send without a sender rather than mailing from a
 domain nobody owns.
 
+With ``MAIL_TRANSPORT=ses`` a non-empty ``MAIL_CANARY_TAG`` diverts the
+recipients whose local part carries the tag to SMTP, so a new relay can be
+proven on a few test mailboxes while every real user stays on SES. The choice
+is made in one place, :func:`_choose_transport`.
+
 Recipients are never logged in full. A subject and a domain are enough to see
 that mail is flowing; the address belongs in the message, not in CloudWatch.
 """
@@ -23,15 +28,17 @@ import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formataddr
+from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 import boto3
 
 from src.config import (
     EMAIL_FROM_ADDRESS,
     EMAIL_FROM_NAME,
+    MAIL_CANARY_TAG,
     MAIL_TRANSPORT,
     SES_CONFIGURATION_SET,
+    SMTP_FROM_ADDRESS,
     SMTP_HOST,
     SMTP_PASSWORD,
     SMTP_PORT,
@@ -53,6 +60,14 @@ class MailNotConfigured(RuntimeError):
     """The chosen transport cannot run with the configuration it was given."""
 
 
+class MailDeliveryFailed(RuntimeError):
+    """The relay refused the message. Names the error class, never the address.
+
+    smtplib errors such as ``SMTPRecipientsRefused`` carry the recipient in their
+    text, and callers log failures with ``exc_info``.
+    """
+
+
 _ses_client = None
 
 
@@ -62,25 +77,53 @@ def _recipient_domain(address: str) -> str:
     return domain or "unknown"
 
 
-def _sender() -> str:
+def _choose_transport(transport: str, to: str) -> str:
+    """The transport that carries a message to this recipient.
+
+    Only "ses" is ever diverted, and only to "smtp": "off" stays silent for a
+    tagged address too, and an empty tag matches nobody.
+    """
+    tag = (MAIL_CANARY_TAG or "").lower()
+    if transport != TRANSPORT_SES or not tag:
+        return transport
+    local_part, _, _ = to.rpartition("@")
+    return TRANSPORT_SMTP if tag in local_part.lower() else transport
+
+
+def _sender(transport: str) -> str:
     """The From header, as a single RFC 5322 address.
+
+    The SMTP path uses ``SMTP_FROM_ADDRESS`` when it is set, because a relay
+    such as Google Workspace only sends as its own mailbox; blank falls back to
+    ``EMAIL_FROM_ADDRESS`` like every other transport.
 
     ``EMAIL_FROM_ADDRESS`` is allowed to carry its own display name, because
     that is how the value is already written in the deployed environments
     ("EVE by ESA Phi Lab <no-reply@dev.eve-chat.chat>"). Only a bare address
     gets ``EMAIL_FROM_NAME`` attached, so a configured name is never doubled.
+    A value that does not parse to one address with a domain is refused: an
+    unquoted comma in the display name would split the From in two.
     """
-    address = (EMAIL_FROM_ADDRESS or "").strip()
+    address = ""
+    if transport == TRANSPORT_SMTP:
+        address = (SMTP_FROM_ADDRESS or "").strip()
+    address = address or (EMAIL_FROM_ADDRESS or "").strip()
     if not address:
         raise MailNotConfigured(
             "MAIL_TRANSPORT is set but EMAIL_FROM_ADDRESS is blank: set a sender "
             "address (optionally 'Display Name <user@domain>') or set "
             "MAIL_TRANSPORT=off"
         )
-    if "<" in address:
-        return address
-    name = (EMAIL_FROM_NAME or "").strip()
-    return formataddr((name, address)) if name else address
+    if "<" not in address:
+        name = (EMAIL_FROM_NAME or "").strip()
+        address = formataddr((name, address)) if name else address
+    _, parsed = parseaddr(address)
+    if not parsed.rpartition("@")[2]:
+        raise MailNotConfigured(
+            f"The sender for MAIL_TRANSPORT={transport} does not parse to one "
+            "address with a domain: quote a display name that contains a comma"
+        )
+    return address
 
 
 def _build_message(
@@ -90,11 +133,18 @@ def _build_message(
 
     Order is not cosmetic. A reader picks the last part it can render, so the
     HTML has to come after the text or every modern client shows the fallback.
+
+    Date and Message-ID are set here because SMTP, unlike SES, leaves them to
+    the client, and receiving filters score a message without them as spam.
+    The Message-ID carries the From domain so it aligns with the sender.
     """
+    _, sender_address = parseaddr(sender)
     message = MIMEMultipart("alternative")
     message["Subject"] = subject
     message["From"] = sender
     message["To"] = to
+    message["Date"] = formatdate(localtime=False, usegmt=True)
+    message["Message-ID"] = make_msgid(domain=sender_address.rpartition("@")[2] or None)
     message.attach(MIMEText(text, "plain", "utf-8"))
     message.attach(MIMEText(html, "html", "utf-8"))
     return message
@@ -106,16 +156,25 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     STARTTLS only when a username is configured. The local Mailpit container
     (compose service "mailcatcher") speaks plain SMTP on port 1025 and offers no
     TLS at all, so upgrading unconditionally would break the one environment
-    this transport exists for.
+    this transport exists for. A relay sender (``SMTP_FROM_ADDRESS``) without a
+    username is refused instead, so a deployed relay never gets mail in clear.
     """
+    if SMTP_FROM_ADDRESS and not SMTP_USERNAME:
+        raise MailNotConfigured(
+            "SMTP_FROM_ADDRESS is set but SMTP_USERNAME is blank: a relay needs "
+            "STARTTLS and a login, plain SMTP is only for the local catcher"
+        )
     message = _build_message(
         sender=sender, to=to, subject=subject, html=html, text=text
     )
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
-        if SMTP_USERNAME:
-            server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.send_message(message)
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
+            if SMTP_USERNAME:
+                server.starttls()
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message, to_addrs=[to])
+    except smtplib.SMTPException as exc:
+        raise MailDeliveryFailed(f"SMTP send failed: {type(exc).__name__}") from None
 
 
 def _get_ses_client():
@@ -169,7 +228,7 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
     failure means: the approval endpoint answers 502, the sign-in path logs and
     carries on.
     """
-    transport = (MAIL_TRANSPORT or TRANSPORT_OFF).strip().lower()
+    transport = _choose_transport((MAIL_TRANSPORT or TRANSPORT_OFF).strip().lower(), to)
 
     if transport == TRANSPORT_OFF:
         logger.info(
@@ -179,7 +238,7 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
         )
         return
 
-    sender = _sender()
+    sender = _sender(transport)
 
     if transport == TRANSPORT_SMTP:
         await asyncio.to_thread(

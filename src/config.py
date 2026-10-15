@@ -220,6 +220,10 @@ SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+# From header for mail that leaves through SMTP. Blank means the SMTP path uses
+# EMAIL_FROM_ADDRESS like every other transport, which is what local Mailpit
+# expects; a relay that only accepts its own mailbox as sender sets it.
+SMTP_FROM_ADDRESS = getenv_or("SMTP_FROM_ADDRESS")
 # Blank means unset, and src/services/mailer.py refuses to send rather than
 # guessing. The old default was noreply@eve-ai.com, a domain nobody here owns:
 # it made an unconfigured host look configured, and every message sent from it
@@ -234,6 +238,10 @@ MAIL_TRANSPORT = getenv_or("MAIL_TRANSPORT", "off").lower()
 # Optional SES configuration set, which is how bounce and complaint events get
 # published. Blank means send without one.
 SES_CONFIGURATION_SET = getenv_or("SES_CONFIGURATION_SET")
+# Canary routing while MAIL_TRANSPORT is "ses": a recipient whose local part
+# contains this tag (case-insensitive, for example "+eve-mail-canary") goes
+# through SMTP instead, everybody else stays on SES. Blank matches nobody.
+MAIL_CANARY_TAG = getenv_or("MAIL_CANARY_TAG")
 # Shared secret for /internal/notifications/*, presented by the back office
 # after it approves an account. Blank means unset, and those endpoints answer
 # 503: an unconfigured door must be closed, not open.
