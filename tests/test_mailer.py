@@ -15,6 +15,7 @@ import smtplib
 from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from src.services import mailer
 from src.services.mailer import MailDeliveryFailed, MailNotConfigured, send_mail
@@ -31,8 +32,10 @@ def _sane_defaults(monkeypatch):
     monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", "")
     monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "")
     mailer._reset_ses_client_for_tests()
+    mailer._reset_fallback_warning_for_tests()
     yield
     mailer._reset_ses_client_for_tests()
+    mailer._reset_fallback_warning_for_tests()
 
 
 @pytest.mark.asyncio
@@ -67,7 +70,7 @@ async def test_smtp_builds_a_multipart_message(monkeypatch):
     monkeypatch.setattr(mailer, "SMTP_PASSWORD", "")
 
     smtp = MagicMock()
-    server = smtp.return_value.__enter__.return_value
+    server = smtp.return_value
     monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
 
     await send_mail(
@@ -102,7 +105,7 @@ async def test_smtp_upgrades_and_authenticates_when_a_username_is_set(monkeypatc
     monkeypatch.setattr(mailer, "SMTP_PASSWORD", "secret")
 
     smtp = MagicMock()
-    server = smtp.return_value.__enter__.return_value
+    server = smtp.return_value
     monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
 
     await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
@@ -214,7 +217,7 @@ def both_transports(monkeypatch):
 
 
 def _smtp_message(smtp):
-    return smtp.return_value.__enter__.return_value.send_message.call_args.args[0]
+    return smtp.return_value.send_message.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -250,7 +253,7 @@ async def test_the_canary_tag_matches_regardless_of_case(monkeypatch, both_trans
     )
 
     ses.send_email.assert_not_called()
-    smtp.return_value.__enter__.return_value.send_message.assert_called_once()
+    smtp.return_value.send_message.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -362,7 +365,7 @@ async def test_the_canary_path_upgrades_and_authenticates(monkeypatch, both_tran
         to="person+eve-mail-canary@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
     )
 
-    server = smtp.return_value.__enter__.return_value
+    server = smtp.return_value
     server.starttls.assert_called_once()
     server.login.assert_called_once_with("mailer", "secret")
     # Envelope recipient is the one address, never re-parsed from the header.
@@ -396,7 +399,7 @@ async def test_a_refused_recipient_never_reaches_the_error(monkeypatch, both_tra
     smtp, _ = both_transports
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
     address = "person+eve-mail-canary@example.com"
-    server = smtp.return_value.__enter__.return_value
+    server = smtp.return_value
     server.send_message.side_effect = smtplib.SMTPRecipientsRefused(
         {address: (550, f"5.1.1 <{address}> does not exist".encode())}
     )
@@ -450,7 +453,7 @@ async def test_smtp_with_a_tag_stays_smtp(monkeypatch, both_transports):
     await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
     ses.send_email.assert_not_called()
-    smtp.return_value.__enter__.return_value.send_message.assert_called_once()
+    smtp.return_value.send_message.assert_called_once()
 
 
 def _fallback_lines(caplog):
@@ -460,26 +463,49 @@ def _fallback_lines(caplog):
     ]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure, reason",
-    [
-        (smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials"), "SMTPAuthenticationError code=535"),
-        (smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"), "SMTPDataError code=550"),
-        (smtplib.SMTPServerDisconnected("Connection unexpectedly closed"), "SMTPServerDisconnected"),
-        (TimeoutError("timed out"), "TimeoutError"),
-    ],
-)
-async def test_an_smtp_failure_falls_back_to_ses_with_the_ses_sender(
-    monkeypatch, both_transports, caplog, failure, reason
-):
-    smtp, ses = both_transports
+def _message_rejected(address):
+    """What SES answers for an unverified sender: the text names the address."""
+    return ClientError(
+        {
+            "Error": {
+                "Code": "MessageRejected",
+                "Message": f"Email address is not verified: {address}",
+            }
+        },
+        "SendEmail",
+    )
+
+
+@pytest.fixture
+def smtp_to_ses(monkeypatch, both_transports):
+    """MAIL_TRANSPORT=smtp with the SES fallback on and a relay sender."""
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
     monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
     monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
     monkeypatch.setattr(mailer, "SES_CONFIGURATION_SET", "eve-x-mail-events")
-    server = smtp.return_value.__enter__.return_value
-    server.send_message.side_effect = failure
+    return both_transports
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "step, failure, reason",
+    [
+        ("login", smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials"), "SMTPAuthenticationError code=535"),
+        ("send_message", smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"), "SMTPDataError code=550"),
+        # smtplib turns a read timeout or a reset into SMTPServerDisconnected; a raw
+        # OSError only comes out of the constructor (refused, DNS, connect timeout).
+        ("connect", TimeoutError("timed out"), "TimeoutError"),
+        ("connect", ConnectionRefusedError(111, "Connection refused"), "ConnectionRefusedError"),
+    ],
+)
+async def test_an_smtp_failure_falls_back_to_ses_with_the_ses_sender(
+    smtp_to_ses, caplog, step, failure, reason
+):
+    smtp, ses = smtp_to_ses
+    if step == "connect":
+        smtp.side_effect = failure
+    else:
+        getattr(smtp.return_value, step).side_effect = failure
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
         await send_mail(
@@ -505,12 +531,69 @@ async def test_an_smtp_failure_falls_back_to_ses_with_the_ses_sender(
 
 
 @pytest.mark.asyncio
-async def test_a_refused_relay_config_falls_back_too(monkeypatch, both_transports):
+async def test_a_disconnect_during_data_falls_back_at_least_once(smtp_to_ses):
+    """The relay may have queued the message before the line dropped.
+
+    Delivery is at-least-once by choice: a second copy of a code mail beats
+    none, so an ambiguous end of DATA goes to SES.
+    """
+    smtp, ses = smtp_to_ses
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected(
+        "Connection unexpectedly closed"
+    )
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        smtplib.SMTPResponseException(421, b"4.7.0 Try again later, closing connection"),
+        smtplib.SMTPServerDisconnected("Connection unexpectedly closed"),
+    ],
+)
+async def test_an_error_after_the_relay_accepted_the_message_is_not_a_failure(
+    smtp_to_ses, caplog, failure
+):
+    """Once send_message returns, the mail is delivered: a bad QUIT must not resend."""
+    smtp, ses = smtp_to_ses
+    server = smtp.return_value
+    server.quit.side_effect = failure
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    server.send_message.assert_called_once()
+    ses.send_email.assert_not_called()
+    assert not _fallback_lines(caplog)
+    records = [r for r in caplog.records if r.name == mailer.logger.name]
+    assert all(r.levelname == "INFO" for r in records)
+    assert records[-1].getMessage() == (
+        "mail sent via smtp subject='Hi' recipient_domain=example.com"
+    )
+    # The socket is released even when QUIT failed.
+    server.close.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_smtp_session_is_closed(smtp_to_ses):
+    smtp, _ = smtp_to_ses
+    server = smtp.return_value
+    server.login.side_effect = smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials")
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    server.send_message.assert_not_called()
+    server.close.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_relay_config_falls_back_too(monkeypatch, smtp_to_ses):
     """MailNotConfigured from the SMTP path is a reason to try SES, not to lose the mail."""
-    smtp, ses = both_transports
-    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
-    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
-    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+    smtp, ses = smtp_to_ses
     monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
 
     await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
@@ -520,14 +603,36 @@ async def test_a_refused_relay_config_falls_back_too(monkeypatch, both_transport
 
 
 @pytest.mark.asyncio
+async def test_a_misconfigured_ses_side_surfaces_during_a_fallback(
+    monkeypatch, smtp_to_ses, caplog
+):
+    """The relay sender is set, the SES one is not: SMTP fails, SES cannot run."""
+    smtp, ses = smtp_to_ses
+    monkeypatch.setattr(mailer, "EMAIL_FROM_ADDRESS", "")
+    smtp.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+        535, b"5.7.8 Bad credentials"
+    )
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        with pytest.raises(MailNotConfigured) as excinfo:
+            await send_mail(
+                to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+            )
+
+    assert "EMAIL_FROM_ADDRESS" in str(excinfo.value)
+    assert len(_fallback_lines(caplog)) == 1
+    ses.send_email.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_canary_falls_back_to_ses(monkeypatch, both_transports):
     """The chosen transport decides: a canary diverted to SMTP falls back like smtp."""
     smtp, ses = both_transports
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
     monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
     monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
-    smtp.return_value.__enter__.return_value.send_message.side_effect = (
-        smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded")
+    smtp.return_value.send_message.side_effect = smtplib.SMTPDataError(
+        550, b"5.4.5 Daily user sending limit exceeded"
     )
 
     await send_mail(
@@ -538,40 +643,55 @@ async def test_a_failed_canary_falls_back_to_ses(monkeypatch, both_transports):
 
 
 @pytest.mark.asyncio
-async def test_when_ses_fails_too_the_ses_error_is_raised(
-    monkeypatch, both_transports, caplog
+async def test_when_ses_fails_too_the_ses_error_is_raised_without_the_address(
+    smtp_to_ses, caplog
 ):
-    smtp, ses = both_transports
-    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
-    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
-    smtp.return_value.__enter__.return_value.send_message.side_effect = (
-        smtplib.SMTPAuthenticationError(534, b"5.7.9 Application-specific password required")
+    smtp, ses = smtp_to_ses
+    address = "person@example.com"
+    smtp.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+        534, b"5.7.9 Application-specific password required"
     )
-
-    class SesDown(Exception):
-        pass
-
-    ses.send_email.side_effect = SesDown("throttled")
+    ses.send_email.side_effect = _message_rejected(address)
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
-        with pytest.raises(SesDown):
-            await send_mail(
-                to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
-            )
+        with pytest.raises(MailDeliveryFailed) as excinfo:
+            await send_mail(to=address, subject="Hi", html="<p>Hi</p>", text="Hi")
 
+    assert str(excinfo.value) == "SES send failed: ClientError MessageRejected"
+    assert "person" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
     # The SMTP failure is in the log line, not in the raised error.
     assert "code=534" in _fallback_lines(caplog)[0].getMessage()
     assert not any("mail sent" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
+async def test_a_plain_ses_error_never_reaches_the_caller_with_the_address(
+    monkeypatch, both_transports
+):
+    """Callers log with exc_info, and MessageRejected names the address."""
+    _, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    ses.send_email.side_effect = _message_rejected("person@example.com")
+
+    with pytest.raises(MailDeliveryFailed) as excinfo:
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert str(excinfo.value) == "SES send failed: ClientError MessageRejected"
+    assert excinfo.value.reason == "ClientError"
+    assert excinfo.value.code == "MessageRejected"
+    assert excinfo.value.__cause__ is None
+
+
+@pytest.mark.asyncio
 async def test_without_a_fallback_the_smtp_error_is_raised_as_today(
-    monkeypatch, both_transports, caplog
+    both_transports, monkeypatch, caplog
 ):
     smtp, ses = both_transports
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
-    smtp.return_value.__enter__.return_value.send_message.side_effect = (
-        smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials")
+    smtp.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+        535, b"5.7.8 Bad credentials"
     )
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
@@ -611,32 +731,77 @@ async def test_off_with_a_fallback_still_sends_nothing(monkeypatch, both_transpo
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_fallback_is_refused(monkeypatch, both_transports):
+async def test_an_unknown_fallback_logs_once_and_does_not_fall_back(
+    monkeypatch, both_transports, caplog
+):
     smtp, ses = both_transports
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
     monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "smtp")
+    smtp.return_value.login.side_effect = smtplib.SMTPAuthenticationError(
+        535, b"5.7.8 Bad credentials"
+    )
 
-    with pytest.raises(MailNotConfigured) as excinfo:
-        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        for _ in range(2):
+            with pytest.raises(MailDeliveryFailed):
+                await send_mail(
+                    to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+                )
 
-    assert "MAIL_FALLBACK_TRANSPORT" in str(excinfo.value)
-    smtp.assert_not_called()
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "MAIL_FALLBACK_TRANSPORT" in errors[0].getMessage()
     ses.send_email.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_a_fallback_send_logs_the_usual_info_line_via_ses(
+async def test_an_unknown_fallback_never_blocks_plain_ses_mail(
     monkeypatch, both_transports, caplog
 ):
-    smtp, _ = both_transports
-    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
-    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
-    smtp.return_value.__enter__.return_value.send_message.side_effect = (
-        smtplib.SMTPServerDisconnected("gone")
-    )
+    """The fallback only matters to SMTP: a typo in it must not stop every SES user."""
+    _, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "smtp")
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    ses.send_email.assert_called_once()
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_send_logs_the_usual_info_line_via_ses(smtp_to_ses, caplog):
+    smtp, _ = smtp_to_ses
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected("gone")
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
         await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
     infos = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
     assert infos == ["mail sent via ses subject='Hi' recipient_domain=example.com"]
+
+
+@pytest.mark.asyncio
+async def test_smtp_waits_at_most_ten_seconds_per_operation(monkeypatch, both_transports):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert smtp.call_args.kwargs["timeout"] == 10
+
+
+def test_the_ses_client_has_short_deadlines_and_two_attempts(monkeypatch):
+    client = MagicMock()
+    factory = MagicMock(return_value=client)
+    monkeypatch.setattr(mailer.boto3, "client", factory)
+
+    assert mailer._get_ses_client() is client
+
+    service = factory.call_args.args[0]
+    config = factory.call_args.kwargs["config"]
+    assert service == "sesv2"
+    assert config.connect_timeout == 3
+    assert config.read_timeout == 8
+    assert config.retries == {"total_max_attempts": 2, "mode": "standard"}
