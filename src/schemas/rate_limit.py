@@ -7,12 +7,14 @@ class RateLimitGroup(str, Enum):
 
     ``FREE_TOKENS`` is ``free``, ``PRO_TOKENS`` is ``pro``,
     ``PRO_PLUS_TOKENS`` is ``pro_plus``, ``ULTRA_TOKENS`` is ``ultra``.
+    ``unlimited`` has no env var and no cap: it never reads a policy from config.
     """
 
     FREE = "free"
     PRO = "pro"
     PRO_PLUS = "pro_plus"
     ULTRA = "ultra"
+    UNLIMITED = "unlimited"
 
 
 # Older rows and configs still use these. Read them as the plan above.
