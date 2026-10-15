@@ -17,6 +17,10 @@ recipients whose local part carries the tag to SMTP, so a new relay can be
 proven on a few test mailboxes while every real user stays on SES. The choice
 is made in one place, :func:`_choose_transport`.
 
+``MAIL_FALLBACK_TRANSPORT=ses`` keeps a relay outage from losing mail: when
+the chosen transport is SMTP and the send raises, the same message goes out
+through SES with the SES sender, and one WARNING line says why.
+
 Recipients are never logged in full. A subject and a domain are enough to see
 that mail is flowing; the address belongs in the message, not in CloudWatch.
 """
@@ -36,6 +40,7 @@ from src.config import (
     EMAIL_FROM_ADDRESS,
     EMAIL_FROM_NAME,
     MAIL_CANARY_TAG,
+    MAIL_FALLBACK_TRANSPORT,
     MAIL_TRANSPORT,
     SES_CONFIGURATION_SET,
     SMTP_FROM_ADDRESS,
@@ -64,8 +69,14 @@ class MailDeliveryFailed(RuntimeError):
     """The relay refused the message. Names the error class, never the address.
 
     smtplib errors such as ``SMTPRecipientsRefused`` carry the recipient in their
-    text, and callers log failures with ``exc_info``.
+    text, and callers log failures with ``exc_info``. The class name and the
+    SMTP reply code survive as attributes, for the fallback log line.
     """
+
+    def __init__(self, message: str, *, reason: str = "", smtp_code: int | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.smtp_code = smtp_code
 
 
 _ses_client = None
@@ -75,6 +86,26 @@ def _recipient_domain(address: str) -> str:
     """The part of an address that is safe to log."""
     _, _, domain = address.rpartition("@")
     return domain or "unknown"
+
+
+def _smtp_code(exc: smtplib.SMTPException) -> int | None:
+    """The reply code of a refused SMTP command, when the server sent one."""
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return exc.smtp_code
+    if isinstance(exc, smtplib.SMTPRecipientsRefused) and exc.recipients:
+        code, _ = next(iter(exc.recipients.values()))
+        return code
+    return None
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """``reason=<class>[ code=<n>]`` for a failed send, with no address in it."""
+    if isinstance(exc, MailDeliveryFailed) and exc.reason:
+        reason = exc.reason
+        if exc.smtp_code is not None:
+            reason += f" code={exc.smtp_code}"
+        return reason
+    return type(exc).__name__
 
 
 def _choose_transport(transport: str, to: str) -> str:
@@ -174,7 +205,11 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
                 server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(message, to_addrs=[to])
     except smtplib.SMTPException as exc:
-        raise MailDeliveryFailed(f"SMTP send failed: {type(exc).__name__}") from None
+        raise MailDeliveryFailed(
+            f"SMTP send failed: {type(exc).__name__}",
+            reason=type(exc).__name__,
+            smtp_code=_smtp_code(exc),
+        ) from None
 
 
 def _get_ses_client():
@@ -238,6 +273,44 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
         )
         return
 
+    fallback = (MAIL_FALLBACK_TRANSPORT or "").strip().lower()
+    if fallback not in ("", TRANSPORT_SES):
+        raise MailNotConfigured(
+            f"Unknown MAIL_FALLBACK_TRANSPORT {fallback!r}: expected blank or "
+            f"{TRANSPORT_SES!r}"
+        )
+
+    if transport == TRANSPORT_SMTP and fallback == TRANSPORT_SES:
+        try:
+            await asyncio.to_thread(
+                _send_smtp,
+                sender=_sender(TRANSPORT_SMTP),
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+            )
+        except Exception as exc:
+            # The SMTP error is only logged: the caller sees SES's verdict.
+            logger.warning(
+                "mail.fallback from=%s to=%s reason=%s recipient_domain=%s",
+                TRANSPORT_SMTP,
+                TRANSPORT_SES,
+                _failure_reason(exc),
+                _recipient_domain(to),
+            )
+            transport = TRANSPORT_SES
+            await asyncio.to_thread(
+                _send_ses,
+                sender=_sender(TRANSPORT_SES),
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+            )
+        _log_sent(transport, subject, to)
+        return
+
     sender = _sender(transport)
 
     if transport == TRANSPORT_SMTP:
@@ -254,6 +327,10 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
             f"{TRANSPORT_OFF!r}, {TRANSPORT_SMTP!r}, {TRANSPORT_SES!r}"
         )
 
+    _log_sent(transport, subject, to)
+
+
+def _log_sent(transport: str, subject: str, to: str) -> None:
     logger.info(
         "mail sent via %s subject=%r recipient_domain=%s",
         transport,

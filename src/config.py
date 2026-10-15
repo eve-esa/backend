@@ -242,6 +242,10 @@ SES_CONFIGURATION_SET = getenv_or("SES_CONFIGURATION_SET")
 # contains this tag (case-insensitive, for example "+eve-mail-canary") goes
 # through SMTP instead, everybody else stays on SES. Blank matches nobody.
 MAIL_CANARY_TAG = getenv_or("MAIL_CANARY_TAG")
+# Second chance for mail that leaves through SMTP: "ses" resends a message the
+# SMTP path failed on through SES with EMAIL_FROM_ADDRESS. Blank means no
+# fallback; any other value refuses to send.
+MAIL_FALLBACK_TRANSPORT = getenv_or("MAIL_FALLBACK_TRANSPORT").lower()
 # Shared secret for /internal/notifications/*, presented by the back office
 # after it approves an account. Blank means unset, and those endpoints answer
 # 503: an unconfigured door must be closed, not open.

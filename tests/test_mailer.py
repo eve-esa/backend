@@ -29,6 +29,7 @@ def _sane_defaults(monkeypatch):
     monkeypatch.setattr(mailer, "SES_CONFIGURATION_SET", "")
     monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", "")
     monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", "")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "")
     mailer._reset_ses_client_for_tests()
     yield
     mailer._reset_ses_client_for_tests()
@@ -450,3 +451,192 @@ async def test_smtp_with_a_tag_stays_smtp(monkeypatch, both_transports):
 
     ses.send_email.assert_not_called()
     smtp.return_value.__enter__.return_value.send_message.assert_called_once()
+
+
+def _fallback_lines(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == mailer.logger.name and "mail.fallback" in r.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure, reason",
+    [
+        (smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials"), "SMTPAuthenticationError code=535"),
+        (smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"), "SMTPDataError code=550"),
+        (smtplib.SMTPServerDisconnected("Connection unexpectedly closed"), "SMTPServerDisconnected"),
+        (TimeoutError("timed out"), "TimeoutError"),
+    ],
+)
+async def test_an_smtp_failure_falls_back_to_ses_with_the_ses_sender(
+    monkeypatch, both_transports, caplog, failure, reason
+):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+    monkeypatch.setattr(mailer, "SES_CONFIGURATION_SET", "eve-x-mail-events")
+    server = smtp.return_value.__enter__.return_value
+    server.send_message.side_effect = failure
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(
+            to="person@example.com", subject="Hello", html="<p>Hi</p>", text="Hi"
+        )
+
+    request = ses.send_email.call_args.kwargs
+    # The SES identity sends, never the Gmail mailbox it has no right to.
+    assert request["FromEmailAddress"] == "EVE <no-reply@eve.test>"
+    assert request["Destination"] == {"ToAddresses": ["person@example.com"]}
+    assert request["ConfigurationSetName"] == "eve-x-mail-events"
+    assert request["Content"]["Simple"]["Subject"]["Data"] == "Hello"
+    assert request["Content"]["Simple"]["Body"]["Text"]["Data"] == "Hi"
+    assert request["Content"]["Simple"]["Body"]["Html"]["Data"] == "<p>Hi</p>"
+
+    [warning] = _fallback_lines(caplog)
+    line = warning.getMessage()
+    assert warning.levelname == "WARNING"
+    assert line == (
+        f"mail.fallback from=smtp to=ses reason={reason} recipient_domain=example.com"
+    )
+    assert "person" not in line
+
+
+@pytest.mark.asyncio
+async def test_a_refused_relay_config_falls_back_too(monkeypatch, both_transports):
+    """MailNotConfigured from the SMTP path is a reason to try SES, not to lose the mail."""
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+    monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    smtp.assert_not_called()
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_canary_falls_back_to_ses(monkeypatch, both_transports):
+    """The chosen transport decides: a canary diverted to SMTP falls back like smtp."""
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    smtp.return_value.__enter__.return_value.send_message.side_effect = (
+        smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded")
+    )
+
+    await send_mail(
+        to="person+eve-mail-canary@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_when_ses_fails_too_the_ses_error_is_raised(
+    monkeypatch, both_transports, caplog
+):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    smtp.return_value.__enter__.return_value.send_message.side_effect = (
+        smtplib.SMTPAuthenticationError(534, b"5.7.9 Application-specific password required")
+    )
+
+    class SesDown(Exception):
+        pass
+
+    ses.send_email.side_effect = SesDown("throttled")
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        with pytest.raises(SesDown):
+            await send_mail(
+                to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+            )
+
+    # The SMTP failure is in the log line, not in the raised error.
+    assert "code=534" in _fallback_lines(caplog)[0].getMessage()
+    assert not any("mail sent" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_without_a_fallback_the_smtp_error_is_raised_as_today(
+    monkeypatch, both_transports, caplog
+):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    smtp.return_value.__enter__.return_value.send_message.side_effect = (
+        smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials")
+    )
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        with pytest.raises(MailDeliveryFailed):
+            await send_mail(
+                to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+            )
+
+    ses.send_email.assert_not_called()
+    assert not _fallback_lines(caplog)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ses_send_never_falls_back(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    ses.send_email.side_effect = RuntimeError("ses down")
+
+    with pytest.raises(RuntimeError):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    smtp.assert_not_called()
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_off_with_a_fallback_still_sends_nothing(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "off")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    smtp.assert_not_called()
+    ses.send_email.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_fallback_is_refused(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "smtp")
+
+    with pytest.raises(MailNotConfigured) as excinfo:
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert "MAIL_FALLBACK_TRANSPORT" in str(excinfo.value)
+    smtp.assert_not_called()
+    ses.send_email.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_send_logs_the_usual_info_line_via_ses(
+    monkeypatch, both_transports, caplog
+):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
+    smtp.return_value.__enter__.return_value.send_message.side_effect = (
+        smtplib.SMTPServerDisconnected("gone")
+    )
+
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    infos = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+    assert infos == ["mail sent via ses subject='Hi' recipient_domain=example.com"]
