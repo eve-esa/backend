@@ -15,11 +15,14 @@ from bson import ObjectId
 from fastapi import HTTPException
 
 from src.database.models.user import User
+from src.schemas.rate_limit import RateLimitGroup
 from src.services.token_rate_limiter import (
     TokenBudgetExceeded,
     check_token_budget,
     consume_tokens_for_user,
     enforce_token_budget_or_raise,
+    get_token_usage_summary,
+    reserve_token_budget,
 )
 from tests.utils.cleaner import cleanup_models
 from tests.utils.openai_proxy import seed_active_window
@@ -208,6 +211,65 @@ async def test_enforce_does_not_raise_under_the_cap(pinned_budget):
     try:
         await seed_active_window(user, used_tokens=0)
         await enforce_token_budget_or_raise(user)  # must not raise
+    finally:
+        await cleanup_models([user])
+
+
+# ── Unlimited plan ──────────────────────────────────────────────────────────────
+
+
+async def _make_unlimited(user: User) -> None:
+    await User.get_collection().update_one(
+        {"_id": ObjectId(user.id)}, {"$set": {"rate_limit_group": "unlimited"}}
+    )
+    user.rate_limit_group = RateLimitGroup.UNLIMITED
+
+
+@pytest.mark.asyncio
+async def test_unlimited_plan_is_never_refused(pinned_budget):
+    """Far past the free cap (100) and with no ``groups.unlimited``: still admitted."""
+    user, _ = await create_test_user_and_token()
+    try:
+        await _make_unlimited(user)
+        await seed_active_window(user, used_tokens=10_000)
+
+        assert await check_token_budget(user) is None
+        await enforce_token_budget_or_raise(user)  # must not raise
+        assert await reserve_token_budget(user, 500) == (None, 0)
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_unlimited_plan_consume_still_counts_usage(pinned_budget):
+    user, _ = await create_test_user_and_token()
+    try:
+        await _make_unlimited(user)
+        await seed_active_window(user, used_tokens=10_000)
+
+        await consume_tokens_for_user(user, 25)
+
+        refreshed = await User.find_by_id(user.id)
+        assert refreshed.rate_limit_tokens_used == 10_025
+        await enforce_token_budget_or_raise(refreshed)  # must not raise
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_unlimited_plan_usage_summary(pinned_budget):
+    user, _ = await create_test_user_and_token()
+    try:
+        await _make_unlimited(user)
+        await seed_active_window(user, used_tokens=10_000)
+
+        summary = await get_token_usage_summary(user)
+
+        assert summary["unlimited"] is True
+        assert summary["rate_limit_group"] == "unlimited"
+        assert summary["used_tokens"] == 10_000
+        assert summary["max_tokens"] is None
+        assert summary["remaining_tokens"] is None
     finally:
         await cleanup_models([user])
 

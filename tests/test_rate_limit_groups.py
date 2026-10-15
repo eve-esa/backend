@@ -80,3 +80,30 @@ def test_legacy_config_key_still_selects_that_plan(monkeypatch):
     resolved, policy = _resolve_policy_for_user(user)
     assert resolved is RateLimitGroup.PRO_PLUS
     assert policy["max_tokens"] == 50
+
+
+@pytest.mark.no_db
+def test_unlimited_plan_name_resolves():
+    assert normalize_rate_limit_group("unlimited") is RateLimitGroup.UNLIMITED
+    assert normalize_rate_limit_group(" Unlimited ") is RateLimitGroup.UNLIMITED
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    "groups",
+    [
+        {},
+        {"free": {"max_tokens": 100}},
+        {"free": {"max_tokens": 100}, "unlimited": {"max_tokens": 5}},
+    ],
+)
+def test_unlimited_plan_never_takes_a_cap_from_config(monkeypatch, groups):
+    """No ``groups.unlimited`` must not fall back to ``free``, and one set by mistake is ignored."""
+    monkeypatch.setattr(
+        "src.services.token_rate_limiter._rate_limit_settings",
+        lambda: {"enabled": True, "default_group": "free", "groups": groups},
+    )
+    user = User(email="unlimited@example.com", rate_limit_group="unlimited")
+    resolved, policy = _resolve_policy_for_user(user)
+    assert resolved is RateLimitGroup.UNLIMITED
+    assert policy["max_tokens"] == 0

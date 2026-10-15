@@ -73,6 +73,11 @@ def _resolve_policy_for_user(user: User) -> Tuple[Optional[RateLimitGroup], Opti
     after_yaml = apply_yaml_aliases(raw, yaml_aliases)
     canonical = normalize_rate_limit_group(after_yaml)
 
+    # No cap by design. Return before the config lookup so a missing
+    # ``groups.unlimited`` can never fall back to the default plan's cap.
+    if canonical is RateLimitGroup.UNLIMITED:
+        return canonical, {"max_tokens": 0}
+
     policy = _policy_for_group(groups, canonical)
     if policy is not None:
         return canonical, policy

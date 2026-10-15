@@ -1,4 +1,7 @@
 import pytest
+from bson import ObjectId
+
+from src.database.models.user import User
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
 
@@ -48,6 +51,28 @@ async def test_get_my_token_usage(async_client):
             assert body["remaining_ratio"] == 1.0
         assert body["period_start"] is not None
         assert body["period_end"] is not None
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_get_my_token_usage_unlimited_plan(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        await User.get_collection().update_one(
+            {"_id": ObjectId(user.id)}, {"$set": {"rate_limit_group": "unlimited"}}
+        )
+        response = await async_client.get(
+            "/users/me/token-usage",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["unlimited"] is True
+        assert body["rate_limit_group"] == "unlimited"
+        assert body["max_tokens"] is None
+        assert body["remaining_tokens"] is None
     finally:
         await cleanup_models([user])
 
