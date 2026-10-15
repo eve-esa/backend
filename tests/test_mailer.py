@@ -792,6 +792,30 @@ async def test_smtp_waits_at_most_ten_seconds_per_operation(monkeypatch, both_tr
     assert smtp.call_args.kwargs["timeout"] == 10
 
 
+@pytest.mark.asyncio
+async def test_smtp_greets_the_relay_with_the_smtp_sender_domain(monkeypatch, both_transports):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert smtp.call_args.kwargs["local_hostname"] == "mail.example.org"
+
+
+@pytest.mark.asyncio
+async def test_smtp_greets_with_the_fallback_sender_domain_when_no_smtp_sender(
+    monkeypatch, both_transports
+):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert smtp.call_args.kwargs["local_hostname"] == "eve.test"
+
+
 def test_the_ses_client_has_short_deadlines_and_two_attempts(monkeypatch):
     client = MagicMock()
     factory = MagicMock(return_value=client)

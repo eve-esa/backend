@@ -206,6 +206,16 @@ def _build_message(
     return message
 
 
+def _helo_name(sender: str) -> str:
+    """The name to greet the relay with: the domain of the From address.
+
+    smtplib defaults to ``socket.getfqdn()``, an internal name or address of
+    the task, and a HELO that is not a sender domain is scored against the message. ``_sender``
+    already refused an address without a domain, so this is never blank.
+    """
+    return parseaddr(sender)[1].rpartition("@")[2]
+
+
 def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> None:
     """Blocking SMTP send, called from a worker thread.
 
@@ -228,7 +238,12 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     server = None
     delivered = False
     try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS)
+        server = smtplib.SMTP(
+            SMTP_HOST,
+            SMTP_PORT,
+            timeout=SMTP_TIMEOUT_SECONDS,
+            local_hostname=_helo_name(sender),
+        )
         if SMTP_USERNAME:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
