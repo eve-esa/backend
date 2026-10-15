@@ -11,6 +11,19 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.5.0](https://github.com/eve-esa/backend/compare/v1.4.0...v1.5.0) (2026-10-15)
+
+
+### Added
+
+* **mail:** fall back to SES when SMTP delivery fails ([#323](https://github.com/eve-esa/backend/issues/323)) ([84642c5](https://github.com/eve-esa/backend/commit/84642c5f3bef9ed962c73d46008c3bd7a45c1b91))
+* **mail:** route canary recipients through SMTP ([#321](https://github.com/eve-esa/backend/issues/321)) ([700d981](https://github.com/eve-esa/backend/commit/700d981567ca4926b5c0c99e651b23984354ebad))
+
+
+### Fixed
+
+* **mail:** greet the SMTP relay with the sender domain ([#324](https://github.com/eve-esa/backend/issues/324)) ([8b2f4c6](https://github.com/eve-esa/backend/commit/8b2f4c6509f4241bcc9be155cc5b7708021b6604))
+
 ## [1.4.0](https://github.com/eve-esa/backend/compare/v1.3.0...v1.4.0) (2026-10-15)
 
 
