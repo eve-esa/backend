@@ -211,6 +211,7 @@ APP_ENVIRONMENT=dev
 | `SMTP_PASSWORD` | No | SMTP password. |
 | `SMTP_FROM_ADDRESS` | No | From header on the SMTP path only; blank falls back to `EMAIL_FROM_ADDRESS`. |
 | `MAIL_CANARY_TAG` | No | With `MAIL_TRANSPORT=ses`, recipients whose local part contains this tag go through SMTP; blank matches nobody. |
+| `MAIL_FALLBACK_TRANSPORT` | No | `ses` resends through SES, from `EMAIL_FROM_ADDRESS`, a message the SMTP path failed on; blank (default) means no fallback. |
 | `EMAIL_FROM_ADDRESS` | No | Sender email address. |
 | `EMAIL_FROM_NAME` | No | Sender display name (default `EVE`). |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated list of allowed origins (default `http://localhost:5173`). |

@@ -17,6 +17,21 @@ recipients whose local part carries the tag to SMTP, so a new relay can be
 proven on a few test mailboxes while every real user stays on SES. The choice
 is made in one place, :func:`_choose_transport`.
 
+``MAIL_FALLBACK_TRANSPORT=ses`` keeps a relay outage from losing mail: when
+the chosen transport is SMTP and the send raises, the same message goes out
+through SES with the SES sender, and one WARNING line says why. Delivery is
+at-least-once by choice. Once the relay has answered DATA the mail counts as
+sent and nothing after it (a failed QUIT) falls back; a disconnect or timeout
+while waiting for that answer is ambiguous, because the relay may have queued
+the message, and it falls back: a second copy of a code mail beats none.
+
+Deadlines: each SMTP operation (connect, EHLO, STARTTLS, AUTH, MAIL, RCPT,
+DATA) waits at most ``SMTP_TIMEOUT_SECONDS``, so a black-holed relay costs one
+of them; SES gets two attempts of 3 s to connect and 8 s to read. The worst
+case of one fallback send is therefore about 10 s plus 22 s, past the back
+office's 10 s wait: the back office can report a failure for a mail that
+still arrives.
+
 Recipients are never logged in full. A subject and a domain are enough to see
 that mail is flowing; the address belongs in the message, not in CloudWatch.
 """
@@ -31,11 +46,14 @@ from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid, parseaddr
 
 import boto3
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 
 from src.config import (
     EMAIL_FROM_ADDRESS,
     EMAIL_FROM_NAME,
     MAIL_CANARY_TAG,
+    MAIL_FALLBACK_TRANSPORT,
     MAIL_TRANSPORT,
     SES_CONFIGURATION_SET,
     SMTP_FROM_ADDRESS,
@@ -49,7 +67,15 @@ logger = logging.getLogger(__name__)
 
 # Long enough for a slow relay handshake, short enough that a black-holed host
 # cannot pin a worker thread for minutes.
-SMTP_TIMEOUT_SECONDS = 20.0
+SMTP_TIMEOUT_SECONDS = 10.0
+
+# Two short attempts: SES either answers in well under a second or is down,
+# and the caller is usually a request somebody is waiting on.
+SES_CLIENT_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=8,
+    retries={"total_max_attempts": 2, "mode": "standard"},
+)
 
 TRANSPORT_OFF = "off"
 TRANSPORT_SMTP = "smtp"
@@ -64,17 +90,47 @@ class MailDeliveryFailed(RuntimeError):
     """The relay refused the message. Names the error class, never the address.
 
     smtplib errors such as ``SMTPRecipientsRefused`` carry the recipient in their
-    text, and callers log failures with ``exc_info``.
+    text, and so does the SES ``MessageRejected`` message, while callers log
+    failures with ``exc_info``. The class name and the SMTP reply code or AWS
+    error code survive as attributes, for the fallback log line.
     """
+
+    def __init__(
+        self, message: str, *, reason: str = "", code: int | str | None = None
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.code = code
 
 
 _ses_client = None
+_bad_fallback_logged = False
 
 
 def _recipient_domain(address: str) -> str:
     """The part of an address that is safe to log."""
     _, _, domain = address.rpartition("@")
     return domain or "unknown"
+
+
+def _smtp_code(exc: smtplib.SMTPException) -> int | None:
+    """The reply code of a refused SMTP command, when the server sent one."""
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return exc.smtp_code
+    if isinstance(exc, smtplib.SMTPRecipientsRefused) and exc.recipients:
+        code, _ = next(iter(exc.recipients.values()))
+        return code
+    return None
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """``reason=<class>[ code=<n>]`` for a failed send, with no address in it."""
+    if isinstance(exc, MailDeliveryFailed) and exc.reason:
+        reason = exc.reason
+        if exc.code is not None:
+            reason += f" code={exc.code}"
+        return reason
+    return type(exc).__name__
 
 
 def _choose_transport(transport: str, to: str) -> str:
@@ -167,14 +223,35 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     message = _build_message(
         sender=sender, to=to, subject=subject, html=html, text=text
     )
+    # Not a ``with`` block: its QUIT can raise after the relay accepted DATA,
+    # and that error must not read as a failed send and trigger a second copy.
+    server = None
+    delivered = False
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
-            if SMTP_USERNAME:
-                server.starttls()
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(message, to_addrs=[to])
-    except smtplib.SMTPException as exc:
-        raise MailDeliveryFailed(f"SMTP send failed: {type(exc).__name__}") from None
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS)
+        if SMTP_USERNAME:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.send_message(message, to_addrs=[to])
+        delivered = True
+        server.quit()
+    except Exception as exc:
+        if delivered:
+            logger.info(
+                "mail smtp session ended with %s after the relay accepted the message",
+                type(exc).__name__,
+            )
+        elif isinstance(exc, smtplib.SMTPException):
+            raise MailDeliveryFailed(
+                f"SMTP send failed: {type(exc).__name__}",
+                reason=type(exc).__name__,
+                code=_smtp_code(exc),
+            ) from None
+        else:
+            raise
+    finally:
+        if server is not None:
+            server.close()
 
 
 def _get_ses_client():
@@ -187,13 +264,18 @@ def _get_ses_client():
     """
     global _ses_client
     if _ses_client is None:
-        _ses_client = boto3.client("sesv2")
+        _ses_client = boto3.client("sesv2", config=SES_CLIENT_CONFIG)
     return _ses_client
 
 
 def _reset_ses_client_for_tests() -> None:
     global _ses_client
     _ses_client = None
+
+
+def _reset_fallback_warning_for_tests() -> None:
+    global _bad_fallback_logged
+    _bad_fallback_logged = False
 
 
 def _send_ses(*, sender: str, to: str, subject: str, html: str, text: str) -> None:
@@ -217,7 +299,38 @@ def _send_ses(*, sender: str, to: str, subject: str, html: str, text: str) -> No
     }
     if SES_CONFIGURATION_SET:
         request["ConfigurationSetName"] = SES_CONFIGURATION_SET
-    _get_ses_client().send_email(**request)
+    try:
+        _get_ses_client().send_email(**request)
+    except (ClientError, BotoCoreError) as exc:
+        code = None
+        if isinstance(exc, ClientError):
+            code = exc.response.get("Error", {}).get("Code") or None
+        raise MailDeliveryFailed(
+            f"SES send failed: {type(exc).__name__}" + (f" {code}" if code else ""),
+            reason=type(exc).__name__,
+            code=code,
+        ) from None
+
+
+def _fallback_for_smtp() -> str:
+    """The fallback transport for an SMTP send, or "" for none.
+
+    Read only on the SMTP path: a typo in a setting that matters to SMTP alone
+    must not block SES mail, so it logs one ERROR and disables the fallback.
+    """
+    global _bad_fallback_logged
+    fallback = MAIL_FALLBACK_TRANSPORT or ""
+    if fallback in ("", TRANSPORT_SES):
+        return fallback
+    if not _bad_fallback_logged:
+        _bad_fallback_logged = True
+        logger.error(
+            "Unknown MAIL_FALLBACK_TRANSPORT %r: expected blank or %r; "
+            "SMTP mail is sent without a fallback",
+            fallback,
+            TRANSPORT_SES,
+        )
+    return ""
 
 
 async def send_mail(to: str, subject: str, html: str, text: str) -> None:
@@ -238,6 +351,37 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
         )
         return
 
+    if transport == TRANSPORT_SMTP and _fallback_for_smtp() == TRANSPORT_SES:
+        try:
+            await asyncio.to_thread(
+                _send_smtp,
+                sender=_sender(TRANSPORT_SMTP),
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+            )
+        except Exception as exc:
+            # The SMTP error is only logged: the caller sees SES's verdict.
+            logger.warning(
+                "mail.fallback from=%s to=%s reason=%s recipient_domain=%s",
+                TRANSPORT_SMTP,
+                TRANSPORT_SES,
+                _failure_reason(exc),
+                _recipient_domain(to),
+            )
+            transport = TRANSPORT_SES
+            await asyncio.to_thread(
+                _send_ses,
+                sender=_sender(TRANSPORT_SES),
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+            )
+        _log_sent(transport, subject, to)
+        return
+
     sender = _sender(transport)
 
     if transport == TRANSPORT_SMTP:
@@ -254,6 +398,10 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
             f"{TRANSPORT_OFF!r}, {TRANSPORT_SMTP!r}, {TRANSPORT_SES!r}"
         )
 
+    _log_sent(transport, subject, to)
+
+
+def _log_sent(transport: str, subject: str, to: str) -> None:
     logger.info(
         "mail sent via %s subject=%r recipient_domain=%s",
         transport,
