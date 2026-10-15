@@ -11,12 +11,13 @@ Config is read once at import, so the knobs are monkeypatched on
 """
 
 import email.utils
+import smtplib
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.services import mailer
-from src.services.mailer import MailNotConfigured, send_mail
+from src.services.mailer import MailDeliveryFailed, MailNotConfigured, send_mail
 
 pytestmark = pytest.mark.no_db
 
@@ -347,3 +348,105 @@ async def test_one_info_line_names_the_transport_and_the_domain_only(
     assert "recipient_domain=example.com" in line
     assert "person" not in line
     assert "canary" not in line
+
+
+@pytest.mark.asyncio
+async def test_the_canary_path_upgrades_and_authenticates(monkeypatch, both_transports):
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+
+    await send_mail(
+        to="person+eve-mail-canary@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    server = smtp.return_value.__enter__.return_value
+    server.starttls.assert_called_once()
+    server.login.assert_called_once_with("mailer", "secret")
+    # Envelope recipient is the one address, never re-parsed from the header.
+    assert server.send_message.call_args.kwargs["to_addrs"] == [
+        "person+eve-mail-canary@example.com"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_relay_sender_without_credentials_fails_closed(
+    monkeypatch, both_transports
+):
+    """The Gmail sender with no username would mean plain SMTP without TLS."""
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "SMTP_FROM_ADDRESS", SMTP_SENDER)
+    monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
+
+    with pytest.raises(MailNotConfigured) as excinfo:
+        await send_mail(
+            to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+        )
+
+    assert "SMTP_USERNAME" in str(excinfo.value)
+    smtp.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_recipient_never_reaches_the_error(monkeypatch, both_transports):
+    """Callers log with exc_info, so the raised error must not carry the address."""
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    address = "person+eve-mail-canary@example.com"
+    server = smtp.return_value.__enter__.return_value
+    server.send_message.side_effect = smtplib.SMTPRecipientsRefused(
+        {address: (550, f"5.1.1 <{address}> does not exist".encode())}
+    )
+
+    with pytest.raises(MailDeliveryFailed) as excinfo:
+        await send_mail(to=address, subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    assert "SMTPRecipientsRefused" in str(excinfo.value)
+    assert "person" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_sender_fails_closed(monkeypatch, both_transports):
+    """An unquoted comma splits the From in two and leaves no domain to sign with."""
+    smtp, _ = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(
+        mailer, "SMTP_FROM_ADDRESS", "EVE by ESA, Phi Lab <eve@mail.example.org>"
+    )
+
+    with pytest.raises(MailNotConfigured):
+        await send_mail(
+            to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+        )
+
+    smtp.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_the_tag_matches_the_local_part_only(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", "canary")
+
+    await send_mail(
+        to="person@canary.example.com", subject="Hi", html="<p>Hi</p>", text="Hi"
+    )
+
+    smtp.assert_not_called()
+    ses.send_email.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_smtp_with_a_tag_stays_smtp(monkeypatch, both_transports):
+    smtp, ses = both_transports
+    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
+    monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    ses.send_email.assert_not_called()
+    smtp.return_value.__enter__.return_value.send_message.assert_called_once()
