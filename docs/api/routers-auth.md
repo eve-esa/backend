@@ -27,10 +27,10 @@ curl -s "$BASE_URL/users/me" -H "Authorization: Bearer $EVE_API_KEY"
 ## Why
 
 The identity-provider migration is documented in
-[`adr/identity-provider-architecture.md`](../adr/identity-provider-architecture.md). In short:
+[`adr/identity-provider-architecture.md`](https://github.com/eve-esa/backend/blob/main/docs/adr/identity-provider-architecture.md). In short:
 the app only verifies issuer, audience and JWT signature; which product issues the token
 (Keycloak locally, Cognito in the cloud) is not the backend's concern.
 
 ## Full API reference
 
-For exhaustive schema details, use [Swagger API](./swagger-api.md).
+For exhaustive schema details, use [Swagger API](https://eve-esa.github.io/eve-guide/backend-swagger/).

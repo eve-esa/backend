@@ -4,8 +4,8 @@ A FastAPI-based backend service for chat with Retrieval-Augmented Generation (RA
 
 For setup and running the backend, see:
 
-- [Local development & configuration](https://eve-esa.github.io/eve-guide/backend/docs/local_setup/) — prerequisites, environment variables, and running the backend directly on your machine
-- [Docker setup](https://eve-esa.github.io/eve-guide/backend/docs/docker_setup/) — run the backend with Docker Compose
+- [Local development & configuration](https://eve-esa.github.io/eve-guide/backend/docs/local_setup/): prerequisites, environment variables, and running the backend directly on your machine
+- [Docker setup](https://eve-esa.github.io/eve-guide/backend/docs/docker_setup/): run the backend with Docker Compose
 
 For additional deployment details, you can also refer to [README.md](https://github.com/eve-esa/backend/blob/main/README.md).
 
@@ -21,7 +21,7 @@ For additional deployment details, you can also refer to [README.md](https://git
 
 ```text
 src/
-  routers/            # FastAPI route handlers (auth, collection, document, conversation, message, tool, user, health)
+  routers/            # FastAPI route handlers (user, collection, document, conversation, message, health_check, openai_proxy, mcp_proxy)
   services/           # Business logic (auth, generate_answer, email, hallucination, etc.)
   database/           # ODM-style models and pagination helpers
   core/               # Vector store and LLM managers
@@ -54,17 +54,25 @@ docs/                 # Site content (this page, api references)
 
 ### API guides (usage-first)
 
-- Auth (identity provider, API keys): `[routers-auth]`
+- Auth (identity provider, API keys): [routers-auth](api/routers-auth.md)
 - API keys (create/list/revoke, curl walkthrough): [api-keys](api/api-keys.md)
 - OpenAI-compatible gateway (`/v1/*`, budget, SDK example): [openai-gateway](api/openai-gateway.md)
-- Collections (public/private + examples): `[routers-collection]`
-- Documents (ingestion + examples): `[routers-document]`
-- Conversations (chat lifecycle + examples): `[routers-conversation]`
-- Messages (generation/streaming + examples): `[routers-message]`
-- Error logs (how / kinds / call sites): [error-logs](error-logs.md)
+- Collections (public/private + examples): [routers-collection](api/routers-collection.md)
+- Documents (ingestion + examples): [routers-document](api/routers-document.md)
+- Conversations (chat lifecycle + examples): [routers-conversation](api/routers-conversation.md)
+- Messages (generation/streaming + examples): [routers-message](api/routers-message.md)
+- Generation failures (error codes, 429 and Retry-After): [generation-errors](api/generation-errors.md)
 - Bug reports (`POST /bug-reports`, rate limit, log event): [bug-reports](api/bug-reports.md)
 
-Use `[swagger-api]` only when you need exhaustive field-level reference.
+Use [swagger-api](https://eve-esa.github.io/eve-guide/backend-swagger/) only when you need exhaustive field-level reference.
+
+### Base URLs
+
+| Target | Base URL |
+| --- | --- |
+| Production API | `https://eve-chat.chat/api` |
+| OpenAI-compatible gateway | `https://eve-chat.chat/api/v1` |
+| Local backend | `http://localhost:8000` |
 
 ### Shared API setup
 
@@ -73,13 +81,13 @@ Use this once and reuse it across all API examples:
 ```python
 import requests
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "https://eve-chat.chat/api"  # local: http://localhost:8000
 
-# Auth flow:
-# 1) signup -> verify -> login
-# 2) set ACCESS_TOKEN from login response
-ACCESS_TOKEN = "<your_access_token>"
-headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+# Bearer credential, either of:
+# - an access token from the identity provider (sign in at https://eve-chat.chat)
+# - an eve_ API key (see API keys)
+TOKEN = "<access_token_or_eve_api_key>"
+headers = {"Authorization": f"Bearer {TOKEN}"}
 ```
 
 ### Recommended API call order
@@ -105,7 +113,7 @@ headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 - Message endpoints require a valid `conversation_id`.
 - Generation endpoints require valid collection names (`public_collections`) from collection listing.
 - Document endpoints require a valid private `collection_id`.
-- Most non-auth endpoints require `Authorization: Bearer <access_token>`.
+- Every route except `/health` and `/collections/public` requires `Authorization: Bearer <token>`, with an access token or an `eve_` API key.
 
 ### Message generation flow (high-level)
 
