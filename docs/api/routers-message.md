@@ -594,4 +594,4 @@ Returns average pipeline latency metrics for the selected date range.
 
 ## Full API reference
 
-For exhaustive schema details, use [Swagger API](./swagger-api.md).
+For exhaustive schema details, use [Swagger API](https://eve-esa.github.io/eve-guide/backend-swagger/).

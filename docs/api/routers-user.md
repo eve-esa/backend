@@ -119,4 +119,4 @@ curl walkthrough live in [API keys](api-keys.md); this page only links the endpo
 
 ## Full API reference
 
-For exhaustive schema details, use [Swagger API](./swagger-api.md).
+For exhaustive schema details, use [Swagger API](https://eve-esa.github.io/eve-guide/backend-swagger/).

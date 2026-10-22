@@ -64,7 +64,7 @@ docs/                 # Site content (this page, api references)
 - Generation failures (error codes, 429 and Retry-After): [generation-errors](api/generation-errors.md)
 - Bug reports (`POST /bug-reports`, rate limit, log event): [bug-reports](api/bug-reports.md)
 
-Use [swagger-api](api/swagger-api.md) only when you need exhaustive field-level reference.
+Use [swagger-api](https://eve-esa.github.io/eve-guide/backend-swagger/) only when you need exhaustive field-level reference.
 
 ### Base URLs
 

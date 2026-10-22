@@ -126,4 +126,4 @@ resp = client.chat.completions.create(
 
 ## Full API reference
 
-For exhaustive schema details, use [Swagger API](./swagger-api.md).
+For exhaustive schema details, use [Swagger API](https://eve-esa.github.io/eve-guide/backend-swagger/).
