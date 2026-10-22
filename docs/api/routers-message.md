@@ -4,7 +4,7 @@ This page covers chat generation, streaming, retry, feedback, and testing endpoi
 
 ## API call order
 
-1. Authenticate first (`/signup` + `/verify` + `/login`).
+1. Authenticate first: an identity provider access token or an `eve_` API key ([Auth](routers-auth.md)).
 2. Create conversation with `POST /conversations`.
 3. Get valid collection names via `GET /collections/public` (and/or private collection names you own).
 4. Call the [agentic generation](#agentic-generation) endpoints with `conversation_id` and collection names.
@@ -231,6 +231,14 @@ the model's to pick.
   call came back as an error, returns `false`.
 - `public_mcp_servers` selects which MCP servers are attached as tools for the
   request; only enabled servers present in the MCP server store are resolved.
+
+## Busy service (429 `overloaded`)
+
+Every generation route (`/messages`, `/stream_messages`, `.../retry`, `/generate-agentic`,
+`/stream-generate-agentic`) answers `429` with `Retry-After: 10` and
+`{"detail": {"code": "overloaded", "message": "The service is busy, retry in a few seconds"}}`
+when the server already runs its maximum of concurrent generations. Wait `Retry-After`
+seconds, then send the request again. See [Generation failures](generation-errors.md).
 
 ## Update message feedback
 

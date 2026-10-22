@@ -104,7 +104,7 @@ to use it, then revoking the old one. A key created for this purpose can use the
 ## curl walkthrough
 
 ```bash
-BASE=https://dev.eve-chat.chat/api
+BASE=https://eve-chat.chat/api
 
 # 1. First key: from the web app (sidebar > API keys), or with a session access token.
 curl -s -X POST "$BASE/users/api-keys" \
@@ -136,12 +136,12 @@ curl -s "$BASE/users/me/token-usage" -H "Authorization: Bearer $EVE_API_KEY"
 curl -s -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $EVE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "eve", "messages": [{"role": "user", "content": "hi"}]}'
+  -d '{"model": "jsc/alias-eve", "messages": [{"role": "user", "content": "hi"}]}'
 
 curl -sN -X POST "$BASE/v1/chat/completions" \
   -H "Authorization: Bearer $EVE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model": "eve", "messages": [{"role": "user", "content": "hi"}], "stream": true}'
+  -d '{"model": "jsc/alias-eve", "messages": [{"role": "user", "content": "hi"}], "stream": true}'
 
 # 5. Revoke. Children of this key stop working too (401), the key itself then answers 404.
 curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$BASE/users/api-keys/<id>" \

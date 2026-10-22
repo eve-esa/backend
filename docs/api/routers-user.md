@@ -5,8 +5,8 @@ keys.
 
 ## API call order
 
-1. Complete auth flow (`/signup`, `/verify`, `/login`) or hold an `eve_` API key.
-2. Use `access_token` (or the API key) in the `Authorization` header.
+1. Sign in at the identity provider for an access token, or hold an `eve_` API key.
+2. Send either one as `Authorization: Bearer <token>`.
 3. Call user routes (`/users/me`, `/users/me/token-usage`, `/users` patch, `/users/api-keys`).
 
 Shared request setup is documented once in [API index](https://eve-esa.github.io/eve-guide/backend/docs/).

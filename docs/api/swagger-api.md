@@ -1,3 +1,3 @@
 # Swagger API
 
-<swagger-ui src="https://api.eve-chat.chat/openapi.json"/>
+<swagger-ui src="https://eve-chat.chat/api/openapi.json"/>
