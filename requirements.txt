@@ -46,7 +46,7 @@ rich==13.9.4
 aiodns==4.0.4
 pycares==5.0.1
 pyyaml==6.0.3
-pypdf==6.19.0
+pypdf==6.21.2
 pymongo==4.17.0
 motor==3.7.1
 PyJWT[crypto]==2.15.1
