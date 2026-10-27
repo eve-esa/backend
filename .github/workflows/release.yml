@@ -79,7 +79,7 @@ jobs:
   # than widening the path filter keeps the ordering deterministic: widening it would start the
   # build and this workflow on the same push, racing each other.
   deploy-dev:
-    name: Build the release commit
+    name: Deploy dev · agents ${{ needs.agents-ref.outputs.ref }}
     needs: [release-please, agents-ref]
     if: needs.release-please.outputs.released == 'true'
     permissions:
@@ -96,7 +96,7 @@ jobs:
   # tag as its ref. workflow_dispatch is also one of the two events that still fire when raised
   # with GITHUB_TOKEN, so no App token is needed here.
   promote-staging:
-    name: Promote to staging
+    name: Promote ${{ needs.release-please.outputs.tag }} to staging
     needs: [release-please, deploy-dev]
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest

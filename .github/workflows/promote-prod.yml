@@ -6,7 +6,7 @@
 # because the esa-eve-prod environment only allows v* refs to deploy and anything else is rejected
 # before the job runs. One approval is required before the job starts.
 name: "promote: prod"
-run-name: promote prod ${{ inputs.version }}
+run-name: promote prod · backend ${{ inputs.version }}
 
 on:
   workflow_dispatch:
