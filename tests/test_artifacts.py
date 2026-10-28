@@ -1,6 +1,5 @@
 import io
 import re
-from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -275,15 +274,20 @@ class _CollidingCounter:
         self._winner_count = winner_count
         self._collisions = collisions
         self.calls = 0
+        self.quota_id = None
 
     async def find_one_and_update(self, *args, **kwargs):
         self.calls += 1
         if self.calls <= self._collisions:
             if self.calls == 1:
-                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                # Reuse the id the function under test asked for, so a run that
+                # straddles UTC midnight cannot insert the winner under another day.
+                query = args[0] if args else kwargs["filter"]
+                self.quota_id = query["_id"]
+                day = self.quota_id.rsplit(":", 1)[1]
                 await self._real.insert_one(
                     {
-                        "_id": f"{self._user_id}:{day}",
+                        "_id": self.quota_id,
                         "day": day,
                         "user_id": self._user_id,
                         "count": self._winner_count,
@@ -309,7 +313,7 @@ async def test_quota_slot_retries_once_after_duplicate_key(monkeypatch):
     try:
         await reserve_daily_quota_slot(user_id)
         assert counter.calls == 2
-        stored = await get_collection("image_upload_quota").find_one({"user_id": user_id})
+        stored = await get_collection("image_upload_quota").find_one({"_id": counter.quota_id})
         assert stored["count"] == 2
     finally:
         await _cleanup_quota(user_id)
