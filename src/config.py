@@ -318,6 +318,14 @@ REDIS_URL = os.getenv("REDIS_URL", "").strip()
 # On: thumbs are posted as scores, when the three LANGFUSE_* values below are
 # set too. Default off, like FEATURE_JSC_MODEL: only "true" turns it on.
 FEATURE_LANGFUSE_SCORES = getenv_or("FEATURE_LANGFUSE_SCORES").lower() == "true"
+
+# On: POST /conversations/{id}/documents attaches files to one conversation, and
+# chat in that conversation searches them without the user selecting a
+# collection. Off: the route answers 404 and chat ignores attached documents.
+# Default off, like FEATURE_JSC_MODEL: only "true" turns it on.
+FEATURE_CONVERSATION_DOCUMENTS = (
+    getenv_or("FEATURE_CONVERSATION_DOCUMENTS").lower() == "true"
+)
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()

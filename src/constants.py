@@ -24,6 +24,15 @@ TOKEN_OVERFLOW_LIMIT = 7_000
 MCP_MAX_TOP_N = 20
 MAX_PRIVATE_DOCUMENTS = 150
 
+# Documents attached to one conversation (POST /conversations/{id}/documents).
+# They also count against MAX_PRIVATE_DOCUMENTS.
+MAX_CONVERSATION_DOCUMENTS = 10
+MAX_CONVERSATION_DOCUMENT_BYTES = 10 * 1024 * 1024
+CONVERSATION_DOCUMENT_EXTENSIONS = (".pdf", ".txt", ".md")
+# Whole request, parsing and embedding included. Below the 120 s CloudFront
+# origin read timeout, with room for the rollback that runs after it expires.
+CONVERSATION_DOCUMENT_DEADLINE_SECONDS = 90
+
 EVE_PUBLIC_COLLECTION_NAME_PROD = "qwen-512-filtered"
 
 PRIVATE_COLLECTION_NAME_PROD = "private-collections"

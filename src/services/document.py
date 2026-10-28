@@ -134,6 +134,7 @@ class DocumentService:
 
             all_documents = []
             ingested_document_ids: List[str] = []
+            chunk_counts: Dict[str, int] = {}
             ingested_file_count = 0
             aligned_ids = list(document_ids or [])
             if len(aligned_ids) < len(files):
@@ -176,6 +177,7 @@ class DocumentService:
                 ingested_file_count += 1
                 if document_id:
                     ingested_document_ids.append(document_id)
+                    chunk_counts[document_id] = len(split_docs)
                 logger.info(f"Processed {len(split_docs)} chunks from {file.filename}")
 
             # Handle results
@@ -214,6 +216,7 @@ class DocumentService:
                         "chunk_count": len(valid_documents),
                         "file_count": ingested_file_count,
                         "ingested_document_ids": ingested_document_ids,
+                        "chunk_counts": chunk_counts,
                     },
                 )
 
