@@ -111,19 +111,10 @@ async def notify_account_approved(
 
 
 # The launch mail to legacy accounts (decision D16, sent in cohorts by
-# ``src/commands/send_cohort_invite.py``). The subject and the text block are
-# approved by product and arrive from the command line, so these defaults are
-# deliberately neutral: they say what is true for every legacy account and
-# nothing more.
+# ``src/commands/send_cohort_invite.py``). The launch copy lives in the
+# cohort_invite templates; a text block from the command line, when given,
+# replaces their structured body.
 COHORT_INVITE_SUBJECT = "The new EVE is ready for you"
-COHORT_INVITE_TEXT = (
-    "EVE, the Earth Virtual Expert by ESA Phi-lab, has a new version, and your "
-    "account comes with it.\n"
-    "\n"
-    "Sign in with the same e-mail address and password you used before. If you "
-    "do not remember your password, choose \"Forgot password\" on the sign-in "
-    "page and follow the steps."
-)
 
 
 def _paragraphs(text: str) -> list[str]:
@@ -141,16 +132,17 @@ def render_cohort_invite(
 ) -> Tuple[str, str, str]:
     """Return ``(subject, html, text)`` for the launch mail of one account.
 
-    The text block is plain text from a file the product owner approves; it is
-    escaped in the HTML part like every other value, so a stray ``<`` cannot
-    change the layout.
+    Without a text block the templates render the launch copy they own. A text
+    block is plain text from a file the product owner approves; its paragraphs
+    replace that copy and are escaped in the HTML part like every other value,
+    so a stray ``<`` cannot change the layout.
     """
     context = {
         "email": email,
         "app_url": FRONTEND_URL,
         "logo_url": f"{FRONTEND_URL}/branding/eve-logo.png",
         "sign_in_url": (sign_in_url or FRONTEND_URL).strip(),
-        "paragraphs": _paragraphs(text_block or COHORT_INVITE_TEXT),
+        "paragraphs": _paragraphs(text_block) if text_block else [],
     }
     html = _environment.get_template("cohort_invite.html").render(**context)
     text = _environment.get_template("cohort_invite.txt").render(**context)

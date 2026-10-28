@@ -1,10 +1,41 @@
-The new EVE is here
+EVE is open to everyone
 
+{% if paragraphs %}
 {% for paragraph in paragraphs %}
 {{ paragraph }}
 
 {% endfor %}
 Sign in to EVE: {{ sign_in_url }}
+{% else %}
+Hi,
+
+You pre-registered for the EVE pilot, so we wanted you to be among the first to know: the Earth Virtual Expert (EVE) is now open to everyone!
+
+Sign in to EVE: {{ sign_in_url }}
+
+
+HOW TO SIGN IN
+
+- Pilot account: sign in at {{ sign_in_url }} with the e-mail address and password you used for the pilot.
+- Forgot your password? Choose "Forgot password" on the sign-in page.
+
+
+WHAT EVE DOES
+
+EVE answers Earth Observation questions with responses grounded in EO data and peer-reviewed science, and every answer is traceable to its sources.
+
+
+WHAT COMES NEXT
+
+This is just the beginning. Expect regular updates over the coming weeks and months, including agentic capabilities that will let EVE plan multi-step analyses, retrieve and process EO data, and run tools for you.
+
+
+YOUR FEEDBACK
+
+We'd love to hear what you think. Send your feedback or questions to eve@picampus-school.com.
+
+Thank you for your early interest in EVE.
+{% endif %}
 
 Kind regards,
 The EVE Team

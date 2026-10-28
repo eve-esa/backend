@@ -113,7 +113,7 @@ def test_read_emails_file_skips_comments_blanks_and_repeats(tmp_path):
 
 
 @pytest.mark.no_db
-def test_render_uses_url_and_escapes_the_text_block():
+def test_render_text_block_overrides_the_body_and_is_escaped():
     subject, html, text = render_cohort_invite(
         "carol@example.org",
         sign_in_url="https://staging.eve-chat.chat",
@@ -125,14 +125,46 @@ def test_render_uses_url_and_escapes_the_text_block():
     assert "Second &lt;b&gt;para&lt;/b&gt; &amp; more." in html
     assert "Second <b>para</b> & more." in text
     assert "Sign in to EVE: https://staging.eve-chat.chat" in text
+    for structured in ("How to sign in", "HOW TO SIGN IN", "pre-registered"):
+        assert structured not in html
+        assert structured not in text
+    for kept in ("Kind regards,", "You are receiving this message because"):
+        assert kept in html
+        assert kept in text
 
 
 @pytest.mark.no_db
-def test_render_default_text_is_english_and_neutral():
-    subject, html, text = render_cohort_invite("dave@example.org")
+def test_render_default_is_the_structured_launch_mail():
+    url = "https://eve-chat.chat"
+    subject, html, text = render_cohort_invite("dave@example.org", sign_in_url=url)
     assert subject == "The new EVE is ready for you"
+    assert "EVE is open to everyone" in html
+    assert "EVE is open to everyone" in text
+    # The button and the link in the sign-in section both point at the URL.
+    assert html.count(f'href="{url}"') >= 2
+    assert f'<a href="{url}" style="color:#003247;">{url}</a>' in html
+    assert 'href="mailto:eve@picampus-school.com"' in html
+    for section in ("How to sign in", "What EVE does", "What comes next", "Your feedback"):
+        assert section in html
+        assert section.upper() in text
+    assert f"sign in at {url} with the e-mail address" in text
+    assert "eve@picampus-school.com" in text
     assert "Forgot password" in text
+    assert "<" not in text
     assert "dave@example.org" in text
+    for gone in ("EVE, the Earth Virtual Expert,", "\u2014", "\u00b7"):
+        assert gone not in html
+        assert gone not in text
+
+
+@pytest.mark.no_db
+def test_mail_templates_carry_no_em_dash_or_middle_dot():
+    from src.services.account_notifications import _TEMPLATES_DIR
+
+    for path in sorted(_TEMPLATES_DIR.iterdir()):
+        content = path.read_text(encoding="utf-8")
+        assert "\u2014" not in content, path.name
+        assert "\u00b7" not in content, path.name
 
 
 @pytest.mark.no_db
