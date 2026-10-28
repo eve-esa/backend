@@ -53,6 +53,7 @@ credential (prod has no writer by design):
 - `python -m src.commands.send_cohort_invite --cohort <name>` without `--apply`
 - `python -m src.commands.gc_mcp_artifacts` without `--apply`
 - `python -m src.commands.migrate_custom_model_secrets --dry-run`
+- `python -m src.commands.reconcile_private_document_counters` without `--apply`
 
 With `--apply` (or without `--dry-run`) they write and need the writer.
 
