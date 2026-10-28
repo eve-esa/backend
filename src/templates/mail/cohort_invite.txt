@@ -7,9 +7,7 @@ EVE is open to everyone
 {% endfor %}
 Sign in to EVE: {{ sign_in_url }}
 {% else %}
-Hi,
-
-You pre-registered for the EVE pilot, so we wanted you to be among the first to know: the Earth Virtual Expert (EVE) is now open to everyone!
+You pre-registered for the EVE pilot with {{ email }}, so we wanted you to be among the first to know: the Earth Virtual Expert (EVE) is now open to everyone!
 
 Sign in to EVE: {{ sign_in_url }}
 
