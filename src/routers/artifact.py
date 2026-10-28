@@ -15,7 +15,6 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
 
 from src.config import (
     ARTIFACT_UPLOAD_ALLOWED_TYPES,
@@ -67,30 +66,17 @@ async def reserve_daily_quota_slot(user_id: str) -> None:
     docs are tiny; they simply accumulate and can be reaped with a TTL index on
     `day` if that ever becomes desirable.
 
-    Two uploads that are the user's first of the day both upsert the same `_id`.
-    MongoDB retries the loser server side, DocumentDB does not and raises a duplicate
-    key error, so the upsert is retried once: the document now exists and the retry is
-    a plain increment.
-
     Raises:
         HTTPException: 429 if the daily upload limit has been reached.
-        DuplicateKeyError: if the upsert collides on both attempts.
     """
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     counter = get_collection(QUOTA_COLLECTION)
-    for attempt in (1, 2):
-        try:
-            doc = await counter.find_one_and_update(
-                {"_id": f"{user_id}:{day}"},
-                {"$inc": {"count": 1}, "$setOnInsert": {"day": day, "user_id": user_id}},
-                upsert=True,
-                return_document=ReturnDocument.AFTER,
-            )
-            break
-        except DuplicateKeyError:
-            if attempt == 2:
-                raise
-            logger.info("Daily upload quota upsert collided for user %s, retrying", user_id)
+    doc = await counter.find_one_and_update(
+        {"_id": f"{user_id}:{day}"},
+        {"$inc": {"count": 1}, "$setOnInsert": {"day": day, "user_id": user_id}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
     if doc["count"] > ARTIFACT_UPLOADS_PER_DAY:
         raise HTTPException(status_code=429, detail="Daily upload limit reached")
 
