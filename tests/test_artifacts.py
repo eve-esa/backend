@@ -2,13 +2,16 @@ import io
 import re
 
 import pytest
+from fastapi import HTTPException
 from botocore.exceptions import ClientError
+from pymongo.errors import DuplicateKeyError
 
 from tests.utils.utils import create_test_user_and_token
 from tests.utils.cleaner import cleanup_models
 from tests.utils.fake_storage import FakeStorage
 from src.database.models.artifact import Artifact, ArtifactSource
 from src.database.mongo import get_collection
+from src.routers.artifact import reserve_daily_quota_slot
 from src.services.storage import (
     ObjectNotFoundError,
     StorageService,
@@ -254,6 +257,97 @@ async def test_upload_quota_enforced_by_atomic_counter(async_client, monkeypatch
         await _cleanup_quota(user.id)
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user])
+
+
+class _CollidingCounter:
+    """Counter collection whose first upsert loses a race on `_id`.
+
+    DocumentDB does not retry an upsert that collides on `_id` (MongoDB does, server
+    side), so the real race cannot be reproduced against a local Mongo. Here the first
+    `find_one_and_update` stores the winner's document, then raises the error the loser
+    gets. `collisions` limits how many calls fail; later calls reach the real collection.
+    """
+
+    def __init__(self, user_id: str, winner_count: int, collisions: int = 1):
+        self._real = get_collection("image_upload_quota")
+        self._user_id = user_id
+        self._winner_count = winner_count
+        self._collisions = collisions
+        self.calls = 0
+        self.quota_id = None
+
+    async def find_one_and_update(self, *args, **kwargs):
+        self.calls += 1
+        if self.calls <= self._collisions:
+            if self.calls == 1:
+                # Reuse the id the function under test asked for, so a run that
+                # straddles UTC midnight cannot insert the winner under another day.
+                query = args[0] if args else kwargs["filter"]
+                self.quota_id = query["_id"]
+                day = self.quota_id.rsplit(":", 1)[1]
+                await self._real.insert_one(
+                    {
+                        "_id": self.quota_id,
+                        "day": day,
+                        "user_id": self._user_id,
+                        "count": self._winner_count,
+                    }
+                )
+            raise DuplicateKeyError("E11000 duplicate key error")
+        return await self._real.find_one_and_update(*args, **kwargs)
+
+
+def _collide_quota_counter(monkeypatch, user_id, winner_count, collisions=1):
+    counter = _CollidingCounter(user_id, winner_count, collisions)
+    monkeypatch.setattr("src.routers.artifact.get_collection", lambda name: counter)
+    return counter
+
+
+@pytest.mark.asyncio
+async def test_quota_slot_retries_once_after_duplicate_key(monkeypatch):
+    """The loser of a first-of-day upsert race retries and increments the winner's counter."""
+
+    user_id = "quota-race-retry"
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOADS_PER_DAY", 10)
+    counter = _collide_quota_counter(monkeypatch, user_id, winner_count=1)
+    try:
+        await reserve_daily_quota_slot(user_id)
+        assert counter.calls == 2
+        stored = await get_collection("image_upload_quota").find_one({"_id": counter.quota_id})
+        assert stored["count"] == 2
+    finally:
+        await _cleanup_quota(user_id)
+
+
+@pytest.mark.asyncio
+async def test_quota_slot_duplicate_key_twice_propagates(monkeypatch):
+    """The retry is bounded to one: a second collision is raised, not swallowed."""
+
+    user_id = "quota-race-twice"
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOADS_PER_DAY", 10)
+    counter = _collide_quota_counter(monkeypatch, user_id, winner_count=1, collisions=2)
+    try:
+        with pytest.raises(DuplicateKeyError):
+            await reserve_daily_quota_slot(user_id)
+        assert counter.calls == 2
+    finally:
+        await _cleanup_quota(user_id)
+
+
+@pytest.mark.asyncio
+async def test_quota_cap_enforced_after_retried_collision(monkeypatch):
+    """A retried slot still counts against the cap: over the limit is a 429."""
+
+    user_id = "quota-race-cap"
+    monkeypatch.setattr("src.routers.artifact.ARTIFACT_UPLOADS_PER_DAY", 1)
+    counter = _collide_quota_counter(monkeypatch, user_id, winner_count=1)
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            await reserve_daily_quota_slot(user_id)
+        assert excinfo.value.status_code == 429
+        assert counter.calls == 2
+    finally:
+        await _cleanup_quota(user_id)
 
 
 # ---------------- Serving -----------------
