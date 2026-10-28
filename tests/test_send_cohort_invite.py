@@ -137,7 +137,7 @@ def test_render_text_block_overrides_the_body_and_is_escaped():
 def test_render_default_is_the_structured_launch_mail():
     url = "https://eve-chat.chat"
     subject, html, text = render_cohort_invite("dave@example.org", sign_in_url=url)
-    assert subject == "The new EVE is ready for you"
+    assert subject == "EVE is now open, come try it"
     assert "EVE is open to everyone" in html
     assert "EVE is open to everyone" in text
     # The button and the link in the sign-in section both point at the URL.

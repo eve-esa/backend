@@ -114,7 +114,7 @@ async def notify_account_approved(
 # ``src/commands/send_cohort_invite.py``). The launch copy lives in the
 # cohort_invite templates; a text block from the command line, when given,
 # replaces their structured body.
-COHORT_INVITE_SUBJECT = "The new EVE is ready for you"
+COHORT_INVITE_SUBJECT = "EVE is now open, come try it"
 
 
 def _paragraphs(text: str) -> list[str]:
