@@ -940,6 +940,7 @@ async def get_mcp_context(
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     auth_text = _auth_error_text(raw)
     if auth_text is not None:
+        logger.error(f"Wiley MCP auth error: {auth_text[:200]}")
         error_obj = Exception(auth_text[:200])
         await error_logger.log_error(
             error=error_obj,
