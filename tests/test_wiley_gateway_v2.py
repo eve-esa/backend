@@ -7,7 +7,6 @@ response envelope, not that the live gateway answers.
 
 import json
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -125,6 +124,31 @@ def _patched(recorder: _Recorder, key: str = API_KEY):
     )
 
 
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"success": False, "error": "allowance exhausted", "allowance": {"remaining": 0}},
+        {"success": False},
+    ],
+)
+async def test_success_false_is_a_failure_not_a_document(
+    envelope, fresh_shared, no_error_rows
+):
+    recorder = _Recorder(envelope=envelope)
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query="q")
+        )
+
+    assert documents == []
+    no_error_rows.log_error.assert_awaited_once()
+    kwargs = no_error_rows.log_error.await_args.kwargs
+    assert kwargs["description"] == "MCP retrieval failed: success false"
+    if "error" in envelope:
+        assert str(kwargs["error"]) == "allowance exhausted"
+
+
 def test_config_points_the_wiley_server_at_v2():
     servers = svc.Config().get_mcp_servers()
     assert servers["eve-mcp-demo"]["url"] == V2_URL
@@ -159,14 +183,14 @@ async def test_call_sends_x_api_key_and_the_v2_tool_and_args(
             {
                 "query": "ocean heat content",
                 "topN": 20,
+                "includeRetractedContent": False,
                 "start_year": 2015,
                 "end_year": 2024,
             },
         )
     ]
-    assert recorder.session_kwargs == [
-        {"read_timeout_seconds": timedelta(seconds=svc.WILEY_MCP_TIMEOUT_S)}
-    ]
+    # The deadline is one total budget in get_mcp_context, not per request.
+    assert recorder.session_kwargs == [{}]
 
 
 async def test_v2_envelope_becomes_wiley_documents(fresh_shared, no_error_rows):

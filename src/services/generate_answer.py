@@ -18,6 +18,7 @@ from src.config import (
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_MODEL_NAME,
     SCRAPING_DOG_API_KEY,
+    WILEY_MCP_TIMEOUT_S,
 )
 from src.constants import (
     DEFAULT_MAX_NEW_TOKENS,
@@ -740,6 +741,20 @@ WILEY_MCP_SERVER_NAME = "eve-mcp-demo"
 WILEY_SEARCH_TOOL = "search_wiley_fulltext"
 
 
+def _failed_wiley_envelope(content_items: List[Any]) -> Optional[Dict[str, Any]]:
+    """The v2 envelope of a content item that says ``success: false``, if any."""
+    for item in content_items or []:
+        text = item.get("text") if isinstance(item, dict) else item
+        if isinstance(text, str):
+            try:
+                text = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if isinstance(text, dict) and text.get("success") is False:
+            return text
+    return None
+
+
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -765,6 +780,9 @@ async def get_mcp_context(
     args: Dict[str, Any] = {
         "query": request.query,
         "topN": min(MCP_MAX_TOP_N, request.k * 2),
+        # The collection picker promises that retracted articles are excluded:
+        # say so instead of relying on the server default.
+        "includeRetractedContent": False,
     }
     start_year, end_year = extract_year_bounds_from_filters(request.filters)
     if start_year is None and end_year is None:
@@ -826,10 +844,25 @@ async def get_mcp_context(
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
 
+    # One deadline for the whole Wiley call (initialize plus tool call), so a
+    # hung gateway costs the turn its Wiley documents and nothing else.
     mcp_start = time.perf_counter()
-    raw = await mcp_client.call_tool_on_server(
-        WILEY_MCP_SERVER_NAME, WILEY_SEARCH_TOOL, args
-    )
+    try:
+        async with asyncio.timeout(WILEY_MCP_TIMEOUT_S):
+            raw = await mcp_client.call_tool_on_server(
+                WILEY_MCP_SERVER_NAME, WILEY_SEARCH_TOOL, args
+            )
+    except TimeoutError as e:
+        mcp_retrieval_latency = time.perf_counter() - mcp_start
+        logger.error(f"Wiley MCP call timed out after {WILEY_MCP_TIMEOUT_S:g} s")
+        await error_logger.log_error(
+            error=e,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description=f"MCP retrieval timed out after {WILEY_MCP_TIMEOUT_S:g} s",
+            error_type=type(e).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     if _is_auth_error(raw):
         error_msg = (
@@ -862,14 +895,40 @@ async def get_mcp_context(
         error_obj = (
             Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
         )
+        # A bad key (401) or an exhausted allowance (429) arrives as an HTTP
+        # status at the transport; name it so the row is readable.
+        http_status = raw.get("http_status") if isinstance(raw, dict) else None
+        description = (
+            f"MCP retrieval failed: HTTP {http_status}"
+            if http_status
+            else "MCP retrieval failed"
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
             pipeline_stage=PipelineStage.RETRIEVAL,
-            description="MCP retrieval failed",
+            description=description,
             error_type=type(error_obj).__name__,
         )
         return [], {}
+
+    failed = _failed_wiley_envelope(content_items)
+    if failed is not None:
+        message = failed.get("error") or failed.get("message")
+        allowance = failed.get("allowance")
+        logger.error(
+            f"Wiley search answered success false: {message or 'no message'}"
+            f" (allowance {allowance})"
+        )
+        error_obj = Exception(str(message or "Wiley search answered success false"))
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="MCP retrieval failed: success false",
+            error_type=type(error_obj).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
 
     # Extract result items from various possible shapes. The raw items are kept
     # as-is here: they are normalised once, further down the classic pipeline.

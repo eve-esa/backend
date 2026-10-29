@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
-from datetime import timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from src.config import Config, WILEY_AUTH_TOKEN, WILEY_MCP_TIMEOUT_S
+from src.config import Config, WILEY_AUTH_TOKEN
 from src.database.models.mcp_server import MCPServer, ToolTransport
 
+import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.websocket import websocket_client
@@ -28,6 +29,48 @@ def _extract_exception_details(exc: BaseException) -> List[str]:
     else:
         details.append(f"{type(exc).__name__}: {exc}")
     return details
+
+
+def _http_status(exc: BaseException) -> Optional[int]:
+    """HTTP status of the first HTTPStatusError inside ``exc``, if any."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    if isinstance(exc, BaseExceptionGroup):
+        for sub_exc in exc.exceptions:
+            status = _http_status(sub_exc)
+            if status is not None:
+                return status
+    return None
+
+
+def _serialize_content_item(item: Any) -> Any:
+    if hasattr(item, "model_dump"):
+        data = item.model_dump()
+        if isinstance(data.get("text"), str):
+            try:
+                data["text"] = json.loads(data["text"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return data
+    try:
+        return dict(item)
+    except Exception:
+        return str(item)
+
+
+def _process_tool_result(
+    result: Any, name: str, arguments: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Convert an MCP CallToolResult to our standard format."""
+    return {
+        "content": [_serialize_content_item(c) for c in result.content],
+        "is_error": getattr(result, "is_error", None)
+        or getattr(result, "isError", None)
+        or False,
+        "server": "unknown",  # We don't have server name in this context
+        "tool_name": name,
+        "arguments": arguments or {},
+    }
 
 
 # Scholar Gateway v2 authenticates every request with a static API key in this
@@ -317,15 +360,24 @@ class MultiServerMCPClientService:
             )
 
         except Exception as e:
-            logger.error(f"Failed to call tool '{name}' on server '{server_name}': {e}")
-            return {
+            # Flatten task group errors so the row reads "HTTPStatusError: ...
+            # '401 Unauthorized' ..." instead of "unhandled errors in a TaskGroup".
+            error = " | ".join(_extract_exception_details(e)) or str(e)
+            status = _http_status(e)
+            logger.error(
+                f"Failed to call tool '{name}' on server '{server_name}': {error}"
+            )
+            failure = {
                 "content": [],
                 "is_error": True,
                 "server": server_name,
                 "tool_name": name,
                 "arguments": arguments or {},
-                "error": str(e),
+                "error": error,
             }
+            if status is not None:
+                failure["http_status"] = status
+            return failure
 
     async def _call_tool_with_original_client(
         self, server_name: str, name: str, arguments: Optional[Dict[str, Any]] = None
@@ -464,80 +516,42 @@ class MultiServerMCPClientService:
         if not url:
             raise ValueError("URL not configured for network transport")
 
-        stack = AsyncExitStack()
-        await stack.__aenter__()
-
-        try:
-            if transport == "websocket":
-                # WebSocket transport
-                ws_url = url
-                auth_value = headers.get("Authorization", "")
-                if auth_value:
-                    sep = "&" if "?" in ws_url else "?"
-                    ws_url = f"{ws_url}{sep}auth_header=Authorization&auth_value={quote(auth_value)}"
-                transport_obj = await stack.enter_async_context(
-                    websocket_client(ws_url)
-                )
-            else:
-                # HTTP transport
-                transport_obj = await stack.enter_async_context(
-                    streamablehttp_client(
-                        url, headers=headers, terminate_on_close=False
-                    )
-                )
-
-            # Handle different transport return types
-            if len(transport_obj) == 3:
-                read, write, _get_session_id = transport_obj
-            else:
-                read, write = transport_obj
-
-            # Deadline per MCP request (initialize, call_tool): a timeout
-            # raises McpError, which call_tool_on_server turns into is_error.
-            session = await stack.enter_async_context(
-                ClientSession(
-                    read,
-                    write,
-                    read_timeout_seconds=timedelta(seconds=WILEY_MCP_TIMEOUT_S),
-                )
+        if transport == "websocket":
+            # WebSocket transport
+            ws_url = url
+            auth_value = headers.get("Authorization", "")
+            if auth_value:
+                sep = "&" if "?" in ws_url else "?"
+                ws_url = f"{ws_url}{sep}auth_header=Authorization&auth_value={quote(auth_value)}"
+            transport_cm = websocket_client(ws_url)
+        else:
+            # HTTP transport
+            transport_cm = streamablehttp_client(
+                url, headers=headers, terminate_on_close=False
             )
-            await session.initialize()
-            result = await session.call_tool(name=name, arguments=arguments or {})
 
-            # Convert to our standard format
-            def _serialize_content_item(item: Any) -> Any:
-                if hasattr(item, "model_dump"):
-                    data = item.model_dump()
-                    if isinstance(data.get("text"), str):
-                        try:
-                            import json
+        # Nested async with, not a manual exit stack: an HTTP error status from
+        # the server (401, 429, 5xx) cancels the transport task group, and only
+        # its own __aexit__ turns that cancellation back into an
+        # ExceptionGroup(HTTPStatusError) that call_tool_on_server can catch.
+        # Swallowing the teardown error instead lets a bare CancelledError out
+        # and kills the whole turn. A real cancellation (Stop, deadline) still
+        # propagates. The total deadline lives with the caller.
+        result = None
+        try:
+            async with transport_cm as transport_obj:
+                read, write = transport_obj[0], transport_obj[1]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        name=name, arguments=arguments or {}
+                    )
+        except Exception as e:
+            if result is None:
+                raise
+            logger.debug(f"Ignoring transport teardown error: {e}")
 
-                            data["text"] = json.loads(data["text"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    return data
-                try:
-                    return dict(item)
-                except Exception:
-                    return str(item)
-
-            processed = {
-                "content": [_serialize_content_item(c) for c in result.content],
-                "is_error": getattr(result, "is_error", None)
-                or getattr(result, "isError", None)
-                or False,
-                "server": "unknown",  # We don't have server name in this context
-                "tool_name": name,
-                "arguments": arguments or {},
-            }
-
-            return processed
-
-        finally:
-            try:
-                await stack.aclose()
-            except BaseException as e:
-                logger.debug(f"Ignoring transport teardown error: {e}")
+        return _process_tool_result(result, name, arguments)
 
     async def call_tool_on_all_servers(
         self, name: str, arguments: Optional[Dict[str, Any]] = None
