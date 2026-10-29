@@ -9,9 +9,10 @@ user is entitled to. This recounts ``documents`` per user and writes the result:
     python -m src.commands.reconcile_private_document_counters [--apply]
 
 Defaults to a dry run that prints one line per user whose counter is wrong:
-user id, email, stored counter, document count. A dry run works with the reader
-credential: it connects without creating indexes. ``--apply`` writes, and needs
-the writer.
+user id, stored counter, document count. No email or other personal data: the
+output is pasted into tasks and kept in terminal logs. A dry run works with the
+reader credential: it connects without creating indexes. ``--apply`` writes,
+and needs the writer.
 
 Users whose counter was never set are left alone: the upload path counts their
 documents the first time it needs the value (_ensure_private_document_count_initialized).
@@ -39,8 +40,8 @@ from src.database.mongo import async_mongo_manager
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# (user id, email, stored counter, document count)
-Mismatch = Tuple[str, str, int, int]
+# (user id, stored counter, document count)
+Mismatch = Tuple[str, int, int]
 
 
 async def _document_counts() -> Dict[str, int]:
@@ -65,7 +66,7 @@ async def find_mismatches() -> Tuple[List[Mismatch], int, int, int]:
     checked = 0
     unset = 0
     cursor = User.get_collection().find(
-        {}, projection={"email": 1, "private_document_count": 1}
+        {}, projection={"private_document_count": 1}
     )
     async for row in cursor:
         checked += 1
@@ -75,14 +76,20 @@ async def find_mismatches() -> Tuple[List[Mismatch], int, int, int]:
         if stored is None:
             unset += 1
         elif stored != actual:
-            mismatches.append((user_id, row.get("email") or "", stored, actual))
+            mismatches.append((user_id, stored, actual))
     orphaned = sum(counts.values())
     return mismatches, checked, unset, orphaned
 
 
 async def _apply_one(user_id: str, stored: int) -> bool:
-    """Write a fresh count if the counter still holds ``stored``; False if it moved."""
-    actual = await Document.count_documents({"user_id": user_id})
+    """Write a fresh count if the counter still holds ``stored``; False if it moved.
+
+    Counted on the primary: on a replica set the default read goes to a
+    secondary, which can miss a document written a moment earlier (#281).
+    """
+    actual = await Document.get_primary_collection().count_documents(
+        {"user_id": user_id}
+    )
     result = await User.get_collection().update_one(
         {"_id": ObjectId(user_id), "private_document_count": stored},
         {"$set": {"private_document_count": actual}},
@@ -109,9 +116,9 @@ async def reconcile_private_document_counters(apply: bool = False) -> int:
     if orphaned:
         print(f"{orphaned} document(s) belong to users that no longer exist (left alone).")
     if mismatches:
-        print("user_id\temail\tstored\tdocuments")
-    for user_id, email, stored, actual in mismatches:
-        print(f"{user_id}\t{email}\t{stored}\t{actual}")
+        print("user_id\tstored\tdocuments")
+    for user_id, stored, actual in mismatches:
+        print(f"{user_id}\t{stored}\t{actual}")
 
     if not mismatches:
         return 0
@@ -121,7 +128,7 @@ async def reconcile_private_document_counters(apply: bool = False) -> int:
 
     fixed = 0
     skipped: List[str] = []
-    for user_id, _email, stored, _actual in mismatches:
+    for user_id, stored, _actual in mismatches:
         if await _apply_one(user_id, stored):
             fixed += 1
         else:

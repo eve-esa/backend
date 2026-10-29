@@ -46,7 +46,8 @@ async def test_dry_run_reports_and_writes_nothing(capsys):
         remaining = await reconcile.reconcile_private_document_counters(apply=False)
 
         out = capsys.readouterr().out
-        assert f"{user.id}\t{user.email}\t7\t2" in out
+        assert f"{user.id}\t7\t2" in out
+        assert user.email not in out
         assert "Dry run: nothing written" in out
         assert remaining >= 1
         assert await _counter(user) == 7
