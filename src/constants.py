@@ -28,6 +28,9 @@ MAX_PRIVATE_DOCUMENTS = 150
 # They also count against MAX_PRIVATE_DOCUMENTS.
 MAX_CONVERSATION_DOCUMENTS = 10
 MAX_CONVERSATION_DOCUMENT_BYTES = 10 * 1024 * 1024
+# Per file, after splitting: past it the embedding cannot finish within the
+# deadline below, so the file is refused before any embedding call.
+MAX_CONVERSATION_DOCUMENT_CHUNKS = 600
 CONVERSATION_DOCUMENT_EXTENSIONS = (".pdf", ".txt", ".md")
 # Whole request, parsing and embedding included. Below the 120 s CloudFront
 # origin read timeout, with room for the rollback that runs after it expires.

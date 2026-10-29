@@ -196,8 +196,9 @@ async def delete_conversation(
                 detail="You are not allowed to delete this conversation",
             )
 
-        await Message.delete_many({"conversation_id": conversation_id})
+        # First: it raises when Qdrant refuses, and nothing is deleted yet then.
         await delete_conversation_documents(requesting_user.id, conversation_id)
+        await Message.delete_many({"conversation_id": conversation_id})
         await conversation.delete()
         return {"message": "Conversation deleted successfully"}
 

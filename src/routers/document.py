@@ -26,6 +26,7 @@ from src.constants import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP,
     MAX_CONVERSATION_DOCUMENT_BYTES,
+    MAX_CONVERSATION_DOCUMENT_CHUNKS,
     MAX_CONVERSATION_DOCUMENTS,
 )
 from src.schemas.common import Pagination
@@ -206,6 +207,16 @@ async def upload_documents(
     collection = await get_collection_and_validate_ownership(
         collection_id, requesting_user
     )
+    # Attached documents go through POST /conversations/{id}/documents, which
+    # enforces the per-conversation caps this route does not know about.
+    if collection.conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "conversation_collection",
+                "message": "Attach documents to this conversation instead.",
+            },
+        )
 
     file_count = len(files)
     slots_reserved = False
@@ -345,11 +356,12 @@ async def upload_conversation_documents(
 
     Raises:
         HTTPException: 404 if the feature is off or the conversation is not
-        found; 403 if the conversation belongs to another user; 415 for a file
-        type other than pdf, txt or md; 413 for a file over 10 MB; 400
-        ``conversation_document_limit`` past 10 documents in the conversation,
-        or the private document limit; 422 if no file yields any text; 504
-        ``conversation_document_timeout`` past the upload deadline.
+        found or belongs to another user; 415 for a file type other than pdf,
+        txt or md; 413 for a file over 10 MB, or one that splits into more than
+        600 chunks; 400 ``conversation_document_limit`` past 10 documents in
+        the conversation, or the private document limit; 422 if no file yields
+        any text; 504 ``conversation_document_timeout`` past the upload
+        deadline; 500 ``conversation_document_failed`` for anything else.
     """
     if not config.FEATURE_CONVERSATION_DOCUMENTS:
         raise HTTPException(status_code=404, detail="Not Found")
@@ -357,12 +369,10 @@ async def upload_conversation_documents(
     # Primary: a client may create the conversation and attach a file right away,
     # before a secondary has the new row (backend #281, #288).
     conversation = await Conversation.find_by_id_on_primary(conversation_id)
-    if not conversation:
+    # Another user's conversation answers like a missing one, so the route never
+    # confirms that an id exists.
+    if not conversation or conversation.user_id != requesting_user.id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conversation.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="You are not allowed to access this conversation"
-        )
 
     await _validate_conversation_files(files)
 
@@ -417,11 +427,19 @@ async def upload_conversation_documents(
                 # add_documents skips a file without a source name.
                 metadata_names=names,
                 document_ids=[doc.id for doc in created_docs],
+                max_chunks_per_file=MAX_CONVERSATION_DOCUMENT_CHUNKS,
             )
 
         if not result.success:
+            if result.message == "too_many_chunks":
+                raise _conversation_document_error(
+                    413,
+                    "conversation_document_chunks",
+                    f"{(result.data or {}).get('filename')} is too long: a document "
+                    f"holds at most {MAX_CONVERSATION_DOCUMENT_CHUNKS} chunks.",
+                )
             if result.error:
-                raise HTTPException(status_code=500, detail=result.error)
+                raise RuntimeError(result.error)
             raise _conversation_document_error(
                 422,
                 "conversation_document_unreadable",
@@ -478,9 +496,15 @@ async def upload_conversation_documents(
             )
         if isinstance(e, HTTPException):
             raise
-        logger.error(f"Error attaching conversation documents: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Error processing documents: {str(e)}"
+        logger.error(
+            "Error attaching documents to conversation %s",
+            conversation_id,
+            exc_info=True,
+        )
+        raise _conversation_document_error(
+            500,
+            "conversation_document_failed",
+            "The documents could not be processed. Try again.",
         )
 
 

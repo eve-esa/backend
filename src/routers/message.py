@@ -247,8 +247,15 @@ async def apply_private_collections_to_request(
         )
 
     attached = await collection_for_chat(user_id, conversation_id)
-    if attached is not None and attached.id not in {c.id for c in user_collections}:
-        user_collections.append(attached)
+    if attached is not None:
+        if attached.id not in {c.id for c in user_collections}:
+            user_collections.append(attached)
+        # The agentic runner hands private_collections, not collection_ids, to
+        # the retrieve tool (_rag_mcp_tool_defaults), so the id goes in both.
+        if attached.id not in request.private_collections:
+            request.private_collections = list(request.private_collections) + [
+                attached.id
+            ]
 
     request.private_collections_map = {c.id: c.name for c in user_collections}
     request.user_id = user_id

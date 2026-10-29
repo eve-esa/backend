@@ -98,6 +98,7 @@ class DocumentService:
         metadata_urls: Optional[List[str] | str] = None,
         metadata_names: Optional[List[str] | str] = None,
         document_ids: Optional[List[str]] = None,
+        max_chunks_per_file: Optional[int] = None,
     ) -> DocumentResult:
         """
         Add documents to a collection.
@@ -110,6 +111,8 @@ class DocumentService:
             metadata_urls: Optional metadata URLs
             metadata_names: Optional metadata names
             document_ids: Optional Mongo document IDs aligned with ``files``
+            max_chunks_per_file: Refuse the whole batch, before any embedding,
+                when one file splits into more chunks than this
 
         Returns:
             DocumentResult: Result of the operation
@@ -173,6 +176,16 @@ class DocumentService:
                 if not split_docs:
                     logger.warning(f"No chunks produced from {file.filename}")
                     continue
+                if max_chunks_per_file and len(split_docs) > max_chunks_per_file:
+                    return DocumentResult(
+                        success=False,
+                        message="too_many_chunks",
+                        data={
+                            "collection": collection_id,
+                            "filename": file.filename,
+                            "chunk_count": len(split_docs),
+                        },
+                    )
                 all_documents.extend(split_docs)
                 ingested_file_count += 1
                 if document_id:
