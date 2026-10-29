@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from src.config import (
     SATCOM_LARGE_MODEL_NAME,
     SATCOM_SMALL_MODEL_NAME,
     SCRAPING_DOG_API_KEY,
+    WILEY_MCP_TIMEOUT_S,
 )
 from src.constants import (
     DEFAULT_MAX_NEW_TOKENS,
@@ -704,13 +706,13 @@ def _select_top_k_unique_results(
     return _deduplicate_results(ranked_results)[:top_k]
 
 
-# Wiley semanticSearch can express a publication-year window and nothing else.
+# Wiley search_wiley_fulltext can express a publication-year window and nothing else.
 # start_year / end_year are the tool arguments for a ``year`` condition.
 _WILEY_SUPPORTED_FILTER_KEYS = frozenset({"year"})
 
 
 def wiley_supports_all_filters(filters: Any) -> bool:
-    """True when Wiley semanticSearch can apply every requested filter.
+    """True when Wiley search_wiley_fulltext can apply every requested filter.
 
     A missing or empty filter is supported. Any clause Wiley cannot express,
     including a ``must`` key other than ``year``, means the search must be
@@ -735,6 +737,94 @@ def wiley_supports_all_filters(filters: Any) -> bool:
         return False
 
 
+# Wiley Scholar Gateway v2: one full-text search tool on the config.yaml server.
+WILEY_MCP_SERVER_NAME = "eve-mcp-demo"
+WILEY_SEARCH_TOOL = "search_wiley_fulltext"
+
+
+def _failed_wiley_envelope(content_items: List[Any]) -> Optional[Dict[str, Any]]:
+    """The v2 envelope of a content item that says ``success: false``, if any."""
+    for item in content_items or []:
+        text = item.get("text") if isinstance(item, dict) else item
+        if isinstance(text, str):
+            try:
+                text = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if isinstance(text, dict) and text.get("success") is False:
+            return text
+    return None
+
+
+def _parse_wiley_text(text: Any) -> Any:
+    """The parsed JSON of a text item, the item itself when it is not a string,
+    or None for a string that is not JSON."""
+    if not isinstance(text, str):
+        return text
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _is_wiley_envelope(parsed: Any) -> bool:
+    """A Scholar Gateway v2 envelope: a ``results`` list, or ``success: true``
+    (a zero-hit search may carry ``results`` as null or omit it)."""
+    return isinstance(parsed, dict) and (
+        isinstance(parsed.get("results"), list) or parsed.get("success") is True
+    )
+
+
+def _split_wiley_text_items(
+    content_items: List[Any],
+) -> tuple[List[Any], List[Optional[str]], bool]:
+    """Split content items into those to read and the non-envelope texts.
+
+    A valid Scholar Gateway v2 answer is a JSON envelope (``_is_wiley_envelope``).
+    A text item that is not one (a plain string such as ``ACCESS_DENIED: ...``,
+    which arrives with HTTP 200 and no error flag, or JSON without ``results``)
+    is never a document. Returns the items to keep (envelopes that carry a
+    results list and non-text items), the rejected texts, and whether any
+    envelope was seen. A rejected JSON or dict item is reported as None: it may
+    echo the user's query, so its text never reaches a log or an error row.
+    """
+    kept: List[Any] = []
+    rejected: List[Optional[str]] = []
+    has_envelope = False
+    for item in content_items or []:
+        if isinstance(item, dict):
+            if "text" not in item:
+                kept.append(item)
+                continue
+            text = item["text"]
+        else:
+            text = item
+        parsed = _parse_wiley_text(text)
+        if _is_wiley_envelope(parsed):
+            has_envelope = True
+            # A zero-hit envelope without a results list carries no document;
+            # handing it to the extractor would turn the envelope into one.
+            if isinstance(parsed.get("results"), list):
+                kept.append(item)
+            continue
+        rejected.append(text if isinstance(text, str) and parsed is None else None)
+    return kept, rejected, has_envelope
+
+
+_WILEY_AUTH_ERROR_RE = re.compile(
+    r"\b401\b|\bunauthori[sz]ed\b|ACCESS_DENIED", re.IGNORECASE
+)
+
+
+def _raise_if_turn_cancelled(cancel_event: Optional[asyncio.Event]) -> None:
+    """Raise CancelledError when the turn was stopped or the task is cancelling."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError()
+
+
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -756,11 +846,13 @@ async def get_mcp_context(
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
 
-    # Build tool arguments
+    # Build tool arguments (Scholar Gateway v2 has no score threshold)
     args: Dict[str, Any] = {
         "query": request.query,
         "topN": min(MCP_MAX_TOP_N, request.k * 2),
-        "threshold": request.score_threshold,
+        # The collection picker promises that retracted articles are excluded:
+        # say so instead of relying on the server default.
+        "includeRetractedContent": False,
     }
     start_year, end_year = extract_year_bounds_from_filters(request.filters)
     if start_year is None and end_year is None:
@@ -771,16 +863,20 @@ async def get_mcp_context(
     if end_year is not None:
         args["end_year"] = end_year
 
-    # Call tool with latency measurement (with one retry on auth/session expiry)
-    def _is_auth_error(raw_payload: Any) -> bool:
-        """Detect auth/session expiry messages in MCP tool response.
+    # Call tool with latency measurement. The v2 API key is static, so an auth
+    # failure is not retried: a reconnect would send the same key again.
+    def _auth_error_text(raw_payload: Any) -> Optional[str]:
+        """The plain text item that reports an auth failure, if any.
 
         Handles both top-level and nested {result: {content: [...]}} payloads and
-        items shaped as {type: 'text', text: '...'} or plain dicts/strings.
+        items shaped as {type: 'text', text: '...'} or plain strings. Only plain
+        text that is not JSON is read, so a valid envelope (and the user's query
+        it echoes) never counts; markers are word-bounded, so "1401 journals"
+        is not a 401.
         """
         try:
             if not isinstance(raw_payload, dict):
-                return False
+                return None
 
             # Support responses wrapped under 'result'
             payload = (
@@ -804,35 +900,48 @@ async def get_mcp_context(
                             return val
                 return ""
 
-            auth_markers = (
-                "oauth 2.0 token has expired",
-                "unauthorized",
-                "401",
-            )
-
             for it in items:
-                lower = _extract_text(it).lower()
-                if lower and any(marker in lower for marker in auth_markers):
-                    return True
+                text = _extract_text(it)
+                if not text or _parse_wiley_text(text) is not None:
+                    continue
+                if _WILEY_AUTH_ERROR_RE.search(text):
+                    return text
         except Exception:
-            return False
-        return False
+            return None
+        return None
 
     # Early cancellation check
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
 
+    # One deadline for the whole Wiley call (initialize plus tool call), so a
+    # hung gateway costs the turn its Wiley documents and nothing else.
     mcp_start = time.perf_counter()
-    raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
+    try:
+        async with asyncio.timeout(WILEY_MCP_TIMEOUT_S):
+            raw = await mcp_client.call_tool_on_server(
+                WILEY_MCP_SERVER_NAME, WILEY_SEARCH_TOOL, args
+            )
+    except TimeoutError as e:
+        _raise_if_turn_cancelled(cancel_event)
+        mcp_retrieval_latency = time.perf_counter() - mcp_start
+        logger.error(f"Wiley MCP call timed out after {WILEY_MCP_TIMEOUT_S:g} s")
+        await error_logger.log_error(
+            error=e,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description=f"MCP retrieval timed out after {WILEY_MCP_TIMEOUT_S:g} s",
+            error_type=type(e).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+    # A Stop that lands while a failure (a 429, say) is being processed must
+    # end the turn, not leave a spurious error row behind.
+    _raise_if_turn_cancelled(cancel_event)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-    # If auth expired, re-establish connection and retry once
-    if _is_auth_error(raw):
-        error_msg = (
-            raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
-        )
-        error_obj = (
-            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
-        )
+    auth_text = _auth_error_text(raw)
+    if auth_text is not None:
+        logger.error(f"Wiley MCP auth error: {auth_text[:200]}")
+        error_obj = Exception(auth_text[:200])
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -840,26 +949,7 @@ async def get_mcp_context(
             description="MCP auth error",
             error_type=type(error_obj).__name__,
         )
-        try:
-            await mcp_client.close()
-        except Exception:
-            pass
-        try:
-            # Reset shared instance to force reconnection with fresh token
-            logger.info(
-                "Resetting shared instance to force reconnection with fresh token"
-            )
-            MultiServerMCPClientService._shared_instance = None
-        except Exception:
-            pass
-        mcp_client = MultiServerMCPClientService.get_shared()
-        if cancel_event is not None and cancel_event.is_set():
-            raise asyncio.CancelledError()
-        mcp_start = time.perf_counter()
-        raw = await mcp_client.call_tool_on_server(
-            "eve-mcp-demo", "semanticSearch", args
-        )
-        mcp_retrieval_latency = time.perf_counter() - mcp_start
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
 
     # Normalize response payload
     content_items = []
@@ -876,14 +966,60 @@ async def get_mcp_context(
         error_obj = (
             Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
         )
+        # A bad key (401) or an exhausted allowance (429) arrives as an HTTP
+        # status at the transport; name it so the row is readable.
+        http_status = raw.get("http_status") if isinstance(raw, dict) else None
+        description = (
+            f"MCP retrieval failed: HTTP {http_status}"
+            if http_status
+            else "MCP retrieval failed"
+        )
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
             pipeline_stage=PipelineStage.RETRIEVAL,
-            description="MCP retrieval failed",
+            description=description,
             error_type=type(error_obj).__name__,
         )
         return [], {}
+
+    failed = _failed_wiley_envelope(content_items)
+    if failed is not None:
+        message = failed.get("error") or failed.get("message")
+        allowance = failed.get("allowance")
+        logger.error(
+            f"Wiley search answered success false: {message or 'no message'}"
+            f" (allowance {allowance})"
+        )
+        error_obj = Exception(str(message or "Wiley search answered success false"))
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description="MCP retrieval failed: success false",
+            error_type=type(error_obj).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+
+    content_items, rejected, has_envelope = _split_wiley_text_items(content_items)
+    if rejected and not has_envelope:
+        # No envelope at all: the gateway failed. Only a plain string is quoted:
+        # JSON may echo the user's query, which must not reach a log or a row.
+        plain = rejected[0]
+        detail = plain[:200] if plain is not None else "no results envelope"
+        logger.error(f"Wiley search answered without a results envelope: {detail}")
+        error_obj = Exception(detail)
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description=f"MCP retrieval failed: {detail}",
+            error_type=type(error_obj).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+    if rejected:
+        # An envelope is present: an extra notice is not a document either.
+        logger.debug(f"Ignoring {len(rejected)} Wiley text item(s) without a results envelope")
 
     # Extract result items from various possible shapes. The raw items are kept
     # as-is here: they are normalised once, further down the classic pipeline.
