@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -755,17 +756,41 @@ def _failed_wiley_envelope(content_items: List[Any]) -> Optional[Dict[str, Any]]
     return None
 
 
-def _split_wiley_text_items(content_items: List[Any]) -> tuple[List[Any], List[str]]:
+def _parse_wiley_text(text: Any) -> Any:
+    """The parsed JSON of a text item, the item itself when it is not a string,
+    or None for a string that is not JSON."""
+    if not isinstance(text, str):
+        return text
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _is_wiley_envelope(parsed: Any) -> bool:
+    """A Scholar Gateway v2 envelope: a ``results`` list, or ``success: true``
+    (a zero-hit search may carry ``results`` as null or omit it)."""
+    return isinstance(parsed, dict) and (
+        isinstance(parsed.get("results"), list) or parsed.get("success") is True
+    )
+
+
+def _split_wiley_text_items(
+    content_items: List[Any],
+) -> tuple[List[Any], List[Optional[str]], bool]:
     """Split content items into those to read and the non-envelope texts.
 
-    A valid Scholar Gateway v2 answer is a JSON envelope carrying a ``results``
-    list. A text item that is not one (a plain string such as
-    ``ACCESS_DENIED: ...``, which arrives with HTTP 200 and no error flag, or
-    JSON without ``results``) is never a document. Returns the items to keep
-    (envelopes and non-text items) and the rejected texts.
+    A valid Scholar Gateway v2 answer is a JSON envelope (``_is_wiley_envelope``).
+    A text item that is not one (a plain string such as ``ACCESS_DENIED: ...``,
+    which arrives with HTTP 200 and no error flag, or JSON without ``results``)
+    is never a document. Returns the items to keep (envelopes that carry a
+    results list and non-text items), the rejected texts, and whether any
+    envelope was seen. A rejected JSON or dict item is reported as None: it may
+    echo the user's query, so its text never reaches a log or an error row.
     """
     kept: List[Any] = []
-    rejected: List[str] = []
+    rejected: List[Optional[str]] = []
+    has_envelope = False
     for item in content_items or []:
         if isinstance(item, dict):
             if "text" not in item:
@@ -774,17 +799,21 @@ def _split_wiley_text_items(content_items: List[Any]) -> tuple[List[Any], List[s
             text = item["text"]
         else:
             text = item
-        parsed = text
-        if isinstance(text, str):
-            try:
-                parsed = json.loads(text)
-            except (json.JSONDecodeError, TypeError):
-                parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
-            kept.append(item)
+        parsed = _parse_wiley_text(text)
+        if _is_wiley_envelope(parsed):
+            has_envelope = True
+            # A zero-hit envelope without a results list carries no document;
+            # handing it to the extractor would turn the envelope into one.
+            if isinstance(parsed.get("results"), list):
+                kept.append(item)
             continue
-        rejected.append(text if isinstance(text, str) else json.dumps(text, default=str))
-    return kept, rejected
+        rejected.append(text if isinstance(text, str) and parsed is None else None)
+    return kept, rejected, has_envelope
+
+
+_WILEY_AUTH_ERROR_RE = re.compile(
+    r"\b401\b|\bunauthori[sz]ed\b|ACCESS_DENIED", re.IGNORECASE
+)
 
 
 def _raise_if_turn_cancelled(cancel_event: Optional[asyncio.Event]) -> None:
@@ -836,15 +865,18 @@ async def get_mcp_context(
 
     # Call tool with latency measurement. The v2 API key is static, so an auth
     # failure is not retried: a reconnect would send the same key again.
-    def _is_auth_error(raw_payload: Any) -> bool:
-        """Detect auth/session expiry messages in MCP tool response.
+    def _auth_error_text(raw_payload: Any) -> Optional[str]:
+        """The plain text item that reports an auth failure, if any.
 
         Handles both top-level and nested {result: {content: [...]}} payloads and
-        items shaped as {type: 'text', text: '...'} or plain dicts/strings.
+        items shaped as {type: 'text', text: '...'} or plain strings. Only plain
+        text that is not JSON is read, so a valid envelope (and the user's query
+        it echoes) never counts; markers are word-bounded, so "1401 journals"
+        is not a 401.
         """
         try:
             if not isinstance(raw_payload, dict):
-                return False
+                return None
 
             # Support responses wrapped under 'result'
             payload = (
@@ -868,18 +900,15 @@ async def get_mcp_context(
                             return val
                 return ""
 
-            auth_markers = (
-                "unauthorized",
-                "401",
-            )
-
             for it in items:
-                lower = _extract_text(it).lower()
-                if lower and any(marker in lower for marker in auth_markers):
-                    return True
+                text = _extract_text(it)
+                if not text or _parse_wiley_text(text) is not None:
+                    continue
+                if _WILEY_AUTH_ERROR_RE.search(text):
+                    return text
         except Exception:
-            return False
-        return False
+            return None
+        return None
 
     # Early cancellation check
     if cancel_event is not None and cancel_event.is_set():
@@ -909,13 +938,9 @@ async def get_mcp_context(
     # end the turn, not leave a spurious error row behind.
     _raise_if_turn_cancelled(cancel_event)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-    if _is_auth_error(raw):
-        error_msg = (
-            raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
-        )
-        error_obj = (
-            Exception(error_msg) if not isinstance(error_msg, Exception) else error_msg
-        )
+    auth_text = _auth_error_text(raw)
+    if auth_text is not None:
+        error_obj = Exception(auth_text[:200])
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
@@ -975,27 +1000,25 @@ async def get_mcp_context(
         )
         return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
 
-    content_items, rejected = _split_wiley_text_items(content_items)
-    has_envelope = any(
-        (isinstance(it, dict) and "text" in it) or isinstance(it, str)
-        for it in content_items
-    )
+    content_items, rejected, has_envelope = _split_wiley_text_items(content_items)
     if rejected and not has_envelope:
-        # No envelope at all: the gateway failed.
-        snippet = rejected[0][:200]
-        logger.error(f"Wiley search answered without a results envelope: {snippet}")
-        error_obj = Exception(snippet)
+        # No envelope at all: the gateway failed. Only a plain string is quoted:
+        # JSON may echo the user's query, which must not reach a log or a row.
+        plain = rejected[0]
+        detail = plain[:200] if plain is not None else "no results envelope"
+        logger.error(f"Wiley search answered without a results envelope: {detail}")
+        error_obj = Exception(detail)
         await error_logger.log_error(
             error=error_obj,
             component=Component.RETRIEVAL,
             pipeline_stage=PipelineStage.RETRIEVAL,
-            description=f"MCP retrieval failed: {snippet}",
+            description=f"MCP retrieval failed: {detail}",
             error_type=type(error_obj).__name__,
         )
         return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
-    for text in rejected:
+    if rejected:
         # An envelope is present: an extra notice is not a document either.
-        logger.debug(f"Ignoring Wiley text item without a results envelope: {text[:200]}")
+        logger.debug(f"Ignoring {len(rejected)} Wiley text item(s) without a results envelope")
 
     # Extract result items from various possible shapes. The raw items are kept
     # as-is here: they are normalised once, further down the classic pipeline.

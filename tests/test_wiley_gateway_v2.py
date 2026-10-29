@@ -151,16 +151,15 @@ async def test_success_false_is_a_failure_not_a_document(
 
 
 @pytest.mark.parametrize(
-    "text",
+    "text, description",
     [
-        "ACCESS_DENIED: Invalid or inactive API key",
-        json.dumps({"message": "no results key here"}),
+        ("Service temporarily unavailable", "MCP retrieval failed: Service temporarily unavailable"),
+        (json.dumps({"message": "no results key here"}), "MCP retrieval failed: no results envelope"),
     ],
 )
 async def test_text_without_a_results_envelope_is_a_failure_not_a_document(
-    text, fresh_shared, no_error_rows
+    text, description, fresh_shared, no_error_rows
 ):
-    # Live v2 with a bad key: HTTP 200, no error flag, one plain text item.
     recorder = _Recorder(text=text)
     key_patch, transport_patch, session_patch = _patched(recorder)
     with key_patch, transport_patch, session_patch:
@@ -171,8 +170,142 @@ async def test_text_without_a_results_envelope_is_a_failure_not_a_document(
     assert documents == []
     assert latencies["mcp_retrieval_latency"] is not None
     no_error_rows.log_error.assert_awaited_once()
-    description = no_error_rows.log_error.await_args.kwargs["description"]
-    assert description == f"MCP retrieval failed: {text[:200]}"
+    assert no_error_rows.log_error.await_args.kwargs["description"] == description
+
+
+async def test_access_denied_text_is_an_auth_error_with_its_snippet(
+    fresh_shared, no_error_rows
+):
+    # Live v2 with a bad key: HTTP 200, no error flag, one plain text item.
+    text = "ACCESS_DENIED: Invalid or inactive API key"
+    recorder = _Recorder(text=text)
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query="q")
+        )
+
+    assert documents == []
+    no_error_rows.log_error.assert_awaited_once()
+    kwargs = no_error_rows.log_error.await_args.kwargs
+    assert kwargs["description"] == "MCP auth error"
+    assert str(kwargs["error"]) == text
+
+
+async def test_json_without_results_never_logs_the_user_query(
+    fresh_shared, no_error_rows, caplog
+):
+    query = "my private research question about glaciers"
+    recorder = _Recorder(
+        text=json.dumps({"query": query, "count": 0, "note": "unexpected shape"})
+    )
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch, caplog.at_level("DEBUG"):
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query=query)
+        )
+
+    assert documents == []
+    no_error_rows.log_error.assert_awaited_once()
+    kwargs = no_error_rows.log_error.await_args.kwargs
+    assert kwargs["description"] == "MCP retrieval failed: no results envelope"
+    assert query not in kwargs["description"]
+    assert query not in str(kwargs["error"])
+    assert not any(
+        query in r.getMessage() for r in caplog.records if r.levelno >= 30
+    )
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"success": True, "query": "q", "count": 0, "totalResults": 0, "results": []},
+        {"success": True, "query": "q", "count": 0, "totalResults": 0, "results": None},
+        {"success": True, "query": "q", "count": 0, "totalResults": 0},
+    ],
+)
+async def test_zero_hit_envelope_is_not_a_failure(envelope, fresh_shared, no_error_rows):
+    recorder = _Recorder(envelope=envelope)
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query="q")
+        )
+
+    assert documents == []
+    no_error_rows.log_error.assert_not_awaited()
+
+
+async def test_envelope_plus_a_1401_notice_keeps_the_documents(
+    fresh_shared, no_error_rows
+):
+    recorder = _Recorder()
+    recorder.result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(_v2_envelope(3))),
+            TextContent(type="text", text="Coverage: 1401 journals"),
+        ]
+    )
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query="ocean heat content")
+        )
+
+    assert len(documents) == 3
+    no_error_rows.log_error.assert_not_awaited()
+
+
+async def test_stop_while_the_gateway_hangs_raises_at_the_deadline(
+    no_error_rows, monkeypatch
+):
+    monkeypatch.setattr(generate_answer, "WILEY_MCP_TIMEOUT_S", 0.3)
+    cancel_event = asyncio.Event()
+
+    async def hanging_call(*_args, **_kwargs):
+        cancel_event.set()  # the Stop lands while the call waits
+        await asyncio.sleep(30)
+
+    client = MagicMock()
+    client.call_tool_on_server = AsyncMock(side_effect=hanging_call)
+    with patch.object(
+        generate_answer.MultiServerMCPClientService, "get_shared", return_value=client
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await generate_answer.get_mcp_context(
+                GenerationRequest(query="q"), cancel_event=cancel_event
+            )
+
+    no_error_rows.log_error.assert_not_awaited()
+
+
+async def test_swallowed_task_cancel_with_an_error_result_still_raises(
+    no_error_rows,
+):
+    # The MCP client catches the cancellation and hands back an error result.
+    started = asyncio.Event()
+
+    async def swallowing_call(*_args, **_kwargs):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return {"content": [], "is_error": True, "error": "cancelled"}
+
+    client = MagicMock()
+    client.call_tool_on_server = AsyncMock(side_effect=swallowing_call)
+    with patch.object(
+        generate_answer.MultiServerMCPClientService, "get_shared", return_value=client
+    ):
+        task = asyncio.create_task(
+            generate_answer.get_mcp_context(GenerationRequest(query="q"))
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    no_error_rows.log_error.assert_not_awaited()
 
 
 async def test_stop_during_a_failing_call_raises_and_writes_no_error_row(
