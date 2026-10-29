@@ -11,6 +11,19 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.7.0](https://github.com/eve-esa/backend/compare/v1.6.0...v1.7.0) (2026-10-29)
+
+
+### Added
+
+* **documents:** reconcile private document counters ([#332](https://github.com/eve-esa/backend/issues/332)) ([b56bd60](https://github.com/eve-esa/backend/commit/b56bd600462375ddf6048c569b42f0b9a7e984a4))
+
+
+### Fixed
+
+* **artifacts:** retry the daily quota upsert once on a duplicate key ([#335](https://github.com/eve-esa/backend/issues/335)) ([161b1ab](https://github.com/eve-esa/backend/commit/161b1ab31dd73e2769beb06e858687125a4ac9f5))
+* **retrieval:** switch Wiley to the Scholar Gateway v2 connector ([#337](https://github.com/eve-esa/backend/issues/337)) ([75f2b2d](https://github.com/eve-esa/backend/commit/75f2b2d512005ed5da2608c99b7752d041bc792b))
+
 ## [1.6.0](https://github.com/eve-esa/backend/compare/v1.5.0...v1.6.0) (2026-10-28)
 
 
