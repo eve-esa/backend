@@ -755,6 +755,47 @@ def _failed_wiley_envelope(content_items: List[Any]) -> Optional[Dict[str, Any]]
     return None
 
 
+def _split_wiley_text_items(content_items: List[Any]) -> tuple[List[Any], List[str]]:
+    """Split content items into those to read and the non-envelope texts.
+
+    A valid Scholar Gateway v2 answer is a JSON envelope carrying a ``results``
+    list. A text item that is not one (a plain string such as
+    ``ACCESS_DENIED: ...``, which arrives with HTTP 200 and no error flag, or
+    JSON without ``results``) is never a document. Returns the items to keep
+    (envelopes and non-text items) and the rejected texts.
+    """
+    kept: List[Any] = []
+    rejected: List[str] = []
+    for item in content_items or []:
+        if isinstance(item, dict):
+            if "text" not in item:
+                kept.append(item)
+                continue
+            text = item["text"]
+        else:
+            text = item
+        parsed = text
+        if isinstance(text, str):
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+            kept.append(item)
+            continue
+        rejected.append(text if isinstance(text, str) else json.dumps(text, default=str))
+    return kept, rejected
+
+
+def _raise_if_turn_cancelled(cancel_event: Optional[asyncio.Event]) -> None:
+    """Raise CancelledError when the turn was stopped or the task is cancelling."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError()
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError()
+
+
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -853,6 +894,7 @@ async def get_mcp_context(
                 WILEY_MCP_SERVER_NAME, WILEY_SEARCH_TOOL, args
             )
     except TimeoutError as e:
+        _raise_if_turn_cancelled(cancel_event)
         mcp_retrieval_latency = time.perf_counter() - mcp_start
         logger.error(f"Wiley MCP call timed out after {WILEY_MCP_TIMEOUT_S:g} s")
         await error_logger.log_error(
@@ -863,6 +905,9 @@ async def get_mcp_context(
             error_type=type(e).__name__,
         )
         return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+    # A Stop that lands while a failure (a 429, say) is being processed must
+    # end the turn, not leave a spurious error row behind.
+    _raise_if_turn_cancelled(cancel_event)
     mcp_retrieval_latency = time.perf_counter() - mcp_start
     if _is_auth_error(raw):
         error_msg = (
@@ -929,6 +974,28 @@ async def get_mcp_context(
             error_type=type(error_obj).__name__,
         )
         return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+
+    content_items, rejected = _split_wiley_text_items(content_items)
+    has_envelope = any(
+        (isinstance(it, dict) and "text" in it) or isinstance(it, str)
+        for it in content_items
+    )
+    if rejected and not has_envelope:
+        # No envelope at all: the gateway failed.
+        snippet = rejected[0][:200]
+        logger.error(f"Wiley search answered without a results envelope: {snippet}")
+        error_obj = Exception(snippet)
+        await error_logger.log_error(
+            error=error_obj,
+            component=Component.RETRIEVAL,
+            pipeline_stage=PipelineStage.RETRIEVAL,
+            description=f"MCP retrieval failed: {snippet}",
+            error_type=type(error_obj).__name__,
+        )
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
+    for text in rejected:
+        # An envelope is present: an extra notice is not a document either.
+        logger.debug(f"Ignoring Wiley text item without a results envelope: {text[:200]}")
 
     # Extract result items from various possible shapes. The raw items are kept
     # as-is here: they are normalised once, further down the classic pipeline.

@@ -5,6 +5,7 @@ sends (URL, X-API-Key header, tool name and arguments) and how it reads the v2
 response envelope, not that the live gateway answers.
 """
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -147,6 +148,81 @@ async def test_success_false_is_a_failure_not_a_document(
     assert kwargs["description"] == "MCP retrieval failed: success false"
     if "error" in envelope:
         assert str(kwargs["error"]) == "allowance exhausted"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ACCESS_DENIED: Invalid or inactive API key",
+        json.dumps({"message": "no results key here"}),
+    ],
+)
+async def test_text_without_a_results_envelope_is_a_failure_not_a_document(
+    text, fresh_shared, no_error_rows
+):
+    # Live v2 with a bad key: HTTP 200, no error flag, one plain text item.
+    recorder = _Recorder(text=text)
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, latencies = await generate_answer.get_mcp_context(
+            GenerationRequest(query="q")
+        )
+
+    assert documents == []
+    assert latencies["mcp_retrieval_latency"] is not None
+    no_error_rows.log_error.assert_awaited_once()
+    description = no_error_rows.log_error.await_args.kwargs["description"]
+    assert description == f"MCP retrieval failed: {text[:200]}"
+
+
+async def test_stop_during_a_failing_call_raises_and_writes_no_error_row(
+    no_error_rows,
+):
+    # The Stop lands while the gateway's 429 is on its way back.
+    cancel_event = asyncio.Event()
+
+    async def failing_call(*_args, **_kwargs):
+        cancel_event.set()
+        return {
+            "content": [],
+            "is_error": True,
+            "error": "429 Too Many Requests",
+            "http_status": 429,
+        }
+
+    client = MagicMock()
+    client.call_tool_on_server = AsyncMock(side_effect=failing_call)
+    with patch.object(
+        generate_answer.MultiServerMCPClientService, "get_shared", return_value=client
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await generate_answer.get_mcp_context(
+                GenerationRequest(query="q"), cancel_event=cancel_event
+            )
+
+    client.call_tool_on_server.assert_awaited_once()
+    no_error_rows.log_error.assert_not_awaited()
+
+
+async def test_envelope_plus_a_notice_keeps_the_envelope_documents(
+    fresh_shared, no_error_rows
+):
+    recorder = _Recorder()
+    recorder.result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(_v2_envelope(3))),
+            TextContent(type="text", text="Notice: results are limited to 2,000 journals"),
+        ]
+    )
+    key_patch, transport_patch, session_patch = _patched(recorder)
+    with key_patch, transport_patch, session_patch:
+        documents, _ = await generate_answer.get_mcp_context(
+            GenerationRequest(query="ocean heat content")
+        )
+
+    assert len(documents) == 3
+    assert all(d["text"].startswith("chunk ") for d in documents)
+    no_error_rows.log_error.assert_not_awaited()
 
 
 def test_config_points_the_wiley_server_at_v2():
