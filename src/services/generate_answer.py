@@ -704,13 +704,13 @@ def _select_top_k_unique_results(
     return _deduplicate_results(ranked_results)[:top_k]
 
 
-# Wiley semanticSearch can express a publication-year window and nothing else.
+# Wiley search_wiley_fulltext can express a publication-year window and nothing else.
 # start_year / end_year are the tool arguments for a ``year`` condition.
 _WILEY_SUPPORTED_FILTER_KEYS = frozenset({"year"})
 
 
 def wiley_supports_all_filters(filters: Any) -> bool:
-    """True when Wiley semanticSearch can apply every requested filter.
+    """True when Wiley search_wiley_fulltext can apply every requested filter.
 
     A missing or empty filter is supported. Any clause Wiley cannot express,
     including a ``must`` key other than ``year``, means the search must be
@@ -735,6 +735,11 @@ def wiley_supports_all_filters(filters: Any) -> bool:
         return False
 
 
+# Wiley Scholar Gateway v2: one full-text search tool on the config.yaml server.
+WILEY_MCP_SERVER_NAME = "eve-mcp-demo"
+WILEY_SEARCH_TOOL = "search_wiley_fulltext"
+
+
 async def get_mcp_context(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
@@ -756,11 +761,10 @@ async def get_mcp_context(
     if cancel_event is not None and cancel_event.is_set():
         raise asyncio.CancelledError()
 
-    # Build tool arguments
+    # Build tool arguments (Scholar Gateway v2 has no score threshold)
     args: Dict[str, Any] = {
         "query": request.query,
         "topN": min(MCP_MAX_TOP_N, request.k * 2),
-        "threshold": request.score_threshold,
     }
     start_year, end_year = extract_year_bounds_from_filters(request.filters)
     if start_year is None and end_year is None:
@@ -771,7 +775,8 @@ async def get_mcp_context(
     if end_year is not None:
         args["end_year"] = end_year
 
-    # Call tool with latency measurement (with one retry on auth/session expiry)
+    # Call tool with latency measurement. The v2 API key is static, so an auth
+    # failure is not retried: a reconnect would send the same key again.
     def _is_auth_error(raw_payload: Any) -> bool:
         """Detect auth/session expiry messages in MCP tool response.
 
@@ -805,7 +810,6 @@ async def get_mcp_context(
                 return ""
 
             auth_markers = (
-                "oauth 2.0 token has expired",
                 "unauthorized",
                 "401",
             )
@@ -823,9 +827,10 @@ async def get_mcp_context(
         raise asyncio.CancelledError()
 
     mcp_start = time.perf_counter()
-    raw = await mcp_client.call_tool_on_server("eve-mcp-demo", "semanticSearch", args)
+    raw = await mcp_client.call_tool_on_server(
+        WILEY_MCP_SERVER_NAME, WILEY_SEARCH_TOOL, args
+    )
     mcp_retrieval_latency = time.perf_counter() - mcp_start
-    # If auth expired, re-establish connection and retry once
     if _is_auth_error(raw):
         error_msg = (
             raw.get("error", "MCP auth error") if isinstance(raw, dict) else str(raw)
@@ -840,26 +845,7 @@ async def get_mcp_context(
             description="MCP auth error",
             error_type=type(error_obj).__name__,
         )
-        try:
-            await mcp_client.close()
-        except Exception:
-            pass
-        try:
-            # Reset shared instance to force reconnection with fresh token
-            logger.info(
-                "Resetting shared instance to force reconnection with fresh token"
-            )
-            MultiServerMCPClientService._shared_instance = None
-        except Exception:
-            pass
-        mcp_client = MultiServerMCPClientService.get_shared()
-        if cancel_event is not None and cancel_event.is_set():
-            raise asyncio.CancelledError()
-        mcp_start = time.perf_counter()
-        raw = await mcp_client.call_tool_on_server(
-            "eve-mcp-demo", "semanticSearch", args
-        )
-        mcp_retrieval_latency = time.perf_counter() - mcp_start
+        return [], {"mcp_retrieval_latency": mcp_retrieval_latency}
 
     # Normalize response payload
     content_items = []

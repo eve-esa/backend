@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
-import time
 from urllib.parse import urlparse
 
-from src.config import Config, WILEY_AUTH_TOKEN
+from src.config import Config, WILEY_AUTH_TOKEN, WILEY_MCP_TIMEOUT_S
 from src.database.models.mcp_server import MCPServer, ToolTransport
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -30,13 +30,48 @@ def _extract_exception_details(exc: BaseException) -> List[str]:
     return details
 
 
+# Scholar Gateway v2 authenticates every request with a static API key in this
+# header. There is no OAuth exchange and no access token to cache or refresh.
+WILEY_API_KEY_HEADER = "X-API-Key"
+_WILEY_HOST = "scholargateway.ai"
+
+
+def is_wiley_url(url: Optional[str]) -> bool:
+    """True when ``url`` points at the Wiley Scholar Gateway."""
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return host == _WILEY_HOST or host.endswith("." + _WILEY_HOST)
+
+
+def with_wiley_api_key(
+    url: Optional[str], headers: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Return a copy of ``headers`` carrying the Wiley API key for a Wiley URL.
+
+    The key is sent as is, never with a Bearer prefix, and only to the Wiley
+    host. A header already configured for the server wins. With
+    ``WILEY_AUTH_TOKEN`` unset the headers are returned without a key.
+    """
+    merged = dict(headers or {})
+    if not is_wiley_url(url):
+        return merged
+    if any(k.lower() == WILEY_API_KEY_HEADER.lower() for k in merged):
+        return merged
+    if WILEY_AUTH_TOKEN:
+        merged[WILEY_API_KEY_HEADER] = WILEY_AUTH_TOKEN
+    return merged
+
+
+def _has_api_key_header(headers: Dict[str, Any]) -> bool:
+    return any(k.lower() == WILEY_API_KEY_HEADER.lower() for k in headers)
+
+
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
-    # Shared singleton and token cache across the process
+    # Shared singleton across the process
     _shared_instance: Optional["MultiServerMCPClientService"] = None
-    _wiley_access_token_shared: Optional[str] = None
-    _wiley_access_token_expiry_epoch_shared: float = 0.0
 
     def __init__(
         self,
@@ -151,8 +186,9 @@ class MultiServerMCPClientService:
                     # Stateless servers answer the closing DELETE with 404.
                     server_config_for_client["terminate_on_close"] = False
 
-                # Add headers if present
-                headers = server_config.get("headers")
+                # Add headers if present; a Wiley server also gets its API key,
+                # so tool listing through MultiServerMCPClient is authenticated.
+                headers = with_wiley_api_key(url, server_config.get("headers"))
                 if headers:
                     server_config_for_client["headers"] = headers
 
@@ -410,54 +446,11 @@ class MultiServerMCPClientService:
         """Call tool over HTTP or WebSocket transport."""
         url = server_config.get("url")
         transport = server_config.get("transport")
-        # Start with configured headers if present
-        headers = dict(server_config.get("headers", {}))
-
-        # Ensure Authorization header is a Bearer token for Wiley servers.
-        # If missing or expired, fetch a new token using client_credentials.
-        if url:
-            parsed = urlparse(url)
-            # Wiley OAuth token endpoint lives at /oauth2/token on the same host
-            token_endpoint = f"{parsed.scheme}://{parsed.netloc}/oauth2/token?grant_type=client_credentials"
-
-            # Reuse token if valid; otherwise refresh it
-            now = time.time()
-            token_value: Optional[str] = None
-
-            # Use class-level shared cache to persist across requests/instances
-            cls = type(self)
-            if (
-                cls._wiley_access_token_shared
-                and now < cls._wiley_access_token_expiry_epoch_shared
-            ):
-                token_value = cls._wiley_access_token_shared
-            else:
-                try:
-                    import httpx
-
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        if not WILEY_AUTH_TOKEN:
-                            raise RuntimeError(
-                                "WILEY_AUTH_TOKEN is not set in environment"
-                            )
-                        resp = await client.post(
-                            token_endpoint,
-                            headers={"Authorization": WILEY_AUTH_TOKEN},
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        token_value = data.get("access_token")
-                        expires_in = int(data.get("expires_in", 3600))
-                        cls._wiley_access_token_expiry_epoch_shared = now + max(
-                            0, expires_in - 60
-                        )
-                        cls._wiley_access_token_shared = token_value
-                except Exception as e:
-                    logger.error(f"Failed to obtain Wiley token: {e}")
-                    raise
-
-            if token_value:
-                headers["Authorization"] = f"Bearer {token_value}"
+        # Start with configured headers; a Wiley server gets its API key.
+        headers = with_wiley_api_key(url, server_config.get("headers"))
+        if is_wiley_url(url) and not _has_api_key_header(headers):
+            logger.error("Wiley API key missing: WILEY_AUTH_TOKEN is not set")
+            raise RuntimeError("WILEY_AUTH_TOKEN is not set in environment")
 
         # If Authorization provided but without Bearer prefix, add it
         auth_value = headers.get("Authorization")
@@ -499,7 +492,15 @@ class MultiServerMCPClientService:
             else:
                 read, write = transport_obj
 
-            session = await stack.enter_async_context(ClientSession(read, write))
+            # Deadline per MCP request (initialize, call_tool): a timeout
+            # raises McpError, which call_tool_on_server turns into is_error.
+            session = await stack.enter_async_context(
+                ClientSession(
+                    read,
+                    write,
+                    read_timeout_seconds=timedelta(seconds=WILEY_MCP_TIMEOUT_S),
+                )
+            )
             await session.initialize()
             result = await session.call_tool(name=name, arguments=arguments or {})
 
