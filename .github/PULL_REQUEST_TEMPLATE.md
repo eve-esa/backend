@@ -15,6 +15,8 @@ Only feat, fix, perf, refactor and revert appear in the changelog. A CI check va
 if it fails, edit the title in the browser and it re-runs on its own.
 
 Do not edit CHANGELOG.md. It is generated.
+
+Reviews use Conventional Comments: see the Code review section of CONTRIBUTING.md.
 -->
 
 ## What changed
