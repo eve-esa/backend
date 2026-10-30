@@ -1191,11 +1191,15 @@ class VectorStoreManager:
             )
             points.append(point)
 
-        await asyncio.to_thread(
-            self.client.upsert,
-            collection_name=PRIVATE_COLLECTION_NAME,
-            points=points,
-            wait=True,
+        # anyio, not asyncio.to_thread: a cancelled caller (an upload deadline)
+        # waits for an upsert already sent instead of returning while it is still
+        # running, so the rollback that follows deletes every point it wrote.
+        await anyio.to_thread.run_sync(
+            lambda: self.client.upsert(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                points=points,
+                wait=True,
+            )
         )
 
     def _qdrant_filter_from_dict(

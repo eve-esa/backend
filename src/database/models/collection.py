@@ -18,4 +18,11 @@ class Collection(MongoModel):
         description="Embedding model to use for the collection",
     )
 
+    # Set on the one collection that holds a conversation's attached documents.
+    # Such a collection is hidden from GET /collections and searched only in that
+    # conversation. Its points live in the shared private Qdrant collection.
+    conversation_id: Optional[str] = Field(
+        None, description="Conversation whose attached documents this holds"
+    )
+
     collection_name: ClassVar[str] = "collections"

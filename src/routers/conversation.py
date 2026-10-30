@@ -10,6 +10,7 @@ from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.database.mongo_model import PaginatedResponse
 from src.schemas.common import Pagination
+from src.services.conversation_documents import delete_conversation_documents
 
 router = APIRouter()
 
@@ -195,6 +196,8 @@ async def delete_conversation(
                 detail="You are not allowed to delete this conversation",
             )
 
+        # First: it raises when Qdrant refuses, and nothing is deleted yet then.
+        await delete_conversation_documents(requesting_user.id, conversation_id)
         await Message.delete_many({"conversation_id": conversation_id})
         await conversation.delete()
         return {"message": "Conversation deleted successfully"}
