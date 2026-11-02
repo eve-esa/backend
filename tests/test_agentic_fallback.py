@@ -1878,3 +1878,187 @@ class TestAgenticSetupLatencies:
         assert events[-1]["latencies"]["generation_unattributed_s"] == (
             latencies["generation_unattributed_s"]
         )
+
+
+def _deep_fallback_update() -> dict:
+    """One deep ``model`` update whose answer came from the fallback model."""
+    return {
+        "model": {
+            "messages": [
+                AIMessage(
+                    content="x",
+                    response_metadata={
+                        "eve_fallback_used": True,
+                        "eve_fallback_latency_s": 1.5,
+                    },
+                )
+            ]
+        }
+    }
+
+
+def _assert_no_dotted_latency_keys(latencies: dict) -> None:
+    dotted = [key for key in latencies if "." in key]
+    assert dotted == []
+
+
+class TestDeepAgentGraph:
+    def test_get_agent_graph_returns_deep_agent(self):
+        pytest.importorskip("deepagents")
+        # Agents refs before the deep graph (v0.5.5, main without the branch)
+        # have no module. The suite must stay green until that graph ships.
+        deep_graph = pytest.importorskip("agents.graphs.deep.graph")
+        from src.services.agents.core.registry import get_agent_graph
+
+        assert isinstance(get_agent_graph("deep"), deep_graph.DeepAgent)
+
+
+class TestDeepFallbackAttribution:
+    async def test_non_streaming_marks_fallback_without_a_fallback_node(self):
+        graph = _FakeUpdatesGraph([_deep_fallback_update()])
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                final_answer,
+                _documents,
+                _use_rag,
+                latencies,
+                prompts,
+                trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert final_answer == "x"
+        assert prompts["used_fallback_llm"] is True
+        assert prompts["agentic_llm_resolved"] == "fallback"
+        assert prompts["endpoint"]["answered"] == "fallback"
+        assert latencies["fallback_latency_s"] == 1.5
+        assert "node_agent_fallback_s" not in latencies
+        assert trace[0]["node"] == "model"
+
+    async def test_streaming_marks_fallback_on_persisted_state(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+        graph = _FakeStreamGraph(updates=[_deep_fallback_update()])
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        kwargs = persist.await_args.kwargs
+        assert kwargs["prompts"]["used_fallback_llm"] is True
+        assert kwargs["prompts"]["agentic_llm_resolved"] == "fallback"
+        assert kwargs["endpoint"]["answered"] == "fallback"
+        assert kwargs["latencies"]["fallback_latency_s"] == 1.5
+        assert "node_agent_fallback_s" not in kwargs["latencies"]
+
+    async def test_react_fallback_node_does_not_add_fallback_latency_s(self):
+        """React still reports ``node_agent_fallback_s`` and nothing else."""
+        updates = [
+            {"agent_fallback": {"messages": [AIMessage(content="fallback answer")]}},
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert prompts["used_fallback_llm"] is True
+        assert "node_agent_fallback_s" in latencies
+        assert "fallback_latency_s" not in latencies
+
+
+class TestDeepLatencyKeys:
+    async def test_non_streaming_renames_model_and_drops_hook_nodes(self):
+        updates = [
+            {
+                "PatchToolCallsMiddleware.before_agent": {
+                    "messages": [AIMessage(content="hook")]
+                }
+            },
+            {"model": {"messages": [AIMessage(content="answer")]}},
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(content="ok", name="search", tool_call_id="c1")
+                    ]
+                }
+            },
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                _prompts,
+                trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert "node_agent_s" in latencies
+        assert "node_tools_s" in latencies
+        _assert_no_dotted_latency_keys(latencies)
+        assert [entry["node"] for entry in trace] == [
+            "PatchToolCallsMiddleware.before_agent",
+            "model",
+            "tools",
+        ]
+
+    async def test_streaming_renames_model_and_drops_hook_nodes(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(content="a"),
+                    {"langgraph_node": "PatchToolCallsMiddleware.before_agent"},
+                ),
+                (AIMessage(content="b"), {"langgraph_node": "tools"}),
+                (AIMessage(content="c"), {"langgraph_node": "model"}),
+            ]
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        latencies = persist.await_args.kwargs["latencies"]
+        assert "node_agent_s" in latencies
+        assert "node_tools_s" in latencies
+        _assert_no_dotted_latency_keys(latencies)
+        assert persist.await_args.kwargs["trace"][-1]["node"] == "model"

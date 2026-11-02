@@ -6,13 +6,16 @@ uvloop==0.23.0
 httptools==0.8.0
 fastapi==0.142.2
 python-dotenv==1.2.3
-langchain==1.4.3
+langchain==1.4.8
 langchain-community==0.4.2
 langchain-openai==1.6.7
 langchain-mcp-adapters==0.3.2
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.8
 langgraph==1.2.12
+# Deep graph dependency of eve-esa-agents[deep]. 0.7.32 needs langchain>=1.4.7
+# and langchain-core>=1.7. Provider packages stay transitive.
+deepagents==0.7.32
 # eve-esa-agents is not listed here. The image installs it from the AGENTS_REF
 # build-arg (see the Dockerfile). A dev build resolves agents main to a commit
 # SHA. A release build passes the tag in agents.ref, and that image is what

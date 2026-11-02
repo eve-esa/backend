@@ -294,6 +294,46 @@ def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) 
     return fallback_used and has_answer
 
 
+# String literals on purpose: agents v0.5.5 does not export these names yet.
+_FALLBACK_MARKER = "eve_fallback_used"
+_FALLBACK_LATENCY_KEY = "eve_fallback_latency_s"
+
+
+def _update_messages(update: Dict[str, Any]) -> List[Any]:
+    msgs: List[Any] = []
+    for out in update.values():
+        got = out.get("messages", []) if isinstance(out, dict) else []
+        msgs.extend(got if isinstance(got, list) else [got])
+    return msgs
+
+
+def _fallback_in_update(update: Dict[str, Any]) -> tuple[bool, float]:
+    """Return (fallback_used, fallback_seconds) for one ``updates`` payload."""
+    used = "agent_fallback" in update
+    seconds = 0.0
+    for msg in _update_messages(update):
+        meta = getattr(msg, "response_metadata", None) or {}
+        if meta.get(_FALLBACK_MARKER):
+            used = True
+            seconds += float(meta.get(_FALLBACK_LATENCY_KEY) or 0.0)
+    return used, seconds
+
+
+def _latency_node_name(node_name: str) -> Optional[str]:
+    """Map a graph node onto a ``metadata.latencies`` key.
+
+    Deep calls the model node ``model``; the back office reads ``node_agent_s``.
+    Middleware hook names contain a dot and must not become a Mongo field.
+    ``None`` drops the node so its time stays in ``generation_unattributed_s``.
+    Trace entries keep the real node name.
+    """
+    if "." in node_name:
+        return None
+    if node_name == "model":
+        return "agent"
+    return node_name
+
+
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
 # Implemented in src.services.mcp.tool_loader; re-exported for backward compat.
 
@@ -1149,6 +1189,7 @@ def _build_agentic_latencies(
     setup_latencies: Dict[str, float],
     first_token_latency: Any = None,
     include_first_token: bool = False,
+    fallback_seconds: float = 0.0,
 ) -> Dict[str, Optional[float]]:
     """Latencies persisted on the message as ``metadata.latencies``."""
     # Backoffice reads these from metadata.latencies.
@@ -1160,13 +1201,17 @@ def _build_agentic_latencies(
     # These add up to generation_latency, so they are not added on top of it:
     # node_<name>_s and generation_unattributed_s (that difference, floored
     # at zero). first_token_latency is the time until the first token, not a
-    # slice of the total.
+    # slice of the total. fallback_latency_s is the fallback call inside the
+    # model node (already inside that node's time). React leaves it unset and
+    # reports node_agent_fallback_s instead.
     latencies: Dict[str, Optional[float]] = {}
     if include_first_token:
         latencies["first_token_latency"] = first_token_latency
     latencies["generation_latency"] = generation_latency
     latencies["total_latency"] = total_latency
     latencies.update({f"node_{k}_s": v for k, v in node_latencies.items()})
+    if fallback_seconds > 0:
+        latencies["fallback_latency_s"] = round(fallback_seconds, 3)
     # Only steps that actually ran. Callers omit a key by not recording it.
     latencies.update(setup_latencies)
     latencies["generation_unattributed_s"] = _generation_unattributed_s(
@@ -1264,17 +1309,21 @@ async def generate_answer_agentic(
 
         async def _run_graph(
             g: Any,
-        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, bool]:
+        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, bool, float]:
             """Stream the graph and collect results.
 
             Returns ``(raw_messages, trace_entries, node_latencies, duration,
-            in_graph_fallback)`` where *in_graph_fallback* is ``True`` when the
-            graph streamed an ``agent_fallback`` node update.
+            in_graph_fallback, fallback_seconds)`` where *in_graph_fallback*
+            is ``True`` when the graph streamed an ``agent_fallback`` node
+            update or a message carrying ``eve_fallback_used``.
+            *fallback_seconds* is the fallback-call time deep puts on that
+            message. React leaves it at 0.
             """
             raw_msgs: List[Any] = []
             trace: List[Dict[str, Any]] = []
             latency_map: Dict[str, float] = {}
             in_graph_fallback = False
+            fallback_seconds = 0.0
             start = time.perf_counter()
             # Separate from latency_map/node_latencies below: that dict keeps its
             # existing "elapsed since run start" semantics for metadata.latencies,
@@ -1299,12 +1348,15 @@ async def generate_answer_agentic(
                         config=config,
                         stream_mode="updates",
                     ):
+                        used, seconds = _fallback_in_update(update)
+                        in_graph_fallback = in_graph_fallback or used
+                        fallback_seconds += seconds
                         step_time = time.perf_counter()
                         for node_name, node_output in update.items():
-                            if node_name == "agent_fallback":
-                                in_graph_fallback = True
                             step_latency_s = step_time - start
-                            latency_map.setdefault(node_name, 0.0)
+                            latency_key = _latency_node_name(node_name)
+                            if latency_key is not None:
+                                latency_map.setdefault(latency_key, 0.0)
                             msgs = (
                                 node_output.get("messages", [])
                                 if isinstance(node_output, dict)
@@ -1334,7 +1386,8 @@ async def generate_answer_agentic(
                                     )
                                 )
                                 raw_msgs.append(msg)
-                            latency_map[node_name] = step_latency_s
+                            if latency_key is not None:
+                                latency_map[latency_key] = step_latency_s
                 except Exception as exc:
                     graph_exc = exc
 
@@ -1364,7 +1417,14 @@ async def generate_answer_agentic(
                     error=graph_exc,
                     graph=agent_graph_type,
                 )
-            return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
+            return (
+                raw_msgs,
+                trace,
+                latency_map,
+                time.perf_counter() - start,
+                in_graph_fallback,
+                fallback_seconds,
+            )
 
         gen_start = time.perf_counter()
         (
@@ -1373,6 +1433,7 @@ async def generate_answer_agentic(
             node_latencies,
             gen_latency,
             used_fallback_llm,
+            fallback_seconds,
         ) = await _run_graph(graph)
 
         final_answer = ""
@@ -1405,6 +1466,7 @@ async def generate_answer_agentic(
                 generation_latency=gen_latency,
                 node_latencies=node_latencies,
                 setup_latencies=setup_latencies,
+                fallback_seconds=fallback_seconds,
             ),
             rag_tool_names,
         )
@@ -1602,6 +1664,7 @@ async def generate_answer_agentic_stream_helper(
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         in_graph_fallback_used = False
+        fallback_seconds = 0.0
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
@@ -1744,8 +1807,9 @@ async def generate_answer_agentic_stream_helper(
                             return
 
                         if mode == "updates":
-                            if "agent_fallback" in payload:
-                                in_graph_fallback_used = True
+                            used, seconds = _fallback_in_update(payload)
+                            in_graph_fallback_used = in_graph_fallback_used or used
+                            fallback_seconds += seconds
                             # An agent step is traced from its node update, not from
                             # the streamed chunks: the first chunk carrying a tool
                             # call has no arguments yet when the provider streams
@@ -1789,9 +1853,11 @@ async def generate_answer_agentic_stream_helper(
                         if node != current_node:
                             if current_node:
                                 elapsed_s = time.perf_counter() - node_start_time
-                                node_latencies[current_node] = (
-                                    node_latencies.get(current_node, 0.0) + elapsed_s
-                                )
+                                latency_key = _latency_node_name(current_node)
+                                if latency_key is not None:
+                                    node_latencies[latency_key] = (
+                                        node_latencies.get(latency_key, 0.0) + elapsed_s
+                                    )
                             for event in _flush_turn_buffer_to_events():
                                 yield event
                             node_start_time = time.perf_counter()
@@ -1852,9 +1918,11 @@ async def generate_answer_agentic_stream_helper(
 
                 if current_node:
                     elapsed_s = time.perf_counter() - node_start_time
-                    node_latencies[current_node] = (
-                        node_latencies.get(current_node, 0.0) + elapsed_s
-                    )
+                    latency_key = _latency_node_name(current_node)
+                    if latency_key is not None:
+                        node_latencies[latency_key] = (
+                            node_latencies.get(latency_key, 0.0) + elapsed_s
+                        )
                 for event in _flush_turn_buffer_to_events():
                     yield event
         except Exception as exc:
@@ -1885,6 +1953,7 @@ async def generate_answer_agentic_stream_helper(
                 setup_latencies=setup_latencies,
                 first_token_latency=first_token_latency,
                 include_first_token=True,
+                fallback_seconds=fallback_seconds,
             ),
             rag_tool_names,
         )
