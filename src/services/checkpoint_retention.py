@@ -22,6 +22,9 @@ Losing a checkpoint is safe: the app ``messages`` collection stays the source of
 truth, and both pipelines rebuild history and the rolling summary from it on
 every turn. A thread idle longer than the window starts from that context.
 
+Checkpoints hold the user's text, so deleting a conversation deletes its thread
+right away (``delete_thread_checkpoints``) instead of waiting for the TTL.
+
 DocumentDB caveats:
 
 - TTL deletes run in a background task, best effort: documents can outlive the
@@ -35,10 +38,12 @@ DocumentDB caveats:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
 from src.config import CHECKPOINT_RETENTION_DAYS
+from src.database.mongo import async_mongo_manager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,9 @@ CHECKPOINT_DB_NAME = "checkpointing_db"
 CHECKPOINT_COLLECTIONS = ("checkpoints", "checkpoint_writes")
 TTL_FIELD = "created_at"
 SECONDS_PER_DAY = 86_400
+# Per collection. The Motor client sets no socket timeout, and this runs inside
+# DELETE /conversations/{id}: a hung delete must not outlast CloudFront's 120 s.
+CHECKPOINT_DELETE_TIMEOUT_S = 10
 
 
 def retention_ttl_seconds(days: int = CHECKPOINT_RETENTION_DAYS) -> Optional[int]:
@@ -106,3 +114,38 @@ def build_mongo_checkpointer(
     ttl_seconds = retention_ttl_seconds(days)
     ensure_ttl_indexes(client[db_name], ttl_seconds)
     return MongoDBSaver(client, db_name=db_name, ttl=ttl_seconds)
+
+
+async def delete_thread_checkpoints(thread_id: str) -> bool:
+    """Delete one thread from both checkpoint collections, off the event loop.
+
+    Through Motor, not the saver's ``delete_thread``, which is sync pymongo and
+    would block the event loop. Matching on ``thread_id`` alone covers every
+    ``checkpoint_ns``, subgraphs included.
+
+    Never raises, so a failure cannot fail the caller's delete; both collections
+    are always tried. The documents left behind wait for the TTL, except those
+    from before retention, which have no ``created_at``: the id in the log is
+    what an operator needs to remove them. The log names only the exception
+    class, because a Mongo error can quote the documents it was working on, and
+    these hold the user's text.
+
+    A timeout stops the wait, not the server: the delete may still finish there.
+
+    Returns:
+        True when both deletes succeeded.
+    """
+    failed = None
+    for name in CHECKPOINT_COLLECTIONS:
+        try:
+            collection = async_mongo_manager.client[CHECKPOINT_DB_NAME][name]
+            async with asyncio.timeout(CHECKPOINT_DELETE_TIMEOUT_S):
+                await collection.delete_many({"thread_id": thread_id})
+        except Exception as exc:
+            failed = type(exc).__name__
+    if failed is None:
+        return True
+    logger.warning(
+        "checkpoint.delete_failed thread_id=%s error=%s", thread_id, failed
+    )
+    return False
