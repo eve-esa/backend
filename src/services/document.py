@@ -98,7 +98,8 @@ class DocumentService:
         metadata_urls: Optional[List[str] | str] = None,
         metadata_names: Optional[List[str] | str] = None,
         document_ids: Optional[List[str]] = None,
-        max_chunks_per_file: Optional[int] = None,
+        max_chunks: Optional[int] = None,
+        qdrant_timeout_s: Optional[float] = None,
     ) -> DocumentResult:
         """
         Add documents to a collection.
@@ -111,8 +112,10 @@ class DocumentService:
             metadata_urls: Optional metadata URLs
             metadata_names: Optional metadata names
             document_ids: Optional Mongo document IDs aligned with ``files``
-            max_chunks_per_file: Refuse the whole batch, before any embedding,
-                when one file splits into more chunks than this
+            max_chunks: Refuse the whole batch, before any embedding, when
+                all files together split into more chunks than this
+            qdrant_timeout_s: HTTP timeout of the Qdrant writes, for a caller
+                with a deadline; a client of its own, never the shared one
 
         Returns:
             DocumentResult: Result of the operation
@@ -130,7 +133,13 @@ class DocumentService:
             processed_names = self._process_metadata(metadata_names, len(files))
 
             # Initialize components
-            vector_store = self._get_vector_store_manager(request.embeddings_model)
+            if qdrant_timeout_s is None:
+                vector_store = self._get_vector_store_manager(request.embeddings_model)
+            else:
+                vector_store = VectorStoreManager(
+                    embeddings_model=request.embeddings_model,
+                    qdrant_timeout_s=qdrant_timeout_s,
+                )
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=request.chunk_size, chunk_overlap=request.chunk_overlap
             )
@@ -176,14 +185,13 @@ class DocumentService:
                 if not split_docs:
                     logger.warning(f"No chunks produced from {file.filename}")
                     continue
-                if max_chunks_per_file and len(split_docs) > max_chunks_per_file:
+                if max_chunks and len(all_documents) + len(split_docs) > max_chunks:
                     return DocumentResult(
                         success=False,
                         message="too_many_chunks",
                         data={
                             "collection": collection_id,
-                            "filename": file.filename,
-                            "chunk_count": len(split_docs),
+                            "chunk_count": len(all_documents) + len(split_docs),
                         },
                     )
                 all_documents.extend(split_docs)

@@ -7,7 +7,10 @@ chunk_count the endpoint reports.
 
 import asyncio
 import io
+import time
 from types import SimpleNamespace
+
+import anyio
 
 import pytest
 from bson import ObjectId
@@ -40,6 +43,11 @@ class FakeVectorStore:
         self.add_error = None
         self.delete_error = None
         self.add_calls = 0
+        # Seconds a write blocks a worker thread that no deadline can interrupt,
+        # like the real upsert (anyio.to_thread without abandon).
+        self.uncancellable_delay = 0.0
+        # Seconds every point delete blocks its thread, as a slow Qdrant would.
+        self.delete_delay = 0.0
 
     def count(self, document_id=None, collection_id=None):
         return sum(
@@ -67,11 +75,15 @@ def store(monkeypatch):
                     "document_id": doc.metadata.get("document_id"),
                 }
             )
+        if fake.uncancellable_delay:
+            await anyio.to_thread.run_sync(time.sleep, fake.uncancellable_delay)
         if fake.delay:
             await asyncio.sleep(fake.delay)
         return [str(i) for i in range(len(document_list))]
 
     def delete_private_docs(self, *, user_id, collection_id, metadata=None, **_):
+        if fake.delete_delay:
+            time.sleep(fake.delete_delay)
         document_id = (metadata or {}).get("metadata.document_id")
         fake.points = [
             p
@@ -544,3 +556,143 @@ async def test_collection_upload_refuses_a_conversation_collection(
         assert await Document.count_documents({"collection_id": collection_id}) == 1
     finally:
         await _cleanup(user, conversation)
+
+
+async def test_chunk_cap_counts_all_files_of_the_request(
+    async_client, store, monkeypatch
+):
+    monkeypatch.setattr("src.routers.document.MAX_CONVERSATION_DOCUMENT_CHUNKS", 3)
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        # Each file splits into 2 chunks: under the cap alone, 4 together.
+        two_chunks = ("Sentinel-2 observes land and coastal areas. " * 30).encode()
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt", two_chunks), _txt("b.txt", two_chunks)],
+        )
+        assert resp.status_code == 413, resp.text
+        assert resp.json()["detail"]["code"] == "conversation_document_chunks"
+        assert store.add_calls == 0
+        assert await _slots(user) == 0
+        assert await Collection.count_documents({"conversation_id": conversation.id}) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_a_write_that_cannot_be_interrupted_still_ends_in_our_504(
+    async_client, store, monkeypatch
+):
+    monkeypatch.setattr("src.routers.document.CONVERSATION_DOCUMENT_DEADLINE_SECONDS", 0.2)
+    store.uncancellable_delay = 1.0
+    # The pause before the next batch, where the expired deadline takes effect.
+    store.delay = 0.05
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        started = time.monotonic()
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("slow.txt")],
+        )
+        elapsed = time.monotonic() - started
+        assert resp.status_code == 504
+        assert resp.json()["detail"]["code"] == "conversation_document_timeout"
+        # The deadline waited for the write in flight (it cannot be cut short),
+        # stopped at the next pause and rolled the write back.
+        assert 1.0 <= elapsed < 3.0
+        assert store.count() == 0
+        assert await _slots(user) == 0
+        assert await Collection.count_documents({"conversation_id": conversation.id}) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_rollback_is_bounded_and_keeps_slots_for_rows_it_could_not_remove(
+    async_client, store, monkeypatch
+):
+    monkeypatch.setattr("src.routers.document.CONVERSATION_DOCUMENT_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr("src.routers.document.CONVERSATION_DOCUMENT_ROLLBACK_SECONDS", 0.3)
+    store.delay = 2.0
+    store.delete_delay = 2.0
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        started = time.monotonic()
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("slow.txt")],
+        )
+        elapsed = time.monotonic() - started
+        assert resp.status_code == 504
+        assert resp.json()["detail"]["code"] == "conversation_document_timeout"
+        # Answered on budget, without waiting out the 2 s delete.
+        assert elapsed < 1.5
+        # The row the rollback left keeps its slot, so the counter stays true.
+        assert await Document.count_documents({"user_id": user.id}) == 1
+        assert await _slots(user) == 1
+    finally:
+        await asyncio.sleep(2.0)  # let the abandoned delete finish before cleanup
+        await _cleanup(user, conversation)
+
+
+async def test_refused_first_upload_leaves_no_collection(async_client, store):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        await User.get_collection().update_one(
+            {"_id": ObjectId(user.id)}, {"$set": {"private_document_count": 150}}
+        )
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt")],
+        )
+        assert resp.status_code == 400
+        assert "Private document limit reached" in resp.text
+        assert await Collection.count_documents({"conversation_id": conversation.id}) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_mongo_failure_in_the_delete_answers_with_a_code(
+    async_client, store, monkeypatch
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt")],
+        )
+
+        async def broken_delete_many(*args, **kwargs):
+            raise RuntimeError("mongo at 10.30.40.5 refused")
+
+        monkeypatch.setattr(Document, "delete_many", broken_delete_many)
+        deleted = await async_client.delete(
+            f"/conversations/{conversation.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert deleted.status_code == 500
+        assert deleted.json()["detail"]["code"] == "conversation_document_cleanup_failed"
+        assert "10.30.40.5" not in deleted.text
+        assert await Conversation.find_by_id(conversation.id) is not None
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_collections_are_indexed_for_the_chat_lookup():
+    from src.database.mongo import async_mongo_manager
+
+    await async_mongo_manager._ensure_indexes()
+    indexes = await Collection.get_collection().index_information()
+    assert any(
+        index["key"] == [("user_id", 1), ("conversation_id", 1)]
+        for index in indexes.values()
+    )

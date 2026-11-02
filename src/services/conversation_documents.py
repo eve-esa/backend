@@ -72,6 +72,29 @@ async def get_or_create_conversation_collection(
     return Collection.from_dict(doc)
 
 
+async def delete_conversation_collection_if_empty(collection: Collection) -> None:
+    """Drop a conversation collection a failed upload left without documents.
+
+    Otherwise every chat turn in the conversation searches an empty collection.
+    An upload racing this one recreates it under the same ``_id``, the
+    conversation id, so documents it writes stay attached either way.
+    """
+    try:
+        remaining = await Document.get_primary_collection().count_documents(
+            {"collection_id": collection.id}
+        )
+        if remaining == 0:
+            await Collection.get_primary_collection().delete_one(
+                {"_id": ObjectId(collection.id)}
+            )
+    except Exception:
+        logger.warning(
+            "Failed to drop empty conversation collection %s",
+            collection.id,
+            exc_info=True,
+        )
+
+
 async def collection_for_chat(
     user_id: str, conversation_id: Optional[str]
 ) -> Optional[Collection]:
@@ -106,13 +129,25 @@ async def delete_conversation_documents(user_id: str, conversation_id: str) -> N
             collection.id,
             exc_info=True,
         )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "conversation_document_cleanup_failed",
-                "message": "The attached documents could not be deleted. Try again.",
-            },
+        raise _cleanup_failed()
+    try:
+        deleted = await Document.delete_many({"collection_id": collection.id})
+        await collection.delete()
+        await release_private_document_slots(user_id, deleted)
+    except Exception:
+        logger.error(
+            "Failed to delete Mongo rows for conversation collection %s",
+            collection.id,
+            exc_info=True,
         )
-    deleted = await Document.delete_many({"collection_id": collection.id})
-    await collection.delete()
-    await release_private_document_slots(user_id, deleted)
+        raise _cleanup_failed()
+
+
+def _cleanup_failed() -> HTTPException:
+    return HTTPException(
+        status_code=500,
+        detail={
+            "code": "conversation_document_cleanup_failed",
+            "message": "The attached documents could not be deleted. Try again.",
+        },
+    )

@@ -22,6 +22,8 @@ from src.database.mongo_model import PaginatedResponse
 from src.constants import (
     CONVERSATION_DOCUMENT_DEADLINE_SECONDS,
     CONVERSATION_DOCUMENT_EXTENSIONS,
+    CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS,
+    CONVERSATION_DOCUMENT_ROLLBACK_SECONDS,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_OVERLAP,
@@ -36,6 +38,8 @@ from src.services.private_document_limit import (
 )
 from src.services.request_rate_limiter import enforce_request_rate
 from src.services.conversation_documents import (
+    delete_conversation_collection_if_empty,
+    get_conversation_collection,
     get_or_create_conversation_collection,
 )
 
@@ -62,12 +66,26 @@ async def get_collection_and_validate_ownership(
 
 
 async def _rollback_uploaded_docs(
-    user_id: str, collection_id: str, created_docs: List[DocumentModel]
+    user_id: str,
+    collection_id: str,
+    created_docs: List[DocumentModel],
+    *,
+    qdrant_timeout_s: Optional[float] = None,
+    abandon_on_cancel: bool = False,
 ) -> None:
-    """Remove Mongo rows and any Qdrant points written for a failed upload."""
+    """Remove Mongo rows and any Qdrant points written for a failed upload.
+
+    ``qdrant_timeout_s`` and ``abandon_on_cancel`` let a caller with a deadline
+    bound the rollback: a delete still running when the caller gives up is left
+    to finish on its own thread.
+    """
     if not created_docs:
         return
-    vector_store = VectorStoreManager()
+    vector_store = (
+        VectorStoreManager()
+        if qdrant_timeout_s is None
+        else VectorStoreManager(qdrant_timeout_s=qdrant_timeout_s)
+    )
     for doc in created_docs:
         try:
             await anyio.to_thread.run_sync(
@@ -76,7 +94,8 @@ async def _rollback_uploaded_docs(
                     user_id=user_id,
                     collection_id=collection_id,
                     metadata={"metadata.document_id": doc.id},
-                )
+                ),
+                abandon_on_cancel=abandon_on_cancel,
             )
         except Exception:
             logger.warning(
@@ -357,8 +376,8 @@ async def upload_conversation_documents(
     Raises:
         HTTPException: 404 if the feature is off or the conversation is not
         found or belongs to another user; 415 for a file type other than pdf,
-        txt or md; 413 for a file over 10 MB, or one that splits into more than
-        600 chunks; 400 ``conversation_document_limit`` past 10 documents in
+        txt or md; 413 for a file over 10 MB, or files that split into more
+        than 600 chunks together; 400 ``conversation_document_limit`` past 10 documents in
         the conversation, or the private document limit; 422 if no file yields
         any text; 504 ``conversation_document_timeout`` past the upload
         deadline; 500 ``conversation_document_failed`` for anything else.
@@ -376,14 +395,18 @@ async def upload_conversation_documents(
 
     await _validate_conversation_files(files)
 
-    collection = await get_or_create_conversation_collection(
-        requesting_user.id, conversation_id
+    # Counted without creating the collection: an upload refused below must not
+    # leave an empty collection behind for every chat turn to search.
+    existing = await get_conversation_collection(requesting_user.id, conversation_id)
+    attached = (
+        await DocumentModel.get_primary_collection().count_documents(
+            {"collection_id": existing.id}
+        )
+        if existing
+        else 0
     )
     # Two uploads racing past this count can exceed the cap by the smaller
     # batch; the private document counter below stays exact either way.
-    attached = await DocumentModel.get_primary_collection().count_documents(
-        {"collection_id": collection.id}
-    )
     if attached + len(files) > MAX_CONVERSATION_DOCUMENTS:
         raise _conversation_document_error(
             400,
@@ -394,26 +417,31 @@ async def upload_conversation_documents(
 
     file_count = len(files)
     slots_held = 0
+    collection: Optional[Collection] = None
     created_docs: List[DocumentModel] = []
     try:
         await reserve_private_document_slots(requesting_user.id, file_count)
         slots_held = file_count
-
+        collection = await get_or_create_conversation_collection(
+            requesting_user.id, conversation_id
+        )
+        # Before the deadline: a deadline hitting inside insert_many would leave
+        # rows that created_docs does not know about, so nothing rolls them back.
+        created_docs = await DocumentModel.bulk_create(
+            [
+                DocumentModel(
+                    user_id=requesting_user.id,
+                    collection_id=collection.id,
+                    name=file.filename,
+                    filename=file.filename,
+                    file_type=os.path.splitext(file.filename)[1].lstrip("."),
+                    file_size=file.size,
+                )
+                for file in files
+            ]
+        )
+        names = [file.filename for file in files]
         with anyio.fail_after(CONVERSATION_DOCUMENT_DEADLINE_SECONDS):
-            created_docs = await DocumentModel.bulk_create(
-                [
-                    DocumentModel(
-                        user_id=requesting_user.id,
-                        collection_id=collection.id,
-                        name=file.filename,
-                        filename=file.filename,
-                        file_type=os.path.splitext(file.filename)[1].lstrip("."),
-                        file_size=file.size,
-                    )
-                    for file in files
-                ]
-            )
-            names = [file.filename for file in files]
             result = await document_service.add_documents(
                 collection_id=collection.id,
                 user_id=requesting_user.id,
@@ -427,7 +455,8 @@ async def upload_conversation_documents(
                 # add_documents skips a file without a source name.
                 metadata_names=names,
                 document_ids=[doc.id for doc in created_docs],
-                max_chunks_per_file=MAX_CONVERSATION_DOCUMENT_CHUNKS,
+                max_chunks=MAX_CONVERSATION_DOCUMENT_CHUNKS,
+                qdrant_timeout_s=CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS,
             )
 
         if not result.success:
@@ -435,8 +464,8 @@ async def upload_conversation_documents(
                 raise _conversation_document_error(
                     413,
                     "conversation_document_chunks",
-                    f"{(result.data or {}).get('filename')} is too long: a document "
-                    f"holds at most {MAX_CONVERSATION_DOCUMENT_CHUNKS} chunks.",
+                    "The files are too long: one upload holds at most "
+                    f"{MAX_CONVERSATION_DOCUMENT_CHUNKS} chunks in total.",
                 )
             if result.error:
                 raise RuntimeError(result.error)
@@ -451,14 +480,14 @@ async def upload_conversation_documents(
         chunk_counts = result_data.get("chunk_counts") or {}
         skipped_docs = [doc for doc in created_docs if doc.id not in ingested]
         if skipped_docs:
-            await _rollback_uploaded_docs(
-                requesting_user.id, collection.id, skipped_docs
-            )
-            await release_private_document_slots(
-                requesting_user.id, len(skipped_docs)
-            )
-            slots_held -= len(skipped_docs)
             created_docs = [doc for doc in created_docs if doc.id in ingested]
+            if await _rollback_conversation_upload(
+                requesting_user.id, collection.id, skipped_docs
+            ):
+                await release_private_document_slots(
+                    requesting_user.id, len(skipped_docs)
+                )
+                slots_held -= len(skipped_docs)
 
         for doc in created_docs:
             await DocumentModel.get_collection().update_one(
@@ -482,12 +511,17 @@ async def upload_conversation_documents(
             "skipped": [doc.name for doc in skipped_docs],
         }
     except Exception as e:
+        rolled_back = True
         if created_docs:
-            await _rollback_uploaded_docs(
+            rolled_back = await _rollback_conversation_upload(
                 requesting_user.id, collection.id, created_docs
             )
-        if slots_held:
+        # Slots go back only with the rows: rows the rollback could not remove
+        # keep theirs, so the counter still matches what the user holds.
+        if slots_held and rolled_back:
             await release_private_document_slots(requesting_user.id, slots_held)
+        if collection is not None and rolled_back:
+            await delete_conversation_collection_if_empty(collection)
         if isinstance(e, TimeoutError):
             raise _conversation_document_error(
                 504,
@@ -506,6 +540,32 @@ async def upload_conversation_documents(
             "conversation_document_failed",
             "The documents could not be processed. Try again.",
         )
+
+
+async def _rollback_conversation_upload(
+    user_id: str, collection_id: str, docs: List[DocumentModel]
+) -> bool:
+    """Roll back an attached-documents upload within its time budget.
+
+    Returns False when the budget runs out first: the request still answers in
+    time, and the log names the documents left for a manual cleanup.
+    """
+    with anyio.move_on_after(CONVERSATION_DOCUMENT_ROLLBACK_SECONDS) as scope:
+        await _rollback_uploaded_docs(
+            user_id,
+            collection_id,
+            docs,
+            qdrant_timeout_s=CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS,
+            abandon_on_cancel=True,
+        )
+    if scope.cancelled_caught:
+        logger.error(
+            "conversation_document_rollback_incomplete collection_id=%s documents=%s",
+            collection_id,
+            ",".join(doc.id for doc in docs),
+        )
+        return False
+    return True
 
 
 @router.delete("/collections/{collection_id}/documents/{document_id}")
