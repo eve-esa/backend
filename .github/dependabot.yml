@@ -72,6 +72,11 @@ updates:
     open-pull-requests-limit: 5
     cooldown:
       default-days: 3
+    # A Python minor (3.12 to 3.15) is a new ABI, not a patch: wheels go missing and CI pins
+    # the same version (U01 check in ci.yml). The tag already takes 3.12 patches on rebuild.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       docker-minor-patch:
         applies-to: "version-updates"
