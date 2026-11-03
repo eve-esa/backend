@@ -17,18 +17,18 @@ langgraph==1.2.12
 # build-arg (see the Dockerfile). A dev build resolves agents main to a commit
 # SHA. A release build passes the tag in agents.ref, and that image is what
 # staging and prod promote. pip install -r this file alone does not install it.
-# OpenTelemetry, see src/observability. The contrib packages (0.65b0) are
-# released in lockstep with the SDK (1.44.0); bump them together.
-opentelemetry-api==1.45.0
-opentelemetry-sdk==1.45.0
-opentelemetry-exporter-otlp-proto-http==1.45.0
-opentelemetry-instrumentation==0.66b0
-opentelemetry-instrumentation-asgi==0.66b0
-opentelemetry-instrumentation-httpx==0.66b0
-opentelemetry-instrumentation-pymongo==0.66b0
-opentelemetry-instrumentation-redis==0.66b0
-opentelemetry-instrumentation-botocore==0.66b0
-opentelemetry-instrumentation-logging==0.66b0
+# OpenTelemetry, see src/observability. The contrib packages (0.66b2) are
+# released in lockstep with the SDK (1.45.2); bump them together.
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-http==1.45.2
+opentelemetry-instrumentation==0.66b2
+opentelemetry-instrumentation-asgi==0.66b2
+opentelemetry-instrumentation-httpx==0.66b2
+opentelemetry-instrumentation-pymongo==0.66b2
+opentelemetry-instrumentation-redis==0.66b2
+opentelemetry-instrumentation-botocore==0.66b2
+opentelemetry-instrumentation-logging==0.66b2
 # OpenLLMetry: LangChain and LangGraph spans. Exact pin, never a range: any
 # bump (Dependabot included) merges only with tests/test_trace_tree.py green,
 # that test is the canary. opentelemetry-instrumentation-mcp stays out (issues
@@ -37,7 +37,7 @@ opentelemetry-instrumentation-langchain==0.62.4
 opentelemetry-semantic-conventions-ai==0.5.1
 openai>=2.53.0,<3.0.0
 langgraph-checkpoint==4.2.0
-langgraph-checkpoint-mongodb==0.5.0
+langgraph-checkpoint-mongodb==0.5.1
 httpx==0.28.1
 # Imported directly (rerankers, crawler) but only ever arrived transitively, so its version floated.
 requests==2.34.2
@@ -47,7 +47,7 @@ aiodns==4.0.4
 pycares==5.0.1
 pyyaml==6.0.3
 pypdf==6.19.0
-pymongo==4.17.0
+pymongo==4.18.3
 motor==3.7.1
 PyJWT[crypto]==2.15.1
 cryptography>=43.0.0
