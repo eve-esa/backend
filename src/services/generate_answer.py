@@ -349,6 +349,7 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
 
 # LangGraph / LangGraph MongoDB checkpointer (optional dependency)
 # We use short-term memory per conversation via a thread_id equal to the conversation_id.
+# A turn without a conversation runs on the stateless graph: no thread, no checkpoint.
 _langgraph_available = False
 try:
     from langchain_core.messages import (
@@ -420,6 +421,7 @@ _compiled_graph_mode = None  # "mongo" or "memory"
 _mongo_checkpointer_cm = None  # context manager kept open for process lifetime
 _mongo_checkpointer = None  # active MongoDBSaver instance
 _inmemory_compiled_graph = None  # Fallback compiled graph using InMemorySaver
+_stateless_compiled_graph = None  # Same graph without a checkpointer
 _graph_init_lock = asyncio.Lock()
 
 
@@ -432,7 +434,7 @@ async def _get_or_create_compiled_graph():
     """
     global _compiled_graph, _compiled_graph_mode
     global _mongo_checkpointer_cm, _mongo_checkpointer
-    global _inmemory_compiled_graph
+    global _inmemory_compiled_graph, _stateless_compiled_graph
 
     if not _langgraph_available:
         return None, None
@@ -517,6 +519,8 @@ Please continue the conversation using this summary as context for understanding
         builder = StateGraph(GenerationState)
         builder.add_node(call_model)
         builder.add_edge(START, "call_model")
+        # In memory only, no I/O: for turns that must remember nothing.
+        _stateless_compiled_graph = builder.compile()
 
         # Try Mongo-backed checkpointer first, keep it open
         try:
@@ -547,6 +551,17 @@ Please continue the conversation using this summary as context for understanding
             except Exception:
                 # As a last resort, no graph
                 return None, None
+
+
+async def _get_or_create_stateless_graph():
+    """The generation graph without a checkpointer, for a turn with no conversation.
+
+    No conversation, no thread: the turn runs without a checkpointer and stores
+    nothing in ``checkpointing_db``.
+    """
+    if _stateless_compiled_graph is None:
+        await _get_or_create_compiled_graph()
+    return _stateless_compiled_graph
 
 
 # How many prior messages the agent instruction prefix includes.
@@ -1384,9 +1399,13 @@ async def generate_answer(
                 # Single invoke to append assistant response to memory (async)
                 gen_start = time.perf_counter()
                 # Pass temperature to the graph via state config
-                graph, mode = await _get_or_create_compiled_graph()
-                if graph is not None:
+                if conversation_id:
+                    graph, _mode = await _get_or_create_compiled_graph()
                     config = {"configurable": {"thread_id": conversation_id}}
+                else:
+                    graph = await _get_or_create_stateless_graph()
+                    config = {}
+                if graph is not None:
                     state = {
                         "messages": add_messages([], messages_for_turn),
                         "temperature": request.temperature,
