@@ -3,7 +3,7 @@
 ``provider_models.yaml`` seeds only empty collections, and the same file would
 seed the row into every new environment, so a model offered in one environment
 gets its row here. The row only controls what the picker lists: the chain still
-needs ``JSC_LARGE_MODEL_NAME`` set.
+needs ``JSC_LARGE_MODEL_NAME`` set, and without it /models hides the row.
 
     python -m src.commands.register_jsc_large_model [--apply] [--disable]
 
@@ -11,11 +11,17 @@ Defaults to a dry run that prints what would change, which works with the reader
 credential. ``--apply`` writes and needs the writer. ``--disable`` hides the row
 again. Re-running changes nothing. The picker refreshes within the catalog cache
 TTL (PROVIDER_CATALOG_CACHE_TTL_SECONDS).
+
+``--disable`` is not a rollback: while the alias is set, a client can still send
+``llm_type: jsc_large``. To turn the model off, blank ``JSC_LARGE_MODEL_NAME``.
 """
 
 import argparse
 import asyncio
 import logging
+import sys
+
+from pymongo.errors import OperationFailure
 
 from src.config import configure_logging
 from src.database.models.catalog_platform_model import CatalogPlatformModelDoc
@@ -24,6 +30,7 @@ from src.database.mongo import async_mongo_manager
 configure_logging()
 logger = logging.getLogger(__name__)
 
+UNAUTHORIZED_CODE = 13
 CATALOG_ID = "jsc-mistral-large"
 LLM_TYPE = "jsc_large"
 DISPLAY_NAME = "Mistral Large 4"
@@ -72,6 +79,18 @@ async def register_jsc_large_model(apply: bool = False, disable: bool = False) -
     print(f"Done: {CATALOG_ID} enabled={enabled} in {database}.")
 
 
+async def main(apply: bool = False, disable: bool = False) -> int:
+    """Run the command; a missing permission is a message, not a traceback."""
+    try:
+        await register_jsc_large_model(apply=apply, disable=disable)
+    except OperationFailure as exc:
+        if exc.code != UNAUTHORIZED_CODE:
+            raise
+        print("Not authorized: --apply needs the writer credential.")
+        return 1
+    return 0
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Add the large JSC model to the picker.")
     parser.add_argument("--apply", action="store_true", help="Write. Default is a dry run.")
@@ -81,4 +100,4 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
-    asyncio.run(register_jsc_large_model(apply=args.apply, disable=args.disable))
+    sys.exit(asyncio.run(main(apply=args.apply, disable=args.disable)))

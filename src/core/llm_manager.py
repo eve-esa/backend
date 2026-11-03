@@ -366,6 +366,10 @@ class LLMManager:
             return bool(self._satcom_large_base_url and SATCOM_RUNPOD_API_KEY)
         return False
 
+    def is_configured(self, llm_type: str) -> bool:
+        """True when ``llm_type`` could answer here, for callers outside the chain."""
+        return self._is_configured(canonical_llm_type(llm_type) or "")
+
     def resolve_chain(self, llm_type: Optional[str] = None) -> list[str]:
         """Return the ordered endpoint candidates for a request.
 
