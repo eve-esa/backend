@@ -32,7 +32,9 @@ class FileParser:
             logger.warning(f"Unsupported file type: {extension}")
             return []
         try:
-            return await to_thread.run_sync(parser, file_path)
+            # Parsing only reads the file, so a caller's deadline may abandon a
+            # slow parse instead of waiting for it.
+            return await to_thread.run_sync(parser, file_path, abandon_on_cancel=True)
         except Exception as e:
             logger.error(f"Error parsing {extension} file: {str(e)}")
             return []

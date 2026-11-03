@@ -24,6 +24,26 @@ TOKEN_OVERFLOW_LIMIT = 7_000
 MCP_MAX_TOP_N = 20
 MAX_PRIVATE_DOCUMENTS = 150
 
+# Documents attached to one conversation (POST /conversations/{id}/documents).
+# They also count against MAX_PRIVATE_DOCUMENTS.
+MAX_CONVERSATION_DOCUMENTS = 10
+MAX_CONVERSATION_DOCUMENT_BYTES = 10 * 1024 * 1024
+# Per request, all files together, after splitting: 600 chunks are 19 batches of
+# 32, which embed well inside the deadline below. Past it the request is
+# refused before any embedding call.
+MAX_CONVERSATION_DOCUMENT_CHUNKS = 600
+CONVERSATION_DOCUMENT_EXTENSIONS = (".pdf", ".txt", ".md")
+# Time budget of one upload, under CloudFront's 120 s origin read timeout so the
+# client always gets our coded 504 instead of CloudFront's bare one:
+#   80 s  parse, embed and upsert (the deadline)
+# + 10 s  one Qdrant call already in flight when it expires: the upsert cannot be
+#         interrupted, so its HTTP timeout is what bounds the overrun
+# + 15 s  rollback
+# = 105 s worst case.
+CONVERSATION_DOCUMENT_DEADLINE_SECONDS = 80
+CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS = 10
+CONVERSATION_DOCUMENT_ROLLBACK_SECONDS = 15
+
 EVE_PUBLIC_COLLECTION_NAME_PROD = "qwen-512-filtered"
 
 PRIVATE_COLLECTION_NAME_PROD = "private-collections"

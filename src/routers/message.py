@@ -31,6 +31,7 @@ from src.schemas.co2 import CO2EquivalenceComparison, CO2EquivalenceResult
 from src.schemas.generation_request import GenerationRequest
 from src.schemas.message import CreateMessageResponse, MessageUpdate
 from src.services.cancel_manager import get_cancel_manager
+from src.services.conversation_documents import collection_for_chat
 from src.services.generate_answer import (
     build_empty_answer_payload,
     build_error_payload,
@@ -223,8 +224,13 @@ async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
 async def apply_private_collections_to_request(
     request: GenerationRequest,
     user_id: str,
+    conversation_id: Optional[str] = None,
 ) -> None:
-    """Resolve private collection IDs and finalize collection_ids on the request."""
+    """Resolve private collection IDs and finalize collection_ids on the request.
+
+    With a conversation_id, the documents attached to that conversation are
+    searched too, without the user selecting them.
+    """
     collection_object_ids = []
     for collection_id in request.private_collections:
         try:
@@ -240,6 +246,17 @@ async def apply_private_collections_to_request(
                 "_id": {"$in": collection_object_ids},
             }
         )
+
+    attached = await collection_for_chat(user_id, conversation_id)
+    if attached is not None:
+        if attached.id not in {c.id for c in user_collections}:
+            user_collections.append(attached)
+        # The agentic runner hands private_collections, not collection_ids, to
+        # the retrieve tool (_rag_mcp_tool_defaults), so the id goes in both.
+        if attached.id not in request.private_collections:
+            request.private_collections = list(request.private_collections) + [
+                attached.id
+            ]
 
     request.private_collections_map = {c.id: c.name for c in user_collections}
     request.user_id = user_id
@@ -522,7 +539,9 @@ async def create_message(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        await apply_private_collections_to_request(request, requesting_user.id)
+        await apply_private_collections_to_request(
+            request, requesting_user.id, conversation_id
+        )
 
         # Extract year range from filters for MCP usage
         try:
@@ -696,7 +715,7 @@ async def retry(
 
         if is_agentic_generation_request(message.request_input, message):
             request = await _prepare_agentic_request(
-                message.request_input, requesting_user
+                message.request_input, requesting_user, message.conversation_id
             )
             request.mcp_proxy_bearer_token = bearer_token
             request.mcp_user_id = str(requesting_user.id)
@@ -1007,7 +1026,9 @@ async def create_message_stream(
 
         request.collection_ids = request.collection_ids + request.public_collections
 
-        await apply_private_collections_to_request(request, requesting_user.id)
+        await apply_private_collections_to_request(
+            request, requesting_user.id, conversation_id
+        )
 
         # Extract year range from filters for MCP usage
         try:
@@ -1929,6 +1950,7 @@ async def retrieve(
 async def _prepare_agentic_request(
     request: GenerationRequest,
     requesting_user: User,
+    conversation_id: Optional[str] = None,
 ) -> GenerationRequest:
     """Normalise collections and resolve MCP servers and skills on the request."""
     request.public_collections = normalize_public_collections_selection(
@@ -1940,7 +1962,9 @@ async def _prepare_agentic_request(
     # Only the private collections the user actually selected in the UI, like
     # the classic endpoints do. Appending every collection the user owns would
     # make the retrieval tool search collections nobody asked for.
-    await apply_private_collections_to_request(request, requesting_user.id)
+    await apply_private_collections_to_request(
+        request, requesting_user.id, conversation_id
+    )
 
     # The retry path re-prepares an already prepared request, so the same ids
     # would pile up on every attempt without this.
@@ -2084,7 +2108,9 @@ async def create_agentic_message(
                 detail="You are not allowed to use collections from other users",
             )
 
-        request = await _prepare_agentic_request(request, requesting_user)
+        request = await _prepare_agentic_request(
+            request, requesting_user, conversation_id
+        )
         request.mcp_proxy_bearer_token = bearer_token
         request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic collection IDs: %s", request.collection_ids)
@@ -2248,7 +2274,9 @@ async def create_agentic_message_stream(
                 detail="You are not allowed to use collections from other users",
             )
 
-        request = await _prepare_agentic_request(request, requesting_user)
+        request = await _prepare_agentic_request(
+            request, requesting_user, conversation_id
+        )
         request.mcp_proxy_bearer_token = bearer_token
         request.mcp_user_id = str(requesting_user.id)
         logger.info("Agentic stream collection IDs: %s", request.collection_ids)
