@@ -12,7 +12,7 @@ langchain-openai==1.6.7
 langchain-mcp-adapters==0.3.2
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.8
-langgraph==1.2.12
+langgraph==1.2.14
 # eve-esa-agents is not listed here. The image installs it from the AGENTS_REF
 # build-arg (see the Dockerfile). A dev build resolves agents main to a commit
 # SHA. A release build passes the tag in agents.ref, and that image is what

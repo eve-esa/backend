@@ -21,6 +21,22 @@ updates:
       semver-major-days: 7
     groups:
       # Order matters: a dependency lands in the first group it matches.
+      # The Mongo driver stack goes first and alone: langgraph-checkpoint-mongodb
+      # caps pymongo, and motor wraps it, so a driver bump never rides with
+      # unrelated minors and is reviewed against the checkpoint tests.
+      mongo-driver:
+        applies-to: "version-updates"
+        patterns:
+          - "pymongo"
+          - "motor"
+          - "langgraph-checkpoint-mongodb"
+        update-types: ["minor", "patch"]
+      mongo-driver-security:
+        applies-to: "security-updates"
+        patterns:
+          - "pymongo"
+          - "motor"
+          - "langgraph-checkpoint-mongodb"
       langchain-ecosystem:
         applies-to: "version-updates"
         patterns:
