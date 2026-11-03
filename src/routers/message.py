@@ -23,6 +23,7 @@ from src.database.models.co2eq_comparison import CO2EQComparison
 from src.database.models.collection import Collection as CollectionModel
 from src.database.models.conversation import Conversation
 from src.database.models.mcp_server import MCPServer
+from src.database.models.skill import Skill
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.middlewares.auth import get_bearer_token, get_current_user
@@ -1929,7 +1930,7 @@ async def _prepare_agentic_request(
     request: GenerationRequest,
     requesting_user: User,
 ) -> GenerationRequest:
-    """Normalise collections and resolve MCP servers on the request."""
+    """Normalise collections and resolve MCP servers and skills on the request."""
     request.public_collections = normalize_public_collections_selection(
         request.public_collections,
         is_prod=IS_PROD,
@@ -1985,6 +1986,28 @@ async def _prepare_agentic_request(
             "Resolved %d MCP server(s): %s",
             len(mcp_docs),
             [s.name for s in mcp_docs],
+        )
+
+    # Same ownership rule as MCP servers. An empty list loads no Mongo skills.
+    # Packaged skills are not filtered here; the loader always adds them.
+    if request.skills:
+        skill_docs = await Skill.find_all(
+            filter_dict={
+                "name": {"$in": request.skills},
+                "enabled": True,
+                "deleted_at": None,
+                "$or": [{"user_id": requesting_user.id}, {"user_id": None}],
+            }
+        )
+        found_names = {skill.name for skill in skill_docs}
+        missing = set[str](request.skills) - found_names
+        if missing:
+            logger.warning("Requested skills not found or disabled: %s", missing)
+        request.skill_configs = list(skill_docs)
+        logger.info(
+            "Resolved %d skill(s): %s",
+            len(skill_docs),
+            [skill.name for skill in skill_docs],
         )
 
     if request.custom_model_id:

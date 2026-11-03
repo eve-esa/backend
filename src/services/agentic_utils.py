@@ -33,7 +33,12 @@ def is_agentic_generation_request(
     message: Optional[Message] = None,
 ) -> bool:
     """Return True when the stored request should use the agentic pipeline."""
-    if request.custom_model_id or request.agent or request.public_mcp_servers:
+    if (
+        request.custom_model_id
+        or request.agent
+        or request.public_mcp_servers
+        or request.skills
+    ):
         return True
     if message is None:
         return False

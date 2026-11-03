@@ -51,6 +51,7 @@ from src.services.agents.core.sandbox import (
     close_sandbox,
     open_sandbox,
 )
+from src.services.agents.core.skills import resolve_skills_root
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
@@ -1058,6 +1059,7 @@ def _build_react_graph(
     llm_idle_timeout: Optional[int] = None,
     on_policy: Any = None,
     sandbox_backend: Any = None,
+    skills_root: Any = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -1113,9 +1115,28 @@ def _build_react_graph(
     }
     # React's compile has no backend parameter. A MagicMock compile exposes
     # (*args, **kwargs) only, so it must not gain a backend kwarg either.
-    if sandbox_backend is not None and _compile_declares_backend(agent):
-        compile_kwargs["backend"] = backend_for_compile(sandbox_backend)
+    if _compile_declares_backend(agent):
+        if sandbox_backend is not None:
+            compile_kwargs["backend"] = backend_for_compile(sandbox_backend)
+        elif skills_root is not None:
+            filesystem = _filesystem_skills_backend(skills_root)
+            if filesystem is not None:
+                compile_kwargs["backend"], compile_kwargs["permissions"] = filesystem
     return agent.compile(**compile_kwargs)
+
+
+def _filesystem_skills_backend(skills_root: Any):
+    """Read-only ``/skills/`` mount for a turn that has no sandbox.
+
+    ``None`` when the deep graph cannot be imported. The sandbox path does
+    not use this: it uploads the tree and the shell reads it there.
+    """
+    try:
+        from agents.graphs.deep.graph import default_backend, default_permissions
+    except ImportError:
+        logger.warning("Deep graph is not installed; skills stay on its default")
+        return None
+    return default_backend(skills_root), default_permissions()
 
 
 def _compile_declares_backend(agent: Any) -> bool:
@@ -1343,9 +1364,12 @@ async def generate_answer_agentic(
         endpoint_metadata = llm_metadata.pop("endpoint", None)
         # Time the sandbox only when this graph can take one. An extra
         # perf_counter call would shift the setup clocks of every other graph.
+        # Skills resolve before that clock: building the tree is not sandbox time.
+        skills_root = None
         if _compile_declares_backend(agent):
+            skills_root = resolve_skills_root(request.skill_configs)
             step_start = time.perf_counter()
-            sandbox_session = await open_sandbox()
+            sandbox_session = await open_sandbox(skills_root)
             if sandbox_session is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
@@ -1364,6 +1388,7 @@ async def generate_answer_agentic(
             sandbox_backend=(
                 None if sandbox_session is None else sandbox_session.backend
             ),
+            skills_root=skills_root,
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
@@ -1701,9 +1726,12 @@ async def generate_answer_agentic_stream_helper(
 
         # Time the sandbox only when this graph can take one. An extra
         # perf_counter call would shift the setup clocks of every other graph.
+        # Skills resolve before that clock: building the tree is not sandbox time.
+        skills_root = None
         if _compile_declares_backend(agent):
+            skills_root = resolve_skills_root(request.skill_configs)
             step_start = time.perf_counter()
-            sandbox_session = await open_sandbox()
+            sandbox_session = await open_sandbox(skills_root)
             if sandbox_session is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
@@ -1722,6 +1750,7 @@ async def generate_answer_agentic_stream_helper(
             sandbox_backend=(
                 None if sandbox_session is None else sandbox_session.backend
             ),
+            skills_root=skills_root,
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 

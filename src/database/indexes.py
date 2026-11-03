@@ -40,6 +40,7 @@ async def _create_index(collection: AsyncIOMotorCollection, keys, **kwargs) -> N
 async def ensure_indexes() -> None:
     """Create MongoDB indexes required by MCP proxy, usage tracking, API keys, and artifacts."""
     mcp_servers = get_collection("mcp_servers")
+    skills = get_collection("skills")
     mcp_usage = get_collection("mcp_usage")
     openai_usage = get_collection("openai_usage")
     api_keys = get_collection("api_keys")
@@ -56,6 +57,15 @@ async def ensure_indexes() -> None:
         [("user_id", 1), ("name", 1)],
         name="mcp_servers_user_name",
         unique=True,
+    )
+    # Soft-deleted rows stay in the collection, so a re-created skill of the
+    # same name must not collide with them. user_id None is the global owner.
+    await _create_index(
+        skills,
+        [("user_id", 1), ("name", 1)],
+        name="skills_user_name",
+        unique=True,
+        partialFilterExpression={"deleted_at": None},
     )
 
     # MCP proxy usage stats. Indexes mirror the back-office query dimensions:

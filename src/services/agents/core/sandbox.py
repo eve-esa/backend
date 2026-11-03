@@ -67,7 +67,10 @@ def _start_agentcore() -> SandboxSession:
         identifier=identifier,
         session_timeout_seconds=_AGENTCORE_TIMEOUT_S,
     )
-    return SandboxSession(backend=sandbox, close=sandbox.close)
+    # writeFiles stores "/skills/..." under the session cwd, and the process
+    # cannot create a real "/skills". Skill text still calls that absolute
+    # path, so the shell rewrites it to the directory the upload used.
+    return SandboxSession(backend=_bind_skills_shell(sandbox), close=sandbox.close)
 
 
 def _start_opensandbox() -> SandboxSession:
@@ -132,13 +135,15 @@ def _upload_error(response: Any) -> Optional[str]:
     return getattr(response, "error", None)
 
 
-def _upload_skills(backend: Any) -> None:
+def _upload_skills(backend: Any, skills_root: Optional[Path] = None) -> None:
     """Copy the host skills tree to ``/skills/`` inside the sandbox.
 
-    One ``upload_files`` call. Any error closes nothing by itself; the caller
-    closes the session so a turn never starts with half the skills.
+    *skills_root* is the merged tree for this turn. ``None`` keeps the packaged
+    folder from the deep graph. One ``upload_files`` call. Any error closes
+    nothing by itself; the caller closes the session so a turn never starts
+    with half the skills.
     """
-    root = _skills_directory()
+    root = _skills_directory() if skills_root is None else skills_root
     if root is None:
         return
     files = _skill_files(root)
@@ -158,14 +163,54 @@ def _upload_skills(backend: Any) -> None:
         raise SandboxError("skills upload failed: " + "; ".join(failed))
 
 
-def _open_sync(provider: str) -> SandboxSession:
+def _rewrite_skills_command(command: str, cwd: str) -> str:
+    """Point a ``/skills`` shell path at the directory ``writeFiles`` used.
+
+    A cwd of ``/`` already stores the upload at ``/skills``. A command that
+    already names ``cwd/skills`` is left alone so a second call does not
+    nest the prefix.
+    """
+    if not cwd or cwd == "/":
+        return command
+    root = f"{cwd}/skills"
+    if root in command:
+        return command
+    return command.replace("/skills", root)
+
+
+def _bind_skills_shell(backend: Any) -> Any:
+    """Rewrite ``/skills`` in ``execute`` and leave every other method in place.
+
+    The object stays an ``AgentCoreSandbox``. ``CompositeBackend`` checks that
+    type before it forwards a shell command, so a wrapper class would make
+    ``execute`` raise.
+    """
+    original = getattr(backend, "execute", None)
+    if original is None:
+        return backend
+    cwd_box: dict[str, Optional[str]] = {"cwd": None}
+
+    def execute(command: str, *args: Any, **kwargs: Any):
+        cwd = cwd_box["cwd"]
+        if cwd is None:
+            probe = original("pwd")
+            text = (getattr(probe, "output", "") or "").strip()
+            cwd = text.splitlines()[-1].rstrip("/") if text else ""
+            cwd_box["cwd"] = cwd
+        return original(_rewrite_skills_command(command, cwd or ""), *args, **kwargs)
+
+    backend.execute = execute
+    return backend
+
+
+def _open_sync(provider: str, skills_root: Optional[Path] = None) -> SandboxSession:
     start = _PROVIDERS.get(provider)
     if start is None:
         known = ", ".join(sorted(_PROVIDERS))
         raise SandboxError(f"unknown SANDBOX_PROVIDER {provider!r}; expected {known}")
     session = start()
     try:
-        _upload_skills(session.backend)
+        _upload_skills(session.backend, skills_root)
     except Exception:
         try:
             session.close()
@@ -175,16 +220,17 @@ def _open_sync(provider: str) -> SandboxSession:
     return session
 
 
-async def open_sandbox() -> Optional[SandboxSession]:
+async def open_sandbox(skills_root: Optional[Path] = None) -> Optional[SandboxSession]:
     """Start this turn's sandbox and upload skills into it.
 
-    ``None`` when ``SANDBOX_PROVIDER`` is unset or ``none``. The provider
-    calls block, so they run on a worker thread.
+    ``None`` when ``SANDBOX_PROVIDER`` is unset or ``none``. *skills_root*
+    ``None`` uploads the packaged skills folder. The provider calls block, so
+    they run on a worker thread.
     """
     provider = os.environ.get(_PROVIDER_ENV, "").strip().lower()
     if provider in ("", "none"):
         return None
-    return await asyncio.to_thread(_open_sync, provider)
+    return await asyncio.to_thread(_open_sync, provider, skills_root)
 
 
 async def close_sandbox(session: Optional[SandboxSession]) -> None:

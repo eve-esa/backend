@@ -32,7 +32,11 @@ from src.services.agents.core.runner import (
     generate_answer_agentic,
     generate_answer_agentic_stream_helper,
 )
-from src.services.agents.core.sandbox import SandboxError, open_sandbox
+from src.services.agents.core.sandbox import (
+    SandboxError,
+    _bind_skills_shell,
+    open_sandbox,
+)
 from src.schemas.generation_request import GenerationRequest
 
 _RUNNER = "src.services.agents.core.runner"
@@ -2269,6 +2273,36 @@ class TestSandbox:
         assert sandbox.closed == 1
         assert names == ["_open_sync", "close"]
 
+    def test_skills_shell_rewrites_the_absolute_path(self):
+        calls: list[str] = []
+
+        class _Inner:
+            def execute(self, command, *, timeout=None):
+                calls.append(command)
+                if command == "pwd":
+                    return SimpleNamespace(output="/opt/sandbox\n", exit_code=0)
+                return SimpleNamespace(output="ran", exit_code=0, timeout=timeout)
+
+        backend = _bind_skills_shell(_Inner())
+        command = "python3 /skills/roll-dice/scripts/roll.py"
+        assert backend.execute(command).output == "ran"
+        assert calls == ["pwd", "python3 /opt/sandbox/skills/roll-dice/scripts/roll.py"]
+        backend.execute("python3 /opt/sandbox/skills/roll-dice/scripts/roll.py")
+        assert calls[-1] == "python3 /opt/sandbox/skills/roll-dice/scripts/roll.py"
+
+    def test_skills_shell_leaves_a_root_cwd_unchanged(self):
+        calls: list[str] = []
+
+        class _Inner:
+            def execute(self, command, *, timeout=None):
+                calls.append(command)
+                return SimpleNamespace(output="/\n", exit_code=0)
+
+        backend = _bind_skills_shell(_Inner())
+        command = "python3 /skills/roll-dice/scripts/roll.py"
+        backend.execute(command)
+        assert calls == ["pwd", command]
+
     async def test_agentcore_identifier_is_passed_through(self, tmp_path, monkeypatch):
         _skills_tree(tmp_path, monkeypatch)
         monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
@@ -2373,7 +2407,7 @@ class TestSandbox:
 
 
 class TestSandboxInGeneration:
-    async def test_unset_provider_does_not_pass_backend(self, monkeypatch):
+    async def test_unset_provider_mounts_skills_without_a_sandbox(self, monkeypatch):
         monkeypatch.delenv("SANDBOX_PROVIDER", raising=False)
         graph = _FakeUpdatesGraph(
             [{"agent": {"messages": [AIMessage(content="ok")]}}]
@@ -2388,8 +2422,10 @@ class TestSandboxInGeneration:
                 )
             )
 
-        assert "backend" not in agent.compile_kwargs
-        assert "permissions" not in agent.compile_kwargs
+        # No sandbox, so the merged skills folder is mounted read-only. The
+        # sandbox clock stays absent: nothing was started.
+        assert "/skills/" in agent.compile_kwargs["backend"].routes
+        assert agent.compile_kwargs["permissions"]
         assert "setup_sandbox_s" not in latencies
 
     async def test_agentcore_is_the_composite_default(self, tmp_path, monkeypatch):

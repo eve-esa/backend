@@ -50,6 +50,10 @@ class GenerationRequest(BaseModel):
         default_factory=list,
         description="List of MCP server names to attach as tools for the agentic pipeline",
     )
+    skills: List[str] = Field(
+        default_factory=list,
+        description="List of skill names to load for the agentic pipeline",
+    )
     agent: Optional[str] = Field(
         default=None,
         description=(
@@ -123,6 +127,7 @@ class GenerationRequest(BaseModel):
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
     _mcp_server_configs: List[Any] = PrivateAttr(default_factory=list)
+    _skill_configs: List[Any] = PrivateAttr(default_factory=list)
     _mcp_proxy_bearer_token: Optional[str] = PrivateAttr(default=None)
     _resolved_custom_model: Any = PrivateAttr(default=None)
     _mcp_user_id: Optional[str] = PrivateAttr(default=None)
@@ -151,6 +156,15 @@ class GenerationRequest(BaseModel):
     @mcp_server_configs.setter
     def mcp_server_configs(self, value: List[Any]) -> None:
         self._mcp_server_configs = list(value) if value else []
+
+    @property
+    def skill_configs(self) -> List[Any]:
+        """Skill rows resolved from ``skills`` during request preparation."""
+        return self._skill_configs
+
+    @skill_configs.setter
+    def skill_configs(self, value: List[Any]) -> None:
+        self._skill_configs = list(value) if value else []
 
     @property
     def mcp_proxy_bearer_token(self) -> Optional[str]:
