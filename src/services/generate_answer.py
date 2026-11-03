@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from src.config import (
     EVE_JSC_MODEL_NAME,
+    JSC_LARGE_MODEL_NAME,
     FALLBACK_MODEL_NAME,
     MAIN_MODEL_NAME,
     SATCOM_LARGE_MODEL_NAME,
@@ -344,6 +345,8 @@ def _resolve_model_name_for_llm_type(llm_type: str) -> Optional[str]:
         return SATCOM_LARGE_MODEL_NAME
     if llm_type == LLMType.Eve_Jsc.value:
         return EVE_JSC_MODEL_NAME
+    if llm_type == LLMType.Jsc_Large.value:
+        return JSC_LARGE_MODEL_NAME or None
     return None
 
 
