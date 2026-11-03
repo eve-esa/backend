@@ -50,6 +50,11 @@ class AsyncMongoDBManager:
         documents = self.database["documents"]
         await documents.create_index("user_id")
         await documents.create_index([("collection_id", 1), ("timestamp", -1)])
+        # Every chat turn in a conversation looks up its attached documents by
+        # these two fields (services/conversation_documents.py).
+        await self.database["collections"].create_index(
+            [("user_id", 1), ("conversation_id", 1)]
+        )
 
     def get_collection(self, collection_name: str) -> AsyncIOMotorCollection:
         """Get a collection from the database."""

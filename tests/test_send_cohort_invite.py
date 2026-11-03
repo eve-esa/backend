@@ -430,7 +430,7 @@ async def test_apply_still_ensures_indexes(world, fake_mailer, pauses, fresh_con
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ensure, expected", [(True, 2), (False, 0)])
+@pytest.mark.parametrize("ensure, expected", [(True, 3), (False, 0)])
 async def test_connect_ensure_indexes_flag(monkeypatch, ensure, expected):
     collection = MagicMock()
     collection.create_index = AsyncMock()

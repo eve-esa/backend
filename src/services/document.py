@@ -98,6 +98,8 @@ class DocumentService:
         metadata_urls: Optional[List[str] | str] = None,
         metadata_names: Optional[List[str] | str] = None,
         document_ids: Optional[List[str]] = None,
+        max_chunks: Optional[int] = None,
+        qdrant_timeout_s: Optional[float] = None,
     ) -> DocumentResult:
         """
         Add documents to a collection.
@@ -110,6 +112,10 @@ class DocumentService:
             metadata_urls: Optional metadata URLs
             metadata_names: Optional metadata names
             document_ids: Optional Mongo document IDs aligned with ``files``
+            max_chunks: Refuse the whole batch, before any embedding, when
+                all files together split into more chunks than this
+            qdrant_timeout_s: HTTP timeout of the Qdrant writes, for a caller
+                with a deadline; a client of its own, never the shared one
 
         Returns:
             DocumentResult: Result of the operation
@@ -127,13 +133,20 @@ class DocumentService:
             processed_names = self._process_metadata(metadata_names, len(files))
 
             # Initialize components
-            vector_store = self._get_vector_store_manager(request.embeddings_model)
+            if qdrant_timeout_s is None:
+                vector_store = self._get_vector_store_manager(request.embeddings_model)
+            else:
+                vector_store = VectorStoreManager(
+                    embeddings_model=request.embeddings_model,
+                    qdrant_timeout_s=qdrant_timeout_s,
+                )
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=request.chunk_size, chunk_overlap=request.chunk_overlap
             )
 
             all_documents = []
             ingested_document_ids: List[str] = []
+            chunk_counts: Dict[str, int] = {}
             ingested_file_count = 0
             aligned_ids = list(document_ids or [])
             if len(aligned_ids) < len(files):
@@ -172,10 +185,20 @@ class DocumentService:
                 if not split_docs:
                     logger.warning(f"No chunks produced from {file.filename}")
                     continue
+                if max_chunks and len(all_documents) + len(split_docs) > max_chunks:
+                    return DocumentResult(
+                        success=False,
+                        message="too_many_chunks",
+                        data={
+                            "collection": collection_id,
+                            "chunk_count": len(all_documents) + len(split_docs),
+                        },
+                    )
                 all_documents.extend(split_docs)
                 ingested_file_count += 1
                 if document_id:
                     ingested_document_ids.append(document_id)
+                    chunk_counts[document_id] = len(split_docs)
                 logger.info(f"Processed {len(split_docs)} chunks from {file.filename}")
 
             # Handle results
@@ -214,6 +237,7 @@ class DocumentService:
                         "chunk_count": len(valid_documents),
                         "file_count": ingested_file_count,
                         "ingested_document_ids": ingested_document_ids,
+                        "chunk_counts": chunk_counts,
                     },
                 )
 
