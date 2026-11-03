@@ -137,7 +137,7 @@ jobs:
             exit 1
           fi
           echo "Installing eve-esa-agents @ ${REF}"
-          pip install "eve-esa-agents @ git+https://github.com/eve-esa/agents.git@${REF}"
+          pip install "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${REF}"
 
       - name: Run tests
         # e2e is excluded on purpose: those tests talk to real deployed services and

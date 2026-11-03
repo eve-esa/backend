@@ -24,6 +24,7 @@ from src.routers import (
     internal_bug_reports_router,
     internal_notifications_router,
     mcp_server_router,
+    skill_router,
     migration_router,
     message_router,
     user_router,
@@ -73,6 +74,7 @@ def register_routers(app: FastAPI):
 
     # MCP Servers
     app.include_router(mcp_server_router, tags=["MCP Servers"])
+    app.include_router(skill_router, tags=["Skills"])
 
     # Custom models
     app.include_router(custom_model_router, tags=["Custom Models"])

@@ -16,7 +16,7 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 # workflow resolves main to a SHA before it passes the build-arg. Default is
 # only for a local compose build that does not pass one.
 ARG AGENTS_REF=main
-RUN pip install --no-cache-dir "eve-esa-agents @ git+https://github.com/eve-esa/agents.git@${AGENTS_REF}"
+RUN pip install --no-cache-dir "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${AGENTS_REF}"
 
 # Runtime layout shared by the production image and the local dev image.
 FROM python:3.12-slim-bookworm AS runtime

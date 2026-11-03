@@ -8,6 +8,7 @@ from .message import router as message_router
 from .conversation import router as conversation_router
 from .user import router as user_router
 from .mcp_server import router as mcp_server_router
+from .skill import router as skill_router
 from .custom_model import router as custom_model_router
 from .error_log import router as error_log_router
 from .internal_notifications import router as internal_notifications_router
@@ -25,6 +26,7 @@ __all__ = [
     "conversation_router",
     "user_router",
     "mcp_server_router",
+    "skill_router",
     "custom_model_router",
     "error_log_router",
     "internal_notifications_router",
