@@ -14,6 +14,9 @@ Covers:
 import asyncio
 import contextlib
 import json
+import sys
+import types
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,6 +32,7 @@ from src.services.agents.core.runner import (
     generate_answer_agentic,
     generate_answer_agentic_stream_helper,
 )
+from src.services.agents.core.sandbox import SandboxError, open_sandbox
 from src.schemas.generation_request import GenerationRequest
 
 _RUNNER = "src.services.agents.core.runner"
@@ -1878,3 +1882,655 @@ class TestAgenticSetupLatencies:
         assert events[-1]["latencies"]["generation_unattributed_s"] == (
             latencies["generation_unattributed_s"]
         )
+
+
+def _deep_fallback_update() -> dict:
+    """One deep ``model`` update whose answer came from the fallback model."""
+    return {
+        "model": {
+            "messages": [
+                AIMessage(
+                    content="x",
+                    response_metadata={
+                        "eve_fallback_used": True,
+                        "eve_fallback_latency_s": 1.5,
+                    },
+                )
+            ]
+        }
+    }
+
+
+def _assert_no_dotted_latency_keys(latencies: dict) -> None:
+    dotted = [key for key in latencies if "." in key]
+    assert dotted == []
+
+
+class TestDeepAgentGraph:
+    def test_get_agent_graph_returns_deep_agent(self):
+        pytest.importorskip("deepagents")
+        # Agents refs before the deep graph (v0.5.5, main without the branch)
+        # have no module. The suite must stay green until that graph ships.
+        deep_graph = pytest.importorskip("agents.graphs.deep.graph")
+        from src.services.agents.core.registry import get_agent_graph
+
+        assert isinstance(get_agent_graph("deep"), deep_graph.DeepAgent)
+
+
+class TestDeepFallbackAttribution:
+    async def test_non_streaming_marks_fallback_without_a_fallback_node(self):
+        graph = _FakeUpdatesGraph([_deep_fallback_update()])
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                final_answer,
+                _documents,
+                _use_rag,
+                latencies,
+                prompts,
+                trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert final_answer == "x"
+        assert prompts["used_fallback_llm"] is True
+        assert prompts["agentic_llm_resolved"] == "fallback"
+        assert prompts["endpoint"]["answered"] == "fallback"
+        assert latencies["fallback_latency_s"] == 1.5
+        assert "node_agent_fallback_s" not in latencies
+        assert trace[0]["node"] == "model"
+
+    async def test_streaming_marks_fallback_on_persisted_state(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+        graph = _FakeStreamGraph(updates=[_deep_fallback_update()])
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        kwargs = persist.await_args.kwargs
+        assert kwargs["prompts"]["used_fallback_llm"] is True
+        assert kwargs["prompts"]["agentic_llm_resolved"] == "fallback"
+        assert kwargs["endpoint"]["answered"] == "fallback"
+        assert kwargs["latencies"]["fallback_latency_s"] == 1.5
+        assert "node_agent_fallback_s" not in kwargs["latencies"]
+
+    async def test_react_fallback_node_without_marker_skips_fallback_latency_s(self):
+        """An ``agent_fallback`` update with no marker stores only the node key.
+
+        Agents builds before the fallback stamp send this shape. The node
+        clock stays ``node_agent_fallback_s``.
+        """
+        updates = [
+            {"agent_fallback": {"messages": [AIMessage(content="fallback answer")]}},
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert prompts["used_fallback_llm"] is True
+        assert "node_agent_fallback_s" in latencies
+        assert "fallback_latency_s" not in latencies
+
+    async def test_react_fallback_marker_records_both_latency_keys(self):
+        """A stamped ``agent_fallback`` message adds ``fallback_latency_s``."""
+        updates = [
+            {
+                "agent_fallback": {
+                    "messages": [
+                        AIMessage(
+                            content="fallback answer",
+                            response_metadata={
+                                "eve_fallback_used": True,
+                                "eve_fallback_latency_s": 1.5,
+                            },
+                        )
+                    ]
+                }
+            },
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                prompts,
+                _trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert prompts["used_fallback_llm"] is True
+        assert latencies["fallback_latency_s"] == 1.5
+        assert "node_agent_fallback_s" in latencies
+
+
+class TestDeepLatencyKeys:
+    async def test_non_streaming_renames_model_and_drops_hook_nodes(self):
+        updates = [
+            {
+                "PatchToolCallsMiddleware.before_agent": {
+                    "messages": [AIMessage(content="hook")]
+                }
+            },
+            {"model": {"messages": [AIMessage(content="answer")]}},
+            {
+                "tools": {
+                    "messages": [
+                        ToolMessage(content="ok", name="search", tool_call_id="c1")
+                    ]
+                }
+            },
+        ]
+        graph = _FakeUpdatesGraph(updates)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            (
+                _answer,
+                _documents,
+                _use_rag,
+                latencies,
+                _prompts,
+                trace,
+                _artifact_ids,
+            ) = await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert "node_agent_s" in latencies
+        assert "node_tools_s" in latencies
+        _assert_no_dotted_latency_keys(latencies)
+        assert [entry["node"] for entry in trace] == [
+            "PatchToolCallsMiddleware.before_agent",
+            "model",
+            "tools",
+        ]
+
+    async def test_streaming_renames_model_and_drops_hook_nodes(self):
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(content="a"),
+                    {"langgraph_node": "PatchToolCallsMiddleware.before_agent"},
+                ),
+                (AIMessage(content="b"), {"langgraph_node": "tools"}),
+                (AIMessage(content="c"), {"langgraph_node": "model"}),
+            ]
+        )
+        persist = AsyncMock()
+
+        with _patched_runner(
+            _build_react_graph=MagicMock(return_value=graph),
+            persist_message_state=persist,
+        ):
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+
+        latencies = persist.await_args.kwargs["latencies"]
+        assert "node_agent_s" in latencies
+        assert "node_tools_s" in latencies
+        _assert_no_dotted_latency_keys(latencies)
+        assert persist.await_args.kwargs["trace"][-1]["node"] == "model"
+
+
+# ─── sandbox ──────────────────────────────────────────────────────────────────
+
+_MISSING = object()
+
+
+class _RecordingSandbox:
+    """Stand-in for a provider session. Records uploads and closes."""
+
+    def __init__(self, upload_error=None):
+        self.uploads: list = []
+        self.closed = 0
+        self.upload_error = upload_error
+
+    def upload_files(self, files):
+        self.uploads.append(list(files))
+        return [SimpleNamespace(path=path, error=self.upload_error) for path, _ in files]
+
+    def close(self):
+        self.closed += 1
+
+    def destroy(self):
+        self.closed += 1
+
+
+class _DeclaringAgent:
+    """``compile`` declares ``backend``, unlike a MagicMock."""
+
+    def __init__(self, graph):
+        self._graph = graph
+        self.compile_kwargs = None
+        self.prompts = {}
+        self.name = "deep"
+
+    def instruction_text(self, **_kwargs):
+        return ""
+
+    def compile(self, backend=_MISSING, **kwargs):
+        self.compile_kwargs = dict(kwargs)
+        if backend is not _MISSING:
+            self.compile_kwargs["backend"] = backend
+        return self._graph
+
+
+def _skills_tree(tmp_path, monkeypatch):
+    skill = tmp_path / "eo" / "SKILL.md"
+    skill.parent.mkdir()
+    skill.write_bytes(b"hello skill")
+    monkeypatch.setenv("EVE_AGENT_SKILLS_DIR", str(tmp_path))
+    return skill
+
+
+def _install_agentcore(monkeypatch, sandbox=None):
+    sandbox = sandbox or _RecordingSandbox()
+    created: list = []
+    module = types.ModuleType("langchain_agentcore_codeinterpreter")
+
+    class AgentCoreSandbox:
+        @staticmethod
+        def create(**kwargs):
+            created.append(kwargs)
+            return sandbox
+
+    module.AgentCoreSandbox = AgentCoreSandbox
+    monkeypatch.setitem(sys.modules, "langchain_agentcore_codeinterpreter", module)
+    return sandbox, created
+
+
+def _install_opensandbox(monkeypatch, sandbox=None):
+    sandbox = sandbox or _RecordingSandbox()
+    created: list = []
+    module = types.ModuleType("opensandbox")
+    config = types.ModuleType("opensandbox.config")
+    adapter = types.ModuleType("langchain_opensandbox")
+
+    class ConnectionConfigSync:
+        def __init__(self, domain=None, protocol="http", api_key=None):
+            self.domain = domain
+            self.protocol = protocol
+            self.api_key = api_key
+
+    class SandboxSync:
+        @staticmethod
+        def create(image, connection_config=None, **kwargs):
+            created.append(
+                {"image": image, "connection_config": connection_config, **kwargs}
+            )
+            return sandbox
+
+    class OpenSandboxBackend:
+        def __init__(self, sandbox):
+            self.sandbox = sandbox
+
+        def upload_files(self, files):
+            return self.sandbox.upload_files(files)
+
+    module.SandboxSync = SandboxSync
+    config.ConnectionConfigSync = ConnectionConfigSync
+    adapter.OpenSandboxBackend = OpenSandboxBackend
+    monkeypatch.setitem(sys.modules, "opensandbox", module)
+    monkeypatch.setitem(sys.modules, "opensandbox.config", config)
+    monkeypatch.setitem(sys.modules, "langchain_opensandbox", adapter)
+    return sandbox, created
+
+
+def _inline_threads():
+    """Run ``asyncio.to_thread`` inline and record the callable names."""
+    names: list = []
+
+    async def _run(fn, /, *args, **kwargs):
+        names.append(getattr(fn, "__name__", repr(fn)))
+        return fn(*args, **kwargs)
+
+    return names, patch(
+        "src.services.agents.core.sandbox.asyncio.to_thread", side_effect=_run
+    )
+
+
+class TestSandbox:
+    async def test_unset_provider_starts_nothing(self, monkeypatch):
+        monkeypatch.delenv("SANDBOX_PROVIDER", raising=False)
+        names, spy = _inline_threads()
+        with spy:
+            assert await open_sandbox() is None
+        assert names == []
+
+    async def test_none_provider_starts_nothing(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "none")
+        assert await open_sandbox() is None
+
+    async def test_unknown_provider_raises(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "modal")
+        with pytest.raises(SandboxError, match="unknown SANDBOX_PROVIDER"):
+            await open_sandbox()
+
+    async def test_agentcore_create_args_and_skills_upload(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        monkeypatch.delenv("SANDBOX_AGENTCORE_IDENTIFIER", raising=False)
+        sandbox, created = _install_agentcore(monkeypatch)
+        names, spy = _inline_threads()
+
+        from src.services.agents.core.sandbox import close_sandbox
+
+        with spy:
+            session = await open_sandbox()
+            await close_sandbox(session)
+
+        assert created == [
+            {
+                "region": "eu-west-1",
+                "identifier": "aws.codeinterpreter.v1",
+                "session_timeout_seconds": 900,
+            }
+        ]
+        assert "boto3_session" not in created[0]
+        assert sandbox.uploads == [[("/skills/eo/SKILL.md", b"hello skill")]]
+        assert sandbox.closed == 1
+        assert names == ["_open_sync", "close"]
+
+    async def test_agentcore_identifier_is_passed_through(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        arn = "arn:aws:bedrock-agentcore::aws:code-interpreter/aws.codeinterpreter.v1"
+        monkeypatch.setenv("SANDBOX_AGENTCORE_IDENTIFIER", arn)
+        _sandbox, created = _install_agentcore(monkeypatch)
+
+        session = await open_sandbox()
+        from src.services.agents.core.sandbox import close_sandbox
+
+        await close_sandbox(session)
+
+        assert created[0]["identifier"] == arn
+
+    async def test_agentcore_requires_region_before_any_call(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.delenv("SANDBOX_AGENTCORE_REGION", raising=False)
+        with pytest.raises(SandboxError, match="SANDBOX_AGENTCORE_REGION"):
+            await open_sandbox()
+
+    async def test_upload_error_closes_and_raises(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(
+            monkeypatch, _RecordingSandbox(upload_error="disk full")
+        )
+
+        with pytest.raises(SandboxError, match="disk full"):
+            await open_sandbox()
+
+        assert sandbox.closed == 1
+
+    async def test_missing_deep_graph_skips_upload(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(monkeypatch)
+        monkeypatch.setattr(
+            "src.services.agents.core.sandbox._skills_directory", lambda: None
+        )
+
+        session = await open_sandbox()
+        from src.services.agents.core.sandbox import close_sandbox
+
+        await close_sandbox(session)
+
+        assert sandbox.uploads == []
+
+    async def test_opensandbox_create_args(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "opensandbox")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_DOMAIN", "sandbox.internal:8080")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_PROTOCOL", "https")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_API_KEY", "secret")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_IMAGE", "python:3.11")
+        monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "ignored.example")
+        remote, created = _install_opensandbox(monkeypatch)
+
+        session = await open_sandbox()
+        from src.services.agents.core.sandbox import close_sandbox
+
+        await close_sandbox(session)
+
+        assert len(created) == 1
+        config = created[0]["connection_config"]
+        assert created[0]["image"] == "python:3.11"
+        assert config.domain == "sandbox.internal:8080"
+        assert config.protocol == "https"
+        assert config.api_key == "secret"
+        assert remote.uploads == [[("/skills/eo/SKILL.md", b"hello skill")]]
+        assert remote.closed == 1
+
+    async def test_opensandbox_sdk_domain_does_not_satisfy_the_check(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "opensandbox")
+        monkeypatch.delenv("SANDBOX_OPENSANDBOX_DOMAIN", raising=False)
+        monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "localhost:8080")
+        with pytest.raises(SandboxError, match="SANDBOX_OPENSANDBOX_DOMAIN"):
+            await open_sandbox()
+
+    async def test_opensandbox_rejects_a_bad_protocol(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "opensandbox")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_DOMAIN", "localhost:8080")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_PROTOCOL", "ftp")
+        with pytest.raises(SandboxError, match="http or https"):
+            await open_sandbox()
+
+    def test_compile_without_backend_drops_the_sandbox(self):
+        agent = MagicMock()
+        agent.compile.return_value = MagicMock(name="compiled")
+        _build_react_graph(
+            "main",
+            tools=[],
+            checkpointer=None,
+            agent=agent,
+            llm=MagicMock(),
+            fallback_llm=MagicMock(),
+            sandbox_backend=object(),
+        )
+        assert "backend" not in agent.compile.call_args.kwargs
+        assert "permissions" not in agent.compile.call_args.kwargs
+
+
+class TestSandboxInGeneration:
+    async def test_unset_provider_does_not_pass_backend(self, monkeypatch):
+        monkeypatch.delenv("SANDBOX_PROVIDER", raising=False)
+        graph = _FakeUpdatesGraph(
+            [{"agent": {"messages": [AIMessage(content="ok")]}}]
+        )
+        agent = _DeclaringAgent(graph)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            _answer, _docs, _rag, latencies, _prompts, _trace, _ids = (
+                await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+            )
+
+        assert "backend" not in agent.compile_kwargs
+        assert "permissions" not in agent.compile_kwargs
+        assert "setup_sandbox_s" not in latencies
+
+    async def test_agentcore_is_the_composite_default(self, tmp_path, monkeypatch):
+        from deepagents.backends.state import StateBackend
+
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(monkeypatch)
+        graph = _FakeUpdatesGraph(
+            [{"agent": {"messages": [AIMessage(content="ok")]}}]
+        )
+        agent = _DeclaringAgent(graph)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+        names, spy = _inline_threads()
+
+        with spy, _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            _answer, _docs, _rag, latencies, _prompts, _trace, _ids = (
+                await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+            )
+
+        backend = agent.compile_kwargs["backend"]
+        assert backend.default is sandbox
+        assert set(backend.routes) == {
+            "/large_tool_results/",
+            "/conversation_history/",
+        }
+        assert all(isinstance(route, StateBackend) for route in backend.routes.values())
+        assert "permissions" not in agent.compile_kwargs
+        assert sandbox.closed == 1
+        assert names == ["_open_sync", "close"]
+        assert latencies["setup_sandbox_s"] >= 0
+
+    async def test_graph_error_closes_the_sandbox(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(monkeypatch)
+        graph = _FakeUpdatesGraph(raise_exc=RuntimeError("boom"))
+        agent = _DeclaringAgent(graph)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            with pytest.raises(RuntimeError, match="boom"):
+                await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+
+        assert sandbox.closed == 1
+
+    async def test_upload_error_skips_compile(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(
+            monkeypatch, _RecordingSandbox(upload_error="disk full")
+        )
+        agent = _DeclaringAgent(_FakeUpdatesGraph())
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            with pytest.raises(SandboxError, match="disk full"):
+                await generate_answer_agentic(
+                    request, user_id="test-user", conversation_id="c1"
+                )
+
+        assert agent.compile_kwargs is None
+        assert sandbox.closed == 1
+
+    async def test_react_ignores_the_provider(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        graph = _FakeUpdatesGraph(
+            [{"agent": {"messages": [AIMessage(content="ok")]}}]
+        )
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        builder = MagicMock(return_value=graph)
+
+        with _patched_runner(_build_react_graph=builder):
+            await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        assert builder.call_args.kwargs["sandbox_backend"] is None
+
+    async def test_stopped_stream_closes_the_sandbox(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(monkeypatch)
+        cancel_event = asyncio.Event()
+
+        class _StopGraph:
+            async def astream(self, *_args, **_kwargs):
+                cancel_event.set()
+                yield "updates", {}
+
+        agent = _DeclaringAgent(_StopGraph())
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            events = [
+                event
+                async for event in generate_answer_agentic_stream_helper(
+                    request,
+                    conversation_id="c1",
+                    message_id="m1",
+                    user_id="test-user",
+                    cancel_event=cancel_event,
+                )
+            ]
+
+        assert _event_payload(events[-1])["type"] == "stopped"
+        assert sandbox.closed == 1
+
+    async def test_opensandbox_backend_is_the_composite_default(
+        self, tmp_path, monkeypatch
+    ):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "opensandbox")
+        monkeypatch.setenv("SANDBOX_OPENSANDBOX_DOMAIN", "sandbox.internal")
+        monkeypatch.delenv("SANDBOX_OPENSANDBOX_PROTOCOL", raising=False)
+        monkeypatch.delenv("SANDBOX_OPENSANDBOX_API_KEY", raising=False)
+        monkeypatch.delenv("SANDBOX_OPENSANDBOX_IMAGE", raising=False)
+        remote, created = _install_opensandbox(monkeypatch)
+        graph = _FakeUpdatesGraph(
+            [{"agent": {"messages": [AIMessage(content="ok")]}}]
+        )
+        agent = _DeclaringAgent(graph)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            await generate_answer_agentic(
+                request, user_id="test-user", conversation_id="c1"
+            )
+
+        backend = agent.compile_kwargs["backend"]
+        assert backend.default.sandbox is remote
+        assert created[0]["image"] == "python:3.12"
+        assert created[0]["connection_config"].protocol == "http"
+        assert created[0]["connection_config"].api_key is None
+        assert remote.closed == 1

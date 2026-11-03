@@ -15,7 +15,7 @@ services:
         "8000",
         "--reload",
         "--reload-dir",
-        "/code",
+        "/code/src",
       ]
     env_file:
       - .env
@@ -43,6 +43,11 @@ services:
       - AUTH_ALLOW_INSECURE_HTTP=true
     volumes:
       - .:/code
+      # repos/eve-esa-agents is a symlink to a checkout outside this repo. The
+      # parent mount keeps the symlink, and that target is not in the container,
+      # so the process would use the agents package baked into the image.
+      # Mounting the symlink path makes Docker follow it on the host.
+      - ./repos/eve-esa-agents:/code/repos/eve-esa-agents
     depends_on:
       - mongo
       - redis

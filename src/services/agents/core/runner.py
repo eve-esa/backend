@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import BackgroundTasks
@@ -45,6 +46,11 @@ from src.services.generate_answer import (
     resolve_generated_model_name,
 )
 from src.services.agents.core.registry import get_agent_graph
+from src.services.agents.core.sandbox import (
+    backend_for_compile,
+    close_sandbox,
+    open_sandbox,
+)
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
@@ -292,6 +298,66 @@ class _TraceTimeline:
 def _recoverable_after_agent_fallback(*, fallback_used: bool, has_answer: bool) -> bool:
     """Return True when agent_fallback produced an answer but the graph still raised."""
     return fallback_used and has_answer
+
+
+# String literals on purpose: agents v0.5.5 does not export these names yet.
+_FALLBACK_MARKER = "eve_fallback_used"
+_FALLBACK_LATENCY_KEY = "eve_fallback_latency_s"
+
+
+def _update_messages(update: Dict[str, Any]) -> List[Any]:
+    msgs: List[Any] = []
+    for out in update.values():
+        got = out.get("messages", []) if isinstance(out, dict) else []
+        msgs.extend(got if isinstance(got, list) else [got])
+    return msgs
+
+
+@dataclass
+class _FallbackUse:
+    """In-graph fallback seen during one agent run.
+
+    ``used`` is true when an update names the ``agent_fallback`` node, or a
+    message carries ``eve_fallback_used``. ``seconds`` sums
+    ``eve_fallback_latency_s`` from those messages: the fallback call only,
+    not the failed primary. ``merge_latencies`` stores that sum as
+    ``fallback_latency_s``. It is not added to ``node_latencies``.
+
+    An ``agent_fallback`` update with no marker (agents before the stamp)
+    leaves ``seconds`` at 0, so only ``node_agent_fallback_s`` is stored.
+    """
+
+    used: bool = False
+    seconds: float = 0.0
+
+    def observe(self, update: Dict[str, Any]) -> None:
+        if "agent_fallback" in update:
+            self.used = True
+        for msg in _update_messages(update):
+            meta = getattr(msg, "response_metadata", None) or {}
+            if meta.get(_FALLBACK_MARKER):
+                self.used = True
+                self.seconds += float(meta.get(_FALLBACK_LATENCY_KEY) or 0.0)
+
+    def merge_latencies(self, latencies: Dict[str, Any]) -> Dict[str, Any]:
+        if self.seconds > 0:
+            latencies["fallback_latency_s"] = round(self.seconds, 3)
+        return latencies
+
+
+def _latency_node_name(node_name: str) -> Optional[str]:
+    """Map a graph node onto a ``metadata.latencies`` key.
+
+    Deep calls the model node ``model``; the back office reads ``node_agent_s``.
+    Middleware hook names contain a dot and must not become a Mongo field.
+    ``None`` drops the node so its time stays in ``generation_unattributed_s``.
+    Trace entries keep the real node name.
+    """
+    if "." in node_name:
+        return None
+    if node_name == "model":
+        return "agent"
+    return node_name
 
 
 # ─── MCP tool loader ──────────────────────────────────────────────────────────
@@ -991,6 +1057,7 @@ def _build_react_graph(
     llm_run_timeout: Optional[int] = None,
     llm_idle_timeout: Optional[int] = None,
     on_policy: Any = None,
+    sandbox_backend: Any = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -1029,20 +1096,47 @@ def _build_react_graph(
         except (TypeError, ValueError):
             pass
     policy_cb = on_policy if on_policy is not None else _graph_on_policy(graph_name)
-    return agent.compile(
-        llm=llm,
-        tools=tools,
-        checkpointer=checkpointer,
-        history=history,
-        summary=summary,
-        fallback_llm=fallback_llm,
-        llm_run_timeout=(
+    compile_kwargs: Dict[str, Any] = {
+        "llm": llm,
+        "tools": tools,
+        "checkpointer": checkpointer,
+        "history": history,
+        "summary": summary,
+        "fallback_llm": fallback_llm,
+        "llm_run_timeout": (
             llm_run_timeout if llm_run_timeout is not None else AGENTIC_TIMEOUT
         ),
-        llm_idle_timeout=(
+        "llm_idle_timeout": (
             llm_idle_timeout if llm_idle_timeout is not None else MODEL_TIMEOUT
         ),
-        on_policy=policy_cb,
+        "on_policy": policy_cb,
+    }
+    # React's compile has no backend parameter. A MagicMock compile exposes
+    # (*args, **kwargs) only, so it must not gain a backend kwarg either.
+    if sandbox_backend is not None and _compile_declares_backend(agent):
+        compile_kwargs["backend"] = backend_for_compile(sandbox_backend)
+    return agent.compile(**compile_kwargs)
+
+
+def _compile_declares_backend(agent: Any) -> bool:
+    """True when ``compile`` has an explicit ``backend`` parameter.
+
+    A catch-all ``**kwargs`` does not count: passing ``backend`` there would
+    change the kwargs of graphs that do not know about a sandbox.
+    """
+    compile_fn = getattr(agent, "compile", None)
+    if compile_fn is None:
+        return False
+    try:
+        parameters = inspect.signature(compile_fn).parameters
+    except (TypeError, ValueError):
+        return False
+    backend = parameters.get("backend")
+    if backend is None:
+        return False
+    return backend.kind not in (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
     )
 
 
@@ -1154,13 +1248,15 @@ def _build_agentic_latencies(
     # Backoffice reads these from metadata.latencies.
     # These add up to total_latency:
     # setup_mcp_tool_loading_s, setup_checkpointer_s, setup_loading_history_s,
-    # setup_llm_resolve_s, setup_graph_compile_s (each omitted when that step
-    # did not run), generation_latency, and other_latency_s (whatever is left:
+    # setup_llm_resolve_s, setup_graph_compile_s, setup_sandbox_s (each omitted
+    # when that step did not run), generation_latency, and other_latency_s
+    # (whatever is left:
     # agent selection, callbacks, artifact stubs).
     # These add up to generation_latency, so they are not added on top of it:
     # node_<name>_s and generation_unattributed_s (that difference, floored
     # at zero). first_token_latency is the time until the first token, not a
-    # slice of the total.
+    # slice of the total. fallback_latency_s is added afterwards by
+    # _FallbackUse.merge_latencies.
     latencies: Dict[str, Optional[float]] = {}
     if include_first_token:
         latencies["first_token_latency"] = first_token_latency
@@ -1219,6 +1315,7 @@ async def generate_answer_agentic(
     _retrieval_ctx, retrieval_token = set_retrieval_context()
     endpoint_metadata: Optional[Dict[str, Any]] = None
     agent_graph_type: Optional[str] = None
+    sandbox_session: Any = None
 
     try:
         setup_latencies: Dict[str, float] = {}
@@ -1244,6 +1341,13 @@ async def generate_answer_agentic(
         )
         setup_latencies["setup_llm_resolve_s"] = time.perf_counter() - step_start
         endpoint_metadata = llm_metadata.pop("endpoint", None)
+        # Time the sandbox only when this graph can take one. An extra
+        # perf_counter call would shift the setup clocks of every other graph.
+        if _compile_declares_backend(agent):
+            step_start = time.perf_counter()
+            sandbox_session = await open_sandbox()
+            if sandbox_session is not None:
+                setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
@@ -1257,6 +1361,9 @@ async def generate_answer_agentic(
                 (endpoint_metadata or {}).get("answered")
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
+            sandbox_backend=(
+                None if sandbox_session is None else sandbox_session.backend
+            ),
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
@@ -1264,17 +1371,18 @@ async def generate_answer_agentic(
 
         async def _run_graph(
             g: Any,
-        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, bool]:
+        ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, _FallbackUse]:
             """Stream the graph and collect results.
 
             Returns ``(raw_messages, trace_entries, node_latencies, duration,
-            in_graph_fallback)`` where *in_graph_fallback* is ``True`` when the
-            graph streamed an ``agent_fallback`` node update.
+            fallback)``. ``fallback.used`` is true when the graph streamed an
+            ``agent_fallback`` node update or a message carrying
+            ``eve_fallback_used``.
             """
             raw_msgs: List[Any] = []
             trace: List[Dict[str, Any]] = []
             latency_map: Dict[str, float] = {}
-            in_graph_fallback = False
+            fallback = _FallbackUse()
             start = time.perf_counter()
             # Separate from latency_map/node_latencies below: that dict keeps its
             # existing "elapsed since run start" semantics for metadata.latencies,
@@ -1299,12 +1407,13 @@ async def generate_answer_agentic(
                         config=config,
                         stream_mode="updates",
                     ):
+                        fallback.observe(update)
                         step_time = time.perf_counter()
                         for node_name, node_output in update.items():
-                            if node_name == "agent_fallback":
-                                in_graph_fallback = True
                             step_latency_s = step_time - start
-                            latency_map.setdefault(node_name, 0.0)
+                            latency_key = _latency_node_name(node_name)
+                            if latency_key is not None:
+                                latency_map.setdefault(latency_key, 0.0)
                             msgs = (
                                 node_output.get("messages", [])
                                 if isinstance(node_output, dict)
@@ -1334,7 +1443,8 @@ async def generate_answer_agentic(
                                     )
                                 )
                                 raw_msgs.append(msg)
-                            latency_map[node_name] = step_latency_s
+                            if latency_key is not None:
+                                latency_map[latency_key] = step_latency_s
                 except Exception as exc:
                     graph_exc = exc
 
@@ -1346,7 +1456,7 @@ async def generate_answer_agentic(
                     for msg in raw_msgs
                 )
                 if not _recoverable_after_agent_fallback(
-                    fallback_used=in_graph_fallback, has_answer=has_answer
+                    fallback_used=fallback.used, has_answer=has_answer
                 ):
                     raise graph_exc
                 logger.warning(
@@ -1364,7 +1474,13 @@ async def generate_answer_agentic(
                     error=graph_exc,
                     graph=agent_graph_type,
                 )
-            return raw_msgs, trace, latency_map, time.perf_counter() - start, in_graph_fallback
+            return (
+                raw_msgs,
+                trace,
+                latency_map,
+                time.perf_counter() - start,
+                fallback,
+            )
 
         gen_start = time.perf_counter()
         (
@@ -1372,7 +1488,7 @@ async def generate_answer_agentic(
             trace_entries,
             node_latencies,
             gen_latency,
-            used_fallback_llm,
+            fallback,
         ) = await _run_graph(graph)
 
         final_answer = ""
@@ -1399,16 +1515,18 @@ async def generate_answer_agentic(
         use_rag = retrieval_calls > 0
 
         total_latency = time.perf_counter() - total_start
-        latencies = _merge_retrieval_latencies(
-            _build_agentic_latencies(
-                total_latency=total_latency,
-                generation_latency=gen_latency,
-                node_latencies=node_latencies,
-                setup_latencies=setup_latencies,
-            ),
-            rag_tool_names,
+        latencies = fallback.merge_latencies(
+            _merge_retrieval_latencies(
+                _build_agentic_latencies(
+                    total_latency=total_latency,
+                    generation_latency=gen_latency,
+                    node_latencies=node_latencies,
+                    setup_latencies=setup_latencies,
+                ),
+                rag_tool_names,
+            )
         )
-        if used_fallback_llm:
+        if fallback.used:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
             # Same re-point as the streaming path: the footer reads this key.
             llm_metadata["agentic_llm_resolved"] = LLMType.Fallback.value
@@ -1417,7 +1535,7 @@ async def generate_answer_agentic(
             "instruction": resolved_instruction,
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
-            "used_fallback_llm": used_fallback_llm,
+            "used_fallback_llm": fallback.used,
             **llm_metadata,
             # This function persists nothing itself: the router lifts the
             # payload out into metadata.endpoint.
@@ -1446,6 +1564,7 @@ async def generate_answer_agentic(
         )
         raise
     finally:
+        await close_sandbox(sandbox_session)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
@@ -1495,7 +1614,6 @@ async def generate_answer_agentic_stream_helper(
 
     total_start = time.perf_counter()
     accumulated: List[str] = []
-    used_fallback_llm = False
     endpoint_metadata: Optional[Dict[str, Any]] = None
     # Bound before the try so the error handlers can still attribute a turn that
     # died before, or during, LLM resolution.
@@ -1513,6 +1631,7 @@ async def generate_answer_agentic_stream_helper(
     # the request's own trace (same trace id) answers; None with telemetry off.
     root_span: Any = None
     trace_id: Optional[str] = current_trace_id()
+    sandbox_session: Any = None
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1580,6 +1699,13 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_llm_resolve_s"] = time.perf_counter() - step_start
         endpoint_metadata = llm_prompts.pop("endpoint", None)
 
+        # Time the sandbox only when this graph can take one. An extra
+        # perf_counter call would shift the setup clocks of every other graph.
+        if _compile_declares_backend(agent):
+            step_start = time.perf_counter()
+            sandbox_session = await open_sandbox()
+            if sandbox_session is not None:
+                setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
@@ -1593,6 +1719,9 @@ async def generate_answer_agentic_stream_helper(
                 (endpoint_metadata or {}).get("answered")
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
+            sandbox_backend=(
+                None if sandbox_session is None else sandbox_session.backend
+            ),
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
@@ -1601,7 +1730,7 @@ async def generate_answer_agentic_stream_helper(
         gen_start = time.perf_counter()
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
-        in_graph_fallback_used = False
+        fallback = _FallbackUse()
         trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
@@ -1744,8 +1873,7 @@ async def generate_answer_agentic_stream_helper(
                             return
 
                         if mode == "updates":
-                            if "agent_fallback" in payload:
-                                in_graph_fallback_used = True
+                            fallback.observe(payload)
                             # An agent step is traced from its node update, not from
                             # the streamed chunks: the first chunk carrying a tool
                             # call has no arguments yet when the provider streams
@@ -1789,9 +1917,11 @@ async def generate_answer_agentic_stream_helper(
                         if node != current_node:
                             if current_node:
                                 elapsed_s = time.perf_counter() - node_start_time
-                                node_latencies[current_node] = (
-                                    node_latencies.get(current_node, 0.0) + elapsed_s
-                                )
+                                latency_key = _latency_node_name(current_node)
+                                if latency_key is not None:
+                                    node_latencies[latency_key] = (
+                                        node_latencies.get(latency_key, 0.0) + elapsed_s
+                                    )
                             for event in _flush_turn_buffer_to_events():
                                 yield event
                             node_start_time = time.perf_counter()
@@ -1852,15 +1982,17 @@ async def generate_answer_agentic_stream_helper(
 
                 if current_node:
                     elapsed_s = time.perf_counter() - node_start_time
-                    node_latencies[current_node] = (
-                        node_latencies.get(current_node, 0.0) + elapsed_s
-                    )
+                    latency_key = _latency_node_name(current_node)
+                    if latency_key is not None:
+                        node_latencies[latency_key] = (
+                            node_latencies.get(latency_key, 0.0) + elapsed_s
+                        )
                 for event in _flush_turn_buffer_to_events():
                     yield event
         except Exception as exc:
             answer = "".join(accumulated)
             if not _recoverable_after_agent_fallback(
-                fallback_used=in_graph_fallback_used, has_answer=bool(answer)
+                fallback_used=fallback.used, has_answer=bool(answer)
             ):
                 raise
             graph_exc = exc
@@ -1877,16 +2009,18 @@ async def generate_answer_agentic_stream_helper(
         )
         total_latency = time.perf_counter() - total_start
 
-        latencies = _merge_retrieval_latencies(
-            _build_agentic_latencies(
-                total_latency=total_latency,
-                generation_latency=gen_latency,
-                node_latencies=node_latencies,
-                setup_latencies=setup_latencies,
-                first_token_latency=first_token_latency,
-                include_first_token=True,
-            ),
-            rag_tool_names,
+        latencies = fallback.merge_latencies(
+            _merge_retrieval_latencies(
+                _build_agentic_latencies(
+                    total_latency=total_latency,
+                    generation_latency=gen_latency,
+                    node_latencies=node_latencies,
+                    setup_latencies=setup_latencies,
+                    first_token_latency=first_token_latency,
+                    include_first_token=True,
+                ),
+                rag_tool_names,
+            )
         )
 
         if answer:
@@ -1919,7 +2053,7 @@ async def generate_answer_agentic_stream_helper(
                 graph=agent_graph_type,
             )
 
-        if in_graph_fallback_used:
+        if fallback.used:
             endpoint_metadata = _record_in_graph_fallback(endpoint_metadata)
             # The footer prefers agentic_llm_resolved when a fallback ran; it
             # must name the model that answered, not the one that died.
@@ -1937,7 +2071,7 @@ async def generate_answer_agentic_stream_helper(
                 "instruction": resolved_instruction,
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
-                "used_fallback_llm": used_fallback_llm or in_graph_fallback_used,
+                "used_fallback_llm": fallback.used,
                 **llm_prompts,
             },
             endpoint=endpoint_metadata,
@@ -2050,6 +2184,7 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
+        await close_sandbox(sandbox_session)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 

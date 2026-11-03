@@ -6,13 +6,22 @@ uvloop==0.23.0
 httptools==0.8.0
 fastapi==0.142.2
 python-dotenv==1.2.3
-langchain==1.4.3
+langchain==1.4.8
 langchain-community==0.4.2
 langchain-openai==1.6.7
 langchain-mcp-adapters==0.3.2
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.8
 langgraph==1.2.12
+# Deep graph dependency of eve-esa-agents[deep]. 0.7.32 needs langchain>=1.4.7
+# and langchain-core>=1.7. Provider packages stay transitive.
+deepagents==0.7.32
+# Sandbox providers. Imported only when SANDBOX_PROVIDER selects one.
+# langchain-agentcore-codeinterpreter pulls bedrock-agentcore, which needs
+# boto3>=1.43.115 (the floor further down). langchain-sandbox-opensandbox
+# 0.1.2 needs deepagents>=0.7,<0.8.
+langchain-agentcore-codeinterpreter==0.0.6
+langchain-sandbox-opensandbox==0.1.2
 # eve-esa-agents is not listed here. The image installs it from the AGENTS_REF
 # build-arg (see the Dockerfile). A dev build resolves agents main to a commit
 # SHA. A release build passes the tag in agents.ref, and that image is what
@@ -58,7 +67,8 @@ mcp==1.30.0
 fastmcp>=3.4.6,<4.0.0
 tiktoken
 trafilatura
-boto3>=1.43.67
+# bedrock-agentcore (via langchain-agentcore-codeinterpreter) needs >=1.43.115.
+boto3>=1.43.115
 # Pinned, not >=: the rediss:// TLS setup relies on redis-py 8.x defaults
 # (ssl_cert_reqs "required", ssl_check_hostname True, socket_keepalive True), and
 # cancel_manager.py calls aclose(), which does not exist before 5.0.1. 8.1.0 is
