@@ -107,16 +107,15 @@ _PROVIDERS: dict[str, Callable[[], SandboxSession]] = {
 
 
 def _skills_directory() -> Optional[Path]:
-    """Skills folder from the deep graph.
+    """Skills folder for this process.
 
-    ``None`` when that graph cannot be imported (agents v0.5.5 has none), so
-    the upload is skipped and the turn still runs.
+    ``None`` when neither ``EVE_AGENT_SKILLS_DIR`` nor the deep graph's
+    ``skills_dir`` is available, so the upload is skipped and the turn still
+    runs.
     """
-    try:
-        from agents.graphs.deep.graph import skills_dir
-    except ImportError:
-        return None
-    return Path(skills_dir())
+    from src.services.agents.core.skills import packaged_skills_dir
+
+    return packaged_skills_dir()
 
 
 def _skill_files(root: Path) -> list[tuple[str, bytes]]:

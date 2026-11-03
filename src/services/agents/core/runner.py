@@ -1128,15 +1128,38 @@ def _build_react_graph(
 def _filesystem_skills_backend(skills_root: Any):
     """Read-only ``/skills/`` mount for a turn that has no sandbox.
 
-    ``None`` when the deep graph cannot be imported. The sandbox path does
-    not use this: it uploads the tree and the shell reads it there.
+    Uses the deep graph helpers when they accept the folder. Otherwise builds
+    the same mount here. The sandbox path does not use this: it uploads the
+    tree and the shell reads it there.
     """
     try:
         from agents.graphs.deep.graph import default_backend, default_permissions
     except ImportError:
-        logger.warning("Deep graph is not installed; skills stay on its default")
-        return None
-    return default_backend(skills_root), default_permissions()
+        return _local_skills_mount(skills_root)
+    try:
+        backend = default_backend(skills_root)
+    except TypeError:
+        return _local_skills_mount(skills_root)
+    return backend, default_permissions()
+
+
+def _local_skills_mount(skills_root: Any):
+    """``/skills/`` routed at *skills_root*, read-only, with state as default."""
+    from deepagents.backends import CompositeBackend, StateBackend
+    from deepagents.backends.filesystem import FilesystemBackend
+    from deepagents.middleware.filesystem import FilesystemPermission
+
+    backend = CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/skills/": FilesystemBackend(root_dir=skills_root, virtual_mode=True),
+        },
+    )
+    permissions = [
+        FilesystemPermission(operations=["read"], paths=["/skills/**"], mode="allow"),
+        FilesystemPermission(operations=["write"], paths=["/skills/**"], mode="deny"),
+    ]
+    return backend, permissions
 
 
 def _compile_declares_backend(agent: Any) -> bool:

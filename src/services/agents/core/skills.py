@@ -46,12 +46,16 @@ def skill_checksum(files: Sequence[Any]) -> str:
 
 
 def packaged_skills_dir() -> Optional[Path]:
-    """Skills folder shipped with the deep graph.
+    """Skills folder for this process.
 
-    ``None`` when that graph cannot be imported. The path is returned even
+    ``EVE_AGENT_SKILLS_DIR`` wins. Otherwise the deep graph's ``skills_dir``
+    is used. ``None`` when neither is available. The path is returned even
     when the folder is missing, so an empty request still points at the same
-    place ``skills_dir()`` does.
+    place.
     """
+    override = os.environ.get("EVE_AGENT_SKILLS_DIR", "").strip()
+    if override:
+        return Path(override)
     try:
         from agents.graphs.deep.graph import skills_dir
     except ImportError:

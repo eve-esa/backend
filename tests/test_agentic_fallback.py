@@ -2407,7 +2407,8 @@ class TestSandbox:
 
 
 class TestSandboxInGeneration:
-    async def test_unset_provider_mounts_skills_without_a_sandbox(self, monkeypatch):
+    async def test_unset_provider_mounts_skills_without_a_sandbox(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
         monkeypatch.delenv("SANDBOX_PROVIDER", raising=False)
         graph = _FakeUpdatesGraph(
             [{"agent": {"messages": [AIMessage(content="ok")]}}]

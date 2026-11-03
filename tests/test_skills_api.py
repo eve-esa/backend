@@ -29,7 +29,7 @@ def _skill(*, user_id, name: str) -> Skill:
 @pytest.mark.asyncio
 async def test_list_skills_requires_auth(async_client):
     response = await async_client.get("/skills")
-    assert response.status_code == 403
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
