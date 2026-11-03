@@ -10,6 +10,7 @@ from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.database.mongo_model import PaginatedResponse
 from src.schemas.common import Pagination
+from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
 
 router = APIRouter()
@@ -174,7 +175,10 @@ async def delete_conversation(
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Delete a conversation and its messages.
+    Delete a conversation, its messages and its agent memory (LangGraph checkpoints).
+
+    A failure deleting the checkpoints is logged as ``checkpoint.delete_failed``
+    and does not fail the request.
 
     Args:
         conversation_id (str): Conversation identifier.
@@ -199,6 +203,7 @@ async def delete_conversation(
         # First: it raises when Qdrant refuses, and nothing is deleted yet then.
         await delete_conversation_documents(requesting_user.id, conversation_id)
         await Message.delete_many({"conversation_id": conversation_id})
+        await delete_thread_checkpoints(conversation_id)
         await conversation.delete()
         return {"message": "Conversation deleted successfully"}
 

@@ -258,7 +258,11 @@ CORS_ALLOWED_ORIGINS = [
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 ]
 
+# Wiley Scholar Gateway v2 API key, sent as is in the X-API-Key header.
 WILEY_AUTH_TOKEN = os.getenv("WILEY_AUTH_TOKEN", "").strip()
+# Seconds the whole Wiley MCP call has (initialize plus tool call); past it the
+# Wiley half of the retrieval is skipped for the turn.
+WILEY_MCP_TIMEOUT_S = float(getenv_or("WILEY_MCP_TIMEOUT_S", "30"))
 
 # Which build is running. The two halves are set at different moments and neither is ever
 # required: unset means "unknown", never a crash.

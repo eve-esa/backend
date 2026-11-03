@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
-import time
 from urllib.parse import urlparse
 
 from src.config import Config, WILEY_AUTH_TOKEN
 from src.database.models.mcp_server import MCPServer, ToolTransport
 
+import httpx
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.websocket import websocket_client
@@ -30,13 +31,90 @@ def _extract_exception_details(exc: BaseException) -> List[str]:
     return details
 
 
+def _http_status(exc: BaseException) -> Optional[int]:
+    """HTTP status of the first HTTPStatusError inside ``exc``, if any."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    if isinstance(exc, BaseExceptionGroup):
+        for sub_exc in exc.exceptions:
+            status = _http_status(sub_exc)
+            if status is not None:
+                return status
+    return None
+
+
+def _serialize_content_item(item: Any) -> Any:
+    if hasattr(item, "model_dump"):
+        data = item.model_dump()
+        if isinstance(data.get("text"), str):
+            try:
+                data["text"] = json.loads(data["text"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return data
+    try:
+        return dict(item)
+    except Exception:
+        return str(item)
+
+
+def _process_tool_result(
+    result: Any, name: str, arguments: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Convert an MCP CallToolResult to our standard format."""
+    return {
+        "content": [_serialize_content_item(c) for c in result.content],
+        "is_error": getattr(result, "is_error", None)
+        or getattr(result, "isError", None)
+        or False,
+        "server": "unknown",  # We don't have server name in this context
+        "tool_name": name,
+        "arguments": arguments or {},
+    }
+
+
+# Scholar Gateway v2 authenticates every request with a static API key in this
+# header. There is no OAuth exchange and no access token to cache or refresh.
+WILEY_API_KEY_HEADER = "X-API-Key"
+_WILEY_HOST = "scholargateway.ai"
+
+
+def is_wiley_url(url: Optional[str]) -> bool:
+    """True when ``url`` points at the Wiley Scholar Gateway."""
+    if not url:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return host == _WILEY_HOST or host.endswith("." + _WILEY_HOST)
+
+
+def with_wiley_api_key(
+    url: Optional[str], headers: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Return a copy of ``headers`` carrying the Wiley API key for a Wiley URL.
+
+    The key is sent as is, never with a Bearer prefix, and only to the Wiley
+    host. A header already configured for the server wins. With
+    ``WILEY_AUTH_TOKEN`` unset the headers are returned without a key.
+    """
+    merged = dict(headers or {})
+    if not is_wiley_url(url):
+        return merged
+    if any(k.lower() == WILEY_API_KEY_HEADER.lower() for k in merged):
+        return merged
+    if WILEY_AUTH_TOKEN:
+        merged[WILEY_API_KEY_HEADER] = WILEY_AUTH_TOKEN
+    return merged
+
+
+def _has_api_key_header(headers: Dict[str, Any]) -> bool:
+    return any(k.lower() == WILEY_API_KEY_HEADER.lower() for k in headers)
+
+
 class MultiServerMCPClientService:
     """Service to interact with multiple MCP servers using LangChain's MultiServerMCPClient."""
 
-    # Shared singleton and token cache across the process
+    # Shared singleton across the process
     _shared_instance: Optional["MultiServerMCPClientService"] = None
-    _wiley_access_token_shared: Optional[str] = None
-    _wiley_access_token_expiry_epoch_shared: float = 0.0
 
     def __init__(
         self,
@@ -151,8 +229,9 @@ class MultiServerMCPClientService:
                     # Stateless servers answer the closing DELETE with 404.
                     server_config_for_client["terminate_on_close"] = False
 
-                # Add headers if present
-                headers = server_config.get("headers")
+                # Add headers if present; a Wiley server also gets its API key,
+                # so tool listing through MultiServerMCPClient is authenticated.
+                headers = with_wiley_api_key(url, server_config.get("headers"))
                 if headers:
                     server_config_for_client["headers"] = headers
 
@@ -281,15 +360,24 @@ class MultiServerMCPClientService:
             )
 
         except Exception as e:
-            logger.error(f"Failed to call tool '{name}' on server '{server_name}': {e}")
-            return {
+            # Flatten task group errors so the row reads "HTTPStatusError: ...
+            # '401 Unauthorized' ..." instead of "unhandled errors in a TaskGroup".
+            error = " | ".join(_extract_exception_details(e)) or str(e)
+            status = _http_status(e)
+            logger.error(
+                f"Failed to call tool '{name}' on server '{server_name}': {error}"
+            )
+            failure = {
                 "content": [],
                 "is_error": True,
                 "server": server_name,
                 "tool_name": name,
                 "arguments": arguments or {},
-                "error": str(e),
+                "error": error,
             }
+            if status is not None:
+                failure["http_status"] = status
+            return failure
 
     async def _call_tool_with_original_client(
         self, server_name: str, name: str, arguments: Optional[Dict[str, Any]] = None
@@ -410,54 +498,11 @@ class MultiServerMCPClientService:
         """Call tool over HTTP or WebSocket transport."""
         url = server_config.get("url")
         transport = server_config.get("transport")
-        # Start with configured headers if present
-        headers = dict(server_config.get("headers", {}))
-
-        # Ensure Authorization header is a Bearer token for Wiley servers.
-        # If missing or expired, fetch a new token using client_credentials.
-        if url:
-            parsed = urlparse(url)
-            # Wiley OAuth token endpoint lives at /oauth2/token on the same host
-            token_endpoint = f"{parsed.scheme}://{parsed.netloc}/oauth2/token?grant_type=client_credentials"
-
-            # Reuse token if valid; otherwise refresh it
-            now = time.time()
-            token_value: Optional[str] = None
-
-            # Use class-level shared cache to persist across requests/instances
-            cls = type(self)
-            if (
-                cls._wiley_access_token_shared
-                and now < cls._wiley_access_token_expiry_epoch_shared
-            ):
-                token_value = cls._wiley_access_token_shared
-            else:
-                try:
-                    import httpx
-
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        if not WILEY_AUTH_TOKEN:
-                            raise RuntimeError(
-                                "WILEY_AUTH_TOKEN is not set in environment"
-                            )
-                        resp = await client.post(
-                            token_endpoint,
-                            headers={"Authorization": WILEY_AUTH_TOKEN},
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        token_value = data.get("access_token")
-                        expires_in = int(data.get("expires_in", 3600))
-                        cls._wiley_access_token_expiry_epoch_shared = now + max(
-                            0, expires_in - 60
-                        )
-                        cls._wiley_access_token_shared = token_value
-                except Exception as e:
-                    logger.error(f"Failed to obtain Wiley token: {e}")
-                    raise
-
-            if token_value:
-                headers["Authorization"] = f"Bearer {token_value}"
+        # Start with configured headers; a Wiley server gets its API key.
+        headers = with_wiley_api_key(url, server_config.get("headers"))
+        if is_wiley_url(url) and not _has_api_key_header(headers):
+            logger.error("Wiley API key missing: WILEY_AUTH_TOKEN is not set")
+            raise RuntimeError("WILEY_AUTH_TOKEN is not set in environment")
 
         # If Authorization provided but without Bearer prefix, add it
         auth_value = headers.get("Authorization")
@@ -471,72 +516,42 @@ class MultiServerMCPClientService:
         if not url:
             raise ValueError("URL not configured for network transport")
 
-        stack = AsyncExitStack()
-        await stack.__aenter__()
+        if transport == "websocket":
+            # WebSocket transport
+            ws_url = url
+            auth_value = headers.get("Authorization", "")
+            if auth_value:
+                sep = "&" if "?" in ws_url else "?"
+                ws_url = f"{ws_url}{sep}auth_header=Authorization&auth_value={quote(auth_value)}"
+            transport_cm = websocket_client(ws_url)
+        else:
+            # HTTP transport
+            transport_cm = streamablehttp_client(
+                url, headers=headers, terminate_on_close=False
+            )
 
+        # Nested async with, not a manual exit stack: an HTTP error status from
+        # the server (401, 429, 5xx) cancels the transport task group, and only
+        # its own __aexit__ turns that cancellation back into an
+        # ExceptionGroup(HTTPStatusError) that call_tool_on_server can catch.
+        # Swallowing the teardown error instead lets a bare CancelledError out
+        # and kills the whole turn. A real cancellation (Stop, deadline) still
+        # propagates. The total deadline lives with the caller.
+        result = None
         try:
-            if transport == "websocket":
-                # WebSocket transport
-                ws_url = url
-                auth_value = headers.get("Authorization", "")
-                if auth_value:
-                    sep = "&" if "?" in ws_url else "?"
-                    ws_url = f"{ws_url}{sep}auth_header=Authorization&auth_value={quote(auth_value)}"
-                transport_obj = await stack.enter_async_context(
-                    websocket_client(ws_url)
-                )
-            else:
-                # HTTP transport
-                transport_obj = await stack.enter_async_context(
-                    streamablehttp_client(
-                        url, headers=headers, terminate_on_close=False
+            async with transport_cm as transport_obj:
+                read, write = transport_obj[0], transport_obj[1]
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(
+                        name=name, arguments=arguments or {}
                     )
-                )
+        except Exception as e:
+            if result is None:
+                raise
+            logger.debug(f"Ignoring transport teardown error: {e}")
 
-            # Handle different transport return types
-            if len(transport_obj) == 3:
-                read, write, _get_session_id = transport_obj
-            else:
-                read, write = transport_obj
-
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            result = await session.call_tool(name=name, arguments=arguments or {})
-
-            # Convert to our standard format
-            def _serialize_content_item(item: Any) -> Any:
-                if hasattr(item, "model_dump"):
-                    data = item.model_dump()
-                    if isinstance(data.get("text"), str):
-                        try:
-                            import json
-
-                            data["text"] = json.loads(data["text"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    return data
-                try:
-                    return dict(item)
-                except Exception:
-                    return str(item)
-
-            processed = {
-                "content": [_serialize_content_item(c) for c in result.content],
-                "is_error": getattr(result, "is_error", None)
-                or getattr(result, "isError", None)
-                or False,
-                "server": "unknown",  # We don't have server name in this context
-                "tool_name": name,
-                "arguments": arguments or {},
-            }
-
-            return processed
-
-        finally:
-            try:
-                await stack.aclose()
-            except BaseException as e:
-                logger.debug(f"Ignoring transport teardown error: {e}")
+        return _process_tool_result(result, name, arguments)
 
     async def call_tool_on_all_servers(
         self, name: str, arguments: Optional[Dict[str, Any]] = None

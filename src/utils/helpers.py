@@ -312,7 +312,7 @@ def _is_mcp_content_block(value: Any) -> bool:
     (``_serialize_content_item`` in ``mcp_client_service.py``) parses a JSON
     string content block into a dict before handing it to the extractor. A
     content block whose ``text`` was so parsed must still be recognised and
-    unwrapped, otherwise the whole block (e.g. a Wiley ``semanticSearch``
+    unwrapped, otherwise the whole block (e.g. a Wiley ``search_wiley_fulltext``
     envelope) is kept as a single bundled document and the chunk list inside
     it is never split. So accept both string and dict ``text`` here.
     """

@@ -1,7 +1,7 @@
 mcp:
   servers:
     eve-mcp-demo:
-      url: "https://custom-agents-dev-mcp.scholargateway.ai/mcp"
+      url: "https://custom-connector-v2.scholargateway.ai/mcp"
       transport: "streamable_http"
       enabled: true
 

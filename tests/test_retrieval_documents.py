@@ -187,7 +187,7 @@ class TestParsedTextContentBlock:
 
     Our MCP client (``_serialize_content_item`` in ``mcp_client_service.py``)
     runs ``json.loads`` on a string ``text`` before the extractor sees it, so a
-    Wiley ``semanticSearch`` envelope arrives as
+    Wiley ``search_wiley_fulltext`` envelope arrives as
     ``{"type": "text", "text": {"success": ..., "results": [chunks]}}``. The
     extractor must still unwrap the block and split the chunk list, otherwise
     the whole envelope is kept as one bundled document and the top-k cap never
