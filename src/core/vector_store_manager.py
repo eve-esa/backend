@@ -618,6 +618,7 @@ class VectorStoreManager:
         embeddings_model: str = DEFAULT_EMBEDDING_MODEL,
         qdrant_url: str = QDRANT_URL,
         qdrant_api_key: str = QDRANT_API_KEY,
+        qdrant_timeout_s: float = 120.0,
     ) -> None:
         """
         Initialize the VectorStoreManager with the specified embeddings model.
@@ -625,12 +626,13 @@ class VectorStoreManager:
         Args:
             embeddings_model: The name of the embeddings model to use.
                 Defaults to NASA's specialized model.
+            qdrant_timeout_s: HTTP timeout of every call on ``self.client``. A
+                caller with a deadline of its own passes a shorter one.
         """
-        # Initialize Qdrant client with timeout configuration
         self.client = QdrantClient(
             qdrant_url,
             api_key=qdrant_api_key,
-            timeout=120.0,  # 2 minutes timeout for operations
+            timeout=qdrant_timeout_s,
         )
         self.qdrant_url = qdrant_url
         self.qdrant_api_key = qdrant_api_key
@@ -1191,11 +1193,15 @@ class VectorStoreManager:
             )
             points.append(point)
 
-        await asyncio.to_thread(
-            self.client.upsert,
-            collection_name=PRIVATE_COLLECTION_NAME,
-            points=points,
-            wait=True,
+        # anyio, not asyncio.to_thread: a cancelled caller (an upload deadline)
+        # waits for an upsert already sent instead of returning while it is still
+        # running, so the rollback that follows deletes every point it wrote.
+        await anyio.to_thread.run_sync(
+            lambda: self.client.upsert(
+                collection_name=PRIVATE_COLLECTION_NAME,
+                points=points,
+                wait=True,
+            )
         )
 
     def _qdrant_filter_from_dict(

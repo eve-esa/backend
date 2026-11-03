@@ -1228,7 +1228,8 @@ async def generate_answer_agentic(
         setup_latencies["setup_mcp_tool_loading_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        checkpointer = await _get_agentic_checkpointer()
+        # No conversation, no thread: run without a checkpointer, store nothing.
+        checkpointer = await _get_agentic_checkpointer() if conversation_id else None
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
@@ -1260,7 +1261,7 @@ async def generate_answer_agentic(
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
-        config = {"configurable": {"thread_id": conversation_id or "default"}}
+        config = {"configurable": {"thread_id": conversation_id}} if conversation_id else {}
 
         async def _run_graph(
             g: Any,
@@ -1485,7 +1486,11 @@ async def generate_answer_agentic_stream_helper(
     answer it has already rendered. Only a turn with nothing streamed ends with
     `error`.
 
+    Raises ``ValueError`` when ``conversation_id`` is empty: a streamed turn
+    always persists its message in a conversation and runs on its thread.
     """
+    if not conversation_id:
+        raise ValueError("a streamed agentic turn needs a conversation id")
     if not _langgraph_available:
         error_info = build_error_payload(RuntimeError("LangGraph not available"))
         with contextlib.suppress(Exception):

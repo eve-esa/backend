@@ -97,6 +97,9 @@ async def list_collections(
     """
     List collections owned by the current user.
 
+    Collections holding a conversation's attached documents are left out: they
+    belong to that conversation, not to My collections.
+
     Args:
         request (Pagination): Pagination parameters.
         request_user (User): Authenticated user injected by dependency.
@@ -107,7 +110,8 @@ async def list_collections(
     return await Collection.find_all_with_pagination(
         limit=request.limit,
         page=request.page,
-        filter_dict={"user_id": request_user.id},
+        # None matches rows without the field, so every older row stays listed.
+        filter_dict={"user_id": request_user.id, "conversation_id": None},
         sort=[("timestamp", -1)],
     )
 
