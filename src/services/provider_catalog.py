@@ -269,9 +269,34 @@ def _transparent_jsc_default() -> bool:
     return bool(EVE_JSC_BASE_URL and not FEATURE_JSC_MODEL)
 
 
+def _configured_platform_rows(rows: list) -> list:
+    """Drop rows whose endpoint could not answer here.
+
+    A pick of such a row is answered by the fallback, and where the answered-by
+    line is off the user cannot tell. So the env vars alone decide both the entry
+    and the call. Listing models must not fail over this: if the manager cannot
+    be built, every row stays.
+    """
+    # Late: generate_answer pulls in the whole pipeline.
+    from src.services.generate_answer import get_shared_llm_manager
+
+    try:
+        manager = get_shared_llm_manager()
+        return [row for row in rows if manager.is_configured(row.llm_type)]
+    except Exception:
+        logger.warning("Could not check platform models, listing all", exc_info=True)
+        return rows
+
+
 async def list_platform_models() -> List[PlatformModel]:
     catalog = await _load_catalog()
     transparent_jsc = _transparent_jsc_default()
+    # The transparent default answers through JSC, not the row's own llm_type, and
+    # its base URL is already what makes it transparent: it is not checked here.
+    remapped = [m for m in catalog.platform if transparent_jsc and m.llm_type == "main"]
+    checked = _configured_platform_rows(
+        [m for m in catalog.platform if m not in remapped]
+    )
     models = [
         PlatformModel(
             id=model.id,
@@ -284,6 +309,7 @@ async def list_platform_models() -> List[PlatformModel]:
             description=model.description,
         )
         for model in catalog.platform
+        if model in remapped or model in checked
     ]
     if _should_inject_jsc(catalog):
         models.insert(

@@ -6,6 +6,8 @@ model, selects it. A blank EVE_JSC_BASE_URL wins over the flag, and a Mongo
 document with the same identity wins over the injection.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from src.database.models.catalog_platform_model import CatalogPlatformModelDoc
@@ -107,6 +109,11 @@ async def test_a_mongo_document_wins_over_the_injection(async_client, monkeypatc
     monkeypatch.setattr("src.services.provider_catalog.FEATURE_JSC_MODEL", True)
     monkeypatch.setattr(
         "src.services.provider_catalog.EVE_JSC_BASE_URL", "https://jsc.example/v1"
+    )
+    # The row is listed only where its endpoint can answer.
+    monkeypatch.setattr(
+        "src.services.generate_answer.get_shared_llm_manager",
+        lambda: SimpleNamespace(is_configured=lambda llm_type: True),
     )
     doc = CatalogPlatformModelDoc(
         catalog_id="eve-instruct-jsc-db",
