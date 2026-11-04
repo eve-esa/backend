@@ -38,6 +38,10 @@ from src.services.request_rate_limiter import (
     start_request_rate_limiter_warm_up,
     stop_request_rate_limiter_warm_up,
 )
+from src.services.agents.core.sandbox_pool import (
+    start_sandbox_reaper,
+    stop_sandbox_reaper,
+)
 from src.utils.error_logger import get_error_logger
 
 # src.config ran load_dotenv on import. Telemetry goes first so the log
@@ -117,8 +121,16 @@ def create_app(debug=False, **kwargs):
                 "Request rate limiter warm-up failed type=%s", type(exc).__name__
             )
         try:
+            start_sandbox_reaper()
+        except Exception:
+            logging.exception("Sandbox reaper failed to start")
+        try:
             yield
         finally:
+            try:
+                await stop_sandbox_reaper()
+            except Exception:
+                logging.exception("Sandbox reaper shutdown failed")
             try:
                 await stop_request_rate_limiter_warm_up(app.state.rate_limit_warm_up)
             except Exception as exc:

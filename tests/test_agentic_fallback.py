@@ -2119,11 +2119,13 @@ _MISSING = object()
 
 
 class _RecordingSandbox:
-    """Stand-in for a provider session. Records uploads and closes."""
+    """Stand-in for a provider session. Records uploads, local closes, and kills."""
 
     def __init__(self, upload_error=None):
         self.uploads: list = []
         self.closed = 0
+        self.destroyed = 0
+        self.renewals: list = []
         self.upload_error = upload_error
 
     def upload_files(self, files):
@@ -2134,7 +2136,11 @@ class _RecordingSandbox:
         self.closed += 1
 
     def destroy(self):
+        self.destroyed += 1
         self.closed += 1
+
+    def renew(self, timeout):
+        self.renewals.append(timeout)
 
 
 class _DeclaringAgent:
@@ -2219,7 +2225,7 @@ def _install_opensandbox(monkeypatch, sandbox=None):
     return sandbox, created
 
 
-def _inline_threads():
+def _inline_threads(*module_paths: str):
     """Run ``asyncio.to_thread`` inline and record the callable names."""
     names: list = []
 
@@ -2227,9 +2233,21 @@ def _inline_threads():
         names.append(getattr(fn, "__name__", repr(fn)))
         return fn(*args, **kwargs)
 
-    return names, patch(
-        "src.services.agents.core.sandbox.asyncio.to_thread", side_effect=_run
-    )
+    paths = module_paths or ("src.services.agents.core.sandbox",)
+
+    class _Spy:
+        def __enter__(self):
+            self._stack = contextlib.ExitStack()
+            for path in paths:
+                self._stack.enter_context(
+                    patch(f"{path}.asyncio.to_thread", side_effect=_run)
+                )
+            return self
+
+        def __exit__(self, *exc):
+            return self._stack.__exit__(*exc)
+
+    return names, _Spy()
 
 
 class TestSandbox:
@@ -2267,7 +2285,7 @@ class TestSandbox:
             {
                 "region": "eu-west-1",
                 "identifier": "aws.codeinterpreter.v1",
-                "session_timeout_seconds": 900,
+                "session_timeout_seconds": 3600,
             }
         ]
         assert "boto3_session" not in created[0]
@@ -2375,8 +2393,13 @@ class TestSandbox:
         assert config.domain == "sandbox.internal:8080"
         assert config.protocol == "https"
         assert config.api_key == "secret"
+        from datetime import timedelta
+
+        from src.services.agents.core.sandbox import sandbox_busy_ttl_s
+
+        assert created[0]["timeout"] == timedelta(seconds=sandbox_busy_ttl_s())
         assert remote.uploads == [[("/skills/eo/SKILL.md", b"hello skill")]]
-        assert remote.closed == 1
+        assert remote.destroyed == 1
 
     async def test_opensandbox_sdk_domain_does_not_satisfy_the_check(self, monkeypatch):
         monkeypatch.setenv("SANDBOX_PROVIDER", "opensandbox")
@@ -2444,7 +2467,7 @@ class TestSandboxInGeneration:
         )
         agent = _DeclaringAgent(graph)
         request = GenerationRequest(query="hi", llm_type="main", agent="deep")
-        names, spy = _inline_threads()
+        names, spy = _inline_threads("src.services.agents.core.sandbox_pool")
 
         with spy, _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
             _answer, _docs, _rag, latencies, _prompts, _trace, _ids = (
@@ -2462,11 +2485,29 @@ class TestSandboxInGeneration:
         assert all(isinstance(route, StateBackend) for route in backend.routes.values())
         assert "permissions" not in agent.compile_kwargs
         assert agent.compile_kwargs["skills"] == ["/skills/"]
-        assert sandbox.closed == 1
-        assert names == ["_open_sync", "close"]
+        # The conversation keeps the sandbox. Release drops local clients only,
+        # and AgentCore's local close is a no-op so the session is not stopped.
+        assert sandbox.closed == 0
+        assert names == ["_open_sync", "detach"]
         assert latencies["setup_sandbox_s"] >= 0
 
-    async def test_graph_error_closes_the_sandbox(self, tmp_path, monkeypatch):
+    async def test_no_conversation_destroys_the_sandbox(self, tmp_path, monkeypatch):
+        _skills_tree(tmp_path, monkeypatch)
+        monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
+        monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
+        sandbox, _created = _install_agentcore(monkeypatch)
+        graph = _FakeUpdatesGraph(
+            [{"agent": {"messages": [AIMessage(content="ok")]}}]
+        )
+        agent = _DeclaringAgent(graph)
+        request = GenerationRequest(query="hi", llm_type="main", agent="deep")
+
+        with _patched_runner(get_agent_graph=MagicMock(return_value=agent)):
+            await generate_answer_agentic(request, user_id="test-user")
+
+        assert sandbox.closed == 1
+
+    async def test_graph_error_keeps_the_sandbox(self, tmp_path, monkeypatch):
         _skills_tree(tmp_path, monkeypatch)
         monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
         monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
@@ -2481,7 +2522,7 @@ class TestSandboxInGeneration:
                     request, user_id="test-user", conversation_id="c1"
                 )
 
-        assert sandbox.closed == 1
+        assert sandbox.closed == 0
 
     async def test_upload_error_skips_compile(self, tmp_path, monkeypatch):
         _skills_tree(tmp_path, monkeypatch)
@@ -2518,7 +2559,7 @@ class TestSandboxInGeneration:
 
         assert builder.call_args.kwargs["sandbox_backend"] is None
 
-    async def test_stopped_stream_closes_the_sandbox(self, tmp_path, monkeypatch):
+    async def test_stopped_stream_keeps_the_sandbox(self, tmp_path, monkeypatch):
         _skills_tree(tmp_path, monkeypatch)
         monkeypatch.setenv("SANDBOX_PROVIDER", "agentcore")
         monkeypatch.setenv("SANDBOX_AGENTCORE_REGION", "eu-west-1")
@@ -2546,7 +2587,7 @@ class TestSandboxInGeneration:
             ]
 
         assert _event_payload(events[-1])["type"] == "stopped"
-        assert sandbox.closed == 1
+        assert sandbox.closed == 0
 
     async def test_opensandbox_backend_is_the_composite_default(
         self, tmp_path, monkeypatch
@@ -2575,4 +2616,5 @@ class TestSandboxInGeneration:
         assert created[0]["image"] == "python:3.12"
         assert created[0]["connection_config"].protocol == "http"
         assert created[0]["connection_config"].api_key is None
+        assert remote.destroyed == 0
         assert remote.closed == 1

@@ -51,6 +51,7 @@ from src.services.agents.core.sandbox import (
     close_sandbox,
     open_sandbox,
 )
+from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
 from src.services.agents.core.skills import resolve_skills_root
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.mcp.artifact_context import (
@@ -1378,6 +1379,7 @@ async def generate_answer_agentic(
     endpoint_metadata: Optional[Dict[str, Any]] = None
     agent_graph_type: Optional[str] = None
     sandbox_session: Any = None
+    sandbox_lease: Any = None
 
     try:
         setup_latencies: Dict[str, float] = {}
@@ -1411,10 +1413,16 @@ async def generate_answer_agentic(
         if _compile_declares_backend(agent):
             skills_root = resolve_skills_root(request.skill_configs)
             step_start = time.perf_counter()
-            sandbox_session = await open_sandbox(skills_root)
-            if sandbox_session is not None:
+            # No conversation: the sandbox dies with the turn. A conversation
+            # keeps one sandbox and restarts its idle timer on release.
+            if conversation_id:
+                sandbox_lease = await acquire_sandbox(conversation_id, skills_root)
+            else:
+                sandbox_session = await open_sandbox(skills_root)
+            if sandbox_lease is not None or sandbox_session is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
+        held = sandbox_lease if sandbox_lease is not None else sandbox_session
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -1427,9 +1435,7 @@ async def generate_answer_agentic(
                 (endpoint_metadata or {}).get("answered")
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
-            sandbox_backend=(
-                None if sandbox_session is None else sandbox_session.backend
-            ),
+            sandbox_backend=None if held is None else held.backend,
             skills_root=skills_root,
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
@@ -1631,6 +1637,7 @@ async def generate_answer_agentic(
         )
         raise
     finally:
+        await release_sandbox(sandbox_lease)
         await close_sandbox(sandbox_session)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
@@ -1702,7 +1709,7 @@ async def generate_answer_agentic_stream_helper(
     # the request's own trace (same trace id) answers; None with telemetry off.
     root_span: Any = None
     trace_id: Optional[str] = current_trace_id()
-    sandbox_session: Any = None
+    sandbox_lease: Any = None
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -1777,8 +1784,10 @@ async def generate_answer_agentic_stream_helper(
         if _compile_declares_backend(agent):
             skills_root = resolve_skills_root(request.skill_configs)
             step_start = time.perf_counter()
-            sandbox_session = await open_sandbox(skills_root)
-            if sandbox_session is not None:
+            # A streamed turn always has a conversation, so this sandbox stays
+            # up and the release below restarts its idle timer.
+            sandbox_lease = await acquire_sandbox(conversation_id, skills_root)
+            if sandbox_lease is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
         graph = _build_react_graph(
@@ -1794,7 +1803,7 @@ async def generate_answer_agentic_stream_helper(
             ),
             llm_run_timeout=AGENTIC_TIMEOUT,
             sandbox_backend=(
-                None if sandbox_session is None else sandbox_session.backend
+                None if sandbox_lease is None else sandbox_lease.backend
             ),
             skills_root=skills_root,
         )
@@ -2259,7 +2268,7 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
-        await close_sandbox(sandbox_session)
+        await release_sandbox(sandbox_lease)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
