@@ -2149,10 +2149,12 @@ class _DeclaringAgent:
     def instruction_text(self, **_kwargs):
         return ""
 
-    def compile(self, backend=_MISSING, **kwargs):
+    def compile(self, backend=_MISSING, skills=_MISSING, **kwargs):
         self.compile_kwargs = dict(kwargs)
         if backend is not _MISSING:
             self.compile_kwargs["backend"] = backend
+        if skills is not _MISSING:
+            self.compile_kwargs["skills"] = skills
         return self._graph
 
 
@@ -2427,6 +2429,7 @@ class TestSandboxInGeneration:
         # sandbox clock stays absent: nothing was started.
         assert "/skills/" in agent.compile_kwargs["backend"].routes
         assert agent.compile_kwargs["permissions"]
+        assert agent.compile_kwargs["skills"] == ["/skills/"]
         assert "setup_sandbox_s" not in latencies
 
     async def test_agentcore_is_the_composite_default(self, tmp_path, monkeypatch):
@@ -2458,6 +2461,7 @@ class TestSandboxInGeneration:
         }
         assert all(isinstance(route, StateBackend) for route in backend.routes.values())
         assert "permissions" not in agent.compile_kwargs
+        assert agent.compile_kwargs["skills"] == ["/skills/"]
         assert sandbox.closed == 1
         assert names == ["_open_sync", "close"]
         assert latencies["setup_sandbox_s"] >= 0
@@ -2566,6 +2570,7 @@ class TestSandboxInGeneration:
             )
 
         backend = agent.compile_kwargs["backend"]
+        assert agent.compile_kwargs["skills"] == ["/skills/"]
         assert backend.default.sandbox is remote
         assert created[0]["image"] == "python:3.12"
         assert created[0]["connection_config"].protocol == "http"

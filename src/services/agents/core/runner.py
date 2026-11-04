@@ -1122,6 +1122,15 @@ def _build_react_graph(
             filesystem = _filesystem_skills_backend(skills_root)
             if filesystem is not None:
                 compile_kwargs["backend"], compile_kwargs["permissions"] = filesystem
+        # create_deep_agent installs SkillsMiddleware only when `skills` is a
+        # list of source paths. `/skills/` is the tree uploaded into the
+        # sandbox or mounted when there is no sandbox.
+        if (
+            skills_root is not None
+            and "backend" in compile_kwargs
+            and _explicit_compile_param(agent, "skills")
+        ):
+            compile_kwargs["skills"] = [_SKILLS_SOURCE]
     return agent.compile(**compile_kwargs)
 
 
@@ -1162,11 +1171,15 @@ def _local_skills_mount(skills_root: Any):
     return backend, permissions
 
 
-def _compile_declares_backend(agent: Any) -> bool:
-    """True when ``compile`` has an explicit ``backend`` parameter.
+# Skill folders live under this prefix in the sandbox and on the no-sandbox mount.
+_SKILLS_SOURCE = "/skills/"
 
-    A catch-all ``**kwargs`` does not count: passing ``backend`` there would
-    change the kwargs of graphs that do not know about a sandbox.
+
+def _explicit_compile_param(agent: Any, name: str) -> bool:
+    """True when ``compile`` has an explicit ``name`` parameter.
+
+    A catch-all ``**kwargs`` does not count. Passing a keyword there would
+    change the kwargs of a graph that does not know it.
     """
     compile_fn = getattr(agent, "compile", None)
     if compile_fn is None:
@@ -1175,13 +1188,18 @@ def _compile_declares_backend(agent: Any) -> bool:
         parameters = inspect.signature(compile_fn).parameters
     except (TypeError, ValueError):
         return False
-    backend = parameters.get("backend")
-    if backend is None:
+    param = parameters.get(name)
+    if param is None:
         return False
-    return backend.kind not in (
+    return param.kind not in (
         inspect.Parameter.VAR_POSITIONAL,
         inspect.Parameter.VAR_KEYWORD,
     )
+
+
+def _compile_declares_backend(agent: Any) -> bool:
+    """True when ``compile`` has an explicit ``backend`` parameter."""
+    return _explicit_compile_param(agent, "backend")
 
 
 def _graph_on_policy(graph_name: Optional[str]):
