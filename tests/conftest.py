@@ -158,6 +158,27 @@ async def async_client():
 
 
 @pytest.fixture(autouse=True)
+def sandbox_store():
+    """Give every test its own in-process sandbox map.
+
+    CI sets ``REDIS_URL``. A test that starts a sandbox must not write the
+    shared map, and must not see a sandbox a previous test left there.
+    """
+    from src.services.agents.core.sandbox_pool import (
+        MemorySandboxStore,
+        override_sandbox_store,
+        reset_sandbox_store,
+    )
+
+    store = MemorySandboxStore()
+    token = override_sandbox_store(store)
+    try:
+        yield store
+    finally:
+        reset_sandbox_store(token)
+
+
+@pytest.fixture(autouse=True)
 def _per_process_endpoint_breaker(monkeypatch):
     """Keep every LLMManager on its own breaker, test by test.
 

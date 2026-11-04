@@ -12,6 +12,7 @@ from src.database.mongo_model import PaginatedResponse
 from src.schemas.common import Pagination
 from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
+from src.services.agents.core.sandbox_pool import discard_conversation_sandbox
 
 router = APIRouter()
 
@@ -204,6 +205,9 @@ async def delete_conversation(
         await delete_conversation_documents(requesting_user.id, conversation_id)
         await Message.delete_many({"conversation_id": conversation_id})
         await delete_thread_checkpoints(conversation_id)
+        # Best effort, like the checkpoints: a failed kill does not fail the
+        # delete. The idle reaper and the provider expiry still stop it.
+        await discard_conversation_sandbox(conversation_id)
         await conversation.delete()
         return {"message": "Conversation deleted successfully"}
 

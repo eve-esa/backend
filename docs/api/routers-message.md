@@ -167,6 +167,8 @@ Re-runs generation using the stored request input of that message.
 
 `POST /conversations/{conversation_id}/stream-generate-agentic`
 
+With `"agent": "deep"`, the turn runs inside the conversation sandbox. A file written in one message is still there on the next message of that conversation. See [Sandbox](../sandbox.md).
+
 ::: routers.message.create_agentic_message
     options:
       show_root_heading: false

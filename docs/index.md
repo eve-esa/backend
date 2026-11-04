@@ -51,6 +51,9 @@ docs/                 # Site content (this page, api references)
 - **Hallucination Detection**
     - Synchronous detection and streaming modes
     - Annotates message metadata with label, reason, timings
+- **Conversation sandbox**
+    - The deep agent keeps one sandbox per conversation and reuses it on the next message
+    - See [Sandbox](sandbox.md)
 
 ### API guides (usage-first)
 
@@ -63,6 +66,7 @@ docs/                 # Site content (this page, api references)
 - Messages (generation/streaming + examples): [routers-message](api/routers-message.md)
 - Generation failures (error codes, 429 and Retry-After): [generation-errors](api/generation-errors.md)
 - Bug reports (`POST /bug-reports`, rate limit, log event): [bug-reports](api/bug-reports.md)
+- Conversation sandbox (idle reuse, providers, Redis): [sandbox](sandbox.md)
 
 Use [swagger-api](https://eve-esa.github.io/eve-guide/backend-swagger/) only when you need exhaustive field-level reference.
 
