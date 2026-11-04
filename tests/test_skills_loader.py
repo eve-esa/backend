@@ -294,9 +294,11 @@ def test_no_sandbox_mounts_the_skills_root(tmp_path):
             on_policy=None,
             backend=None,
             permissions=None,
+            skills=None,
         ):
             captured["backend"] = backend
             captured["permissions"] = permissions
+            captured["skills"] = skills
             return "graph"
 
     _build_react_graph(
@@ -311,6 +313,46 @@ def test_no_sandbox_mounts_the_skills_root(tmp_path):
     )
     assert captured["backend"] is not None
     assert captured["permissions"]
+    assert captured["skills"] == ["/skills/"]
+
+
+@pytest.mark.no_db
+def test_compile_without_a_skills_parameter_stays_unchanged(tmp_path):
+    from src.services.agents.core.runner import _build_react_graph
+
+    captured = {}
+
+    class _Agent:
+        name = "deep"
+
+        def compile(
+            self,
+            llm,
+            tools,
+            checkpointer,
+            history=None,
+            summary=None,
+            fallback_llm=None,
+            llm_run_timeout=None,
+            llm_idle_timeout=None,
+            on_policy=None,
+            backend=None,
+            permissions=None,
+        ):
+            captured["backend"] = backend
+            return "graph"
+
+    _build_react_graph(
+        None,
+        [],
+        None,
+        agent=_Agent(),
+        llm=object(),
+        fallback_llm=object(),
+        on_policy=lambda **_kwargs: None,
+        skills_root=tmp_path,
+    )
+    assert captured["backend"] is not None
 
 
 @pytest.mark.no_db
