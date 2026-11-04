@@ -225,7 +225,17 @@ APP_ENVIRONMENT=dev
 | `EVE_JSC_API_KEY` | No | API key for EVE-JSC, issued by Jülich (required when `llm_type` is `eve_jsc` or a model is called with the `jsc/` prefix; a blank value counts as unset). |
 | `OPENAI_PROXY_UPSTREAM_URL` | No | OpenAI-compatible URL the `/v1/*` proxy forwards `eve`/`runpod` models to. Setting this or `EVE_JSC_BASE_URL` enables the proxy. |
 | `OPENAI_PROXY_API_KEY` | No | API key for that upstream (falls back to `MAIN_MODEL_API_KEY`, which is the same RunPod endpoint). |
-| `REDIS_URL` | Yes | Redis connection string for pub/sub and cancellations (optional; if not set, in-process cancellation is used)(default `redis://127.0.0.1:6379/0`). |
+| `REDIS_URL` | Yes | Redis connection string for pub/sub, cancellations, and the [conversation sandbox](sandbox.md) (optional; if not set, in-process cancellation is used and the sandbox map stays in this process)(default `redis://127.0.0.1:6379/0`). |
+| `SANDBOX_PROVIDER` | No | `agentcore`, `opensandbox`, or `none`. Unset starts nothing. See [Sandbox](sandbox.md). |
+| `SANDBOX_IDLE_TTL_S` | No | Seconds a conversation sandbox stays up after its last turn (default `600`). |
+| `SANDBOX_MAX_LIFETIME_S` | No | AgentCore hard session cap in seconds (default `3600`, maximum `28800`). |
+| `SANDBOX_REAPER_INTERVAL_S` | No | How often a worker looks for idle sandboxes (default `30`). |
+| `SANDBOX_AGENTCORE_REGION` | For AgentCore | AWS region of the code interpreter. |
+| `SANDBOX_AGENTCORE_IDENTIFIER` | No | AgentCore interpreter id (default `aws.codeinterpreter.v1`). |
+| `SANDBOX_OPENSANDBOX_DOMAIN` | For OpenSandbox | OpenSandbox domain. |
+| `SANDBOX_OPENSANDBOX_PROTOCOL` | No | `http` or `https` (default `http`). |
+| `SANDBOX_OPENSANDBOX_API_KEY` | No | OpenSandbox API key. |
+| `SANDBOX_OPENSANDBOX_IMAGE` | No | OpenSandbox image (default `python:3.12`). |
 | `APP_ENVIRONMENT` | No | `dev`, `staging` or `prod`. Selects the public collections, the default model and the private collection name; anything else reads as non-production. |
 | `LOG_LEVEL` | No | Root log level: `DEBUG`, `INFO`, `WARNING` or `ERROR` (default `INFO`). `DEBUG` gives the verbose output the server used to run with. `httpx`, `httpcore`, `urllib3`, `pymongo`, `botocore`, `boto3`, `openai` and `mcp` stay at `WARNING` at every level, since they log request URLs and query bodies. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | OTLP HTTP collector base URL, e.g. `http://otel-collector:4318` with the stack `clickstack` profile. Unset or empty keeps telemetry off: no SDK import, no exporter thread, no middleware. |

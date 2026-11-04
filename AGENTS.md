@@ -9,7 +9,7 @@ Before changing behaviour that a person can click, start the local stack in the 
 One product, several processes:
 
 - The browser loads the React app. Deployed, CloudFront serves that bundle from S3 and sends `/api/*` to this service. Locally the Vite dev server calls the API directly.
-- This service owns conversations, generation, document retrieval (`POST /retrieve`), auth validation, the MCP proxy (`/mcp/{server}`), and the conversation sandbox described below.
+- This service owns conversations, generation, document retrieval (`POST /retrieve`), auth validation, and the MCP proxy (`/mcp/{server}`).
 - The chat agent is a LangGraph graph from `eve-esa/agents` (import name `agents`). This repo runs the graph. It does not define it. `src/services/agents/graphs_bundle.py` prefers a checkout at `repos/eve-esa-agents` over the commit pinned in `requirements.txt`.
 - Document search in an agent turn is the `eve_retrieval` MCP server. Its `retrieve` tool calls back into `POST /retrieve`. The URL the proxy dials is `config.url` on the `mcp_servers` row named `eve_retrieval`.
 - Local dependencies in `docker-compose.yml`: MongoDB, Redis, Keycloak (realm `eve`, client `eve-frontend`), MinIO. Qdrant and the LLM endpoints stay on the URLs already in `.env`.
@@ -122,72 +122,6 @@ Open http://localhost:5173. The local Keycloak client allows `http://localhost:5
 ### 4. Check the path you changed
 
 Docs respond, the frontend loads, sign-in returns to the app, and a chat turn that should retrieve documents calls the local `eve_retrieval` (its log shows `POST /retrieve` against `localhost:8001`). Unit tests stay `pytest -m "not e2e"` with `FREE_TOKENS=100` and `FREE_PERIOD_MONTHS=1`.
-
-## Sandbox
-
-A conversation keeps one sandbox. A message does not create a new one and does not destroy it. The next message reuses it and restarts the idle timer. Files written in one turn are still there on the next turn, until the sandbox is idle, replaced, or the conversation is deleted.
-
-Code lives in `src/services/agents/core/sandbox.py` (one provider session) and `src/services/agents/core/sandbox_pool.py` (the map shared by the workers). `src/services/agents/core/runner.py` acquires and releases. Deleting a conversation calls `discard_conversation_sandbox`. The reaper starts in the server lifespan and stops on shutdown. Shutdown does not destroy sandboxes.
-
-A sandbox starts only when the graph's `compile` takes a `backend` argument. Today that is the deep agent (`agent` = `deep`). `SANDBOX_PROVIDER` unset or `none` starts nothing. A turn with no `conversation_id` still uses `open_sandbox` / `close_sandbox`, and that sandbox is destroyed at the end of the turn, including when the turn fails. Streaming always has a conversation id and uses the pool.
-
-### Providers
-
-Settings are read when a turn starts, not at import. Every name this service owns starts with `SANDBOX_`. An SDK that already has its own names keeps those names.
-
-| Provider | What it is | Settings |
-| --- | --- | --- |
-| `agentcore` | Bedrock AgentCore code interpreter, through `langchain-agentcore-codeinterpreter` | `SANDBOX_AGENTCORE_REGION` (required). `SANDBOX_AGENTCORE_IDENTIFIER` (default `aws.codeinterpreter.v1`) |
-| `opensandbox` | `opensandbox` `SandboxSync` plus `langchain-sandbox-opensandbox` | `SANDBOX_OPENSANDBOX_DOMAIN` (required). `SANDBOX_OPENSANDBOX_PROTOCOL` (`http` or `https`, default `http`). `SANDBOX_OPENSANDBOX_API_KEY` (optional). `SANDBOX_OPENSANDBOX_IMAGE` (default `python:3.12`) |
-
-AgentCore `sessionTimeoutSeconds` is an absolute cap. Activity does not extend it, and the API cannot renew it. The cap is 28,800 seconds. `SANDBOX_MAX_LIFETIME_S` defaults to 3600 and is clamped to that cap. A session is reusable only while the remaining cap is greater than `AGENTIC_TIMEOUT` + 60 seconds (the turn cap plus a margin). Status `READY` can be attached. `TERMINATED`, `ResourceNotFoundException`, `ValidationException` whose message says `is not active`, and `ConflictException` whose message says `already terminated` mean the sandbox is gone. Any other `get_session` error, and any other status, fails the turn and leaves the record in place. A wrapper that did not create the session must not `close()` it: `close()` stops a session this process created. Attach stops the remote session through the client. The data-plane client read timeout is 300 seconds.
-
-OpenSandbox `renew` sets the expiry to now plus the duration. `destroy` kills the remote sandbox. `close` only drops the local HTTP client. A connect error whose `status_code` is 404 or 410 means the sandbox is gone. Anything else fails the turn and leaves the record.
-
-### Idle timer and replacement
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `SANDBOX_IDLE_TTL_S` | 600 | How long the sandbox stays after the last turn |
-| `SANDBOX_MAX_LIFETIME_S` | 3600 | AgentCore hard cap. Not used for OpenSandbox |
-| `SANDBOX_REAPER_INTERVAL_S` | 30 | How often a worker looks for idle sandboxes |
-| `AGENTIC_TIMEOUT` | 120 | Turn cap. Added to the idle window while a turn is in flight |
-
-While a turn is in flight the deadline is now plus the idle window plus `AGENTIC_TIMEOUT`, and an OpenSandbox expiry is renewed to that same window. The last turn to release sets the deadline back to now plus the idle window and renews OpenSandbox to the idle window. An earlier release of a concurrent turn does not pull the deadline in. The count of those turns is `inflight`.
-
-Replace a record only when the provider reports the sandbox gone (`SandboxGone`), when the provider changed, or when an AgentCore session is inside the hard-cap margin and `inflight` is 0. A throttle, a timeout, or any other attach error keeps the record and fails the turn. A failed stop also keeps the record, so the reaper can try again. A failed save of a new sandbox destroys that new session. If the lock is lost after the new session was created, that session is destroyed and not saved.
-
-A deadline that is already past, or missing, clears a stale `inflight` before the reuse decision. Otherwise a crashed turn would keep a session that is about to hit the AgentCore cap.
-
-OpenSandbox records do not store `created_at` or `max_lifetime_s`. They stay reusable. Their expiry is `renew`.
-
-### Redis
-
-The map is in Redis when `REDIS_URL` is set, because the next message can land on another gunicorn worker. Without Redis the map is in this process only. Tests install a fresh in-process map so a `REDIS_URL` in CI cannot leak records.
-
-| Key | Type | Contents |
-| --- | --- | --- |
-| `sandbox:conv:{conversation_id}` | hash | `provider`, `sandbox_id`, `skills_digest`, `inflight`. AgentCore also stores `region`, `identifier`, `created_at`, `max_lifetime_s` |
-| `sandbox:idle` | zset | member is the conversation id, score is the kill deadline as epoch seconds |
-| `sandbox:lock:{conversation_id}` | string | `SET NX PX` for 180 seconds |
-
-The lock covers create, attach, release, discard, and the reaper. It is not held while the turn runs, so two turns of one conversation share the sandbox. A waiter polls until the holder releases. There is no fixed wait. A dead holder stops refreshing and the key expires within 180 seconds. The reaper tries once and skips a lock that is held. The holder refreshes every 60 seconds. A Redis error on that refresh is retried. The lock is lost only when the refresh sees another token. Before every other write the holder asks Redis again and extends the key, so a write does not run on a lock that has already expired. The in-flight count and the deadline move in one script that also checks the token. A count that moved without its lease would never be released.
-
-The reaper reads the deadline again under the lock. A turn that reattached between the scan and the lock is left alone.
-
-### Skills and the graph backend
-
-The skills digest is the sha256 of the uploaded `(path, bytes)` list. The same digest skips the upload. A changed digest runs `rm -rf /skills` and uploads again. AgentCore stores `/skills/...` under the session cwd, because the process cannot create a real `/skills`. The shell rewrite points `/skills` at `{cwd}/skills`.
-
-`backend_for_compile` builds a `CompositeBackend` whose default is the sandbox. `/large_tool_results/` and `/conversation_history/` stay on `StateBackend`. `/skills/` is not routed, so the file tools and the shell both read the tree that was uploaded into the sandbox.
-
-### Local AgentCore check
-
-The AWS keys in `.env` win over the SSO chain, because dotenv loads with `override=True`. A live check has to put a fresh SSO session into the process environment before this service imports config, and set `LOAD_DOTENV_OVERRIDE=false`. Do not print those credentials, and do not write them into `.env`.
-
-Use `llm_type` `eve_jsc` and `agent` `deep`. Ask for a file, then in a later message read it back. The log shows `sandbox.created` and then `sandbox.reused` with the same `sandbox_id`. A direct `cat` in that sandbox is the proof. The model can also repeat a marker that was in the first message. Discard the conversation sandbox when the check is done, and do not leave the process running.
-
-Unit tests for this path are `tests/test_sandbox_pool.py` and the sandbox cases in `tests/test_agentic_fallback.py`. Run them on the host. The backend container dies with SIGILL inside pymongo. The invocation is the one in section 4, with `MONGO_HOST=localhost` and `REDIS_URL=redis://127.0.0.1:6379/0` set in the environment so `.env` does not point pytest at the Docker hostnames.
 
 ## Observability
 
