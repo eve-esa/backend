@@ -67,6 +67,11 @@ EVE_JSC_MODEL_NAME = os.getenv("EVE_JSC_MODEL_NAME", "alias-eve").strip()
 # provider (Jülich), so inheriting it only turns a missing-config error into a
 # confusing 401 from the upstream. Blank means unusable, and says so.
 EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
+# A second model on the same JSC endpoint and key, its own llm_type so EVE-Instruct
+# keeps EVE_JSC_MODEL_NAME, here and on /v1. Blank means the type is not offered:
+# no default, because llm_type is not checked against the catalog, so a set alias
+# is callable by any client whether or not the picker lists it.
+JSC_LARGE_MODEL_NAME = getenv_or("JSC_LARGE_MODEL_NAME")
 
 JSC_EMBEDDING_API_KEY = getenv_or("JSC_EMBEDDING_API_KEY") or EVE_JSC_API_KEY
 JSC_EMBEDDING_MODEL_NAME = getenv_or(
@@ -124,6 +129,9 @@ ENDPOINT_BREAKER_SHARED = os.getenv("ENDPOINT_BREAKER_SHARED", "true").strip().l
 # Per-endpoint first-token budgets. RunPod is serverless with 1-3 min cold
 # starts; JSC is a warm vLLM. One MODEL_TIMEOUT cannot serve both.
 EVE_JSC_TIMEOUT = int(os.getenv("EVE_JSC_TIMEOUT", MODEL_TIMEOUT))
+# Mistral Large 4 took about 11 s to its first output and 26 s to answer (measured
+# 2026-11-02 with one tool), and the sync path waits for the whole answer.
+JSC_LARGE_TIMEOUT = int(getenv_or("JSC_LARGE_TIMEOUT", "60"))
 MAIN_MODEL_TIMEOUT = int(os.getenv("MAIN_MODEL_TIMEOUT", "120"))
 
 # Feature flags. A flag names the feature, never the environment it runs in.
