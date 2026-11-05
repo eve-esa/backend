@@ -277,9 +277,42 @@
 - **enabled**: bool
 - **environment**: list[string] | null
 - **config**: ToolConfig
+- **attribution**: MCPServerAttribution | null
 - **created_at**: datetime
 - **updated_at**: datetime
 - **deleted_at**: datetime | null
+
+### MCPServerMetadata (stored on the `mcp_servers` row)
+
+Written by the backoffice, never by the write routes.
+
+- **citation**: object | null — the server's `CITATION.cff` from [eve-esa/mcp-tool-registry](https://github.com/eve-esa/mcp-tool-registry), parsed as-is ([CFF 1.2.0](https://github.com/citation-file-format/citation-file-format/blob/1.2.0/schema-guide.md), hyphenated keys such as `given-names`)
+
+### MCPServerAttribution (`attribution` on `GET /mcp-servers` and `GET /mcp-servers/{id}`)
+
+Derived from `metadata.citation`; null when the row has no usable citation. Contact details (`email`) are never returned.
+
+- **title**: string | null
+- **abstract**: string | null
+- **authors**: list[MCPServerAuthor]
+- **license**: string | null — SPDX id; a CFF list is joined with ` OR `
+- **repository_url**: string | null — `repository-code`, else `repository`, else `url`. Only `http` and `https` links are returned
+- **preferred_citation**: MCPServerPreferredCitation | null
+
+### MCPServerAuthor
+
+- **name**: string — entity `name`, or `given-names name-particle family-names name-suffix`
+- **given_names**, **family_names**, **alias**, **affiliation**, **orcid**, **website**: string | null
+- **github_url**: string | null — set when `alias` is a valid GitHub handle
+- **orcid** and **website** are returned only when they are `http` or `https` URLs
+
+### MCPServerPreferredCitation
+
+- **title**: string
+- **authors**: list[string]
+- **year**: string | null — `year`, else the year of `date-published`
+- **doi**: string | null
+- **url**: string | null — the DOI unchanged when it is already an `http(s)` URL, else `https://doi.org/<doi>`, else the reference `url`. Only `http` and `https`
 
 ### ToolConfig (response model)
 

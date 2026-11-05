@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.database.models.mcp_server import MCPServer, ToolConfig, ToolTransport
+from src.database.models.mcp_server import (
+    MCPServer,
+    MCPServerMetadata,
+    ToolConfig,
+    ToolTransport,
+)
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
 
@@ -291,3 +296,94 @@ async def test_create_mcp_server_succeeds_when_registration_enabled(
         if created is not None:
             models.insert(0, created)
         await cleanup_models(models)
+
+
+# ─── Attribution (metadata.citation, src/services/mcp/attribution.py) ──
+
+_CITATION = {
+    "cff-version": "1.2.0",
+    "message": "If you use this MCP server, please cite it.",
+    "title": "EFFIS Fire Detection MCP Server",
+    "authors": [
+        {
+            "given-names": "Antonio",
+            "family-names": "Lopez",
+            "alias": "Lopez-Antonio",
+            "affiliation": "Pi School",
+        }
+    ],
+    "license": "Apache-2.0",
+}
+
+
+@pytest.mark.asyncio
+@patch(f"{_ROUTER}._load_mcp_tools_for_servers", new_callable=AsyncMock, return_value=[])
+async def test_list_and_get_return_attribution_from_stored_citation(
+    mock_load_tools, async_client
+):
+    user, token = await create_test_user_and_token()
+    cited = _mcp_server(user_id=None, name="cited-server")
+    cited.metadata = MCPServerMetadata(citation=_CITATION)
+    uncited = _mcp_server(user_id=None, name="uncited-server")
+    rows = [cited, uncited]
+    for row in rows:
+        await row.save()
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        listed = await async_client.get("/mcp-servers?limit=100", headers=headers)
+        assert listed.status_code == 200
+        by_name = {item["name"]: item for item in listed.json()["data"]}
+        assert by_name["uncited-server"]["attribution"] is None
+        attribution = by_name["cited-server"]["attribution"]
+        assert attribution["title"] == "EFFIS Fire Detection MCP Server"
+        assert attribution["authors"][0]["name"] == "Antonio Lopez"
+        assert attribution["authors"][0]["github_url"] == "https://github.com/Lopez-Antonio"
+        assert "metadata" not in by_name["cited-server"]
+
+        detail = await async_client.get(f"/mcp-servers/{cited.id}", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["attribution"] == attribution
+    finally:
+        await cleanup_models([*rows, user])
+
+
+@pytest.mark.asyncio
+async def test_malformed_citation_does_not_break_the_list(async_client):
+    user, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=None, name="bad-citation")
+    await server.save()
+    await MCPServer.get_collection().update_one(
+        {"name": "bad-citation"}, {"$set": {"metadata": {"citation": "not a mapping"}}}
+    )
+    try:
+        response = await async_client.get(
+            "/mcp-servers?limit=100", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 200
+        row = next(i for i in response.json()["data"] if i["name"] == "bad-citation")
+        assert row["attribution"] is None
+    finally:
+        await cleanup_models([server, user])
+
+
+@pytest.mark.asyncio
+async def test_patch_keeps_stored_citation_unchanged(async_client, monkeypatch):
+    monkeypatch.setattr(
+        "src.routers.mcp_server.config.FEATURE_MCP_SERVER_REGISTRATION", True
+    )
+    owner, token = await create_test_user_and_token()
+    server = _mcp_server(user_id=owner.id, name="patched-cited")
+    server.metadata = MCPServerMetadata(citation=_CITATION)
+    await server.save()
+    try:
+        response = await async_client.patch(
+            f"/mcp-servers/{server.id}",
+            json={"description": "new description"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+        raw = await MCPServer.get_collection().find_one({"name": "patched-cited"})
+        assert raw["description"] == "new description"
+        assert raw["metadata"]["citation"] == _CITATION
+    finally:
+        await cleanup_models([server, owner])

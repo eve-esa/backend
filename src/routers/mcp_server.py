@@ -24,6 +24,7 @@ from src.schemas.mcp_server import (
     MCPServerUpdate,
 )
 from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
+from src.services.mcp.attribution import attribution_from_citation
 from src.services.mcp.proxy_url import resolve_public_mcp_url
 
 router = APIRouter()
@@ -48,6 +49,10 @@ def _to_public_mcp_server(mcp_server: MCPServer) -> MCPServerPublic:
         enabled=mcp_server.enabled,
         environment=getattr(mcp_server, "environment", None),
         config={"transport": transport, "url": public_url},
+        attribution=attribution_from_citation(
+            mcp_server.metadata.citation if mcp_server.metadata else None,
+            server_name=mcp_server.name,
+        ),
         created_at=mcp_server.created_at,
         updated_at=mcp_server.updated_at,
         deleted_at=mcp_server.deleted_at,

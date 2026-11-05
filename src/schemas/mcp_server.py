@@ -66,6 +66,46 @@ class MCPServerPublicConfig(BaseModel):
     )
 
 
+class MCPServerAuthor(BaseModel):
+    """One author from CITATION.cff: a person or an entity (organization, team)."""
+
+    name: str = Field(..., description="Display name")
+    given_names: Optional[str] = Field(default=None, description="Person's given names")
+    family_names: Optional[str] = Field(default=None, description="Person's family names")
+    alias: Optional[str] = Field(default=None, description="Alias, usually a GitHub handle")
+    github_url: Optional[str] = Field(
+        default=None, description="GitHub profile, when the alias is a valid GitHub handle"
+    )
+    affiliation: Optional[str] = Field(default=None, description="Affiliation")
+    orcid: Optional[str] = Field(default=None, description="ORCID URL")
+    website: Optional[str] = Field(default=None, description="Personal or entity website")
+
+
+class MCPServerPreferredCitation(BaseModel):
+    """The work users are asked to cite instead of the server itself, e.g. a paper."""
+
+    title: str = Field(..., description="Title of the work")
+    authors: List[str] = Field(default_factory=list, description="Author display names")
+    year: Optional[str] = Field(default=None, description="Publication year")
+    doi: Optional[str] = Field(default=None, description="DOI, without the resolver prefix")
+    url: Optional[str] = Field(
+        default=None, description="Link to the work; the DOI resolver when a DOI is set"
+    )
+
+
+class MCPServerAttribution(BaseModel):
+    """Who wrote the server and how to cite it, derived from its CITATION.cff."""
+
+    title: Optional[str] = Field(default=None, description="Title of the server")
+    abstract: Optional[str] = Field(default=None, description="Short description")
+    authors: List[MCPServerAuthor] = Field(default_factory=list, description="Authors")
+    license: Optional[str] = Field(default=None, description="SPDX license identifier(s)")
+    repository_url: Optional[str] = Field(default=None, description="Source code URL")
+    preferred_citation: Optional[MCPServerPreferredCitation] = Field(
+        default=None, description="Work to cite when using the server"
+    )
+
+
 class MCPServerPublic(BaseModel):
     """Sanitized MCP server payload that never exposes internal URLs or headers."""
 
@@ -81,6 +121,10 @@ class MCPServerPublic(BaseModel):
     )
     config: MCPServerPublicConfig = Field(
         ..., description="Sanitized MCP connection configuration"
+    )
+    attribution: Optional[MCPServerAttribution] = Field(
+        default=None,
+        description="Authors and citation from the server's CITATION.cff, or null if none",
     )
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: datetime = Field(description="Last update timestamp")
