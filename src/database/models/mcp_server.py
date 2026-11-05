@@ -1,7 +1,7 @@
 from typing import Any, ClassVar, Dict, List, Optional
 from enum import Enum
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from src.database.mongo_model import MongoModel
 
 
@@ -47,6 +47,24 @@ class ToolConfig(BaseModel):
     )
 
 
+class MCPServerMetadata(BaseModel):
+    """Descriptive metadata about an MCP server, written by the backoffice.
+
+    ``citation`` is the server's ``CITATION.cff`` from eve-esa/mcp-tool-registry,
+    parsed as-is (Citation File Format 1.2.0, hyphenated keys such as
+    ``given-names``). It is kept as a plain dict so a save from this service
+    round-trips it unchanged; ``src/services/mcp/attribution.py`` turns it into
+    the public ``attribution`` payload.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # Any, not Dict: a malformed value must not fail loading the whole row.
+    citation: Optional[Any] = Field(
+        default=None, description="CITATION.cff content (CFF 1.2.0) as stored"
+    )
+
+
 class MCPServer(MongoModel):
     """Model for storing MCP server configuration and connection metadata."""
 
@@ -64,6 +82,10 @@ class MCPServer(MongoModel):
 
     # Connection configuration
     config: ToolConfig = Field(..., description="MCP connection configuration")
+
+    metadata: Optional[MCPServerMetadata] = Field(
+        default=None, description="Descriptive metadata such as author attribution"
+    )
 
     # Timestamps
     created_at: datetime = Field(
