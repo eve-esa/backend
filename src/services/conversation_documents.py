@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 from functools import partial
-from typing import Optional
+from typing import Any, Optional
 
 import anyio
 from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -104,13 +105,101 @@ async def collection_for_chat(
     return await get_conversation_collection(user_id, conversation_id)
 
 
+def _ingested_documents(collection_id: str) -> dict[str, Any]:
+    """Rows whose upload finished.
+
+    An upload inserts its rows first and sets ``chunk_count`` once the points
+    are written. Until then a row is neither listed nor deletable: a delete
+    landing mid-upload would leave the points written after it with no row.
+    """
+    return {"collection_id": collection_id, "chunk_count": {"$gt": 0}}
+
+
+async def list_conversation_documents(
+    user_id: str, conversation_id: str
+) -> list[Document]:
+    """A conversation's documents, oldest first, read on the primary.
+
+    Primary, because the composer lists right after an upload or a delete. Not
+    paginated: the user's private document cap bounds the rows.
+    """
+    collection = await get_conversation_collection(user_id, conversation_id)
+    if collection is None:
+        return []
+    rows = (
+        await Document.get_primary_collection()
+        .find(_ingested_documents(collection.id))
+        .sort([("timestamp", 1), ("_id", 1)])
+        .to_list(length=None)
+    )
+    return [Document.from_dict(row) for row in rows]
+
+
+async def delete_conversation_document(
+    user_id: str, conversation_id: str, document_id: str
+) -> bool:
+    """Remove one attached document: points, row, slot. False if there is none.
+
+    Qdrant goes first and a failure there stops everything, like the whole
+    conversation delete. The slot goes back only if this call removed the row,
+    so two deletes of one document racing each other release it once. Removing
+    the last document drops the collection, so chat stops searching it.
+    """
+    collection = await get_conversation_collection(user_id, conversation_id)
+    if collection is None:
+        return False
+    try:
+        row_filter = {
+            "_id": ObjectId(document_id),
+            **_ingested_documents(collection.id),
+        }
+    except InvalidId:
+        return False
+    documents = Document.get_primary_collection()
+    if await documents.find_one(row_filter, projection={"_id": 1}) is None:
+        return False
+    try:
+        await anyio.to_thread.run_sync(
+            partial(
+                VectorStoreManager().delete_private_docs,
+                user_id=user_id,
+                collection_id=collection.id,
+                metadata={"metadata.document_id": document_id},
+            )
+        )
+    except Exception:
+        logger.error(
+            "Failed to delete Qdrant points for conversation document %s",
+            document_id,
+            exc_info=True,
+        )
+        raise _cleanup_failed()
+    try:
+        removed = (await documents.delete_one(row_filter)).deleted_count
+        if removed:
+            await release_private_document_slots(user_id, removed)
+    except Exception:
+        logger.error(
+            "Failed to delete Mongo row for conversation document %s",
+            document_id,
+            exc_info=True,
+        )
+        raise _cleanup_failed()
+    if not removed:
+        return False
+    await delete_conversation_collection_if_empty(collection)
+    return True
+
+
 async def delete_conversation_documents(user_id: str, conversation_id: str) -> None:
     """Remove a conversation's attached documents: points, rows, collection, slots.
 
     Runs whatever the flag says, so documents attached while it was on are not
-    left holding slots after it is turned off. Qdrant goes first and a failure
-    there stops everything, like DELETE /collections/{id}: Mongo rows deleted
-    over points that survive would leave those points with nothing to find them.
+    left holding slots after it is turned off. Same order as
+    DELETE /collections/{id}. Qdrant goes first and a failure there stops
+    everything: Mongo rows deleted over points that survive would leave those
+    points with nothing to find them. Slots go back right after their rows:
+    a retry finds no rows, so it could never release them later.
     """
     collection = await get_conversation_collection(user_id, conversation_id)
     if collection is None:
@@ -132,8 +221,8 @@ async def delete_conversation_documents(user_id: str, conversation_id: str) -> N
         raise _cleanup_failed()
     try:
         deleted = await Document.delete_many({"collection_id": collection.id})
-        await collection.delete()
         await release_private_document_slots(user_id, deleted)
+        await collection.delete()
     except Exception:
         logger.error(
             "Failed to delete Mongo rows for conversation collection %s",

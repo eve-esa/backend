@@ -39,8 +39,10 @@ from src.services.private_document_limit import (
 from src.services.request_rate_limiter import enforce_request_rate
 from src.services.conversation_documents import (
     delete_conversation_collection_if_empty,
+    delete_conversation_document as delete_attached_document,
     get_conversation_collection,
     get_or_create_conversation_collection,
+    list_conversation_documents as list_attached_documents,
 )
 
 # Setup
@@ -566,6 +568,85 @@ async def _rollback_conversation_upload(
         )
         return False
     return True
+
+
+async def _require_own_conversation(conversation_id: str, user: User) -> None:
+    """404 when the feature is off, or the conversation is missing or not the user's."""
+    if not config.FEATURE_CONVERSATION_DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Not Found")
+    # Primary and 404 for the same reasons as the upload route above.
+    conversation = await Conversation.find_by_id_on_primary(conversation_id)
+    if not conversation or conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+@router.get("/conversations/{conversation_id}/documents")
+async def list_conversation_documents(
+    conversation_id: str = Path(..., description="Conversation ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    List the documents attached to one conversation, oldest first.
+
+    A document appears once its upload has finished, so every entry has a
+    ``chunk_count`` above 0.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Per document: its id, name, chunk count, file type and size.
+
+    Raises:
+        HTTPException: 404 if the feature is off or the conversation is not
+        found or belongs to another user.
+    """
+    await _require_own_conversation(conversation_id, requesting_user)
+    documents = await list_attached_documents(requesting_user.id, conversation_id)
+    return {
+        "documents": [
+            {
+                "document_id": doc.id,
+                "name": doc.name,
+                "chunk_count": doc.chunk_count,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+            }
+            for doc in documents
+        ]
+    }
+
+
+@router.delete("/conversations/{conversation_id}/documents/{document_id}")
+async def delete_conversation_document(
+    conversation_id: str = Path(..., description="Conversation ID"),
+    document_id: str = Path(..., description="Document ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Remove one document from a conversation: its points, its row and its slot.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if the feature is off, the conversation is not found
+        or belongs to another user, or the document is not attached to it or
+        its upload is still running; 500 ``conversation_document_cleanup_failed``
+        if it could not be deleted, which a retry can finish.
+    """
+    await _require_own_conversation(conversation_id, requesting_user)
+    if not await delete_attached_document(
+        requesting_user.id, conversation_id, document_id
+    ):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"message": "Document deleted successfully"}
 
 
 @router.delete("/collections/{collection_id}/documents/{document_id}")
