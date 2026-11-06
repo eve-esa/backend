@@ -190,7 +190,12 @@ APP_ENVIRONMENT=dev
 | `FALLBACK_MODEL_NAME` | No | Model name for the fallback model (defaults to value in config.yaml). |
 | `MAIN_MODEL_API_KEY` | No | API key for the main model. |
 | `FALLBACK_MODEL_API_KEY` | No | API key for the fallback model. |
-| `MODEL_TIMEOUT` | No | Timeout in seconds for model calls (default `13`). |
+| `MODEL_TIMEOUT` | No | Default seconds to the first token (default `13`). Used for every model without its own budget, including the fallback model. A stall with nothing sent yet tries the next model, then the fallback. [Example](error-logs.md). |
+| `MAIN_MODEL_TIMEOUT` | No | First-token budget for `main` (default `120`). A RunPod cold start needs more than 13s. |
+| `EVE_JSC_TIMEOUT` | No | First-token budget for `eve_jsc` (default `MODEL_TIMEOUT`, 13). |
+| `JSC_LARGE_TIMEOUT` | No | First-token budget for `jsc_large` (default `60`). |
+| `AGENTIC_TIMEOUT` | No | Seconds to the first answer token (default `120`). Restarts on each tool call and tool result. A tool returning at 130s, then an answer at 131s, is still inside it. Also the cap on one LLM call. [Example](error-logs.md). |
+| `AGENTIC_TURN_DEADLINE` | No | Longest one agentic turn may run, in seconds (default `4 * AGENTIC_TIMEOUT`, 480). The router cuts a turn still running at 480s. Also the agentic slow-slot warning and the sandbox windows. [Example](sandbox.md). |
 | `EMBEDDING_URL` | Yes | Main Embedding Model(Qwen/Qwen3-Embedding-4B) provider url, OpenAI capatible (e.g., `https://api.deepinfra.com/v1/openai`) |
 | `EMBEDDING_API_KEY` | Yes | Main Embedding Model provider API token |
 | `DEEPINFRA_API_TOKEN` | Yes | DeepInfra API token for embedding and reranking retrieved documents (recommended for best retrieval quality, but backend still works without it). |

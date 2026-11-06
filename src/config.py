@@ -50,6 +50,9 @@ MAIN_MODEL_NAME = os.getenv("MAIN_MODEL_NAME", "eve-esa/eve_v0.1").strip()
 FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "mistral-small-latest").strip()
 
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
+# Seconds to the first answer token. Default 120. Starts at generation and
+# restarts on each tool call and tool result. Also the cap on one LLM call.
+# The turn itself is cut at AGENTIC_TURN_DEADLINE (default 480).
 AGENTIC_TIMEOUT = int(os.getenv("AGENTIC_TIMEOUT", 120))
 
 SATCOM_SMALL_MODEL_NAME = os.getenv(
@@ -448,6 +451,12 @@ MAX_INFLIGHT_GENERATIONS_PER_WORKER = _tolerant_int_env(
 # retrieval, embedding or a model hangs, and ends the stream with a timeout
 # error. <=0 disables it.
 CLASSIC_GENERATION_TIMEOUT = _tolerant_int_env("CLASSIC_GENERATION_TIMEOUT", 300)
+# Longest one agentic turn may run, in seconds. Default 4 * AGENTIC_TIMEOUT
+# = 480. At 480s the router cancels the stream and the agentic slot warns.
+# Added to the sandbox idle window while a turn is in flight (600 + 480).
+AGENTIC_TURN_DEADLINE = _tolerant_int_env(
+    "AGENTIC_TURN_DEADLINE", 4 * AGENTIC_TIMEOUT
+)
 
 # Per-principal request rate limit (src/services/request_rate_limiter.py). One
 # token bucket per user and route class in Valkey (REDIS_URL, database 1). Off:

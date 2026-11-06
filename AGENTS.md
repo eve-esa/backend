@@ -66,12 +66,15 @@ That also starts mongo, redis, keycloak, and minio. The source tree is bind-moun
 
 Wait until `docker-compose ps` shows the backend running, then `curl -sf -o /dev/null -w '%{http_code}' http://localhost:8001/docs`.
 
-If that stays empty and `docker exec backend-backend-1 python -c 'import server'` dies with SIGILL inside pymongo, leave the other containers up and run the API on the host. The frontend then uses `yarn dev` with no `VITE_API_URL` override, and the retrieval base URL below is `http://localhost:8000`:
+If that stays empty and `docker exec backend-backend-1 python -c 'import server'` dies with SIGILL inside pymongo, leave the other containers up and stop the backend container so it releases port 8001. Run the API on the host, on the port the frontend already calls. A frontend started with `VITE_API_URL=http://localhost:8001` needs the host process on 8001. Use 8000 only when the frontend has no `VITE_API_URL` override.
 
 ```bash
+docker-compose stop backend
 LOAD_DOTENV_OVERRIDE=false MONGO_HOST=localhost REDIS_URL=redis://127.0.0.1:6379/0 \
-  python3 -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+  python3 -m uvicorn server:app --host 127.0.0.1 --port 8001 --reload
 ```
+
+The sandbox uses the AWS SDK chain. Do not put `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or `AWS_SESSION_TOKEN` in `.env`. Those are temporary, they expire, and dotenv loads them over the SSO profile, so `aws sso login` has no effect until the three lines are gone. `.env` sets `AWS_PROFILE=esa-eve-dev` (account `012298690756`, same as the `default` profile). When `StartCodeInterpreterSession` says the security token is expired, run `aws sso login --profile esa-eve-dev`. Do not paste a new session into `.env`. The container does not see `~/.aws`, so only the host process can use that login.
 
 ### 2. Local `eve_retrieval`
 
@@ -159,7 +162,7 @@ The database is `default`. The tables HyperDX uses are `otel_logs`, `otel_traces
 
 ## Leave alone
 
-- `.env`, published ports, and Keycloak realm files. A stale `AUTH_*` in `.env` wins over `docker-compose.yml` because dotenv loads with `override=True`.
+- `.env`, published ports, and Keycloak realm files. A stale `AUTH_*` in `.env` wins over `docker-compose.yml` because dotenv loads with `override=True`. Do not add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, or `AWS_SESSION_TOKEN` to `.env`. Refresh the sandbox with `aws sso login --profile esa-eve-dev`.
 - The compose `frontend` service, unless someone explicitly asks for that container.
 - `CHANGELOG.md` and `v*` tags. Release-please owns both.
 - The AgentCore URL that was in `mcp_servers` before the local rewrite. Put it back only when the local volume is thrown away.

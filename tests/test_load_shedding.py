@@ -9,6 +9,7 @@ free it while the work is still running.
 
 import asyncio
 import contextlib
+import time
 
 import pytest
 
@@ -435,7 +436,7 @@ DEADLINE_ROUTES = [
     ),
     (
         "stream-generate-agentic",
-        "AGENTIC_STREAM_DEADLINE_SECONDS",
+        "AGENTIC_TURN_DEADLINE",
         "src.services.agents.core.runner.generate_answer_agentic_json_stream",
     ),
 ]
@@ -444,7 +445,15 @@ DEADLINE_ROUTES = [
 @pytest.mark.parametrize("absorbs_cancel", [True, False])
 @pytest.mark.parametrize("path,setting,stream", DEADLINE_ROUTES)
 async def test_a_generation_that_never_ends_is_cut_at_the_deadline(
-    async_client, conversation_owner, cap, monkeypatch, path, setting, stream, absorbs_cancel
+    async_client,
+    conversation_owner,
+    cap,
+    monkeypatch,
+    path,
+    setting,
+    stream,
+    absorbs_cancel,
+    caplog,
 ):
     user, token, conversation = conversation_owner
     limiter = cap(1)
@@ -477,6 +486,16 @@ async def test_a_generation_that_never_ends_is_cut_at_the_deadline(
     assert message.metadata["error"]["type"] == "GenerationDeadlineExceeded"
     # Cut by the deadline, not stopped by the user: the frontend offers a retry.
     assert not message.stopped
+    slot_warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING" and "Generation slot" in record.getMessage()
+    ]
+    if setting == "AGENTIC_TURN_DEADLINE":
+        assert len(slot_warnings) == 1
+        assert path in slot_warnings[0].getMessage()
+    else:
+        assert slot_warnings == []
 
 
 @pytest.mark.no_db
@@ -499,3 +518,33 @@ async def test_a_quick_slot_is_not_logged(caplog):
     slot = await limiter.try_acquire("messages")
     slot.release()
     assert not [r for r in caplog.records if "held" in r.getMessage()]
+
+
+@pytest.mark.no_db
+async def test_an_agentic_slot_warns_only_at_its_deadline(caplog):
+    limiter = GenerationLimiter(1)
+    early = await limiter.try_acquire("stream-generate-agentic", slow_after=480)
+    early._acquired_at = time.monotonic() - 90
+    early.release()
+    assert not [r for r in caplog.records if "held" in r.getMessage()]
+
+    caplog.clear()
+    late = await limiter.try_acquire("stream-generate-agentic", slow_after=480)
+    late._acquired_at = time.monotonic() - 480
+    late.release()
+    held = [r for r in caplog.records if "held" in r.getMessage()]
+    assert len(held) == 1
+    assert held[0].levelname == "WARNING"
+    assert "stream-generate-agentic" in held[0].getMessage()
+
+
+@pytest.mark.no_db
+async def test_a_classic_slot_still_warns_past_sixty_seconds(caplog):
+    limiter = GenerationLimiter(1)
+    slot = await limiter.try_acquire("stream_messages")
+    slot._acquired_at = time.monotonic() - 61
+    slot.release()
+    held = [r for r in caplog.records if "held" in r.getMessage()]
+    assert len(held) == 1
+    assert held[0].levelname == "WARNING"
+    assert "stream_messages" in held[0].getMessage()
