@@ -11,6 +11,26 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.8.0](https://github.com/eve-esa/backend/compare/v1.7.0...v1.8.0) (2026-11-06)
+
+
+### Added
+
+* **agents:** support the deep agent and sandbox skills ([#350](https://github.com/eve-esa/backend/issues/350)) ([3ce45de](https://github.com/eve-esa/backend/commit/3ce45de68132e68d64d9a74fe2cb935927b6e9d4))
+* **documents:** attach documents to one conversation ([#333](https://github.com/eve-esa/backend/issues/333)) ([f59f5d0](https://github.com/eve-esa/backend/commit/f59f5d0780cd2eca51e598c78de79434c35871e2))
+* **mcp:** return server attribution ([#354](https://github.com/eve-esa/backend/issues/354)) ([c8ed480](https://github.com/eve-esa/backend/commit/c8ed480704c7f6a0cf637c8425490d880d051361))
+* **models:** add Mistral Large 4 as a selectable JSC model ([#342](https://github.com/eve-esa/backend/issues/342)) ([75472b1](https://github.com/eve-esa/backend/commit/75472b16f2c0eea396bc231935e05cdb9aff6df7))
+* **sandbox:** keep a sandbox per conversation ([#353](https://github.com/eve-esa/backend/issues/353)) ([b550a81](https://github.com/eve-esa/backend/commit/b550a81b61c4541b205111cf8f08284592709c21))
+
+
+### Fixed
+
+* **conversations:** delete agent memory with the conversation ([#340](https://github.com/eve-esa/backend/issues/340)) ([b774176](https://github.com/eve-esa/backend/commit/b774176f4f3337fd9d37963b20670f9a6621e689))
+* **deps:** pymongo, langgraph and OpenTelemetry for the open alerts ([#344](https://github.com/eve-esa/backend/issues/344)) ([7ec77d5](https://github.com/eve-esa/backend/commit/7ec77d5c9e18f6cf273f6bd0e9e78552729640c6))
+* **generation:** run turns without a conversation without memory ([#347](https://github.com/eve-esa/backend/issues/347)) ([45ee4fb](https://github.com/eve-esa/backend/commit/45ee4fb9760efa864600a3a89545f4a98532f4d1))
+* restart agentic budget after tools ([#355](https://github.com/eve-esa/backend/issues/355)) ([820bd23](https://github.com/eve-esa/backend/commit/820bd234d7286a8ebdbd05f3000aea0fb23825c6))
+* **skills:** pass the skills path into compile ([#352](https://github.com/eve-esa/backend/issues/352)) ([03742d7](https://github.com/eve-esa/backend/commit/03742d7b96f89941de1c88c7c980b7c9739031cb))
+
 ## [1.7.0](https://github.com/eve-esa/backend/compare/v1.6.0...v1.7.0) (2026-10-29)
 
 
