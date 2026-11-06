@@ -176,10 +176,13 @@ async def delete_conversation(
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
-    Delete a conversation, its messages and its agent memory (LangGraph checkpoints).
+    Delete a conversation, its messages, its attached documents (collection, rows,
+    vectors and slots) and its agent memory (LangGraph checkpoints).
 
-    A failure deleting the checkpoints is logged as ``checkpoint.delete_failed``
-    and does not fail the request.
+    A failure deleting the attached documents answers 500
+    ``conversation_document_cleanup_failed`` before anything is deleted from the
+    conversation, so a retry can finish. A failure deleting the checkpoints is
+    logged as ``checkpoint.delete_failed`` and does not fail the request.
 
     Args:
         conversation_id (str): Conversation identifier.

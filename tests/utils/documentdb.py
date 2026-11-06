@@ -20,6 +20,9 @@ class _DocumentDBCollection:
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._inner, name)
+        if name == "with_options":
+            # get_primary_collection goes through here: stay guarded on its result.
+            return lambda *args, **kwargs: _DocumentDBCollection(attr(*args, **kwargs))
         if name not in _UPDATE_METHODS:
             return attr
 
