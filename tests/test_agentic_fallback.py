@@ -1103,7 +1103,9 @@ class TestTraceTiming:
     ``started_at_s``/``latency_s`` must reflect the timing contract instead:
     an agent step starts when the previous event ended, a tool step starts
     when the agent step that requested it ended, and the final answer starts
-    when the previous event ended and ends at stream completion.
+    when the previous event ended and ends at stream completion. Announcing a
+    tool call and seeing a tool result each read the clock once more, to
+    restart the first-answer budget.
 
     The events follow LangGraph's order for ``stream_mode=["messages",
     "updates"]``: a node's message chunks, then that node's update.
@@ -1187,9 +1189,9 @@ class TestTraceTiming:
             {"started_at_s": e["started_at_s"], "latency_s": e["latency_s"]}
             for e in trace
         ] == [
-            {"started_at_s": 0.0, "latency_s": 2.0},
-            {"started_at_s": 2.0, "latency_s": 3.0},
-            {"started_at_s": 5.0, "latency_s": 6.0},
+            {"started_at_s": 0.0, "latency_s": 3.0},
+            {"started_at_s": 3.0, "latency_s": 4.0},
+            {"started_at_s": 7.0, "latency_s": 7.0},
         ]
 
     async def test_parallel_tool_calls_share_the_same_start(self):
@@ -1217,7 +1219,7 @@ class TestTraceTiming:
         agent_end = trace[0]["started_at_s"] + trace[0]["latency_s"]
         tool_entries = [e for e in trace if e["role"] == "tool"]
         assert [e["started_at_s"] for e in tool_entries] == [agent_end, agent_end]
-        assert [e["latency_s"] for e in tool_entries] == [3.0, 4.0]
+        assert [e["latency_s"] for e in tool_entries] == [4.0, 6.0]
 
     async def test_agent_step_is_traced_from_the_update_with_its_arguments(self):
         """Providers stream tool-call arguments over several chunks, so the
@@ -2618,3 +2620,176 @@ class TestSandboxInGeneration:
         assert created[0]["connection_config"].api_key is None
         assert remote.destroyed == 0
         assert remote.closed == 1
+
+
+class _ManualClock:
+    """A ``perf_counter`` the test moves. It does not advance on its own."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _ClockedStreamGraph:
+    """Yields ``(mode, payload)`` after moving ``clock`` by the given seconds."""
+
+    def __init__(self, clock: _ManualClock, steps):
+        self._clock = clock
+        self._steps = steps
+
+    async def astream(self, *args, **kwargs):
+        for advance, event in self._steps:
+            if advance:
+                self._clock.advance(advance)
+            yield event
+
+
+def _stream_step(advance: float, mode: str, payload):
+    return (advance, (mode, payload))
+
+
+async def _stream_on_clock(steps) -> list:
+    clock = _ManualClock()
+    graph = _ClockedStreamGraph(clock, steps)
+    request = GenerationRequest(query="hi", llm_type="main", agent="react")
+    with patch(f"{_RUNNER}.time.perf_counter", clock), _patched_runner(
+        _build_react_graph=MagicMock(return_value=graph),
+    ):
+        return [
+            _event_payload(event)
+            async for event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            )
+        ]
+
+
+def _answer_events(events) -> list:
+    return [event for event in events if event["type"] in ("token", "error", "final")]
+
+
+class TestFirstAnswerBudgetRestarts:
+    """The 120s first-answer clock restarts on a tool call and a tool result.
+
+    The clock is moved by the graph, not by ``_fake_clock``: that one advances
+    on every ``perf_counter`` call, so a new read in the helper would change
+    the elapsed time.
+    """
+
+    _PAST = AGENTIC_TIMEOUT + 1
+
+    def _tool_result(self):
+        return (
+            ToolMessage(content="docs", name="dummy_search", tool_call_id="call-1"),
+            {"langgraph_node": "tools"},
+        )
+
+    def _tool_call(self):
+        return (
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "dummy_search",
+                        "args": {"query": "sea ice"},
+                        "id": "call-1",
+                    }
+                ],
+            ),
+            {"langgraph_node": "agent"},
+        )
+
+    def _answer(self):
+        return (AIMessage(content="done"), {"langgraph_node": "agent"})
+
+    async def test_a_slow_tool_result_then_a_quick_answer(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(self._PAST, "messages", self._tool_result()),
+                _stream_step(1, "messages", self._answer()),
+            ]
+        )
+
+        assert _answer_events(events)[0] == {"type": "token", "content": "done"}
+        assert not any(event["type"] == "error" for event in events)
+
+    async def test_a_slow_model_step_before_a_tool_call_still_answers(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(self._PAST, "messages", self._tool_call()),
+                _stream_step(1, "messages", self._tool_result()),
+                _stream_step(1, "messages", self._answer()),
+            ]
+        )
+
+        assert any(
+            event["type"] == "token" and event["content"] == "done" for event in events
+        )
+        assert not any(event["type"] == "error" for event in events)
+
+    async def test_text_tool_call_and_answer_in_one_turn_restart_the_budget(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(
+                    self._PAST,
+                    "messages",
+                    (
+                        AIMessage(
+                            content=(
+                                '[TOOL_CALLS]dummy_search{"query": "sea ice"}done'
+                            )
+                        ),
+                        {"langgraph_node": "agent"},
+                    ),
+                ),
+            ]
+        )
+
+        assert any(
+            event["type"] == "token" and event["content"] == "done" for event in events
+        )
+        assert not any(event["type"] == "error" for event in events)
+
+    async def test_a_stall_after_the_tool_result_still_times_out(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(0, "messages", self._tool_result()),
+                _stream_step(self._PAST, "messages", self._answer()),
+            ]
+        )
+
+        assert [event["type"] for event in events if event["type"] == "token"] == []
+        assert any(event["type"] == "error" for event in events)
+
+    async def test_a_stall_with_no_tool_still_times_out(self):
+        events = await _stream_on_clock(
+            [_stream_step(self._PAST, "messages", self._answer())]
+        )
+
+        assert [event["type"] for event in events if event["type"] == "token"] == []
+        assert any(event["type"] == "error" for event in events)
+
+    async def test_a_tool_result_in_an_update_restarts_the_budget(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(
+                    self._PAST,
+                    "updates",
+                    {"tools": {"messages": [self._tool_result()[0]]}},
+                ),
+                _stream_step(1, "messages", self._answer()),
+            ]
+        )
+
+        assert any(
+            event["type"] == "token" and event["content"] == "done" for event in events
+        )
+        assert not any(event["type"] == "error" for event in events)
+

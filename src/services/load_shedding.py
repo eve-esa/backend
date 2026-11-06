@@ -23,8 +23,9 @@ from src.config import MAX_INFLIGHT_GENERATIONS_PER_WORKER
 logger = logging.getLogger(__name__)
 
 SHED_RETRY_AFTER_SECONDS = 10
-# A slot held longer than this is logged when it comes back: a generation that
-# slow is either a cold model or a hang the deadline had to cut.
+# Classic routes warn when a slot was held at least this long. Agentic routes
+# pass AGENTIC_TURN_DEADLINE instead, so a normal tool round does not warn
+# and a turn cut at the deadline does.
 SLOW_SLOT_LOG_SECONDS = 60
 SHED_DETAIL = {
     "code": "overloaded",
@@ -35,13 +36,22 @@ SHED_DETAIL = {
 class GenerationSlot:
     """One admitted generation. ``release`` is idempotent."""
 
-    __slots__ = ("_limiter", "_released", "_route", "_acquired_at")
+    __slots__ = ("_limiter", "_released", "_route", "_acquired_at", "_slow_after")
 
-    def __init__(self, limiter: "GenerationLimiter", route: str = "") -> None:
+    def __init__(
+        self,
+        limiter: "GenerationLimiter",
+        route: str = "",
+        slow_after: Optional[float] = None,
+    ) -> None:
         self._limiter = limiter
         self._released = False
         self._route = route
         self._acquired_at = time.monotonic()
+        # None keeps SLOW_SLOT_LOG_SECONDS, read at release so a test can
+        # patch the constant. A route that passes slow_after warns at that
+        # deadline instead.
+        self._slow_after = slow_after
 
     def release(self) -> None:
         if self._released:
@@ -49,7 +59,8 @@ class GenerationSlot:
         self._released = True
         self._limiter._release()
         held = time.monotonic() - self._acquired_at
-        if held > SLOW_SLOT_LOG_SECONDS:
+        limit = SLOW_SLOT_LOG_SECONDS if self._slow_after is None else self._slow_after
+        if held >= limit:
             logger.warning(
                 "Generation slot on %s held %.0f s, %d generations in flight",
                 self._route,
@@ -78,7 +89,9 @@ class GenerationLimiter:
     def in_flight(self) -> int:
         return self._in_flight
 
-    async def try_acquire(self, route: str = "") -> Optional[GenerationSlot]:
+    async def try_acquire(
+        self, route: str = "", slow_after: Optional[float] = None
+    ) -> Optional[GenerationSlot]:
         semaphore = self._semaphore
         if semaphore is not None:
             if semaphore.locked():
@@ -87,7 +100,7 @@ class GenerationLimiter:
             # and returns without yielding to the loop.
             await semaphore.acquire()
         self._in_flight += 1
-        return GenerationSlot(self, route)
+        return GenerationSlot(self, route, slow_after)
 
     def _release(self) -> None:
         self._in_flight -= 1
@@ -102,10 +115,16 @@ def get_generation_limiter() -> GenerationLimiter:
     return _limiter
 
 
-async def acquire_generation_slot_or_raise(route: str) -> GenerationSlot:
-    """Admit one generation on ``route`` or raise 429 ``overloaded``."""
+async def acquire_generation_slot_or_raise(
+    route: str, slow_after: Optional[float] = None
+) -> GenerationSlot:
+    """Admit one generation on ``route`` or raise 429 ``overloaded``.
+
+    ``slow_after`` is the hold time, in seconds, that logs a warning on
+    release. ``None`` uses ``SLOW_SLOT_LOG_SECONDS``.
+    """
     limiter = _limiter
-    slot = await limiter.try_acquire(route)
+    slot = await limiter.try_acquire(route, slow_after)
     if slot is None:
         logger.warning(
             "Load shed on %s: %d generations in flight, cap %d per worker",

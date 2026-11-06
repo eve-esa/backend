@@ -26,7 +26,7 @@ only, never from `message` or `type`.
 
 | code | Meaning | Suggested copy angle |
 |---|---|---|
-| `timeout` | The model did not produce a first token in time; almost always a serverless cold start | "warming up, retry in a moment" |
+| `timeout` | No first token within that model's budget. If nothing was sent, the next endpoint and then the fallback model were already tried; this code remains when those also produced nothing. Text already streamed is kept, and no second answer is appended. | "warming up, retry in a moment" |
 | `empty_answer` | Generation completed but produced nothing | "empty answer, retry" |
 | `upstream_error` | Anything else from the model endpoint or pipeline | generic failure, retry |
 
@@ -92,6 +92,10 @@ payload with `answered: null` and the failed attempt listed:
 
 An explicit request is never promoted to another endpoint: asking for
 `eve_jsc` can only be answered by `eve_jsc` or the fallback model.
+
+The wait is for the first token only. Later tokens are not under it. The budget is `MAIN_MODEL_TIMEOUT` (120s) for `main`, `EVE_JSC_TIMEOUT` (default 13s) for `eve_jsc`, `JSC_LARGE_TIMEOUT` (60s) for `jsc_large`, and `MODEL_TIMEOUT` (13s) for every other model.
+
+A `main` request that sends nothing for 120s is recorded as `timeout`, then the next endpoint is tried, then the fallback model streams the reply. The client gets that reply, and `answered` names the model that produced it. The client sees `code: timeout` only when the fallback also produced nothing, or when tokens were already on the stream and the rest of the turn died.
 
 Cancellation is NOT an error code: a user stop is carried by the SSE
 `stopped` event and the `Message.stopped` field.

@@ -791,3 +791,14 @@ def test_sync_skills_reports_a_failed_clear(tmp_path: Path):
     )
     with pytest.raises(SandboxError, match="clear"):
         sync_skills(session, tmp_path)
+
+
+def test_turn_windows_follow_the_turn_deadline(monkeypatch):
+    monkeypatch.setattr(
+        "src.services.agents.core.sandbox.AGENTIC_TURN_DEADLINE", 480
+    )
+    monkeypatch.setattr(
+        "src.services.agents.core.sandbox.sandbox_idle_ttl_s", lambda: 600
+    )
+    assert sandbox_busy_ttl_s() == 1080
+    assert sandbox_reuse_limit_s() == 540

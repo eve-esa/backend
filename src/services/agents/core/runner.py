@@ -874,11 +874,11 @@ async def _resolve_agentic_llm_client(
 
 
 class _AgenticBudgetTimeout(TimeoutError):
-    """The whole-run AGENTIC_TIMEOUT guard fired.
+    """No final-answer token within AGENTIC_TIMEOUT (default 120s).
 
-    Distinct type on purpose: that budget includes tool execution, so it says
-    nothing about the LLM endpoint's health and must never open its circuit
-    (slow MCP tools would otherwise park a healthy endpoint for everyone).
+    The clock starts at generation and restarts on each announced tool call
+    and each tool result. At 480s AGENTIC_TURN_DEADLINE cuts the turn. Must
+    not open the LLM circuit: non-answer chunks mean the endpoint is up.
     """
 
 
@@ -1812,6 +1812,9 @@ async def generate_answer_agentic_stream_helper(
         config = {"configurable": {"thread_id": conversation_id}}
 
         gen_start = time.perf_counter()
+        # First-answer budget. gen_start stays put: generation_latency uses it.
+        # This clock restarts on each announced tool call and each tool result.
+        answer_budget_started_at = gen_start
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         fallback = _FallbackUse()
@@ -1832,6 +1835,7 @@ async def generate_answer_agentic_stream_helper(
         announced_tool_calls: set = set()
 
         def _tool_call_events(tool_calls: List[Any]) -> List[str]:
+            nonlocal answer_budget_started_at
             events: List[str] = []
             for tc in tool_calls:
                 if isinstance(tc, dict):
@@ -1846,6 +1850,9 @@ async def generate_answer_agentic_stream_helper(
                 if key in announced_tool_calls:
                     continue
                 announced_tool_calls.add(key)
+                # Once per announced call. A repeat of the same call must not
+                # restart the budget a second time.
+                answer_budget_started_at = time.perf_counter()
                 query_used = args.get("query", "")
                 label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
@@ -1890,7 +1897,7 @@ async def generate_answer_agentic_stream_helper(
                 answer_items = [answer_text]
 
             if tokens_yielded == 0:
-                elapsed = time.perf_counter() - gen_start
+                elapsed = time.perf_counter() - answer_budget_started_at
                 if elapsed > AGENTIC_TIMEOUT:
                     raise _AgenticBudgetTimeout(
                         "No final-answer token received within AGENTIC_TIMEOUT"
@@ -1971,6 +1978,8 @@ async def generate_answer_agentic_stream_helper(
                                 if not isinstance(msgs, list):
                                     msgs = [msgs]
                                 for msg in msgs:
+                                    if ToolMessage and isinstance(msg, ToolMessage):
+                                        answer_budget_started_at = time.perf_counter()
                                     if not (
                                         AIMessage
                                         and isinstance(msg, AIMessage)
@@ -2012,6 +2021,7 @@ async def generate_answer_agentic_stream_helper(
                             current_node = node
 
                         if ToolMessage and isinstance(chunk, ToolMessage):
+                            answer_budget_started_at = time.perf_counter()
                             graph_messages.append(chunk)
                             announced_tool_calls.clear()
                             preview = stringify_tool_content(chunk.content)[:200]

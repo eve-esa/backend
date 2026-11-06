@@ -13,7 +13,7 @@ from bson import ObjectId
 from pydantic import BaseModel, Field
 
 from src.config import (
-    AGENTIC_TIMEOUT,
+    AGENTIC_TURN_DEADLINE,
     CLASSIC_GENERATION_TIMEOUT,
     IS_PROD,
     MODEL_TIMEOUT,
@@ -87,12 +87,6 @@ from src.utils.helpers import (
 from src.utils.sse_keepalive import with_sse_keepalive
 
 logger = logging.getLogger(__name__)
-
-# Overall deadline of one streamed agentic turn. The runner's own AGENTIC_TIMEOUT
-# guard counts per model run from after setup (tool discovery, history), so a
-# healthy turn with tool rounds can pass it in total; this backstop only frees
-# the load shedding slot from a hang, hence twice the guard.
-AGENTIC_STREAM_DEADLINE_SECONDS = 2 * AGENTIC_TIMEOUT
 
 router = APIRouter()
 
@@ -2082,7 +2076,9 @@ async def create_agentic_message(
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
-    slot = await acquire_generation_slot_or_raise("generate-agentic")
+    slot = await acquire_generation_slot_or_raise(
+        "generate-agentic", slow_after=AGENTIC_TURN_DEADLINE
+    )
 
     message = None
     try:
@@ -2247,7 +2243,9 @@ async def create_agentic_message_stream(
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
     # Same hand-off as create_message_stream: the generation task holds it.
-    slot = await acquire_generation_slot_or_raise("stream-generate-agentic")
+    slot = await acquire_generation_slot_or_raise(
+        "stream-generate-agentic", slow_after=AGENTIC_TURN_DEADLINE
+    )
     gen_task = None
 
     message = None
@@ -2301,6 +2299,8 @@ async def create_agentic_message_stream(
         cancel_event = cancel_mgr.create(message.id)
         cancel_mgr.link_conversation(conversation_id, message.id)
         subscriber_ready = asyncio.Event()
+        # Cuts the turn at AGENTIC_TURN_DEADLINE. AGENTIC_TIMEOUT only bounds
+        # the wait for the next answer token, and restarts on each tool step.
         gen_task = asyncio.create_task(
             run_agentic_generation_to_bus(
                 request=request,
@@ -2310,7 +2310,7 @@ async def create_agentic_message_stream(
                 background_tasks=background_tasks,
                 cancel_event=cancel_event,
                 subscriber_ready=subscriber_ready,
-                deadline_seconds=AGENTIC_STREAM_DEADLINE_SECONDS,
+                deadline_seconds=AGENTIC_TURN_DEADLINE,
             )
         )
         slot.release_when_done(gen_task)

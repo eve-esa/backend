@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from src.config import AGENTIC_TIMEOUT
+from src.config import AGENTIC_TURN_DEADLINE
 
 logger = logging.getLogger(__name__)
 
@@ -148,13 +148,23 @@ def sandbox_reaper_interval_s() -> int:
 
 
 def sandbox_busy_ttl_s() -> int:
-    """Provider expiry while a turn is in flight: the idle window plus the turn cap."""
-    return sandbox_idle_ttl_s() + AGENTIC_TIMEOUT
+    """How long the sandbox stays up when a turn starts.
+
+    Idle window plus AGENTIC_TURN_DEADLINE. Default 600 + 480 = 1080. A turn
+    that starts at 10:00 is covered until 10:18. If it ends at 10:02, release
+    sets the deadline to 10:12.
+    """
+    return sandbox_idle_ttl_s() + AGENTIC_TURN_DEADLINE
 
 
 def sandbox_reuse_limit_s() -> int:
-    """Minimum hard-TTL left before a session is worth reusing."""
-    return AGENTIC_TIMEOUT + _REUSE_MARGIN_S
+    """AgentCore time that must remain before a session is reused.
+
+    AGENTIC_TURN_DEADLINE plus 60s. Default 540. A session created at 10:00
+    ends at 11:00. A turn at 10:50 (600s left) reuses it. A turn at 10:52
+    (480s left) replaces it.
+    """
+    return AGENTIC_TURN_DEADLINE + _REUSE_MARGIN_S
 
 
 def _require(name: str) -> str:

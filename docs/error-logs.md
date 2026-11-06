@@ -56,7 +56,7 @@ failures never raise to the caller.
 | `ToolReturnedError` | `src/services/agents/core/interceptors.py` | Exception stand-in when the tool returned `isError` / structured / 401 text |
 | `classify_mcp_tool_result` | `src/services/agents/core/interceptors.py` | Detect returned MCP failures (`is_error` / `structured` / `text`) |
 | `_graph_on_policy` | `src/services/agents/core/runner.py` | Callback passed into `AgentGraph.compile(on_policy=…)` |
-| `_AgenticBudgetTimeout` | `src/services/agents/core/runner.py` | Whole-run `AGENTIC_TIMEOUT` (`kind=run_timeout`); does not open the LLM circuit |
+| `_AgenticBudgetTimeout` | `src/services/agents/core/runner.py` | First-answer `AGENTIC_TIMEOUT`, restarted by each tool call and tool result (`kind=run_timeout`); does not open the LLM circuit |
 | `record_kind` | `src/observability/context.py` | Agentic `kind` as an event on the current span plus a WARNING log |
 
 
@@ -95,7 +95,7 @@ stdlib `TimeoutError`; the runner maps it with `_is_node_timeout_error`.
 | `kind` | What happened | Typical location | Also a span event? |
 | ------ | ------------- | ---------------- | -------------- |
 | `timeout` | Node idle/run timeout (`NodeTimeoutError`) | `node` + `graph` | yes |
-| `run_timeout` | Whole-run budget (`AGENTIC_TIMEOUT` / `_AgenticBudgetTimeout`) | `source=runner`, `graph` | yes |
+| `run_timeout` | First-answer budget (`AGENTIC_TIMEOUT` / `_AgenticBudgetTimeout`, restarted by each tool call and tool result) | `source=runner`, `graph` | yes |
 | `retry` | LangGraph retried a node (`timed_node`, attempt > 1) | `node`, `graph`, `error.attempt` | yes |
 | `error_handler` | Uncaught exception in a node, leftover runner catch, or agentic router | `node` and/or `source=router`/`runner` | yes |
 | `fallback` | In-graph fallback LLM after primary failed | `node`, `graph` | yes |
@@ -143,11 +143,13 @@ node budgets:
 ```text
 agent.compile(
     llm=…, tools=…, fallback_llm=…,
-    llm_idle_timeout=MODEL_TIMEOUT,   # TimeoutPolicy idle (resets on chunks)
-    llm_run_timeout=AGENTIC_TIMEOUT,  # TimeoutPolicy wall-clock per attempt
+    llm_idle_timeout=endpoint_timeout(answered),  # first token; resets on each chunk
+    llm_run_timeout=AGENTIC_TIMEOUT,              # 120s wall clock for one LLM attempt
     on_policy=_graph_on_policy(graph.name),
 )
 ```
+
+`endpoint_timeout` is the first-token budget, not `MODEL_TIMEOUT` for every model. `main` gets `MAIN_MODEL_TIMEOUT` (120s), `eve_jsc` gets `EVE_JSC_TIMEOUT` (default 13s), `jsc_large` gets `JSC_LARGE_TIMEOUT` (60s), and every other model gets `MODEL_TIMEOUT` (13s). The fallback node is given 1.5 times those two caps.
 
 `ReactAgent.compile` / `SimpleChatAgent.compile` then attach LangGraph
 kwargs **per node** via `add_instrumented_node` (drops kwargs the installed
@@ -156,7 +158,7 @@ LangGraph does not accept):
 
 | Node | `timed_node` | `RetryPolicy` | `TimeoutPolicy` | `error_handler` |
 | ---- | ------------ | ------------- | --------------- | --------------- |
-| `agent` | yes | yes (max 3, `retry_on_transient`) | idle + run | yes → may `goto agent_fallback` |
+| `agent` | yes | yes (2 attempts, one retry) | idle + run | yes → may `goto agent_fallback` |
 | `tools` (react only) | yes | yes | **no** | yes, but see layer B |
 | `agent_fallback` | yes | **no** | idle + run | yes, then **re-raises** (`node == agent_fallback`, no loop) |
 
@@ -199,19 +201,13 @@ body. LangGraph invokes it with a `NodeError` (`error.node`,
 
 Typical `agent` timeout (primary LLM stalled):
 
-1. `TimeoutPolicy` wraps **one attempt**. Idle timeout resets on every
-   streamed chunk (first-token budget). Run timeout is a hard wall clock
-   and does not reset. Either one raises `NodeTimeoutError` (this is
-   **not** a stdlib `TimeoutError`).
-2. `RetryPolicy` sees a transient failure and re-invokes `agent`
-   (attempts 2 and 3). Each re-invoke goes through `timed_node`, which
-   emits `kind=retry` with `error.attempt`.
-3. After attempts are exhausted, LangGraph calls `error_handler`.
-4. Handler emits `kind=timeout`, then `kind=fallback`, then jumps to
-   `agent_fallback`.
-5. `agent_fallback` is a single LLM call on the fallback model. If
-   **it** times out, the same handler emits `timeout` (or `error_handler`)
-   and re-raises, no second fallback.
+1. `TimeoutPolicy` wraps **one attempt**. The idle timeout is that model's first-token budget and resets on every streamed chunk. The run timeout is `AGENTIC_TIMEOUT` (120s), a hard wall clock that does not reset. Either one raises `NodeTimeoutError` (this is **not** a stdlib `TimeoutError`).
+2. `RetryPolicy` allows 2 attempts, so the same model is tried once more. The second attempt goes through `timed_node`, which emits `kind=retry` with `error.attempt`.
+3. After both attempts fail, LangGraph calls `error_handler`.
+4. The handler emits `kind=timeout`, then `kind=fallback`, then jumps to `agent_fallback`. The user gets the fallback model's reply.
+5. `agent_fallback` is one LLM call on the fallback model, with 1.5 times the idle and run caps (180s when the primary cap was 120s). If it times out, the same handler emits `timeout` and re-raises. There is no second fallback, and the client then sees the error.
+
+A `main` model that sends nothing for 120s follows that path. Chunks that keep arriving never hit the idle budget. `AGENTIC_TURN_DEADLINE` (default 480s) is a different clock: it cuts the whole turn.
 
 A programmer error (`ValueError`, bad prompt, …) skips retry (not
 transient), goes straight to `error_handler` → `kind=error_handler` →
@@ -282,10 +278,15 @@ If `error_handler` re-raises, or a budget outside the node fires,
 - `NodeTimeoutError` → `timeout`
 - anything else → `error_handler`
 
-`_AgenticBudgetTimeout` is **not** LangGraph. Streaming checks elapsed
-time until the first **final-answer** token against `AGENTIC_TIMEOUT`
-(tool time counts). It must not open the LLM circuit: slow MCP would
-otherwise park a healthy endpoint.
+`_AgenticBudgetTimeout` is **not** LangGraph. It fires when no final-answer token arrives within `AGENTIC_TIMEOUT` (default 120s). The clock starts at generation and restarts on each announced tool call and each tool result. It does not open the LLM circuit.
+
+`AGENTIC_TURN_DEADLINE` (default `4 * AGENTIC_TIMEOUT`, 480s) bounds the whole turn. The router cancels the stream there and persists `GenerationDeadlineExceeded`. A normal agentic slot warns only at that same point. Classic routes still warn at 60s.
+
+With the defaults:
+
+- A tool returns at 130s and the answer token arrives at 131s. The clock restarted at the tool result, so the turn continues.
+- A tool returns at 130s and no answer token arrives by 250s. `_AgenticBudgetTimeout`, `kind=run_timeout`.
+- The turn is still running at 480s. The router cuts it, whatever the first-answer clock says.
 
 If `agent_fallback` already produced an answer, the runner may persist
 the leftover **and** keep the fallback answer. That leftover can

@@ -15,7 +15,7 @@ Settings are read when a turn starts, not at import. Every name this service own
 | `agentcore` | Bedrock AgentCore code interpreter, through `langchain-agentcore-codeinterpreter` | `SANDBOX_AGENTCORE_REGION` (required). `SANDBOX_AGENTCORE_IDENTIFIER` (default `aws.codeinterpreter.v1`) |
 | `opensandbox` | `opensandbox` `SandboxSync` plus `langchain-sandbox-opensandbox` | `SANDBOX_OPENSANDBOX_DOMAIN` (required). `SANDBOX_OPENSANDBOX_PROTOCOL` (`http` or `https`, default `http`). `SANDBOX_OPENSANDBOX_API_KEY` (optional). `SANDBOX_OPENSANDBOX_IMAGE` (default `python:3.12`) |
 
-AgentCore `sessionTimeoutSeconds` is an absolute cap. Activity does not extend it, and the API cannot renew it. The cap is 28,800 seconds ([`StartCodeInterpreterSession`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_StartCodeInterpreterSession.html)). `SANDBOX_MAX_LIFETIME_S` defaults to 3600 and is clamped to that cap. A session is reusable only while the time left on the cap is greater than `AGENTIC_TIMEOUT` plus 60 seconds. Status `READY` can be attached. The sandbox is gone when the status is `TERMINATED`, or when `get_session` raises `ResourceNotFoundException`, a `ValidationException` whose message says `is not active`, or a `ConflictException` whose message says `already terminated`. Any other `get_session` error, and any other status, fails the turn and leaves the record in place. A wrapper that did not create the session must not call `close()`: `close()` stops a session this process created. Attach stops the remote session through the client. The data-plane client read timeout is 300 seconds.
+AgentCore `sessionTimeoutSeconds` is an absolute cap. Activity does not extend it, and the API cannot renew it. The cap is 28,800 seconds ([`StartCodeInterpreterSession`](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_StartCodeInterpreterSession.html)). `SANDBOX_MAX_LIFETIME_S` defaults to 3600 and is clamped to that cap. Status `READY` can be attached. The sandbox is gone when the status is `TERMINATED`, or when `get_session` raises `ResourceNotFoundException`, a `ValidationException` whose message says `is not active`, or a `ConflictException` whose message says `already terminated`. Any other `get_session` error, and any other status, fails the turn and leaves the record in place. A wrapper that did not create the session must not call `close()`: `close()` stops a session this process created. Attach stops the remote session through the client. The data-plane client read timeout is 300 seconds.
 
 OpenSandbox `renew` sets the expiry to now plus the duration given. `destroy` kills the remote sandbox. `close` only drops the local HTTP client. A connect error whose `status_code` is 404 or 410 means the sandbox is gone. Anything else fails the turn and leaves the record.
 
@@ -26,9 +26,19 @@ OpenSandbox `renew` sets the expiry to now plus the duration given. `destroy` ki
 | `SANDBOX_IDLE_TTL_S` | 600 | How long the sandbox stays after the last turn |
 | `SANDBOX_MAX_LIFETIME_S` | 3600 | AgentCore hard cap. Not used for OpenSandbox |
 | `SANDBOX_REAPER_INTERVAL_S` | 30 | How often a worker looks for idle sandboxes |
-| `AGENTIC_TIMEOUT` | 120 | Turn cap. Added to the idle window while a turn is in flight |
+| `AGENTIC_TURN_DEADLINE` | 480 | Turn deadline. Added to the idle window while a turn is in flight |
 
-While a turn is in flight the deadline is now plus the idle window plus `AGENTIC_TIMEOUT`, and an OpenSandbox expiry is renewed to that same window. The last turn to release sets the deadline back to now plus the idle window and renews OpenSandbox to the idle window. An earlier release of a concurrent turn does not pull the deadline in. The count of those turns is `inflight`.
+While a turn is in flight the sandbox deadline is now plus `SANDBOX_IDLE_TTL_S` plus `AGENTIC_TURN_DEADLINE` (600 + 480 = 1080s). OpenSandbox's expiry is renewed to that same window. When the turn ends, the deadline goes back to now plus the idle window. The idle window stays in the in-turn sum so a turn that dies before release still leaves the sandbox up. An earlier release of a concurrent turn does not pull the deadline in. The count of those turns is `inflight`.
+
+```text
+10:00  turn starts, sandbox created, deadline 10:18
+10:02  turn ends, deadline 10:12
+10:05  next turn reuses it, deadline 10:23
+10:06  turn ends, deadline 10:16
+10:16  the reaper stops it
+```
+
+AgentCore also ends the session at `SANDBOX_MAX_LIFETIME_S` (3600s) after creation, and nothing extends that. A session is reused only while more than `AGENTIC_TURN_DEADLINE` plus 60s remain (540s). A session with 200s left is replaced, because the turn may run 480s.
 
 A record is replaced only when the provider reports the sandbox gone, when the provider changed, or when an AgentCore session is inside the hard-cap margin and `inflight` is 0. A throttle, a timeout, or any other attach error keeps the record and fails the turn. A failed stop also keeps the record, so the reaper can try again. A failed save of a new sandbox destroys that new session. If the lock is lost after the new session was created, that session is destroyed and not saved.
 
