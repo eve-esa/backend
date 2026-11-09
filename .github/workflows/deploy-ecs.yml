@@ -252,7 +252,7 @@ jobs:
 
       - name: Render task definition with new image digest
         id: render
-        uses: aws-actions/amazon-ecs-render-task-definition@138c24f321fdbdf7edee4a685519d253cae2cdea # v1.9.0
+        uses: aws-actions/amazon-ecs-render-task-definition@8d79160660ad39c402a16e5fc7cd2a32e8f7d6b7 # v1.9.1
         with:
           task-definition: /tmp/task-def.json
           container-name: backend
@@ -263,7 +263,7 @@ jobs:
             APP_VERSION=${{ steps.version.outputs.app-version }}
 
       - name: Deploy task definition to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@c465972ecbd160473f22e683363b422a5412a3de # v2.6.3
+        uses: aws-actions/amazon-ecs-deploy-task-definition@a00d4d57ac0de1a99b39fe469f3d898d38717c2b # v2.6.4
         id: deploy
         with:
           task-definition: ${{ steps.render.outputs.task-definition }}
