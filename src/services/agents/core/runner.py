@@ -17,7 +17,12 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
-from src.config import AGENTIC_LLM_TYPE, AGENTIC_TIMEOUT, MODEL_TIMEOUT
+from src.config import (
+    AGENTIC_LLM_TYPE,
+    AGENTIC_TIMEOUT,
+    MODEL_TIMEOUT,
+    TOOL_RESULT_MAX_TOKENS,
+)
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
 from src.database.models.message import Message
@@ -49,6 +54,7 @@ from src.services.agents.core.registry import get_agent_graph
 from src.services.agents.core.sandbox import (
     backend_for_compile,
     close_sandbox,
+    large_tool_result_permissions,
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
@@ -514,8 +520,30 @@ def _rag_tool_names(tools: Any) -> set[str]:
     return names
 
 
+def _retrieval_tool_content(
+    content: Any, user_id: Optional[str], conversation_id: Optional[str]
+) -> Any:
+    """The stored tool result when ``content`` is an offload stub.
+
+    The retrieval interceptor already kept the documents, so this only
+    matters for a RAG tool that did not go through it. A stub that is not
+    read back stays a stub, and the parse below finds no documents.
+    """
+    if not user_id or not conversation_id or not isinstance(content, str):
+        return content
+    if not content.startswith("Tool result too large"):
+        return content
+    from src.services.agents.core.tool_results import expand_offloaded_content
+
+    return expand_offloaded_content(content, user_id, conversation_id)
+
+
 def _collect_retrieval_documents(
-    all_messages: Any, rag_tool_names: set[str]
+    all_messages: Any,
+    rag_tool_names: set[str],
+    *,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
 ) -> tuple[List[Dict[str, Any]], int, int]:
     """Documents produced by the retrieval tool during an agentic run.
 
@@ -553,6 +581,13 @@ def _collect_retrieval_documents(
     documents: List[Dict[str, Any]] = []
     retrieval_calls = 0
     retrieval_errors = 0
+    # The context is filled inside the tools node, so it is complete even when
+    # the run was cancelled before the ToolMessage reached the stream. When it
+    # already has these RAG calls, skip the S3 GET: the documents below would
+    # be discarded. The collector is synchronous, so a GET that is still
+    # required stays sync and runs only on this fallback (no context calls).
+    ctx = get_retrieval_context()
+    context_calls = ctx.for_tools(rag_tool_names) if ctx is not None else []
     for msg in all_messages:
         if not isinstance(msg, ToolMessage):
             continue
@@ -563,22 +598,21 @@ def _collect_retrieval_documents(
             )
         if name not in rag_tool_names:
             continue
-        content = getattr(msg, "content", None)
+        raw = getattr(msg, "content", None)
+        content = (
+            raw
+            if context_calls
+            else _retrieval_tool_content(raw, user_id, conversation_id)
+        )
         if is_retrieval_error_payload(content):
             retrieval_errors += 1
             continue
         retrieval_calls += 1
         documents.extend(extract_documents_from_retrieval_payload(content))
 
-    # The context is filled inside the tools node, so it is complete even when
-    # the run was cancelled before the ToolMessage reached the stream: the
-    # documents and the call count come from it whenever it has RAG calls.
-    ctx = get_retrieval_context()
-    if ctx is not None:
-        calls = ctx.for_tools(rag_tool_names)
-        if calls:
-            documents = [doc for call in calls for doc in call.documents]
-            retrieval_calls = max(retrieval_calls, len(calls))
+    if context_calls:
+        documents = [doc for call in context_calls for doc in call.documents]
+        retrieval_calls = max(retrieval_calls, len(context_calls))
     return documents, retrieval_calls, retrieval_errors
 
 
@@ -1061,6 +1095,8 @@ def _build_react_graph(
     on_policy: Any = None,
     sandbox_backend: Any = None,
     skills_root: Any = None,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -1117,12 +1153,36 @@ def _build_react_graph(
     # React's compile has no backend parameter. A MagicMock compile exposes
     # (*args, **kwargs) only, so it must not gain a backend kwarg either.
     if _compile_declares_backend(agent):
+        offload = _offload_backend(user_id, conversation_id, sandbox_backend)
         if sandbox_backend is not None:
-            compile_kwargs["backend"] = backend_for_compile(sandbox_backend)
-        elif skills_root is not None:
-            filesystem = _filesystem_skills_backend(skills_root)
-            if filesystem is not None:
-                compile_kwargs["backend"], compile_kwargs["permissions"] = filesystem
+            compile_kwargs["backend"] = backend_for_compile(
+                sandbox_backend, tool_results=offload
+            )
+            # Route-scoped deny. Offload calls awrite and does not consult it.
+            if offload is not None:
+                compile_kwargs["permissions"] = large_tool_result_permissions()
+        else:
+            routes: Dict[str, Any] = {}
+            permissions: List[Any] = []
+            if skills_root is not None:
+                skills_route, skill_permissions = _skills_route(skills_root)
+                if skills_route is not None:
+                    routes[_SKILLS_SOURCE] = skills_route
+                if skill_permissions:
+                    permissions.extend(skill_permissions)
+            # No conversation: leave /large_tool_results/ on the default
+            # StateBackend. A second StateBackend shares the files channel
+            # and the composite strips the prefix, so the keys collide.
+            if offload is not None:
+                routes[_LARGE_TOOL_RESULTS] = offload
+                permissions.extend(large_tool_result_permissions())
+            from deepagents.backends import CompositeBackend, StateBackend
+
+            compile_kwargs["backend"] = CompositeBackend(
+                default=StateBackend(), routes=routes
+            )
+            if permissions:
+                compile_kwargs["permissions"] = permissions
         # create_deep_agent installs SkillsMiddleware only when `skills` is a
         # list of source paths. `/skills/` is the tree uploaded into the
         # sandbox or mounted when there is no sandbox.
@@ -1132,6 +1192,8 @@ def _build_react_graph(
             and _explicit_compile_param(agent, "skills")
         ):
             compile_kwargs["skills"] = [_SKILLS_SOURCE]
+    if _explicit_compile_param(agent, "tool_result_max_tokens"):
+        compile_kwargs["tool_result_max_tokens"] = TOOL_RESULT_MAX_TOKENS
     return agent.compile(**compile_kwargs)
 
 
@@ -1174,6 +1236,63 @@ def _local_skills_mount(skills_root: Any):
 
 # Skill folders live under this prefix in the sandbox and on the no-sandbox mount.
 _SKILLS_SOURCE = "/skills/"
+_LARGE_TOOL_RESULTS = "/large_tool_results/"
+
+
+def _offload_backend(
+    user_id: Optional[str], conversation_id: Optional[str], sandbox_backend: Any
+) -> Any:
+    """The S3 route for ``/large_tool_results/``, or ``None``.
+
+    A conversation stores the files in S3 and, when a sandbox is attached,
+    mirrors them there. ``None`` means the caller must not add a route: the
+    path stays on the default backend, so the state key remains
+    ``/large_tool_results/{id}``.
+    """
+    if not user_id or not conversation_id:
+        return None
+    from src.services.agents.core.tool_results import S3ToolResultBackend
+
+    return S3ToolResultBackend(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        sandbox_backend=sandbox_backend,
+    )
+
+
+def _skills_route(skills_root: Any):
+    """The ``/skills/`` backend and its permissions, or ``(None, None)``."""
+    filesystem = _filesystem_skills_backend(skills_root)
+    if filesystem is None:
+        return None, None
+    backend, permissions = filesystem
+    from deepagents.backends import CompositeBackend
+
+    if isinstance(backend, CompositeBackend):
+        route = backend.routes.get(_SKILLS_SOURCE)
+        if route is not None:
+            return route, permissions
+    local_backend, local_permissions = _local_skills_mount(skills_root)
+    return local_backend.routes.get(_SKILLS_SOURCE), local_permissions
+
+
+def _on_fresh_tool_results(
+    user_id: Optional[str], conversation_id: Optional[str]
+):
+    """Restore callback for ``acquire_sandbox``. The pool calls it under the lock.
+
+    A reused sandbox does not get this callback. ``restore_tool_results`` logs
+    and swallows its own failure.
+    """
+
+    async def _restore(lease: Any) -> None:
+        if lease is None or not user_id or not conversation_id:
+            return
+        from src.services.agents.core.tool_results import restore_tool_results
+
+        await restore_tool_results(lease.backend, user_id, conversation_id)
+
+    return _restore
 
 
 def _explicit_compile_param(agent: Any, name: str) -> bool:
@@ -1416,7 +1535,11 @@ async def generate_answer_agentic(
             # No conversation: the sandbox dies with the turn. A conversation
             # keeps one sandbox and restarts its idle timer on release.
             if conversation_id:
-                sandbox_lease = await acquire_sandbox(conversation_id, skills_root)
+                sandbox_lease = await acquire_sandbox(
+                    conversation_id,
+                    skills_root,
+                    on_fresh=_on_fresh_tool_results(user_id, conversation_id),
+                )
             else:
                 sandbox_session = await open_sandbox(skills_root)
             if sandbox_lease is not None or sandbox_session is not None:
@@ -1437,6 +1560,8 @@ async def generate_answer_agentic(
             llm_run_timeout=AGENTIC_TIMEOUT,
             sandbox_backend=None if held is None else held.backend,
             skills_root=skills_root,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
@@ -1583,7 +1708,10 @@ async def generate_answer_agentic(
         # still kept verbatim in the trace by _serialise_trace_entry above.
         rag_tool_names = _rag_tool_names(tools)
         documents, retrieval_calls, _retrieval_errors = _collect_retrieval_documents(
-            all_messages, rag_tool_names
+            all_messages,
+            rag_tool_names,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         use_rag = retrieval_calls > 0
 
@@ -1720,7 +1848,10 @@ async def generate_answer_agentic_stream_helper(
     def _retrieval_state() -> tuple[List[Dict[str, Any]], bool]:
         """(documents, use_rag) from the retrieval ToolMessages seen so far."""
         documents, retrieval_calls, _errors = _collect_retrieval_documents(
-            graph_messages, rag_tool_names
+            graph_messages,
+            rag_tool_names,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         return documents, retrieval_calls > 0
 
@@ -1786,7 +1917,11 @@ async def generate_answer_agentic_stream_helper(
             step_start = time.perf_counter()
             # A streamed turn always has a conversation, so this sandbox stays
             # up and the release below restarts its idle timer.
-            sandbox_lease = await acquire_sandbox(conversation_id, skills_root)
+            sandbox_lease = await acquire_sandbox(
+                conversation_id,
+                skills_root,
+                on_fresh=_on_fresh_tool_results(user_id, conversation_id),
+            )
             if sandbox_lease is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
@@ -1806,6 +1941,8 @@ async def generate_answer_agentic_stream_helper(
                 None if sandbox_lease is None else sandbox_lease.backend
             ),
             skills_root=skills_root,
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 

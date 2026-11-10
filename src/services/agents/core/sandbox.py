@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -39,7 +40,13 @@ _REUSE_MARGIN_S = 60
 _DEFAULT_AGENTCORE_ID = "aws.codeinterpreter.v1"
 _DEFAULT_OPENSANDBOX_IMAGE = "python:3.12"
 _SKILLS_PREFIX = "/skills/"
-_OFFLOAD_ROUTES = ("/large_tool_results/", "/conversation_history/")
+_CONVERSATION_HISTORY = "/conversation_history/"
+_LARGE_TOOL_RESULTS = "/large_tool_results/"
+# writeFiles stores these under the session cwd. The shell rewrite points a
+# command at that directory. Longest prefix first, and neither has a trailing
+# slash, so ``/skills`` itself is covered. A raw replace of ``/skills`` would
+# rewrite the suffix of ``/large_tool_results/skills_1``.
+_SHELL_PREFIXES = ("/large_tool_results", "/skills")
 
 
 class SandboxError(RuntimeError):
@@ -352,9 +359,10 @@ def _opensandbox_session(remote: Any, *, skills_digest: str = "") -> SandboxSess
 def _start_opensandbox() -> SandboxSession:
     from datetime import timedelta
 
-    from opensandbox import SandboxSync
-
+    # Config is checked before the SDK import. A missing domain or a bad
+    # protocol must raise SandboxError even when the package is not installed.
     image, config = _opensandbox_connection()
+    from opensandbox import SandboxSync
     remote = SandboxSync.create(
         image,
         connection_config=config,
@@ -364,9 +372,8 @@ def _start_opensandbox() -> SandboxSession:
 
 
 def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
-    from opensandbox import SandboxSync
-
     _image, config = _opensandbox_connection()
+    from opensandbox import SandboxSync
     sandbox_id = record["sandbox_id"]
     try:
         remote = SandboxSync.connect(sandbox_id, connection_config=config)
@@ -535,22 +542,38 @@ def sync_skills(session: SandboxSession, skills_root: Optional[Path] = None) -> 
 
 
 def _rewrite_skills_command(command: str, cwd: str) -> str:
-    """Point a ``/skills`` shell path at the directory ``writeFiles`` used.
+    """Point shell paths at the directory ``writeFiles`` used.
 
-    A cwd of ``/`` already stores the upload at ``/skills``. A command that
-    already names ``cwd/skills`` is left alone so a second call does not
-    nest the prefix.
+    A cwd of ``/`` already stores the upload at the absolute path. A command
+    that already names ``cwd`` plus one prefix is left alone for that prefix,
+    so a second call does not nest it. Only a whole path token is replaced,
+    longest prefix first.
     """
     if not cwd or cwd == "/":
         return command
-    root = f"{cwd}/skills"
-    if root in command:
-        return command
-    return command.replace("/skills", root)
+    for prefix in _SHELL_PREFIXES:
+        root = f"{cwd}{prefix}"
+        if root in command:
+            continue
+        command = _replace_path_token(command, prefix, root)
+    return command
+
+
+def _replace_path_token(command: str, prefix: str, root: str) -> str:
+    """Replace ``prefix`` only where it begins a path token.
+
+    The character before the match is not a path character, and the token
+    continues with ``/`` or ends. ``/skills`` inside
+    ``/large_tool_results/skills_1`` is left alone.
+    """
+    pattern = re.compile(
+        rf"(?<![\w./\-]){re.escape(prefix)}(?=/|(?![\w./\-]))"
+    )
+    return pattern.sub(lambda _match: root, command)
 
 
 def _bind_skills_shell(backend: Any) -> Any:
-    """Rewrite ``/skills`` in ``execute`` and leave every other method in place.
+    """Rewrite ``/skills`` and ``/large_tool_results`` in ``execute``.
 
     The object stays an ``AgentCoreSandbox``. ``CompositeBackend`` checks that
     type before it forwards a shell command, so a wrapper class would make
@@ -620,17 +643,43 @@ async def close_sandbox(session: Optional[SandboxSession]) -> None:
         logger.exception("Failed to close the sandbox")
 
 
-def backend_for_compile(sandbox_backend: Any) -> Any:
+def backend_for_compile(sandbox_backend: Any, tool_results: Any = None) -> Any:
     """Composite whose default is the sandbox.
 
     ``/skills/`` is not routed: the turn uploaded that tree into the sandbox,
-    and the file tools and the shell both read it there. The offload prefixes
-    stay in graph state. An agents build that still evicts large messages then
-    keeps those paths after this sandbox is destroyed.
+    and the file tools and the shell both read it there. ``/conversation_history/``
+    stays in graph state. ``/large_tool_results/`` uses ``tool_results`` when
+    the turn has a conversation. With no conversation that prefix stays on the
+    sandbox. A second ``StateBackend`` would share the files channel, and the
+    composite would strip the prefix, so ``/large_tool_results/{id}`` and
+    ``/{id}`` would be the same key.
+
+    This composite stores no permissions. The runner passes
+    ``large_tool_result_permissions`` when the route exists. Those paths sit
+    under the route, which is what an execute backend accepts. ``/skills/``
+    is not a route here, so a skills rule is not added. Offload calls
+    ``awrite`` and does not consult the deny, so a new id still writes.
     """
     from deepagents.backends import CompositeBackend, StateBackend
 
-    return CompositeBackend(
-        default=sandbox_backend,
-        routes={route: StateBackend() for route in _OFFLOAD_ROUTES},
-    )
+    routes: dict[str, Any] = {_CONVERSATION_HISTORY: StateBackend()}
+    if tool_results is not None:
+        routes[_LARGE_TOOL_RESULTS] = tool_results
+    return CompositeBackend(default=sandbox_backend, routes=routes)
+
+
+def large_tool_result_permissions() -> list:
+    """Deny model writes on ``/large_tool_results/**``. Reads stay allowed.
+
+    The pattern starts with the route prefix, so a composite whose default
+    can execute accepts it.
+    """
+    from deepagents.middleware.filesystem import FilesystemPermission
+
+    return [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/large_tool_results/**"],
+            mode="deny",
+        )
+    ]

@@ -130,6 +130,76 @@ async def test_unset_provider_acquires_nothing(monkeypatch):
     assert await acquire_sandbox("c1") is None
 
 
+async def test_fresh_is_true_only_for_a_sandbox_this_turn_started(monkeypatch, clock):
+    state = _install(monkeypatch, clock)
+
+    created = await acquire_sandbox("c1", None)
+    assert created is not None and created.fresh is True
+    await release_sandbox(created)
+
+    reused = await acquire_sandbox("c1", None)
+    assert reused is not None and reused.fresh is False
+    await release_sandbox(reused)
+
+    state["dead"] = True
+    replaced = await acquire_sandbox("c1", None)
+    assert replaced is not None and replaced.fresh is True
+    assert replaced.session.sandbox_id != reused.session.sandbox_id
+
+
+async def test_on_fresh_finishes_before_another_turn_attaches(monkeypatch, clock):
+    _install(monkeypatch, clock)
+    release_restore = asyncio.Event()
+    started = asyncio.Event()
+
+    async def on_fresh(_lease):
+        started.set()
+        await release_restore.wait()
+
+    first_task = asyncio.create_task(
+        acquire_sandbox("c1", None, on_fresh=on_fresh)
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    second_task = asyncio.create_task(acquire_sandbox("c1", None))
+    done, _pending = await asyncio.wait({second_task}, timeout=0.05)
+    assert second_task not in done
+    release_restore.set()
+    first = await asyncio.wait_for(first_task, timeout=2)
+    second = await asyncio.wait_for(second_task, timeout=2)
+
+    assert first is not None and first.fresh is True
+    assert second is not None and second.fresh is False
+    await release_sandbox(first)
+    await release_sandbox(second)
+
+
+async def test_on_fresh_skips_a_reused_sandbox(monkeypatch, clock):
+    _install(monkeypatch, clock)
+    calls = []
+
+    async def on_fresh(lease):
+        calls.append(lease.fresh)
+
+    first = await acquire_sandbox("c1", None, on_fresh=on_fresh)
+    await release_sandbox(first)
+    second = await acquire_sandbox("c1", None, on_fresh=on_fresh)
+    await release_sandbox(second)
+
+    assert calls == [True]
+
+
+async def test_on_fresh_failure_is_swallowed(monkeypatch, clock):
+    _install(monkeypatch, clock)
+
+    async def on_fresh(_lease):
+        raise RuntimeError("restore down")
+
+    lease = await acquire_sandbox("c1", None, on_fresh=on_fresh)
+
+    assert lease is not None and lease.fresh is True
+    await release_sandbox(lease)
+
+
 async def test_same_conversation_reuses_one_sandbox(monkeypatch, clock, sandbox_store):
     state = _install(monkeypatch, clock)
 
