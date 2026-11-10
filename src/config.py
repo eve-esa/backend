@@ -54,6 +54,9 @@ MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", 13))
 # restarts on each tool call and tool result. Also the cap on one LLM call.
 # The turn itself is cut at AGENTIC_TURN_DEADLINE (default 480).
 AGENTIC_TIMEOUT = int(os.getenv("AGENTIC_TIMEOUT", 120))
+# deepagents writes a tool result to /large_tool_results/ past this many
+# tokens. Passed to compile only when the graph declares the parameter.
+TOOL_RESULT_MAX_TOKENS = int(os.getenv("TOOL_RESULT_MAX_TOKENS", "20000"))
 
 SATCOM_SMALL_MODEL_NAME = os.getenv(
     "SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"

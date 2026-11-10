@@ -8,6 +8,7 @@ local MinIO container. No code changes are needed to switch between the two.
 import logging
 import mimetypes
 import uuid
+from datetime import datetime
 from typing import AsyncIterator, Optional
 
 import boto3
@@ -140,6 +141,26 @@ def sniff_artifact_type(
     return None
 
 
+def _tag_set(tagging: str) -> list[dict[str, str]]:
+    """Turn a PutObject ``Tagging`` query string into a TagSet.
+
+    ``kind=tool-result`` becomes ``[{"Key": "kind", "Value": "tool-result"}]``.
+    Empty parts are dropped. The object write does not depend on this parse.
+    """
+    from urllib.parse import unquote_plus
+
+    tags: list[dict[str, str]] = []
+    for part in tagging.split("&"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = unquote_plus(key).strip()
+        if not key:
+            continue
+        tags.append({"Key": key, "Value": unquote_plus(value)})
+    return tags
+
+
 def guess_extension_from_content_type(content_type: Optional[str]) -> str:
     """Guess a filename extension (without the leading dot) from a MIME type.
 
@@ -186,16 +207,87 @@ class StorageService:
         base = f"users/{user_id}/{clean_prefix}" if clean_prefix else f"users/{user_id}"
         return f"{base}/{uuid.uuid4().hex}.{clean_ext}"
 
-    async def put_object(self, key: str, body: bytes, content_type: str) -> None:
-        """Store an object in the bucket."""
-        await run_in_threadpool(
-            lambda: self._client().put_object(
+    def put_object_sync(
+        self,
+        key: str,
+        body: bytes,
+        content_type: str,
+        tagging: Optional[str] = None,
+    ) -> None:
+        """Store an object. ``tagging`` is an S3 ``Tagging`` query string.
+
+        The bytes go up first, with no ``Tagging`` argument. Tags are a second
+        call. A bucket policy that rejects ``PutObjectTagging`` must not fail
+        the write: the warning is logged and the object stays.
+        """
+        self._client().put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=key,
+            Body=body,
+            ContentType=content_type,
+        )
+        if not tagging:
+            return
+        try:
+            tag_set = _tag_set(tagging)
+            if not tag_set:
+                return
+            self._client().put_object_tagging(
                 Bucket=S3_BUCKET_NAME,
                 Key=key,
-                Body=body,
-                ContentType=content_type,
+                Tagging={"TagSet": tag_set},
             )
+        except Exception:
+            logger.warning("storage.tagging_failed key=%s", key, exc_info=True)
+
+    async def put_object(
+        self,
+        key: str,
+        body: bytes,
+        content_type: str,
+        tagging: Optional[str] = None,
+    ) -> None:
+        """Store an object in the bucket.
+
+        Tagging uses the sync path: a rejected tag call logs a warning and
+        this write still succeeds.
+        """
+        await run_in_threadpool(
+            self.put_object_sync, key, body, content_type, tagging
         )
+
+    def exists_sync(self, key: str) -> bool:
+        """True when ``HeadObject`` finds ``key``.
+
+        A missing key is false. Any other error propagates, so a denied head
+        is not treated as "absent" and then overwritten.
+        """
+        try:
+            self._client().head_object(Bucket=S3_BUCKET_NAME, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _MISSING_OBJECT_ERROR_CODES:
+                return False
+            raise
+        return True
+
+    async def exists(self, key: str) -> bool:
+        """Async ``exists_sync``."""
+        return await run_in_threadpool(self.exists_sync, key)
+
+    def get_object_sync(self, key: str) -> dict:
+        """Fetch an object. ``Body`` is a ``StreamingBody``.
+
+        Raises:
+            ObjectNotFoundError: if the key is absent from the bucket.
+        """
+        try:
+            return self._client().get_object(Bucket=S3_BUCKET_NAME, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _MISSING_OBJECT_ERROR_CODES:
+                raise ObjectNotFoundError(key) from exc
+            raise
 
     async def get_object(self, key: str) -> dict:
         """Fetch an object; returns the raw boto3 response (Body is a StreamingBody).
@@ -203,15 +295,74 @@ class StorageService:
         Raises:
             ObjectNotFoundError: if the key is absent from the bucket.
         """
-        try:
-            return await run_in_threadpool(
-                lambda: self._client().get_object(Bucket=S3_BUCKET_NAME, Key=key)
-            )
-        except ClientError as exc:
-            code = str(exc.response.get("Error", {}).get("Code", ""))
-            if code in _MISSING_OBJECT_ERROR_CODES:
-                raise ObjectNotFoundError(key) from exc
-            raise
+        return await run_in_threadpool(self.get_object_sync, key)
+
+    def list_key_records(
+        self, prefix: str, max_keys: int, *, scan_limit: int = 1000
+    ) -> tuple[list[dict], bool]:
+        """Objects under ``prefix``, newest first, at most ``max_keys``.
+
+        Each record is ``{"key", "size", "last_modified"}``. ListObjects
+        order is lexicographic, so the scanned window is sorted by
+        ``LastModified`` before the slice. A first page is not the newest
+        set. The second value is true when the scan stopped early or more
+        objects exist than ``max_keys``. Listing stops after ``scan_limit``
+        keys so one prefix cannot page without bound.
+        """
+        if max_keys < 1:
+            return [], False
+        limit = max(scan_limit, max_keys)
+        client = self._client()
+        collected: list[dict] = []
+        token = None
+        stopped_early = False
+        while len(collected) < limit:
+            params = {
+                "Bucket": S3_BUCKET_NAME,
+                "Prefix": prefix,
+                "MaxKeys": min(1000, limit - len(collected)),
+            }
+            if token:
+                params["ContinuationToken"] = token
+            page = client.list_objects_v2(**params)
+            for item in page.get("Contents") or []:
+                key = item.get("Key")
+                if not key or key.endswith("/"):
+                    continue
+                collected.append(
+                    {
+                        "key": key,
+                        "size": int(item.get("Size") or 0),
+                        "last_modified": item.get("LastModified"),
+                    }
+                )
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+            if not token:
+                stopped_early = True
+                break
+        else:
+            stopped_early = True
+
+        def _stamp(value: object) -> float:
+            if isinstance(value, datetime):
+                return value.timestamp()
+            return 0.0
+
+        collected.sort(key=lambda item: _stamp(item.get("last_modified")), reverse=True)
+        truncated = stopped_early or len(collected) > max_keys
+        return collected[:max_keys], truncated
+
+    async def list_keys(self, prefix: str, max_keys: int) -> list[dict]:
+        """Keys under ``prefix``, newest first, at most ``max_keys``.
+
+        Each item is ``{"key", "size", "last_modified"}``.
+        """
+        records, _truncated = await run_in_threadpool(
+            self.list_key_records, prefix, max_keys
+        )
+        return records
 
     async def stream_body(
         self, body, chunk_size: int = STREAM_CHUNK_SIZE

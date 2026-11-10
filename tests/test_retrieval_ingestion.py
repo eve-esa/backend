@@ -8,6 +8,7 @@ staging (2026-09-22) the model copied the Qdrant point ids from that block
 into its answer, glued to the sentences.
 """
 
+import io
 import json
 import re
 from types import SimpleNamespace
@@ -450,6 +451,64 @@ class TestCollectRetrievalDocuments:
 
         assert calls == 1
         assert [d["id"] for d in documents] == ["481257"]
+
+    def test_an_offloaded_stub_is_read_back_for_documents(self, monkeypatch):
+        payload = json.dumps(_response(_private_doc()))
+        stub = (
+            "Tool result too large, the result of this tool call c1 was saved "
+            "in the filesystem at this path: /large_tool_results/c1\n\npreview"
+        )
+
+        def fake_get(key):
+            assert key.endswith("/large_tool_results/c1")
+            return {"Body": io.BytesIO(payload.encode())}
+
+        monkeypatch.setattr(
+            "src.services.agents.core.tool_results.storage_service.get_object_sync",
+            fake_get,
+        )
+        messages = self._messages(stub)
+
+        documents, calls, errors = _collect_retrieval_documents(
+            messages,
+            {"eve_retrieval_retrieve"},
+            user_id="user-1",
+            conversation_id="conv-1",
+        )
+
+        assert (calls, errors) == (1, 0)
+        assert [d["id"] for d in documents] == [PRIVATE_ID]
+
+    def test_context_calls_do_not_get_the_offloaded_stub(self, monkeypatch):
+        from src.services.mcp.retrieval_context import RetrievalCall
+
+        def boom(_key):
+            raise AssertionError("S3 get")
+
+        monkeypatch.setattr(
+            "src.services.agents.core.tool_results.storage_service.get_object_sync",
+            boom,
+        )
+        stub = (
+            "Tool result too large, the result of this tool call c1 was saved "
+            "in the filesystem at this path: /large_tool_results/c1\n\npreview"
+        )
+        with retrieval_context() as ctx:
+            ctx.calls.append(
+                RetrievalCall(
+                    tool_name="eve_retrieval_retrieve",
+                    documents=[{"id": PRIVATE_ID}],
+                )
+            )
+            documents, calls, errors = _collect_retrieval_documents(
+                self._messages(stub),
+                {"eve_retrieval_retrieve"},
+                user_id="user-1",
+                conversation_id="conv-1",
+            )
+
+        assert (calls, errors) == (1, 0)
+        assert [d["id"] for d in documents] == [PRIVATE_ID]
 
     def test_error_payload_still_counts_as_error(self):
         messages = self._messages(json.dumps({"error": "boom"}))

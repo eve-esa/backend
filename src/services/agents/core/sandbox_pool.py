@@ -436,11 +436,23 @@ class RedisSandboxStore:
 
 
 class SandboxLease:
-    """A sandbox held for one turn. Release it; do not destroy it."""
+    """A sandbox held for one turn. Release it; do not destroy it.
 
-    def __init__(self, session: SandboxSession, conversation_id: str) -> None:
+    ``fresh`` is true when this turn started the sandbox, including a
+    replacement for one that was dead or past its hard cap. A reused sandbox
+    already holds the tool results written into it, so it is not refilled.
+    """
+
+    def __init__(
+        self,
+        session: SandboxSession,
+        conversation_id: str,
+        *,
+        fresh: bool = False,
+    ) -> None:
         self.session = session
         self.conversation_id = conversation_id
+        self.fresh = fresh
 
     @property
     def backend(self) -> Any:
@@ -538,7 +550,9 @@ async def _replace(
 
 
 async def acquire_sandbox(
-    conversation_id: str, skills_root: Any = None
+    conversation_id: str,
+    skills_root: Any = None,
+    on_fresh: Any = None,
 ) -> Optional[SandboxLease]:
     """Return the conversation's sandbox, starting one when it has none.
 
@@ -546,6 +560,10 @@ async def acquire_sandbox(
     dead, from another provider, or inside its hard-TTL margin is destroyed
     and replaced. The idle deadline moves out by the turn cap plus the idle
     window, and the provider expiry moves with it when the provider allows.
+
+    ``on_fresh`` runs only when this turn started the sandbox, and it runs
+    before the lock is released. A reused sandbox does not call it. A failure
+    is logged and swallowed so the lease is still returned.
     """
     provider = sandbox_provider()
     if provider in ("", "none"):
@@ -556,7 +574,19 @@ async def acquire_sandbox(
     async with store.hold(conversation_id, wait=True) as guard:
         if guard is None:
             raise SandboxError("sandbox lock was not acquired")
-        return await _acquire_locked(store, conversation_id, provider, skills_root, guard)
+        lease = await _acquire_locked(
+            store, conversation_id, provider, skills_root, guard
+        )
+        if lease.fresh and on_fresh is not None:
+            try:
+                await on_fresh(lease)
+            except Exception:
+                logger.warning(
+                    "sandbox.on_fresh_failed conversation_id=%s",
+                    conversation_id,
+                    exc_info=True,
+                )
+        return lease
 
 
 async def _acquire_locked(
@@ -573,6 +603,7 @@ async def _acquire_locked(
             store, conversation_id, record, now, guard
         )
     session: Optional[SandboxSession] = None
+    fresh = False
     inflight = int(record.get("inflight", "0")) if record else 0
     same_provider = record is not None and record.get("provider") == provider
     if same_provider and record is not None and (
@@ -595,6 +626,7 @@ async def _acquire_locked(
             await guard.check()
             await _replace(store, conversation_id, record, guard)
         session = await asyncio.to_thread(_open_sync, skills_root)
+        fresh = True
         try:
             await guard.check()
             await store.put(conversation_id, _stored_record(session))
@@ -644,7 +676,7 @@ async def _acquire_locked(
                 "sandbox.detach_failed conversation_id=%s", conversation_id
             )
         raise
-    return SandboxLease(session, conversation_id)
+    return SandboxLease(session, conversation_id, fresh=fresh)
 
 
 async def release_sandbox(lease: Optional[SandboxLease]) -> None:

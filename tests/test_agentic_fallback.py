@@ -2478,14 +2478,27 @@ class TestSandboxInGeneration:
                 )
             )
 
+        from src.services.agents.core.tool_results import S3ToolResultBackend
+
         backend = agent.compile_kwargs["backend"]
         assert backend.default is sandbox
         assert set(backend.routes) == {
             "/large_tool_results/",
             "/conversation_history/",
         }
-        assert all(isinstance(route, StateBackend) for route in backend.routes.values())
-        assert "permissions" not in agent.compile_kwargs
+        assert isinstance(backend.routes["/large_tool_results/"], S3ToolResultBackend)
+        assert backend.routes["/large_tool_results/"].sandbox_backend is sandbox
+        assert isinstance(backend.routes["/conversation_history/"], StateBackend)
+        from deepagents.middleware.filesystem import _all_paths_scoped_to_routes
+
+        permissions = agent.compile_kwargs["permissions"]
+        assert _all_paths_scoped_to_routes(permissions, backend)
+        assert any(
+            rule.mode == "deny"
+            and "write" in rule.operations
+            and "/large_tool_results/**" in rule.paths
+            for rule in permissions
+        )
         assert agent.compile_kwargs["skills"] == ["/skills/"]
         # The conversation keeps the sandbox. Release drops local clients only,
         # and AgentCore's local close is a no-op so the session is not stopped.
