@@ -38,7 +38,7 @@ async def _create_index(collection: AsyncIOMotorCollection, keys, **kwargs) -> N
 
 
 async def ensure_indexes() -> None:
-    """Create MongoDB indexes required by MCP proxy, usage tracking, API keys, and artifacts."""
+    """Create MongoDB indexes required by MCP proxy, usage tracking, API keys, artifacts, and messages."""
     mcp_servers = get_collection("mcp_servers")
     skills = get_collection("skills")
     mcp_usage = get_collection("mcp_usage")
@@ -51,6 +51,7 @@ async def ensure_indexes() -> None:
     catalog_providers = get_collection("catalog_providers")
     users = get_collection("users")
     external_identities = get_collection("external_identities")
+    messages = get_collection("messages")
 
     await _create_index(
         mcp_servers,
@@ -231,7 +232,17 @@ async def ensure_indexes() -> None:
         name="users_approval_status",
     )
 
+    # History search loads one conversation ordered by time. Without this,
+    # that read scans the whole messages collection. Not a text index:
+    # DocumentDB allows one text index per collection and cannot combine it
+    # with conversation_id.
+    await _create_index(
+        messages,
+        [("conversation_id", 1), ("timestamp", 1)],
+        name="messages_conversation_timestamp",
+    )
+
     logger.info(
         "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, "
-        "custom models, and external identities"
+        "custom models, external identities, and messages"
     )

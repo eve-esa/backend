@@ -54,6 +54,9 @@ docs/                 # Site content (this page, api references)
 - **Conversation sandbox**
     - The deep agent keeps one sandbox per conversation and reuses it on the next message
     - See [Sandbox](sandbox.md)
+- **Queryable history**
+    - The react and deep agents can search and read the stored messages of the current conversation
+    - See [Queryable history](queryable-history.md)
 
 ### API guides (usage-first)
 
@@ -67,6 +70,7 @@ docs/                 # Site content (this page, api references)
 - Generation failures (error codes, 429 and Retry-After): [generation-errors](api/generation-errors.md)
 - Bug reports (`POST /bug-reports`, rate limit, log event): [bug-reports](api/bug-reports.md)
 - Conversation sandbox (idle reuse, providers, Redis): [sandbox](sandbox.md)
+- Queryable history (search and read stored messages): [queryable-history](queryable-history.md)
 
 Use [swagger-api](https://eve-esa.github.io/eve-guide/backend-swagger/) only when you need exhaustive field-level reference.
 
