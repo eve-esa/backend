@@ -404,6 +404,29 @@ class TestBuildTools:
         assert tools == [mcp_tool]
         assert getattr(tools, "_mcp_client", None) is sentinel_client
 
+    @pytest.mark.asyncio
+    async def test_history_tools_keep_the_mcp_client(self):
+        from src.services.agents.core.runner import _MCPToolsWithClient
+
+        mcp_tool = MagicMock(name="effis_search")
+        sentinel_client = MagicMock()
+        wrapped = _MCPToolsWithClient([mcp_tool], sentinel_client)
+        request = GenerationRequest(query="test")
+        request.mcp_server_configs = [_mcp_server("effis", "https://effis.example/mcp")]
+
+        with patch(f"{_RUNNER}._langgraph_available", True), patch(
+            f"{_RUNNER}._load_mcp_tools_for_servers",
+            AsyncMock(return_value=wrapped),
+        ), patch(f"{_RUNNER}.logger"):
+            tools = await _build_tools(request, conversation_id="conv-1")
+
+        assert tools[0] is mcp_tool
+        assert [tool.name for tool in tools[1:]] == [
+            "search_history",
+            "read_history",
+        ]
+        assert getattr(tools, "_mcp_client", None) is sentinel_client
+
 
 class TestMcpToolCache:
     def test_ttl_expiry_drops_stale_entry(self):

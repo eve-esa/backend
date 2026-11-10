@@ -50,6 +50,10 @@ from src.services.generate_answer import (
     raise_if_deadline_expired,
     resolve_generated_model_name,
 )
+from src.services.agents.core.history_search import (
+    build_history_tools,
+    note_searchable_history,
+)
 from src.services.agents.core.registry import get_agent_graph
 from src.services.agents.core.sandbox import (
     backend_for_compile,
@@ -779,8 +783,15 @@ def _with_request_rag_defaults(
 async def _build_tools(
     request: GenerationRequest,
     cancel_event: Optional[asyncio.Event] = None,
+    *,
+    conversation_id: Optional[str] = None,
 ) -> List[Any]:
-    """Return LangChain StructuredTools bound to the current request context."""
+    """Return LangChain StructuredTools bound to the current request context.
+
+    ``conversation_id`` adds ``search_history`` and ``read_history``, bound to
+    that conversation. The ``simple`` graph does not call tools, so its caller
+    leaves this unset.
+    """
     if not _langgraph_available:
         return []
 
@@ -808,6 +819,9 @@ async def _build_tools(
                 tools = _MCPToolsWithClient(tools, mcp_client)
         except Exception:
             logger.error("MCP tool loading failed; proceeding without MCP tools", exc_info=True)
+
+    if conversation_id:
+        tools.extend(build_history_tools(conversation_id))
 
     return tools
 
@@ -1503,8 +1517,12 @@ async def generate_answer_agentic(
     try:
         setup_latencies: Dict[str, float] = {}
 
+        agent_graph_type = _resolve_agent_graph_type(request)
         step_start = time.perf_counter()
-        tools = await _build_tools(request)
+        tools = await _build_tools(
+            request,
+            conversation_id=None if agent_graph_type == "simple" else conversation_id,
+        )
         setup_latencies["setup_mcp_tool_loading_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
@@ -1515,8 +1533,9 @@ async def generate_answer_agentic(
         step_start = time.perf_counter()
         history, summary = await _fetch_conversation_context(conversation_id)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
+        if agent_graph_type != "simple":
+            summary = note_searchable_history(summary)
 
-        agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
@@ -1885,8 +1904,13 @@ async def generate_answer_agentic_stream_helper(
 
         setup_latencies: Dict[str, float] = {}
 
+        agent_graph_type = _resolve_agent_graph_type(request)
         step_start = time.perf_counter()
-        tools = await _build_tools(request, cancel_event=cancel_event)
+        tools = await _build_tools(
+            request,
+            cancel_event=cancel_event,
+            conversation_id=None if agent_graph_type == "simple" else conversation_id,
+        )
         setup_latencies["setup_mcp_tool_loading_s"] = time.perf_counter() - step_start
         rag_tool_names.update(_rag_tool_names(tools))
 
@@ -1897,8 +1921,9 @@ async def generate_answer_agentic_stream_helper(
         step_start = time.perf_counter()
         history, summary = await _fetch_conversation_context(conversation_id)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
+        if agent_graph_type != "simple":
+            summary = note_searchable_history(summary)
 
-        agent_graph_type = _resolve_agent_graph_type(request)
         agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
