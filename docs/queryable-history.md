@@ -30,7 +30,9 @@ One entry is cut at 4,000 characters. The whole tool result is cut at 12,000 cha
 
 ### Summary
 
-When the conversation has a rolling summary, the copy passed into the graph gains one sentence: the full text is still stored, and `search_history` / `read_history` can read it. That sentence is not written back to `conversations.summary`. A conversation with no summary is unchanged. The tool descriptions say when to call the tools.
+For a `react` turn with a rolling summary, the copy passed into the graph gains one sentence: the full text is still stored, and `search_history` / `read_history` can read it. That sentence is not written back to `conversations.summary`. A conversation with no summary is unchanged. The tool descriptions say when to call the tools.
+
+The `deep` graph writes its own summary. The summary message names the covered `message_id` range and carries the same sentence. See [Context management](context-management.md).
 
 ### Index
 

@@ -1,0 +1,32 @@
+sequenceDiagram
+    autonumber
+    participant R as Message router
+    participant Run as Agent runner
+    participant CP as checkpointing_db
+    participant MW as Summarization middleware
+    participant S as Summarizer model
+    participant M as Chat model
+    participant DB as conversations
+
+    R->>Run: generate (conversation_id, message_id)
+    Run->>CP: aget_tuple(thread_id)
+    alt checkpoint exists
+        Note over Run: send the new message only
+    else checkpoint expired
+        Note over Run: seed every stored turn,<br/>then the new message
+    end
+    Run->>CP: graph loads the thread, appends the message
+    loop every model call in the turn
+        Note over MW: apply _summarization_event<br/>(summary + tail)
+        opt tokens over 85% of the window
+            MW->>S: older messages (arguments already cut)
+            S-->>MW: summary, at most 2,000 tokens
+            MW->>CP: new _summarization_event
+        end
+        MW->>M: summary message + kept tail
+        M-->>Run: tool call or answer
+    end
+    Run-->>R: answer streamed and stored
+    Run-)CP: aget_state (background task)
+    CP--)Run: summary text, first id, last id
+    Run-)DB: save summary when it changed

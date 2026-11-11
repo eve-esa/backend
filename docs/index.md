@@ -54,6 +54,9 @@ docs/                 # Site content (this page, api references)
 - **Conversation sandbox**
     - The deep agent keeps one sandbox per conversation and reuses it on the next message
     - See [Sandbox](sandbox.md)
+- **Context management**
+    - Where a conversation is remembered, how each agent graph builds its context, and how the deep agent summarizes
+    - See [Context management](context-management.md)
 - **Queryable history**
     - The react and deep agents can search and read the stored messages of the current conversation
     - See [Queryable history](queryable-history.md)
