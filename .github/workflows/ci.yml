@@ -127,15 +127,14 @@ jobs:
 
       # eve-esa-agents is not in requirements.txt. The image installs it from
       # AGENTS_REF. The suite imports it at collection, so CI installs the same
-      # ref a dev build resolves: the agents main SHA.
+      # commit the image defaults to.
       - name: Install eve-esa-agents
         run: |
           set -euo pipefail
-          REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
-          if [ -z "$REF" ]; then
-            echo "ERROR: could not resolve agents main"
-            exit 1
-          fi
+          # Summarization lives on this agents commit (eve-esa/agents#20), not yet
+          # on main. After that pull request merges, move the pin to the merge
+          # commit if it is not this one.
+          REF=ce1a4b758f3d5587bd3864bddd8445873164d77f
           echo "Installing eve-esa-agents @ ${REF}"
           pip install "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${REF}"
 

@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -95,6 +95,15 @@ router = APIRouter()
 # refused request takes no generation slot and spends no token budget.
 CHAT_RATE_LIMIT = Depends(enforce_request_rate("chat"))
 RETRIEVE_RATE_LIMIT = Depends(enforce_request_rate("retrieve"))
+
+
+def _agent_summarizes(prompts: Any) -> bool:
+    """True when the agentic turn ran the deep graph.
+
+    That graph writes its own summary and the runner stores it, so the
+    rolling summary would overwrite it.
+    """
+    return isinstance(prompts, dict) and prompts.get("agent_graph_type") == "deep"
 
 
 async def resolve_artifact_attachments(
@@ -726,6 +735,7 @@ async def retry(
                 request,
                 user_id=requesting_user.id,
                 conversation_id=conversation_id,
+                message_id=message.id,
             )
 
             message.output = answer
@@ -760,7 +770,8 @@ async def retry(
                 requesting_user, count_tokens_for_texts(message.input, answer)
             )
 
-            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+            if not _agent_summarizes(prompts):
+                background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
 
             return {
                 "id": message.id,
@@ -2136,7 +2147,10 @@ async def create_agentic_message(
             trace_entries,
             artifact_ids,
         ) = await generate_answer_agentic(
-            request, user_id=requesting_user.id, conversation_id=conversation_id
+            request,
+            user_id=requesting_user.id,
+            conversation_id=conversation_id,
+            message_id=message.id,
         )
 
         message.output = answer
@@ -2162,7 +2176,8 @@ async def create_agentic_message(
             requesting_user, count_tokens_for_texts(request.query, answer)
         )
 
-        background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
+        if not _agent_summarizes(prompts):
+            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
 
         return {
             "id": message.id,

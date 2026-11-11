@@ -85,7 +85,8 @@ jobs:
           if [ -n "${AGENTS_REF}" ]; then
             REF="${AGENTS_REF}"
           else
-            REF=$(git ls-remote https://github.com/eve-esa/agents.git refs/heads/main | awk '{print $1}')
+            # Same commit CI installs. See .github/workflows/ci.yml.
+            REF=ce1a4b758f3d5587bd3864bddd8445873164d77f
           fi
           if [ -z "${REF}" ]; then
             echo "ERROR: could not resolve an agents ref"
