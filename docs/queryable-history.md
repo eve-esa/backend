@@ -1,8 +1,8 @@
 ## Queryable history
 
-The `react` and `deep` graphs can search the stored messages of the current conversation. `search_history` finds a fact the summary or the recent turn dropped. `read_history` returns the raw messages around a hit. Neither tool calls a model. The text they return is the stored text.
+The deep agent can search the stored messages of the current conversation. `search_history` finds a fact the summary or the recent turn dropped. `read_history` returns the raw messages around a hit. Neither tool calls a model. The text they return is the stored text.
 
-The tools are built in `src/services/agents/core/history_search.py` and attached in `src/services/agents/core/runner.py`. The conversation id is bound into the tools. The model cannot pass another conversation. The `simple` graph does not call tools, so it does not get them. A turn with no conversation id does not get them either.
+The tools are built in `src/services/agents/core/history_search.py` and attached in `src/services/agents/core/runner.py`. The conversation id is bound into the tools. The model cannot pass another conversation. A turn with no conversation id does not get them.
 
 There is no second store. A call reads the `messages` documents for that conversation. A document with a `trace` becomes one entry per user, assistant, and tool step. A document without a `trace` becomes the user `input` and the assistant `output`. System steps are skipped. An empty step is skipped.
 
@@ -30,9 +30,7 @@ One entry is cut at 4,000 characters. The whole tool result is cut at 12,000 cha
 
 ### Summary
 
-For a `react` turn with a rolling summary, the copy passed into the graph gains one sentence: the full text is still stored, and `search_history` / `read_history` can read it. That sentence is not written back to `conversations.summary`. A conversation with no summary is unchanged. The tool descriptions say when to call the tools.
-
-The `deep` graph writes its own summary. The summary message names the covered `message_id` range and carries the same sentence. See [Context management](context-management.md).
+The agent's summary message names the covered `message_id` range and says that `search_history` and `read_history` can read the raw messages behind it. The tool descriptions say when to call the tools. See [Context management](context-management.md).
 
 ### Index
 
@@ -40,4 +38,4 @@ The `deep` graph writes its own summary. The summary message names the covered `
 
 ### Checking it
 
-Use a `react` or `deep` conversation that already has several turns. Ask for a name, number, or decision from an earlier turn that the summary no longer states. The trace should contain a `search_history` call, and the answer should match the stored message. A query with `roles=["tool"]` should hit a tool result and leave user and assistant messages out of the hit list. A message from another conversation must not appear.
+Use a deep-agent conversation that already has several turns. Ask for a name, number, or decision from an earlier turn that the summary no longer states. The trace should contain a `search_history` call, and the answer should match the stored message. A query with `roles=["tool"]` should hit a tool result and leave user and assistant messages out of the hit list. A message from another conversation must not appear.
