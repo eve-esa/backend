@@ -31,6 +31,7 @@ from src.config import (
 )
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
+from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.custom_model_service import (
@@ -1405,6 +1406,13 @@ def _graph_on_policy(graph_name: Optional[str]):
 
 # ─── Conversation context ─────────────────────────────────────────────────────
 
+# Thread-state key of the deepagents summarization middleware, and the
+# ``additional_kwargs`` the EVE subclass puts on its summary message.
+SUMMARIZATION_EVENT_KEY = "_summarization_event"
+SUMMARY_TEXT_KEY = "eve_summary"
+SUMMARY_FIRST_ID_KEY = "eve_summary_first_message_id"
+SUMMARY_LAST_ID_KEY = "eve_summary_last_message_id"
+
 
 async def _fetch_conversation_context(
     conversation_id: Optional[str],
@@ -1459,6 +1467,67 @@ async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
         )
         return True
     return found is not None
+
+
+async def save_agent_summary(graph: Any, conversation_id: str) -> None:
+    """Copy the deep agent's latest summary onto ``Conversation.summary``.
+
+    The summarization middleware keeps its last compaction in the thread
+    state. Nothing is written until the agent has summarized, or when the
+    stored copy already matches.
+    """
+    try:
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": conversation_id}}
+        )
+        event = (getattr(snapshot, "values", None) or {}).get(SUMMARIZATION_EVENT_KEY)
+        message = (event or {}).get("summary_message")
+        extra = getattr(message, "additional_kwargs", None) or {}
+        text = extra.get(SUMMARY_TEXT_KEY)
+        if not text:
+            return
+        first_id = extra.get(SUMMARY_FIRST_ID_KEY)
+        last_id = extra.get(SUMMARY_LAST_ID_KEY)
+        convo = await Conversation.find_by_id(conversation_id)
+        if convo is None:
+            return
+        if (convo.summary, convo.summary_first_message_id, convo.summary_last_message_id) == (
+            text,
+            first_id,
+            last_id,
+        ):
+            return
+        convo.summary = text
+        convo.summary_first_message_id = first_id
+        convo.summary_last_message_id = last_id
+        await convo.save()
+    except Exception:
+        logger.warning(
+            "saving agent summary failed conversation=%s", conversation_id, exc_info=True
+        )
+
+
+def _schedule_after_turn(
+    agent_graph_type: str,
+    graph: Any,
+    conversation_id: Optional[str],
+    background_tasks: Optional[BackgroundTasks],
+) -> None:
+    """Keep ``Conversation.summary`` current once the turn is persisted.
+
+    The deep agent writes its own summary; the backend stores it. Graphs
+    without a summarizer keep the rolling summary.
+    """
+    if not conversation_id:
+        return
+    if agent_graph_type == "deep":
+        job, args = save_agent_summary, (graph, conversation_id)
+    else:
+        job, args = maybe_rollup_and_trim_history, (conversation_id,)
+    if background_tasks:
+        background_tasks.add_task(job, *args)
+    else:
+        asyncio.create_task(job(*args))
 
 
 async def _seed_turns(
@@ -1912,6 +1981,10 @@ async def generate_answer_agentic(
             # payload out into metadata.endpoint.
             **({"endpoint": endpoint_metadata} if endpoint_metadata else {}),
         }
+        # The router schedules the rolling summary for the other graphs: that
+        # job reads the message it saves.
+        if agent_graph_type == "deep" and conversation_id:
+            asyncio.create_task(save_agent_summary(graph, conversation_id))
 
         return (
             final_answer,
@@ -2494,10 +2567,7 @@ async def generate_answer_agentic_stream_helper(
             artifact_ids=_collected_artifact_ids(),
         )
 
-        if background_tasks:
-            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
-        else:
-            asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
+        _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
         final_emitted = True
         for event in _final_events(answer, latencies):

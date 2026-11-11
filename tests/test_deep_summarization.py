@@ -197,3 +197,99 @@ async def test_a_react_turn_keeps_the_rollup(monkeypatch):
     assert prior == []
     assert new_checkpoint is False
     assert prepared is agent
+
+
+def _graph_with_summary(extra):
+    snapshot = MagicMock()
+    snapshot.values = {
+        "_summarization_event": {
+            "cutoff_index": 4,
+            "summary_message": HumanMessage("<summary>…</summary>", additional_kwargs=extra),
+        }
+    }
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=snapshot)
+    return graph
+
+
+class _Conversation:
+    def __init__(self, summary=None, first=None, last=None):
+        self.summary = summary
+        self.summary_first_message_id = first
+        self.summary_last_message_id = last
+        self.save = AsyncMock()
+
+
+@pytest.mark.asyncio
+async def test_the_agent_summary_is_saved_with_its_range(monkeypatch):
+    convo = _Conversation(summary="rolled up")
+    monkeypatch.setattr(runner.Conversation, "find_by_id", AsyncMock(return_value=convo))
+    graph = _graph_with_summary(
+        {
+            "lc_source": "summarization",
+            "eve_summary": "agent summary",
+            "eve_summary_first_message_id": "m1",
+            "eve_summary_last_message_id": "m4",
+        }
+    )
+
+    await runner.save_agent_summary(graph, "conv-1")
+
+    graph.aget_state.assert_awaited_once_with({"configurable": {"thread_id": "conv-1"}})
+    assert convo.summary == "agent summary"
+    assert convo.summary_first_message_id == "m1"
+    assert convo.summary_last_message_id == "m4"
+    convo.save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_or_missing_summary_is_not_written(monkeypatch):
+    convo = _Conversation("agent summary", "m1", "m4")
+    find = AsyncMock(return_value=convo)
+    monkeypatch.setattr(runner.Conversation, "find_by_id", find)
+
+    await runner.save_agent_summary(
+        _graph_with_summary(
+            {
+                "eve_summary": "agent summary",
+                "eve_summary_first_message_id": "m1",
+                "eve_summary_last_message_id": "m4",
+            }
+        ),
+        "conv-1",
+    )
+    convo.save.assert_not_awaited()
+
+    snapshot = MagicMock()
+    snapshot.values = {"messages": []}
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=snapshot)
+    find.reset_mock()
+    await runner.save_agent_summary(graph, "conv-1")
+    find.assert_not_awaited()
+
+
+def test_after_a_turn_deep_saves_and_other_graphs_roll_up():
+    tasks = MagicMock()
+    graph = MagicMock()
+
+    runner._schedule_after_turn("deep", graph, "conv-1", tasks)
+    tasks.add_task.assert_called_once_with(runner.save_agent_summary, graph, "conv-1")
+
+    tasks.reset_mock()
+    runner._schedule_after_turn("react", graph, "conv-1", tasks)
+    tasks.add_task.assert_called_once_with(
+        runner.maybe_rollup_and_trim_history, "conv-1"
+    )
+
+    tasks.reset_mock()
+    runner._schedule_after_turn("deep", graph, None, tasks)
+    tasks.add_task.assert_not_called()
+
+
+def test_the_router_skips_the_rollup_only_for_deep():
+    from src.routers.message import _agent_summarizes
+
+    assert _agent_summarizes({"agent_graph_type": "deep"}) is True
+    assert _agent_summarizes({"agent_graph_type": "react"}) is False
+    assert _agent_summarizes(None) is False
