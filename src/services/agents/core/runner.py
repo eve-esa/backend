@@ -1041,12 +1041,14 @@ def _build_initial_messages(
     prior: Optional[List[Any]] = None,
     message_id: Optional[str] = None,
     new_checkpoint: Optional[bool] = None,
+    agent_graph_type: Optional[str] = None,
 ) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
     Prepends :data:`_ARTIFACT_MARKDOWN_INSTRUCTION` as a ``SystemMessage``
     when MCP tools are in play, since only then can a tool result carry an
-    artifact stub worth guarding against being rewritten.
+    artifact stub worth guarding against being rewritten.  A ``deep`` turn
+    skips it: the deep agent carries the rule in its system prompt.
 
     First turn only: the checkpointed thread state keeps the turn-one copy
     visible on later turns, and injecting another one mid-conversation puts a
@@ -1062,7 +1064,7 @@ def _build_initial_messages(
     if new_checkpoint is None:
         new_checkpoint = not history
     messages: List[Any] = []
-    if tools and SystemMessage and new_checkpoint:
+    if tools and SystemMessage and new_checkpoint and agent_graph_type != "deep":
         messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
     if prior:
         messages.extend(prior)
@@ -1443,20 +1445,21 @@ async def _fetch_conversation_context(
 
 
 def _agent_with_pinned_context(agent: Any) -> Any:
-    """Copy *agent* with ``PINNED_CONTEXT`` at the front of its system prompt.
+    """Copy *agent* with the standing rules in its system prompt.
 
-    The copy keeps the registry instance unchanged. Compaction does not edit
-    the system message, so the block survives a summary.
+    ``PINNED_CONTEXT`` goes in front and :data:`_ARTIFACT_MARKDOWN_INSTRUCTION`
+    at the end. The copy keeps the registry instance unchanged. Compaction
+    does not edit the system message, so both survive a summary; a
+    ``SystemMessage`` in the thread would leave the model's view at the cutoff.
     """
-    pinned = (PINNED_CONTEXT or "").strip()
-    if not pinned:
-        return agent
     system = str((getattr(agent, "prompts", None) or {}).get("system") or "").strip()
-    if system.startswith(pinned):
+    if _ARTIFACT_MARKDOWN_INSTRUCTION in system:
         return agent
+    pinned = (PINNED_CONTEXT or "").strip()
+    parts = [p for p in (pinned, system, _ARTIFACT_MARKDOWN_INSTRUCTION) if p]
     cloned = copy.copy(agent)
-    cloned.prompts = dict(agent.prompts)
-    cloned.prompts["system"] = f"{pinned}\n\n{system}" if system else pinned
+    cloned.prompts = dict(getattr(agent, "prompts", None) or {})
+    cloned.prompts["system"] = "\n\n".join(parts)
     return cloned
 
 
@@ -1850,6 +1853,7 @@ async def generate_answer_agentic(
                                 prior=prior,
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
+                                agent_graph_type=agent_graph_type,
                             )
                         },
                         config=config,
@@ -2346,6 +2350,7 @@ async def generate_answer_agentic_stream_helper(
                                 prior=prior,
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
+                                agent_graph_type=agent_graph_type,
                             )
                         },
                         config=config,

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.services.agents.core import runner
 from src.services.agents.core.history_search import SEARCH_NOTE
@@ -142,7 +142,25 @@ async def test_a_deep_turn_with_a_checkpoint_drops_the_rollup(monkeypatch):
     assert new_checkpoint is False
     assert prepared is not agent
     assert prepared.prompts["system"].startswith("Stay factual.")
+    assert prepared.prompts["system"].endswith(runner._ARTIFACT_MARKDOWN_INSTRUCTION)
     assert agent.prompts["system"] == "You are EVE"
+
+
+def test_the_artifact_rule_is_a_system_message_only_outside_deep():
+    tools = [object()]
+    react = _build_initial_messages(_request("q"), tools, history=[], agent_graph_type="react")
+    deep = _build_initial_messages(_request("q"), tools, history=[], agent_graph_type="deep")
+    assert isinstance(react[0], SystemMessage)
+    assert not any(isinstance(m, SystemMessage) for m in deep)
+
+
+def test_the_artifact_rule_is_added_to_the_deep_prompt_once(monkeypatch):
+    monkeypatch.setattr(runner, "PINNED_CONTEXT", "")
+    agent = _DeclaringAgent()
+    once = runner._agent_with_pinned_context(agent)
+    twice = runner._agent_with_pinned_context(once)
+    assert once.prompts["system"] == f"You are EVE\n\n{runner._ARTIFACT_MARKDOWN_INSTRUCTION}"
+    assert twice is once
 
 
 @pytest.mark.asyncio
