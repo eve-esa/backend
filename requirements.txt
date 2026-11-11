@@ -13,9 +13,9 @@ langchain-mcp-adapters==0.3.2
 langchain-text-splitters==1.1.2
 langchain-classic==1.0.8
 langgraph==1.2.14
-# Deep graph dependency of eve-esa-agents[deep]. 0.7.32 needs langchain>=1.4.7
+# Deep graph dependency of eve-esa-agents[deep]. 0.7.35 needs langchain>=1.4.7
 # and langchain-core>=1.7. Provider packages stay transitive.
-deepagents==0.7.32
+deepagents==0.7.35
 # Sandbox providers. Imported only when SANDBOX_PROVIDER selects one.
 # langchain-agentcore-codeinterpreter pulls bedrock-agentcore, which needs
 # boto3>=1.43.115 (the floor further down). langchain-sandbox-opensandbox

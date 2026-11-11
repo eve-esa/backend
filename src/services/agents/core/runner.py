@@ -18,10 +18,16 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import BackgroundTasks
 
 from src.config import (
+    AGENT_CONTEXT_WINDOW_TOKENS,
     AGENTIC_LLM_TYPE,
     AGENTIC_TIMEOUT,
     MODEL_TIMEOUT,
+    PINNED_CONTEXT,
+    SUMMARY_KEEP_FRACTION,
+    SUMMARY_MAX_TOKENS,
+    SUMMARY_TRIGGER_FRACTION,
     TOOL_RESULT_MAX_TOKENS,
+    TRUNCATE_ARGS_MAX_CHARS,
 )
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
@@ -51,6 +57,7 @@ from src.services.generate_answer import (
     resolve_generated_model_name,
 )
 from src.services.agents.core.history_search import (
+    SEARCH_NOTE,
     build_history_tools,
     note_searchable_history,
 )
@@ -1027,7 +1034,12 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
 
 
 def _build_initial_messages(
-    request: GenerationRequest, tools: List[Any], history: Optional[List[Any]] = None
+    request: GenerationRequest,
+    tools: List[Any],
+    history: Optional[List[Any]] = None,
+    prior: Optional[List[Any]] = None,
+    message_id: Optional[str] = None,
+    new_checkpoint: Optional[bool] = None,
 ) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
@@ -1039,11 +1051,24 @@ def _build_initial_messages(
     visible on later turns, and injecting another one mid-conversation puts a
     ``system`` message after an ``assistant`` one, which strict chat templates
     refuse (Blablador: 400 "Unexpected role 'system' after role 'assistant'").
+    ``new_checkpoint`` overrides that guess. A deep turn that already has a
+    thread passes False even though ``history`` is empty.
+
+    ``prior`` is the stored turns seeded into a deep thread that has no
+    checkpoint. ``message_id`` is written on the new human message so a later
+    summary can name the range it covers.
     """
+    if new_checkpoint is None:
+        new_checkpoint = not history
     messages: List[Any] = []
-    if tools and SystemMessage and not history:
+    if tools and SystemMessage and new_checkpoint:
         messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
-    messages.append(HumanMessage(content=request.query))
+    if prior:
+        messages.extend(prior)
+    human_kwargs: Dict[str, Any] = {}
+    if message_id:
+        human_kwargs["additional_kwargs"] = {"eve_message_id": str(message_id)}
+    messages.append(HumanMessage(content=request.query, **human_kwargs))
     return messages
 
 
@@ -1208,6 +1233,17 @@ def _build_react_graph(
             compile_kwargs["skills"] = [_SKILLS_SOURCE]
     if _explicit_compile_param(agent, "tool_result_max_tokens"):
         compile_kwargs["tool_result_max_tokens"] = TOOL_RESULT_MAX_TOKENS
+    summary_kwargs = {
+        "context_window": AGENT_CONTEXT_WINDOW_TOKENS,
+        "summary_trigger_fraction": SUMMARY_TRIGGER_FRACTION,
+        "summary_keep_fraction": SUMMARY_KEEP_FRACTION,
+        "summary_max_tokens": SUMMARY_MAX_TOKENS,
+        "truncate_args_max_chars": TRUNCATE_ARGS_MAX_CHARS,
+        "recall_note": SEARCH_NOTE,
+    }
+    for name, value in summary_kwargs.items():
+        if _explicit_compile_param(agent, name):
+            compile_kwargs[name] = value
     return agent.compile(**compile_kwargs)
 
 
@@ -1387,6 +1423,115 @@ async def _fetch_conversation_context(
     return history, summary
 
 
+def _agent_with_pinned_context(agent: Any) -> Any:
+    """Copy *agent* with ``PINNED_CONTEXT`` at the front of its system prompt.
+
+    The copy keeps the registry instance unchanged. Compaction does not edit
+    the system message, so the block survives a summary.
+    """
+    pinned = (PINNED_CONTEXT or "").strip()
+    if not pinned:
+        return agent
+    system = str((getattr(agent, "prompts", None) or {}).get("system") or "").strip()
+    if system.startswith(pinned):
+        return agent
+    cloned = copy.copy(agent)
+    cloned.prompts = dict(agent.prompts)
+    cloned.prompts["system"] = f"{pinned}\n\n{system}" if system else pinned
+    return cloned
+
+
+async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
+    """True when this conversation already has a checkpoint.
+
+    A lookup error is treated as "the thread is there": seeding on top of a
+    thread that could not be read would duplicate it.
+    """
+    if checkpointer is None:
+        return False
+    try:
+        found = await checkpointer.aget_tuple(
+            {"configurable": {"thread_id": conversation_id}}
+        )
+    except Exception:
+        logger.warning(
+            "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
+        )
+        return True
+    return found is not None
+
+
+async def _seed_turns(
+    conversation_id: str, exclude_message_id: Optional[str]
+) -> List[Any]:
+    """Stored turns as human/assistant messages, excluding the turn in progress.
+
+    Each human message carries ``eve_message_id`` so a summary can name the
+    range. The current message is already in the database with an empty
+    output; it is not part of the seed. The new human message added for this
+    turn carries that id instead.
+    """
+    cursor = (
+        Message.get_collection()
+        .find({"conversation_id": conversation_id}, {"input": 1, "output": 1})
+        .sort([("timestamp", 1), ("_id", 1)])
+    )
+    documents = await cursor.to_list(length=None)
+    if exclude_message_id:
+        documents = [
+            doc
+            for doc in documents
+            if str(doc.get("_id")) != str(exclude_message_id)
+        ]
+    elif documents:
+        documents = documents[:-1]
+    seeded: List[Any] = []
+    for doc in documents:
+        message_id = str(doc.get("_id"))
+        user = doc.get("input")
+        if user:
+            seeded.append(
+                HumanMessage(
+                    content=str(user),
+                    additional_kwargs={"eve_message_id": message_id},
+                )
+            )
+        output = doc.get("output")
+        if output:
+            seeded.append(AIMessage(content=str(output)))
+    return seeded
+
+
+async def _prepare_agent_context(
+    agent_graph_type: str,
+    conversation_id: Optional[str],
+    checkpointer: Any,
+    message_id: Optional[str],
+) -> tuple[List[Any], Optional[str], List[Any], bool, Any]:
+    """Return history, summary, seeded turns, new-checkpoint, and the agent.
+
+    A deep turn with a checkpoint uses that thread and no rolling summary.
+    Without one, the stored turns are seeded into the new thread. ``simple``
+    and ``react`` keep the rolling summary and the one-turn window.
+    """
+    history, summary = await _fetch_conversation_context(conversation_id)
+    prior: List[Any] = []
+    new_checkpoint = not history
+    agent = get_agent_graph(agent_graph_type)
+    if agent_graph_type == "deep" and conversation_id:
+        if await _checkpoint_exists(checkpointer, conversation_id):
+            history, summary = [], None
+            new_checkpoint = False
+        else:
+            prior = await _seed_turns(conversation_id, message_id)
+            history, summary = [], None
+            new_checkpoint = True
+        agent = _agent_with_pinned_context(agent)
+    elif agent_graph_type != "simple":
+        summary = note_searchable_history(summary)
+    return history, summary, prior, new_checkpoint, agent
+
+
 def _generation_unattributed_s(
     generation_latency: float, node_latencies: Dict[str, float]
 ) -> float:
@@ -1479,6 +1624,7 @@ async def generate_answer_agentic(
     *,
     user_id: str,
     conversation_id: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> tuple[
     str,
     List[Dict[str, Any]],
@@ -1501,10 +1647,8 @@ async def generate_answer_agentic(
         raise RuntimeError("LangGraph is not available — cannot run agentic generation")
 
     total_start = time.perf_counter()
-    # message_id is unset here: Message.create() in the router runs before this
-    # call and there's no clean way to thread it through this signature; artifacts
-    # are still linked via conversation_id, and the router attaches artifact_ids
-    # to the Message itself once this call returns.
+    # message_id tags the human message on the thread. Artifacts stay linked
+    # via conversation_id; the router attaches artifact_ids to the Message.
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
@@ -1531,12 +1675,10 @@ async def generate_answer_agentic(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary = await _fetch_conversation_context(conversation_id)
+        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+            agent_graph_type, conversation_id, checkpointer, message_id
+        )
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
-        if agent_graph_type != "simple":
-            summary = note_searchable_history(summary)
-
-        agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
         llm, llm_metadata = await _resolve_agentic_llm_client(
@@ -1620,7 +1762,16 @@ async def generate_answer_agentic(
                 set_llm_attributes(root_span, endpoint_metadata, include_answered=False)
                 try:
                     async for update in g.astream(
-                        {"messages": _build_initial_messages(request, tools, history)},
+                        {
+                            "messages": _build_initial_messages(
+                                request,
+                                tools,
+                                history,
+                                prior=prior,
+                                message_id=message_id,
+                                new_checkpoint=new_checkpoint,
+                            )
+                        },
                         config=config,
                         stream_mode="updates",
                     ):
@@ -1919,12 +2070,10 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary = await _fetch_conversation_context(conversation_id)
+        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+            agent_graph_type, conversation_id, checkpointer, message_id
+        )
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
-        if agent_graph_type != "simple":
-            summary = note_searchable_history(summary)
-
-        agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
         llm, llm_prompts = await _resolve_agentic_llm_client(
@@ -2105,7 +2254,16 @@ async def generate_answer_agentic_stream_helper(
                 # the spans it ends, not in the loop's finaliser.
                 async with contextlib.aclosing(
                     graph.astream(
-                        {"messages": _build_initial_messages(request, tools, history)},
+                        {
+                            "messages": _build_initial_messages(
+                                request,
+                                tools,
+                                history,
+                                prior=prior,
+                                message_id=message_id,
+                                new_checkpoint=new_checkpoint,
+                            )
+                        },
                         config=config,
                         stream_mode=["messages", "updates"],
                     )

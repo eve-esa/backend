@@ -14,7 +14,9 @@ from tests.utils.utils import create_test_user_and_token
 from tests.test_artifacts import PNG_BYTES, _upload, _use_fake_storage
 
 
-async def _mock_generate_answer_agentic(request, user_id=None, conversation_id=None):
+async def _mock_generate_answer_agentic(
+    request, user_id=None, conversation_id=None, message_id=None
+):
     # (answer, tool_results, use_rag, latencies, prompts, trace, artifact_ids)
     return "Agentic answer", [], False, {}, {}, [], []
 

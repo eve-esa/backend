@@ -12,10 +12,9 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Own layer so a new agents ref does not rebuild the requirements above it.
 # The ARG has to be a commit SHA or a tag. Docker caches this RUN on the ARG
-# text, so the branch name "main" would keep serving a stale install. The dev
-# workflow resolves main to a SHA before it passes the build-arg. Default is
-# only for a local compose build that does not pass one.
-ARG AGENTS_REF=main
+# text, so a branch name would keep serving a stale install. The default is
+# the summarization commit. deploy-dev passes the same SHA.
+ARG AGENTS_REF=b22aaea9948477a342fd96c088cfec6edf03bd63
 RUN pip install --no-cache-dir "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${AGENTS_REF}"
 
 # Runtime layout shared by the production image and the local dev image.
@@ -63,5 +62,5 @@ ARG GIT_SHA
 ENV APP_GIT_SHA=${GIT_SHA}
 # Same ref the builder installed. Redeclared here because an ARG does not cross
 # stages, and it has to stay beside GIT_SHA so it does not bust the layers above.
-ARG AGENTS_REF=main
+ARG AGENTS_REF=b22aaea9948477a342fd96c088cfec6edf03bd63
 ENV APP_AGENTS_REF=${AGENTS_REF}

@@ -726,6 +726,7 @@ async def retry(
                 request,
                 user_id=requesting_user.id,
                 conversation_id=conversation_id,
+                message_id=message.id,
             )
 
             message.output = answer
@@ -2136,7 +2137,10 @@ async def create_agentic_message(
             trace_entries,
             artifact_ids,
         ) = await generate_answer_agentic(
-            request, user_id=requesting_user.id, conversation_id=conversation_id
+            request,
+            user_id=requesting_user.id,
+            conversation_id=conversation_id,
+            message_id=message.id,
         )
 
         message.output = answer
