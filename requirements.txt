@@ -44,7 +44,7 @@ opentelemetry-instrumentation-logging==0.66b2
 # 4463 and 4447, PR 4441): the MCP client span is ours, in tool_loader.py.
 opentelemetry-instrumentation-langchain==0.62.4
 opentelemetry-semantic-conventions-ai==0.5.1
-openai>=2.53.0,<3.0.0
+openai>=3.42.0,<4.0.0
 langgraph-checkpoint==4.2.0
 langgraph-checkpoint-mongodb==0.5.1
 httpx==0.28.1
