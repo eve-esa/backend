@@ -316,6 +316,29 @@ def test_summary_chunks_are_not_answer_tokens():
     assert runner._is_internal_model_call(None) is False
 
 
+def test_the_summary_call_becomes_a_summarizing_event():
+    import json
+
+    raw = runner._summarizing_event(
+        {
+            "event": "eve_summarization",
+            "phase": "started",
+            "first_message_id": "a",
+            "last_message_id": "b",
+        }
+    )
+    assert raw.startswith("data: ") and raw.endswith("\n\n")
+    assert json.loads(raw[len("data: "):]) == {
+        "type": "summarizing",
+        "phase": "started",
+        "first_message_id": "a",
+        "last_message_id": "b",
+    }
+    assert runner._summarizing_event({"event": "other", "phase": "started"}) is None
+    assert runner._summarizing_event({"event": "eve_summarization", "phase": "x"}) is None
+    assert runner._summarizing_event("text") is None
+
+
 def test_the_router_skips_the_rollup_only_for_deep():
     from src.routers.message import _agent_summarizes
 

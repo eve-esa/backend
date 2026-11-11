@@ -134,7 +134,7 @@ jobs:
           # Summarization lives on this agents commit (eve-esa/agents#20), not yet
           # on main. After that pull request merges, move the pin to the merge
           # commit if it is not this one.
-          REF=354f5153779297432061929cdd5c8998296228a0
+          REF=ce1a4b758f3d5587bd3864bddd8445873164d77f
           echo "Installing eve-esa-agents @ ${REF}"
           pip install "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${REF}"
 

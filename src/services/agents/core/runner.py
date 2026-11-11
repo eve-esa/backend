@@ -1427,6 +1427,28 @@ def _is_internal_model_call(metadata: Any) -> bool:
     return _INTERNAL_CALL_KEY in metadata or metadata.get("lc_source") == "summarization"
 
 
+# ``event`` of the custom stream payload the deep summarization middleware
+# writes around its summary call (agents ``SUMMARY_STREAM_EVENT``).
+SUMMARY_STREAM_EVENT = "eve_summarization"
+_SUMMARY_PHASES = ("started", "finished")
+
+
+def _summarizing_event(payload: Any) -> Optional[str]:
+    """SSE ``summarizing`` event for a custom stream payload, else None."""
+    if not isinstance(payload, dict) or payload.get("event") != SUMMARY_STREAM_EVENT:
+        return None
+    phase = payload.get("phase")
+    if phase not in _SUMMARY_PHASES:
+        return None
+    event = {
+        "type": "summarizing",
+        "phase": phase,
+        "first_message_id": payload.get("first_message_id"),
+        "last_message_id": payload.get("last_message_id"),
+    }
+    return f"data: {json.dumps(event)}\n\n"
+
+
 async def _fetch_conversation_context(
     conversation_id: Optional[str],
 ) -> tuple[List[Any], Optional[str]]:
@@ -2354,7 +2376,7 @@ async def generate_answer_agentic_stream_helper(
                             )
                         },
                         config=config,
-                        stream_mode=["messages", "updates"],
+                        stream_mode=["messages", "updates", "custom"],
                     )
                 ) as graph_stream:
                     async for mode, payload in graph_stream:
@@ -2371,6 +2393,12 @@ async def generate_answer_agentic_stream_helper(
                             )
                             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                             return
+
+                        if mode == "custom":
+                            event = _summarizing_event(payload)
+                            if event is not None:
+                                yield event
+                            continue
 
                         if mode == "updates":
                             fallback.observe(payload)
