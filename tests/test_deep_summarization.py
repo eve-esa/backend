@@ -287,6 +287,17 @@ def test_after_a_turn_deep_saves_and_other_graphs_roll_up():
     tasks.add_task.assert_not_called()
 
 
+def test_summary_chunks_are_not_answer_tokens():
+    summary_chunk = {
+        "langgraph_node": "model",
+        "lc_source": "summarization",
+        "lc_internal_call": "x",
+    }
+    assert runner._is_internal_model_call(summary_chunk) is True
+    assert runner._is_internal_model_call({"langgraph_node": "model"}) is False
+    assert runner._is_internal_model_call(None) is False
+
+
 def test_the_router_skips_the_rollup_only_for_deep():
     from src.routers.message import _agent_summarizes
 

@@ -1412,6 +1412,17 @@ SUMMARIZATION_EVENT_KEY = "_summarization_event"
 SUMMARY_TEXT_KEY = "eve_summary"
 SUMMARY_FIRST_ID_KEY = "eve_summary_first_message_id"
 SUMMARY_LAST_ID_KEY = "eve_summary_last_message_id"
+# Metadata LangChain middleware puts on its own model calls. Only the newer
+# streaming API filters those calls; stream_mode="messages" still yields them
+# from the model node, like answer tokens.
+_INTERNAL_CALL_KEY = "lc_internal_call"
+
+
+def _is_internal_model_call(metadata: Any) -> bool:
+    """True for a chunk from a middleware model call, such as the summary."""
+    if not isinstance(metadata, dict):
+        return False
+    return _INTERNAL_CALL_KEY in metadata or metadata.get("lc_source") == "summarization"
 
 
 async def _fetch_conversation_context(
@@ -2399,6 +2410,8 @@ async def generate_answer_agentic_stream_helper(
                             continue
 
                         chunk, metadata = payload
+                        if _is_internal_model_call(metadata):
+                            continue
                         node = metadata.get("langgraph_node", "")
                         if node != current_node:
                             if current_node:
