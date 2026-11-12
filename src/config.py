@@ -616,6 +616,12 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
 S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
+# S3 client bounds (seconds, total attempts including the first). The calls run
+# in the threadpool, so these, not an asyncio deadline, decide how long a hung
+# S3 holds a thread.
+S3_CONNECT_TIMEOUT_S = float(getenv_or("S3_CONNECT_TIMEOUT_S", "5"))
+S3_READ_TIMEOUT_S = float(getenv_or("S3_READ_TIMEOUT_S", "15"))
+S3_MAX_ATTEMPTS = int(getenv_or("S3_MAX_ATTEMPTS", "2"))
 
 # Generic artifact knobs, consumed by MCP tool-output ingestion.
 ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))

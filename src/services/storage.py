@@ -19,8 +19,11 @@ from fastapi.concurrency import run_in_threadpool
 from src.config import (
     S3_ACCESS_KEY_ID,
     S3_BUCKET_NAME,
+    S3_CONNECT_TIMEOUT_S,
     S3_ENDPOINT_URL,
+    S3_MAX_ATTEMPTS,
     S3_PRESIGN_TTL_SECONDS,
+    S3_READ_TIMEOUT_S,
     S3_REGION,
     S3_SECRET_ACCESS_KEY,
 )
@@ -207,7 +210,16 @@ class StorageService:
                 endpoint_url=S3_ENDPOINT_URL or None,
                 aws_access_key_id=S3_ACCESS_KEY_ID or None,
                 aws_secret_access_key=S3_SECRET_ACCESS_KEY or None,
-                config=BotoConfig(signature_version="s3v4"),
+                # Bounded: every call runs in the shared threadpool, which an
+                # ``asyncio.timeout`` around it cannot cancel. The botocore
+                # defaults (60 s read, legacy retries) would hold threads for
+                # minutes during an S3 brownout.
+                config=BotoConfig(
+                    signature_version="s3v4",
+                    connect_timeout=S3_CONNECT_TIMEOUT_S,
+                    read_timeout=S3_READ_TIMEOUT_S,
+                    retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
+                ),
             )
         return self._s3
 
@@ -406,6 +418,56 @@ class StorageService:
         await run_in_threadpool(
             lambda: self._client().delete_object(Bucket=S3_BUCKET_NAME, Key=key)
         )
+
+    def delete_prefix_sync(self, prefix: str, max_keys: int = 10_000) -> int:
+        """Delete every object under one user's ``prefix``; returns the count.
+
+        Refuses a prefix that is not ``users/<id>/<something>/``, so a bug in
+        the caller can never empty the bucket or another tree. Lists a page,
+        deletes it in one ``DeleteObjects`` call (at most 1000 keys each) and
+        stops after ``max_keys``. A per-key error raises ``RuntimeError``
+        after the batch, so the caller can log and retry later.
+        """
+        parts = prefix.split("/")
+        if (
+            len(parts) < 4
+            or parts[0] != "users"
+            or not all(parts[1:-1])
+            or parts[-1] != ""
+        ):
+            raise ValueError("refusing to delete outside one user's sub-prefix")
+        client = self._client()
+        deleted = 0
+        while deleted < max_keys:
+            page = client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix=prefix,
+                MaxKeys=min(1000, max_keys - deleted),
+            )
+            keys = [
+                {"Key": item["Key"]}
+                for item in page.get("Contents") or []
+                if item.get("Key")
+            ]
+            if not keys:
+                break
+            result = client.delete_objects(
+                Bucket=S3_BUCKET_NAME, Delete={"Objects": keys, "Quiet": True}
+            )
+            errors = result.get("Errors") or []
+            if errors:
+                raise RuntimeError(
+                    f"{len(errors)} of {len(keys)} objects not deleted "
+                    f"({errors[0].get('Code', 'unknown')})"
+                )
+            deleted += len(keys)
+            if not page.get("IsTruncated"):
+                break
+        return deleted
+
+    async def delete_prefix(self, prefix: str, max_keys: int = 10_000) -> int:
+        """Async ``delete_prefix_sync``: the boto calls run in the threadpool."""
+        return await run_in_threadpool(self.delete_prefix_sync, prefix, max_keys)
 
     async def generate_presigned_get(
         self,

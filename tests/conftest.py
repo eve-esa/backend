@@ -158,6 +158,20 @@ async def async_client():
 
 
 @pytest.fixture(autouse=True)
+def artifact_cleanup_storage(monkeypatch):
+    """Keep the conversation delete cascade off real S3.
+
+    Every DELETE /conversations/{id} now lists the tool-result prefix. A test
+    that wants to see the objects patches the same name with its own fake.
+    """
+    from tests.utils.fake_storage import FakeStorage
+
+    monkeypatch.setattr(
+        "src.services.artifact_cleanup.storage_service", FakeStorage()
+    )
+
+
+@pytest.fixture(autouse=True)
 def artifact_uploads_on(monkeypatch):
     """Open POST /artifacts for the suite: it defaults to off in src/config.py.
 

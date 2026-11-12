@@ -128,6 +128,20 @@ async def _signal_stop(conversation_id: str) -> Optional[str]:
     return message_id
 
 
+async def stop_active_generation(conversation_id: str, timeout_s: float) -> bool:
+    """Stop the conversation's in-flight generation (the /stop path) and wait.
+
+    Returns True when nothing runs any more, False when the turn did not
+    unwind within ``timeout_s``.
+    """
+    message_id = await _signal_stop(conversation_id)
+    if not message_id:
+        return True
+    return await get_cancel_manager().wait_until_finished(
+        conversation_id, message_id, timeout_s
+    )
+
+
 async def _preempt_active_generation(conversation_id: str) -> None:
     """Stop the conversation's in-flight generation and wait for it to end."""
     message_id = await _signal_stop(conversation_id)

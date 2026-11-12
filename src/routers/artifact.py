@@ -32,6 +32,7 @@ from src.database.mongo import get_collection
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
+from src.services.artifact_cleanup import delete_artifact
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
     INLINE_CONTENT_TYPES,
@@ -352,3 +353,46 @@ async def get_artifact(
     )
 
 
+@router.delete("/artifacts/{artifact_id}")
+async def delete_owned_artifact(
+    artifact_id: str = Path(..., description="Artifact ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Delete an owned artifact: its object, its record and its message references.
+
+    References are both MCP outputs (``messages.artifact_ids``) and attached
+    uploads (``messages.attachments[].image_id``). The object goes first.
+    When storage refuses, the record stays and the answer is 503, so the user
+    can retry and nothing is orphaned. With versioning on, S3 keeps the bytes
+    as a noncurrent version until the lifecycle rule expires it.
+
+    Args:
+        artifact_id (str): Artifact identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if missing; 403 if owned by another user; 503 with
+        ``detail.code`` ``artifact_delete_failed`` if storage refused.
+    """
+    artifact = await get_owned_artifact(artifact_id, requesting_user)
+    try:
+        await delete_artifact(artifact)
+    except Exception as exc:  # noqa: BLE001 - mapped to a retryable 503
+        logger.warning(
+            "artifact.delete_failed user=%s artifact=%s error=%s",
+            requesting_user.id,
+            artifact.id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "artifact_delete_failed",
+                "message": "The file could not be deleted. Try again later.",
+            },
+        )
+    return {"message": "Artifact deleted successfully"}
