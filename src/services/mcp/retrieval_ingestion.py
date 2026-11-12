@@ -132,6 +132,21 @@ def _graph_tool_name(request: Any) -> str:
     return f"{server}_{name}".lower() if server else name.lower()
 
 
+_COLLECTION_ARGS = ("public_collections", "private_collections", "collection_ids")
+
+
+def _collection_args(request: Any) -> Dict[str, Any]:
+    """The collection arguments of the call as the server receives them."""
+    args = getattr(request, "args", None)
+    if not isinstance(args, dict):
+        return {}
+    return {
+        key: list(args[key])
+        for key in _COLLECTION_ARGS
+        if isinstance(args.get(key), (list, tuple))
+    }
+
+
 class RetrievalContextInterceptor:
     """Stash the full retrieval documents, hand the model a reduced copy.
 
@@ -155,7 +170,9 @@ class RetrievalContextInterceptor:
             return result
 
         try:
-            return self._reduce(result, _graph_tool_name(request))
+            return self._reduce(
+                result, _graph_tool_name(request), _collection_args(request)
+            )
         except Exception:
             logger.warning(
                 "Retrieval result reduction failed for tool %r on server %r; "
@@ -166,7 +183,12 @@ class RetrievalContextInterceptor:
             )
             return result
 
-    def _reduce(self, result: "CallToolResult", tool_name: str) -> "CallToolResult":
+    def _reduce(
+        self,
+        result: "CallToolResult",
+        tool_name: str,
+        collections: Optional[Dict[str, Any]] = None,
+    ) -> "CallToolResult":
         ctx = get_retrieval_context()
         if ctx is None:
             return result
@@ -188,6 +210,7 @@ class RetrievalContextInterceptor:
                     tool_name=tool_name,
                     documents=extract_documents_from_retrieval_payload(response),
                     latencies=dict(latencies) if isinstance(latencies, dict) else {},
+                    collections=dict(collections or {}),
                 )
             )
             slim = slim_retrieval_response_for_model(response)

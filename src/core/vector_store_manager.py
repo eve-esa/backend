@@ -89,6 +89,24 @@ def is_private_qdrant_collection(name: str) -> bool:
     return bool(name) and name in ALL_PRIVATE_COLLECTION_NAMES
 
 
+def _title_private_payload(payload: Dict[str, Any]) -> None:
+    """Give an uploaded chunk its file name as ``title``, in place.
+
+    Uploads store the name in ``metadata.source_name`` and never set a title,
+    and Sources shows "Title not available" for a chunk without one. Done on
+    read, so chunks uploaded before this change get it too.
+    """
+    title = payload.get("title")
+    if title and title != "None":
+        return
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    name = metadata.get("source_name") or metadata.get("filename")
+    if isinstance(name, str) and name.strip():
+        payload["title"] = name.strip()
+
+
 def eve_public_collection_names() -> set[str]:
     """Catalog names that receive EVE client ``filters``."""
     return {EVE_PUBLIC_COLLECTION_NAME_PROD}
@@ -1468,6 +1486,8 @@ class VectorStoreManager:
                 display_name = name_map.get(
                     logical_id, logical_id or PRIVATE_COLLECTION_NAME
                 )
+                if isinstance(payload, dict):
+                    _title_private_payload(payload)
                 conv = self._to_generic_result(scored, display_name)
                 if conv is not None:
                     results.append(conv)

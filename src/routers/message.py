@@ -295,11 +295,17 @@ async def apply_private_collections_to_request(
 
     user_collections = []
     if collection_object_ids:
+        # Primary: the agent's retrieve call reaches POST /retrieve with the
+        # conversation collection in private_collections and no conversation
+        # id. On the turn right after the upload that created it, a secondary
+        # may not have the row yet, and a collection missing from
+        # private_collections_map is not searched.
         user_collections = await CollectionModel.find_all(
             filter_dict={
                 "user_id": user_id,
                 "_id": {"$in": collection_object_ids},
-            }
+            },
+            primary=True,
         )
 
     attached = await collection_for_chat(user_id, conversation_id)

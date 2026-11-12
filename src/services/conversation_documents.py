@@ -169,6 +169,22 @@ async def list_conversation_documents(
     return [Document.from_dict(row) for row in rows]
 
 
+async def searchable_document_names(
+    user_id: str, conversation_id: Optional[str]
+) -> list[str]:
+    """Names of the conversation's listed documents, oldest first.
+
+    The same rows as GET /conversations/{id}/documents, read on the primary: a
+    chat turn sent right after an upload has to name the file it just stored.
+    Nothing when the feature is off, like :func:`collection_for_chat`.
+    """
+    if not conversation_id or not config.FEATURE_CONVERSATION_DOCUMENTS:
+        return []
+    documents = await list_conversation_documents(user_id, conversation_id)
+    names = (str(doc.name or doc.filename or "") for doc in documents)
+    return [name for name in names if name.strip()]
+
+
 async def delete_conversation_document(
     user_id: str, conversation_id: str, document_id: str
 ) -> bool:

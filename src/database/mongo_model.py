@@ -90,9 +90,13 @@ class MongoModel(BaseModel):
         skip: Optional[int] = None,
         sort: Optional[List[tuple]] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        primary: bool = False,
     ) -> List[T]:
-        """Find all documents in the collection."""
-        collection = cls.get_collection()
+        """Find all documents in the collection.
+
+        ``primary`` reads on the primary (see :meth:`get_primary_collection`).
+        """
+        collection = cls.get_primary_collection() if primary else cls.get_collection()
         query = filter_dict or {}
 
         cursor = collection.find(query)

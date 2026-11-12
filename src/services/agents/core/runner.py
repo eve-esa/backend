@@ -73,6 +73,7 @@ from src.services.agents.core.sandbox import (
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
 from src.services.agents.core.skills import resolve_skills_root
 from src.services.checkpoint_retention import build_mongo_checkpointer
+from src.services.conversation_documents import searchable_document_names
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
@@ -1506,6 +1507,90 @@ def _agent_with_pinned_context(agent: Any) -> Any:
     return cloned
 
 
+_DOCUMENT_NAME_MAX_CHARS = 120
+
+
+def attached_documents_line(names: List[str]) -> Optional[str]:
+    """The system line naming a conversation's documents, or None without any.
+
+    It says the documents exist and that the retrieve tool searches them; it
+    does not tell the model to search, which stays the model's choice (forcing
+    retrieval was reverted in #306). File names are user input, so each is put
+    on one line, stripped of control characters, capped and quoted.
+    """
+    quoted: List[str] = []
+    for name in names:
+        text = "".join(ch for ch in " ".join(str(name).split()) if ch.isprintable())
+        if len(text) > _DOCUMENT_NAME_MAX_CHARS:
+            text = text[: _DOCUMENT_NAME_MAX_CHARS - 3] + "..."
+        if text:
+            quoted.append(json.dumps(text, ensure_ascii=False))
+    if not quoted:
+        return None
+    return (
+        "The user attached these documents to this conversation: "
+        + ", ".join(quoted)
+        + ". The retrieve tool searches them along with the selected collections."
+    )
+
+
+def _agent_with_system_line(agent: Any, line: Optional[str]) -> Any:
+    """Copy *agent* with ``line`` at the end of its system prompt.
+
+    Every graph rebuilds its system message from ``prompts["system"]`` on each
+    turn and keeps it out of the thread, so the line follows uploads made
+    mid-conversation without a ``system`` message after an ``assistant`` one
+    (see :func:`_build_initial_messages`). The registry instance is unchanged.
+    """
+    if not line:
+        return agent
+    system = str((getattr(agent, "prompts", None) or {}).get("system") or "").strip()
+    cloned = copy.copy(agent)
+    cloned.prompts = dict(getattr(agent, "prompts", None) or {})
+    cloned.prompts["system"] = f"{system}\n\n{line}" if system else line
+    return cloned
+
+
+async def _with_attached_documents(
+    agent: Any,
+    tools: Any,
+    user_id: Optional[str],
+    conversation_id: Optional[str],
+) -> Any:
+    """*agent* naming the conversation's documents when a retrieve tool can search them.
+
+    A lookup failure leaves the turn without the line rather than failing it:
+    the conversation collection is still in ``private_collections``.
+    """
+    if not user_id or not conversation_id or not _rag_tool_names(tools):
+        return agent
+    try:
+        names = await searchable_document_names(user_id, conversation_id)
+    except Exception:
+        logger.warning(
+            "Could not list attached documents conversation=%s",
+            conversation_id,
+            exc_info=True,
+        )
+        return agent
+    return _agent_with_system_line(agent, attached_documents_line(names))
+
+
+def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]]:
+    """The collections each retrieval call of this run searched, in call order.
+
+    Stored as ``metadata.prompts.retrieval_calls``: the tool calls in the trace
+    carry the model's arguments, before the runner replaced the UI-owned ones.
+    """
+    ctx = get_retrieval_context()
+    if ctx is None:
+        return []
+    return [
+        {"tool": call.tool_name, **call.collections, "documents": len(call.documents)}
+        for call in ctx.for_tools(rag_tool_names)
+    ]
+
+
 async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
     """True when this conversation already has a checkpoint.
 
@@ -1804,6 +1889,7 @@ async def generate_answer_agentic(
         history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
+        agent = await _with_attached_documents(agent, tools, user_id, conversation_id)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
@@ -2038,6 +2124,7 @@ async def generate_answer_agentic(
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
             "used_fallback_llm": fallback.used,
+            "retrieval_calls": _retrieval_call_collections(rag_tool_names),
             **llm_metadata,
             # This function persists nothing itself: the router lifts the
             # payload out into metadata.endpoint.
@@ -2208,6 +2295,7 @@ async def generate_answer_agentic_stream_helper(
         history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
+        agent = await _with_attached_documents(agent, tools, user_id, conversation_id)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
@@ -2634,6 +2722,7 @@ async def generate_answer_agentic_stream_helper(
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
                 "used_fallback_llm": fallback.used,
+                "retrieval_calls": _retrieval_call_collections(rag_tool_names),
                 **llm_prompts,
             },
             endpoint=endpoint_metadata,

@@ -29,7 +29,9 @@ from src.database.models.user import User
 from src.database.mongo import get_collection
 from src.routers.message import apply_private_collections_to_request
 from src.schemas.generation_request import GenerationRequest
-from src.services.agents.core.runner import _rag_mcp_tool_defaults
+from src.services.agents.core.registry import get_agent_graph
+from src.services.agents.core.runner import _rag_mcp_tool_defaults, _with_attached_documents
+from src.services.conversation_documents import searchable_document_names
 from tests.utils.cleaner import cleanup_models
 from tests.utils.documentdb import reject_pipeline_updates
 from tests.utils.utils import create_test_user_and_token
@@ -425,6 +427,115 @@ async def test_reads_after_writes_use_the_primary(async_client, store, monkeypat
         assert resp.json()["collection_id"] in request.private_collections
     finally:
         monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+def _lag_secondaries(monkeypatch) -> None:
+    for model in (Conversation, Collection, Document):
+        monkeypatch.setattr(
+            model,
+            "get_collection",
+            classmethod(lambda cls: _LaggingSecondary(get_collection(cls.collection_name))),
+        )
+
+
+async def test_retrieve_right_after_the_upload_searches_the_conversation_collection(
+    async_client, store, monkeypatch
+):
+    """The agent's retrieve call reaches POST /retrieve with the conversation
+    collection in private_collections and no conversation id. Dev has no
+    replica set, so the lagging secondary stands in for one: the collection is
+    only found when the lookup reads the primary."""
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        _lag_secondaries(monkeypatch)
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt")],
+        )
+        assert resp.status_code == 200, resp.text
+        collection_id = resp.json()["collection_id"]
+
+        request = GenerationRequest(
+            query="what does the file say?", private_collections=[collection_id]
+        )
+        await apply_private_collections_to_request(request, user.id)
+
+        assert request.private_collections_map == {collection_id: "Attached documents"}
+        assert collection_id in request.collection_ids
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_the_turn_after_the_upload_names_the_document(
+    async_client, store, monkeypatch
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    other_conversation = await _conversation(user)
+    try:
+        _lag_secondaries(monkeypatch)
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt"), _txt("b.txt")],
+        )
+        assert resp.status_code == 200, resp.text
+        # A row whose ingestion stored nothing is not searchable, so not named.
+        await Document.get_collection().insert_one(
+            {
+                "user_id": user.id,
+                "collection_id": resp.json()["collection_id"],
+                "name": "empty.txt",
+                "chunk_count": 0,
+            }
+        )
+
+        assert await searchable_document_names(user.id, conversation.id) == [
+            "a.txt",
+            "b.txt",
+        ]
+        assert await searchable_document_names(user.id, other_conversation.id) == []
+        monkeypatch.setattr("src.config.FEATURE_CONVERSATION_DOCUMENTS", False)
+        assert await searchable_document_names(user.id, conversation.id) == []
+    finally:
+        monkeypatch.undo()
+        await cleanup_models([other_conversation])
+        await _cleanup(user, conversation)
+
+
+async def test_a_document_attached_mid_conversation_is_named_on_the_next_turn(
+    async_client, store
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    retrieve = SimpleNamespace(
+        name="eve_retrieval_retrieve",
+        args={"query": {}, "public_collections": {}, "private_collections": {}},
+    )
+    try:
+        agent = get_agent_graph("react")
+        first_turn = await _with_attached_documents(
+            agent, [retrieve], user.id, conversation.id
+        )
+        assert first_turn is agent
+
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt")],
+        )
+        assert resp.status_code == 200, resp.text
+
+        next_turn = await _with_attached_documents(
+            get_agent_graph("react"), [retrieve], user.id, conversation.id
+        )
+        instruction = next_turn.instruction_text(history=[], summary=None)
+        assert '"a.txt"' in instruction
+    finally:
         await _cleanup(user, conversation)
 
 
