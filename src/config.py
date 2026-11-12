@@ -640,6 +640,11 @@ ARTIFACT_UPLOAD_ALLOWED_TYPES = [
 ARTIFACT_UPLOAD_MAX_BYTES = int(os.getenv("ARTIFACT_UPLOAD_MAX_BYTES", 10 * 1024 * 1024))
 ARTIFACT_UPLOADS_PER_DAY = int(os.getenv("ARTIFACT_UPLOADS_PER_DAY", 100))
 
+# User uploads (POST /artifacts). Off by default: an environment whose frontend
+# offers attachments sets it to "true" (local compose, dev). Off answers 404;
+# reading, listing and the agent's own artifacts are not affected.
+FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "true"
+
 # Curated image catalog (demo). When enabled, a small static catalog of images
 # is offered to the answer-generation prompt so the model can embed them as
 # markdown. Disabled -> the composed generation prompts are byte-identical to

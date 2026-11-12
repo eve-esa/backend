@@ -158,6 +158,15 @@ async def async_client():
 
 
 @pytest.fixture(autouse=True)
+def artifact_uploads_on(monkeypatch):
+    """Open POST /artifacts for the suite: it defaults to off in src/config.py.
+
+    The flag tests switch it off again with the same monkeypatch.
+    """
+    monkeypatch.setattr("src.config.FEATURE_ARTIFACT_UPLOADS", True)
+
+
+@pytest.fixture(autouse=True)
 def sandbox_store():
     """Give every test its own in-process sandbox map.
 

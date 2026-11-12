@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from src import config
 from src.config import (
     ARTIFACT_UPLOAD_ALLOWED_TYPES,
     ARTIFACT_UPLOAD_MAX_BYTES,
@@ -109,9 +110,23 @@ async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifac
     return artifact
 
 
+def require_uploads_enabled() -> None:
+    """404 while ``FEATURE_ARTIFACT_UPLOADS`` is off, as if the route did not exist.
+
+    A dependency, not a conditional mount: GET /artifacts shares the path, so
+    an unmounted POST would answer 405 and confirm the route exists. Listed
+    first, so a closed route spends no rate limit token.
+    """
+    if not config.FEATURE_ARTIFACT_UPLOADS:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 @router.post(
     "/artifacts",
-    dependencies=[Depends(enforce_request_rate("upload"))],
+    dependencies=[
+        Depends(require_uploads_enabled),
+        Depends(enforce_request_rate("upload")),
+    ],
 )
 async def upload_artifact(
     file: UploadFile = File(...),
