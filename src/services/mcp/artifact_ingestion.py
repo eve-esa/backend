@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 import weakref
 from typing import Any, List, Optional, Tuple
 
@@ -38,7 +39,12 @@ from src.services.mcp.tool_artifacts import (
     sandbox_path,
     upload_tool_artifacts,
 )
-from src.services.storage import guess_extension_from_content_type, storage_service
+from src.services.storage import (
+    ARTIFACT_TYPE_CONTENT_TYPES,
+    guess_extension_from_content_type,
+    sniff_artifact_type,
+    storage_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +62,41 @@ try:
     _mcp_types_available = True
 except Exception:
     _mcp_types_available = False
+
+
+OPAQUE_CONTENT_TYPE = "application/octet-stream"
+
+# Raster types the chat embeds as images. SVG is never one of them: it can
+# carry script, and a blob URL opened in a new tab runs in the app origin.
+INLINE_IMAGE_CONTENT_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+_MARKDOWN_SPECIALS = re.compile(r'([\\\[\]()<>"])')
+
+
+def detect_content_type(data: bytes, filename: Optional[str] = None) -> str:
+    """Content type from the bytes, through the upload allowlist.
+
+    The type a tool declares, and a filename extension alone, are never
+    trusted: anything the allowlist cannot classify is stored opaque.
+    Text types still need a matching extension plus clean UTF-8, as on upload.
+    """
+    kind = sniff_artifact_type(data[:16], filename, data)
+    if kind is None:
+        return OPAQUE_CONTENT_TYPE
+    return ARTIFACT_TYPE_CONTENT_TYPES.get(kind, OPAQUE_CONTENT_TYPE)
+
+
+def clean_filename(filename: str) -> str:
+    """Drop control characters (new lines included) from a tool filename."""
+    return _CONTROL_CHARS.sub(" ", str(filename)).strip() or "file"
+
+
+def md_escape(text: str) -> str:
+    """Make *text* safe as markdown link text: one line, no link syntax."""
+    return _MARKDOWN_SPECIALS.sub(r"\\\1", clean_filename(text))
 
 
 def _filename_from_uri(uri: Any) -> Optional[str]:
@@ -113,14 +154,15 @@ def _stub_text(
     """
     url = f"/artifacts/{artifact_id}"
     title = _provenance_title(server_name, tool_name)
+    label = md_escape(filename)
     link_line = (
-        f'![{filename}]({url} "{title}")' if is_image else f'[{filename}]({url} "{title}")'
+        f'![{label}]({url} "{title}")' if is_image else f'[{label}]({url} "{title}")'
     )
     meta: dict[str, Any] = {
         "artifact_id": artifact_id,
         "url": url,
         "content_type": content_type,
-        "filename": filename,
+        "filename": clean_filename(filename),
         "size_bytes": size_bytes,
     }
     # The sandbox path, without the users/.../conversations/... prefix.
@@ -293,7 +335,8 @@ class ArtifactInterceptor:
                     new_content.append(_warning_text("exceeds size limit"))
                     continue
 
-                content_type = block.mimeType or "application/octet-stream"
+                # block.mimeType is the tool's claim; only the bytes count.
+                content_type = detect_content_type(data)
                 ext = guess_extension_from_content_type(content_type)
                 filename = f"{tool_name}-{counter}.{ext}"
                 artifact, output_path = await self._persist(
@@ -301,7 +344,7 @@ class ArtifactInterceptor:
                 )
                 new_content.append(
                     _stub_text(
-                        is_image=True,
+                        is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -338,17 +381,16 @@ class ArtifactInterceptor:
                     new_content.append(_warning_text("exceeds size limit"))
                     continue
 
-                content_type = resource.mimeType or "application/octet-stream"
+                uri_filename = _filename_from_uri(getattr(resource, "uri", None))
+                content_type = detect_content_type(data, uri_filename)
                 ext = guess_extension_from_content_type(content_type)
-                filename = _filename_from_uri(getattr(resource, "uri", None)) or (
-                    f"{tool_name}-{counter}.{ext}"
-                )
+                filename = uri_filename or f"{tool_name}-{counter}.{ext}"
                 artifact, output_path = await self._persist(
                     data, content_type, filename, ctx, tool_name, server_name
                 )
                 new_content.append(
                     _stub_text(
-                        is_image=content_type.startswith("image/"),
+                        is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -397,6 +439,7 @@ class ArtifactInterceptor:
         tool_name: str,
         server_name: str,
     ) -> tuple[Artifact, Optional[str]]:
+        filename = clean_filename(filename)
         ext = guess_extension_from_content_type(content_type)
         key = storage_service.build_user_key(ctx.user_id, ext, prefix="artifacts")
         await storage_service.put_object(key, data, content_type)
@@ -507,8 +550,9 @@ class ArtifactInterceptor:
             if len(data) > ARTIFACT_MAX_BYTES:
                 return None
 
-            content_type = getattr(item, "mimeType", None) or "application/octet-stream"
-            prepared.append((data, content_type, _filename_from_uri(getattr(item, "uri", None))))
+            uri_filename = _filename_from_uri(getattr(item, "uri", None))
+            content_type = detect_content_type(data, uri_filename)
+            prepared.append((data, content_type, uri_filename))
 
         if not prepared:
             return None
@@ -526,7 +570,7 @@ class ArtifactInterceptor:
             )
             stubs.append(
                 _stub_text(
-                    is_image=content_type.startswith("image/"),
+                    is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                     filename=filename,
                     artifact_id=artifact.id,
                     content_type=content_type,

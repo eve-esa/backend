@@ -80,3 +80,28 @@ async def test_lookup_errors_fail_open(monkeypatch):
 
     answer = await append_missing_artifact_stubs("text", ["img1"])
     assert answer == "text"
+
+
+@pytest.mark.asyncio
+async def test_filenames_and_names_are_escaped_in_appended_stubs(patched_artifacts):
+    artifact = _fake_artifact("img1", "image/png", "x](https://phish.example)\n\n# hi")
+    artifact.source = SimpleNamespace(mcp_server='ev"il', tool_name="t")
+    patched_artifacts["img1"] = artifact
+
+    answer = await append_missing_artifact_stubs("Answer.", ["img1"])
+
+    stub = answer.split("\n\n", 1)[1].strip()
+    assert "\n" not in stub
+    assert "](https://phish" not in stub
+    assert stub.startswith("![x\\]\\(https://phish.example\\) # hi](/artifacts/img1 ")
+    assert stub.endswith('"MCP: evil/t")')
+
+
+@pytest.mark.asyncio
+async def test_a_non_image_type_gets_a_link_stub(patched_artifacts):
+    patched_artifacts["bin1"] = _fake_artifact("bin1", "image/svg+xml", "chart.svg")
+
+    answer = await append_missing_artifact_stubs("Answer.", ["bin1"])
+
+    assert "![" not in answer
+    assert '[chart.svg](/artifacts/bin1 "MCP: dummy/get_sample_image")' in answer

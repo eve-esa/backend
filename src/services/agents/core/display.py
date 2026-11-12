@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import mimetypes
 import re
 import urllib.parse
 from types import SimpleNamespace
@@ -34,8 +33,12 @@ from src.services.mcp.artifact_context import (
     ArtifactRequestContext,
     get_artifact_context,
 )
-from src.services.mcp.artifact_ingestion import ArtifactInterceptor, _stub_text
-from src.services.storage import ARTIFACT_TYPE_CONTENT_TYPES, sniff_artifact_type
+from src.services.mcp.artifact_ingestion import (
+    INLINE_IMAGE_CONTENT_TYPES,
+    ArtifactInterceptor,
+    _stub_text,
+    detect_content_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +142,7 @@ def _reuse(artifact: Artifact, ctx: ArtifactRequestContext) -> str:
         ctx.collected_artifact_ids.append(artifact.id)
     source = artifact.source
     return _stub_text(
-        is_image=(artifact.content_type or "").startswith("image/"),
+        is_image=artifact.content_type in INLINE_IMAGE_CONTENT_TYPES,
         filename=artifact.filename,
         artifact_id=artifact.id,
         content_type=artifact.content_type,
@@ -157,14 +160,12 @@ def _not_stored(path: str) -> str:
 
 
 def _content_type(data: bytes, filename: str) -> str:
-    """MIME type from the bytes, then the filename, then a generic type."""
-    kind = sniff_artifact_type(data[:16], filename, data)
-    if kind:
-        mapped = ARTIFACT_TYPE_CONTENT_TYPES.get(kind)
-        if mapped:
-            return mapped
-    guessed, _encoding = mimetypes.guess_type(filename)
-    return guessed or "application/octet-stream"
+    """MIME type from the bytes through the upload allowlist, else opaque.
+
+    The filename never decides on its own: a ``chart.svg`` or a ``plot.png``
+    holding HTML is stored as ``application/octet-stream``.
+    """
+    return detect_content_type(data, filename)
 
 
 def _resource_uri(path: str) -> str:

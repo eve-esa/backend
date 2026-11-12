@@ -376,3 +376,44 @@ async def test_stream_turn_includes_display_only_with_a_sandbox(monkeypatch):
 
     agent, _backend = await _run(monkeypatch, stream=True, sandbox=False)
     assert "display" not in _tool_names(agent)
+
+
+HTML_BYTES = b"<!doctype html><html><script>alert(1)</script></html>"
+SVG_BYTES = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        ("plot.png", HTML_BYTES),
+        ("chart.svg", SVG_BYTES),
+        ("page.html", HTML_BYTES),
+    ],
+)
+@pytest.mark.asyncio
+async def test_markup_is_never_stored_as_an_inline_type(stored, with_context, path, body):
+    tool = build_display_tool(_Backend(content=body))
+
+    try:
+        text = await tool.ainvoke({"path": path})
+        payload = _parse_stub(text)
+        assert not text.startswith("!")
+        assert payload["content_type"] == "application/octet-stream"
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert artifact.content_type == "application/octet-stream"
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_bracket_in_the_name_is_escaped(stored, with_context):
+    tool = build_display_tool(_Backend(content=PNG_BYTES))
+
+    try:
+        text = await tool.ainvoke({"path": "x](https:evil.example).png"})
+        link_line = text.split("\n", 1)[0]
+        assert "](https:evil" not in link_line
+        assert link_line.startswith("![")
+        assert link_line.count("](") == 1
+    finally:
+        await _cleanup()

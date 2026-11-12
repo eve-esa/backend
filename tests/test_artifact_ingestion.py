@@ -704,3 +704,169 @@ async def test_artifact_interceptor_is_last_in_tool_interceptors(monkeypatch):
     assert isinstance(interceptors[-1], ArtifactInterceptor)
     # bind_client() was called with this exact client instance (weakref resolves to it).
     assert interceptors[-1]._client_ref() is mock_client_instance
+
+
+# ---------------- types come from the bytes, never from the tool -----------------
+
+SVG_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+)
+HTML_BYTES = b"<!doctype html><html><script>alert(1)</script></html>"
+
+
+@pytest.mark.asyncio
+async def test_svg_declared_as_png_is_not_stored_as_an_inline_image(
+    interceptor, with_context
+):
+    """A tool that labels SVG bytes image/png gets an opaque download, not an image."""
+    icept, fake = interceptor
+    result = CallToolResult(
+        content=[
+            ImageContent(
+                type="image",
+                data=base64.b64encode(SVG_BYTES).decode("ascii"),
+                mimeType="image/png",
+            )
+        ]
+    )
+
+    out = await icept(_request(name="chart"), _handler(result))
+
+    try:
+        stub = out.content[0]
+        payload = _parse_stub(stub)
+        assert payload["content_type"] == "application/octet-stream"
+        assert not stub.text.startswith("!")
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert artifact.content_type == "application/octet-stream"
+        assert fake.objects[artifact.key]["content_type"] == "application/octet-stream"
+        assert not artifact.key.endswith((".svg", ".png"))
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_png_declared_with_a_wrong_type_is_stored_as_png(
+    interceptor, with_context
+):
+    icept, _fake = interceptor
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/svg+xml")]
+    )
+
+    out = await icept(_request(name="chart"), _handler(result))
+
+    try:
+        stub = out.content[0]
+        payload = _parse_stub(stub)
+        assert payload["content_type"] == "image/png"
+        assert stub.text.startswith("![chart-1.png]")
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert artifact.content_type == "image/png"
+        assert artifact.key.endswith(".png")
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.parametrize(
+    "declared, uri",
+    [
+        ("image/svg+xml", "resource://tool/chart.svg"),
+        ("text/html", "resource://tool/page.html"),
+        ("image/png", "resource://tool/chart.png"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_embedded_markup_is_never_an_inline_type(
+    interceptor, with_context, declared, uri
+):
+    icept, _fake = interceptor
+    body = SVG_BYTES if "svg" in uri else HTML_BYTES
+    resource = EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=uri, mimeType=declared, blob=base64.b64encode(body).decode("ascii")
+        ),
+    )
+
+    out = await icept(_request(name="render"), _handler(CallToolResult(content=[resource])))
+
+    try:
+        stub = out.content[0]
+        payload = _parse_stub(stub)
+        assert payload["content_type"] == "application/octet-stream"
+        assert not stub.text.startswith("!")
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_resource_link_html_declared_as_image_is_octet_stream(
+    interceptor, with_context
+):
+    icept, _fake = interceptor
+    session = _FakeSession(
+        contents=[
+            TextResourceContents(
+                uri="resource://tool/page.html", mimeType="image/png", text=HTML_BYTES.decode()
+            )
+        ]
+    )
+    # Keep a strong reference: the interceptor holds the client by weakref.
+    client = _FakeBoundClient(session)
+    icept.bind_client(client)
+    link = ResourceLink(type="resource_link", name="page", uri="resource://tool/page.html")
+
+    out = await icept(_request(name="export"), _handler(CallToolResult(content=[link])))
+
+    try:
+        stub = out.content[0]
+        payload = _parse_stub(stub)
+        assert payload["content_type"] == "application/octet-stream"
+        assert not stub.text.startswith("!")
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.parametrize(
+    "uri_name",
+    [
+        "x%5D(javascript:alert(1))",
+        "x%5D(https://phish.example)",
+        "a%0A%0A%5Bclick%5D(https://phish.example)",
+    ],
+)
+@pytest.mark.asyncio
+async def test_filename_is_escaped_in_the_markdown_stub(
+    interceptor, with_context, uri_name, monkeypatch
+):
+    icept, _fake = interceptor
+    from urllib.parse import unquote
+
+    raw_name = unquote(uri_name)
+    resource = EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri="resource://tool/report.pdf",
+            mimeType="application/pdf",
+            blob=base64.b64encode(b"%PDF-1.4 x").decode("ascii"),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.services.mcp.artifact_ingestion._filename_from_uri", lambda uri: raw_name
+    )
+    out = await icept(_request(name="make"), _handler(CallToolResult(content=[resource])))
+
+    try:
+        stub = out.content[0]
+        link_line, meta_line = stub.text.split("\n")
+        assert "](javascript:" not in link_line
+        assert "](https://phish" not in link_line
+        # One link only: the text part closes exactly once, before the URL.
+        assert link_line.count("](/artifacts/") == 1
+        assert link_line.count("](") == 1
+        assert "\\]" in link_line and "\\(" in link_line
+        payload = json.loads(meta_line)
+        assert "\n" not in payload["filename"]
+    finally:
+        await _cleanup()

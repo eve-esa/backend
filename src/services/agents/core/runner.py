@@ -1120,6 +1120,11 @@ async def append_missing_artifact_stubs(
         return answer
     try:
         from src.database.models.artifact import Artifact
+        from src.services.mcp.artifact_ingestion import (
+            INLINE_IMAGE_CONTENT_TYPES,
+            _provenance_title,
+            md_escape,
+        )
 
         lines: List[str] = []
         for artifact_id in artifact_ids:
@@ -1130,13 +1135,14 @@ async def append_missing_artifact_stubs(
             if not artifact:
                 continue
             source = getattr(artifact, "source", None)
-            server = getattr(source, "mcp_server", None) or "unknown"
-            tool = getattr(source, "tool_name", None) or "tool"
-            title = f"MCP: {server}/{tool}"
-            if (artifact.content_type or "").startswith("image/"):
-                lines.append(f'![{artifact.filename}]({url} "{title}")')
+            title = _provenance_title(
+                getattr(source, "mcp_server", None), getattr(source, "tool_name", None)
+            )
+            label = md_escape(artifact.filename or "file")
+            if artifact.content_type in INLINE_IMAGE_CONTENT_TYPES:
+                lines.append(f'![{label}]({url} "{title}")')
             else:
-                lines.append(f'[{artifact.filename}]({url} "{title}")')
+                lines.append(f'[{label}]({url} "{title}")')
         if lines:
             answer = answer.rstrip() + "\n\n" + "\n\n".join(lines) + "\n"
     except Exception:
