@@ -235,6 +235,28 @@ class CancelManager:
                 return None
         return None
 
+    async def wait_until_finished(
+        self, conversation_id: str, message_id: str, timeout: float
+    ) -> bool:
+        """Wait for a generation to end; True when it did within timeout.
+
+        The local task is awaited when this worker owns it. Otherwise the
+        conversation mapping is polled: the owner clears it on exit.
+        """
+        task = self._tasks.get(message_id)
+        if task is not None:
+            await asyncio.wait({task}, timeout=timeout)
+            return task.done()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            active = await self.get_message_for_conversation_async(conversation_id)
+            if active != message_id:
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.25)
+
     def cancel_by_conversation(self, conversation_id: str) -> Optional[str]:
         message_id = self._conv_to_msg.get(conversation_id)
         if message_id:

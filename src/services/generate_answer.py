@@ -272,6 +272,7 @@ async def persist_message_state(
     artifact_ids: Optional[List[str]] = None,
     endpoint: Optional[Dict[str, Any]] = None,
     trace_id: Optional[str] = None,
+    clear_error: bool = False,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -282,6 +283,7 @@ async def persist_message_state(
     - Sets Message.trace (agentic execution trace) if provided.
     - Sets Message.artifact_ids (MCP-produced artifacts from this run) if provided.
     - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
+    - Drops metadata.error when clear_error is set and no new error is given.
     """
     if stopped:
         # The answer's root span reads it: a stopped turn, not a failed one.
@@ -326,6 +328,10 @@ async def persist_message_state(
                 # failures, and legacy documents store a plain string here
                 # that a dict merge would crash on.
                 existing_metadata["error"] = filtered_error
+        elif clear_error:
+            # The same message can be written by an overlapping retry, so a
+            # successful answer must not inherit that run's failure marker.
+            existing_metadata.pop("error", None)
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -2157,6 +2163,7 @@ async def _classic_stream_events(
             retrieved_docs=retrieved_docs,
             generated_model_name=generated_model_name,
             endpoint=endpoint_metadata,
+            clear_error=bool(answer),
         )
 
         if background_tasks:
