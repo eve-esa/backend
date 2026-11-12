@@ -9,8 +9,10 @@ separate path (not this router) and are read-only here.
 
 import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -32,6 +34,8 @@ from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
+    INLINE_CONTENT_TYPES,
+    OPAQUE_CONTENT_TYPE,
     ObjectNotFoundError,
     sniff_artifact_type,
     storage_service,
@@ -44,18 +48,10 @@ logger = logging.getLogger(__name__)
 # Collection holding the atomic per-user-per-day upload counters.
 QUOTA_COLLECTION = "image_upload_quota"
 
-# Content types allowed to be served with `Content-Disposition: inline`. Anything
-# else (html, svg, unknown) is forced to `attachment` so a browser never
-# executes a stored artifact as a page (stored-XSS defense).
-INLINE_CONTENT_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "application/pdf",
-    "text/plain",
-    "application/json",
-}
+# Characters that never reach a filename in a header: controls (CR/LF split
+# the header, the rest make uvicorn refuse it), quotes, backslashes and path
+# separators.
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f\x7f"\\/]+')
 
 
 async def reserve_daily_quota_slot(user_id: str) -> None:
@@ -97,16 +93,14 @@ async def reserve_daily_quota_slot(user_id: str) -> None:
 
 
 async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifact:
-    """Fetch an artifact and validate that the requesting user owns it."""
+    """Fetch an artifact the requesting user owns.
+
+    A missing id and another user's id both answer 404, so the answer never
+    confirms that someone else's artifact exists.
+    """
     artifact = await Artifact.find_by_id(artifact_id)
-    if not artifact:
+    if not artifact or artifact.user_id != requesting_user.id:
         raise HTTPException(status_code=404, detail="Artifact not found")
-
-    if artifact.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="You are not allowed to access this artifact"
-        )
-
     return artifact
 
 
@@ -119,6 +113,44 @@ def require_uploads_enabled() -> None:
     """
     if not config.FEATURE_ARTIFACT_UPLOADS:
         raise HTTPException(status_code=404, detail="Not Found")
+
+
+def serving_headers(artifact: Artifact) -> tuple[str, str]:
+    """Media type and ``Content-Disposition`` an artifact is served with.
+
+    Only the inline allowlist keeps its stored type. Anything else, including
+    rows stored as ``image/svg+xml`` or ``text/html`` before the type came
+    from the bytes, is served as ``application/octet-stream`` with
+    ``attachment``, so neither a browser tab nor a blob URL renders it.
+    """
+    if artifact.content_type in INLINE_CONTENT_TYPES:
+        return artifact.content_type, content_disposition("inline", artifact.filename)
+    return OPAQUE_CONTENT_TYPE, content_disposition("attachment", artifact.filename)
+
+
+def content_disposition(disposition: str, filename: Optional[str]) -> str:
+    """``Content-Disposition`` value that any filename can travel in (RFC 6266).
+
+    Header values are encoded as latin-1, so a raw CJK, emoji or U+202F name
+    raised and the route answered 500. An ASCII name keeps the plain
+    ``filename="..."`` form. Any other name gets an ASCII fallback (accents
+    folded, the rest as ``_``) plus ``filename*=UTF-8''<percent-encoded>``.
+    Control characters, quotes, backslashes and path separators become ``_``
+    in both, so the header cannot be split or refused, nor the name used as
+    a path.
+    """
+    name = _UNSAFE_FILENAME_CHARS.sub("_", filename or "").strip() or "artifact"
+    if name.isascii():
+        return f'{disposition}; filename="{name}"'
+    fallback = "".join(
+        char if char.isascii() and char.isprintable() else "_"
+        for char in unicodedata.normalize("NFKD", name)
+        if not unicodedata.combining(char)
+    )
+    return (
+        f'{disposition}; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(name, safe='')}"
+    )
 
 
 @router.post(
@@ -240,14 +272,22 @@ async def get_artifact_presigned_url(
         artifact_id (str): Artifact identifier.
         requesting_user (User): Authenticated user injected by dependency.
 
+    The type and disposition are signed into the URL, so storage serves the
+    same headers as ``GET /artifacts/{id}`` whatever type the object carries.
+
     Returns:
         The presigned URL and its TTL in seconds.
 
     Raises:
-        HTTPException: 404 if not found; 403 if access is forbidden.
+        HTTPException: 404 if missing or owned by another user.
     """
     artifact = await get_owned_artifact(artifact_id, requesting_user)
-    url = await storage_service.generate_presigned_get(artifact.key)
+    media_type, disposition = serving_headers(artifact)
+    url = await storage_service.generate_presigned_get(
+        artifact.key,
+        response_content_type=media_type,
+        response_content_disposition=disposition,
+    )
     return {"url": url, "expires_in": S3_PRESIGN_TTL_SECONDS}
 
 
@@ -267,11 +307,11 @@ async def get_artifact(
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
-        Streaming response with the stored media type and caching headers.
+        Streaming response with the served media type and caching headers.
 
     Raises:
-        HTTPException: 404 if the record is missing or its bytes are gone from
-        storage; 403 if access is forbidden.
+        HTTPException: 404 if the record is missing, owned by another user, or
+        its bytes are gone from storage.
     """
     artifact = await get_owned_artifact(artifact_id, requesting_user)
     try:
@@ -286,16 +326,7 @@ async def get_artifact(
             status_code=404, detail="Artifact content is no longer available"
         )
 
-    # Sanitize the filename for the header (display-only): drop CR/LF, quotes,
-    # backslashes and path separators to prevent header injection.
-    safe_filename = re.sub(r'[\r\n"\\/]+', "_", artifact.filename or "artifact")
-
-    # Only a known-safe set of types render inline; everything else (html, svg,
-    # unrecognized) is forced to download so a stored artifact is never executed
-    # as a page by the browser.
-    disposition = (
-        "inline" if artifact.content_type in INLINE_CONTENT_TYPES else "attachment"
-    )
+    media_type, disposition = serving_headers(artifact)
 
     headers = {
         # Per-user authorized payload: force revalidation so a shared browser
@@ -305,7 +336,7 @@ async def get_artifact(
         "Vary": "Authorization",
         # Never let the browser MIME-sniff a mismatched/hostile type.
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": f'{disposition}; filename="{safe_filename}"',
+        "Content-Disposition": disposition,
     }
     etag = response.get("ETag")
     if etag:
@@ -316,7 +347,7 @@ async def get_artifact(
 
     return StreamingResponse(
         storage_service.stream_body(response["Body"]),
-        media_type=artifact.content_type,
+        media_type=media_type,
         headers=headers,
     )
 

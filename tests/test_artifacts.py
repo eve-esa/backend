@@ -386,8 +386,8 @@ async def test_get_artifact_owner(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
-    """A different user cannot fetch someone else's artifact (403)."""
+async def test_get_artifact_other_user_not_found(async_client, monkeypatch):
+    """A different user gets 404 for someone else's artifact, not 403."""
 
     _use_fake_storage(monkeypatch)
     owner, owner_token = await create_test_user_and_token()
@@ -400,7 +400,7 @@ async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
         resp = await async_client.get(
             f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {intr_token}"}
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
     finally:
         await Artifact.delete_many({"user_id": owner.id})
         await cleanup_models([owner, intruder])
@@ -849,8 +849,8 @@ async def test_message_with_legacy_image_ids_alias_accepted(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_message_with_other_users_image_forbidden(async_client, monkeypatch):
-    """Attaching another user's artifact to a message is forbidden (403)."""
+async def test_message_with_other_users_image_not_found(async_client, monkeypatch):
+    """Attaching another user's artifact to a message answers 404, not 403."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -875,7 +875,7 @@ async def test_message_with_other_users_image_forbidden(async_client, monkeypatc
             json={"query": "look", "artifact_ids": [image_id]},
             headers={"Authorization": f"Bearer {intr_token}"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
         await async_client.delete(
             f"/conversations/{conv_id}",

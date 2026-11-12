@@ -50,5 +50,17 @@ class FakeStorage:
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
-    async def generate_presigned_get(self, key, expires_in=None):
+    async def generate_presigned_get(
+        self,
+        key,
+        expires_in=None,
+        *,
+        response_content_type=None,
+        response_content_disposition=None,
+    ):
+        self.last_presign = {
+            "key": key,
+            "response_content_type": response_content_type,
+            "response_content_disposition": response_content_disposition,
+        }
         return f"http://minio.local/{key}?signed=1"

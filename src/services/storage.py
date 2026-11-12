@@ -82,6 +82,24 @@ ARTIFACT_TYPE_CONTENT_TYPES = {
     "geojson": "application/geo+json",
 }
 
+# Raster types the chat embeds as images. SVG is never one of them: it can
+# carry script, and a blob URL opened in a new tab runs in the app origin.
+INLINE_IMAGE_CONTENT_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Types served with their own media type and ``Content-Disposition: inline``.
+# Anything else (html, svg, csv, unknown) is served as
+# ``application/octet-stream`` with ``attachment``, so a stored file is never
+# rendered or executed by the browser (stored-XSS defense).
+INLINE_CONTENT_TYPES = INLINE_IMAGE_CONTENT_TYPES | {
+    "application/pdf",
+    "text/plain",
+    "application/json",
+}
+
+OPAQUE_CONTENT_TYPE = "application/octet-stream"
+
 # Text-like artifact types that have no magic bytes to sniff. Detecting them
 # safely requires BOTH a matching file extension AND a decodable, NUL-free
 # UTF-8 payload (see sniff_artifact_type) so an uploader can't smuggle
@@ -390,14 +408,28 @@ class StorageService:
         )
 
     async def generate_presigned_get(
-        self, key: str, expires_in: Optional[int] = None
+        self,
+        key: str,
+        expires_in: Optional[int] = None,
+        *,
+        response_content_type: Optional[str] = None,
+        response_content_disposition: Optional[str] = None,
     ) -> str:
-        """Generate a short-TTL presigned GET URL (never persist it)."""
+        """Generate a short-TTL presigned GET URL (never persist it).
+
+        The ``response_*`` overrides are signed into the URL, so storage
+        answers with them instead of the type stored on the object.
+        """
         ttl = expires_in or S3_PRESIGN_TTL_SECONDS
+        params = {"Bucket": S3_BUCKET_NAME, "Key": key}
+        if response_content_type:
+            params["ResponseContentType"] = response_content_type
+        if response_content_disposition:
+            params["ResponseContentDisposition"] = response_content_disposition
         return await run_in_threadpool(
             lambda: self._client().generate_presigned_url(
                 "get_object",
-                Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+                Params=params,
                 ExpiresIn=ttl,
             )
         )

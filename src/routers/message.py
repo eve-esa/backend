@@ -178,7 +178,7 @@ async def resolve_artifact_attachments(
         A list of attachment dicts, or None if no artifacts were requested.
 
     Raises:
-        HTTPException: 404 if any artifact is missing; 403 if any belongs to another user.
+        HTTPException: 404 if any artifact is missing or belongs to another user.
     """
     if not artifact_ids:
         return None
@@ -188,14 +188,13 @@ async def resolve_artifact_attachments(
 
     attachments = []
     for artifact_id in unique_artifact_ids:
-        artifact = await Artifact.find_by_id(artifact_id)
-        if not artifact:
+        # Primary: the upload may be the previous request, and a secondary
+        # that has not caught up would answer "not found". Another user's
+        # artifact answers the same 404, so its existence is not confirmed.
+        artifact = await Artifact.find_by_id_on_primary(artifact_id)
+        if not artifact or artifact.user_id != requesting_user.id:
             raise HTTPException(
                 status_code=404, detail=f"Image {artifact_id} not found"
-            )
-        if artifact.user_id != requesting_user.id:
-            raise HTTPException(
-                status_code=403, detail="You are not allowed to use this image"
             )
         if artifact.conversation_id != conversation_id:
             artifact.conversation_id = conversation_id

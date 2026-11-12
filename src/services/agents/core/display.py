@@ -159,15 +159,6 @@ def _not_stored(path: str) -> str:
     )
 
 
-def _content_type(data: bytes, filename: str) -> str:
-    """MIME type from the bytes through the upload allowlist, else opaque.
-
-    The filename never decides on its own: a ``chart.svg`` or a ``plot.png``
-    holding HTML is stored as ``application/octet-stream``.
-    """
-    return detect_content_type(data, filename)
-
-
 def _resource_uri(path: str) -> str:
     """URI whose last segment is the display filename.
 
@@ -242,7 +233,9 @@ def build_display_tool(backend: Any) -> StructuredTool:
         try:
             block = _embedded(
                 wanted,
-                _content_type(data, filename),
+                # The bytes decide, through the upload allowlist; the filename
+                # alone never does (a plot.png holding HTML is stored opaque).
+                detect_content_type(data, filename),
                 base64.b64encode(data).decode("ascii"),
             )
         except ValidationError:

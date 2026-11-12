@@ -41,6 +41,8 @@ from src.services.mcp.tool_artifacts import (
 )
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
+    INLINE_IMAGE_CONTENT_TYPES,
+    OPAQUE_CONTENT_TYPE,
     guess_extension_from_content_type,
     sniff_artifact_type,
     storage_service,
@@ -63,14 +65,6 @@ try:
 except Exception:
     _mcp_types_available = False
 
-
-OPAQUE_CONTENT_TYPE = "application/octet-stream"
-
-# Raster types the chat embeds as images. SVG is never one of them: it can
-# carry script, and a blob URL opened in a new tab runs in the app origin.
-INLINE_IMAGE_CONTENT_TYPES = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp"}
-)
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 _MARKDOWN_SPECIALS = re.compile(r'([\\\[\]()<>"])')
@@ -113,18 +107,19 @@ def _filename_from_uri(uri: Any) -> Optional[str]:
 def _provenance_title(server_name: Optional[str], tool_name: Optional[str]) -> str:
     """Build a plain, quote-safe markdown title attributing the MCP source.
 
-    Double quotes are stripped from both names since markdown's title syntax
-    delimits with them (`"title"`); an unescaped quote in a server/tool name
-    would otherwise break the link/image syntax. Falls back to a bare "MCP"
-    when either name is missing/unresolved rather than embedding one of this
-    module's internal placeholder defaults ("unknown", "tool") as if it were
-    real data.
+    Server names are user-registered, so both names lose control characters
+    (a blank line would end the paragraph), double quotes (the title
+    delimiter) and backslashes (which would escape the closing quote). Falls
+    back to a bare "MCP" when either name is missing/unresolved rather than
+    embedding one of this module's internal placeholder defaults ("unknown",
+    "tool") as if it were real data.
     """
 
     def _clean(value: Optional[str]) -> Optional[str]:
         if not value or value in ("unknown", "tool"):
             return None
-        return value.replace('"', "")
+        cleaned = _CONTROL_CHARS.sub(" ", str(value)).replace('"', "").replace("\\", "")
+        return cleaned.strip() or None
 
     server = _clean(server_name)
     tool = _clean(tool_name)
@@ -133,9 +128,30 @@ def _provenance_title(server_name: Optional[str], tool_name: Optional[str]) -> s
     return "MCP"
 
 
+def artifact_markdown_line(
+    *,
+    artifact_id: str,
+    filename: Optional[str],
+    content_type: Optional[str],
+    server_name: Optional[str] = None,
+    tool_name: Optional[str] = None,
+) -> str:
+    """The one markdown reference to a stored artifact.
+
+    An image embed only for the raster allowlist, a plain link for anything
+    else (SVG and HTML included). Used by the tool stub and by the stubs the
+    runner appends to an answer, so both always agree.
+    """
+    url = f"/artifacts/{artifact_id}"
+    title = _provenance_title(server_name, tool_name)
+    label = md_escape(filename or "file")
+    if content_type in INLINE_IMAGE_CONTENT_TYPES:
+        return f'![{label}]({url} "{title}")'
+    return f'[{label}]({url} "{title}")'
+
+
 def _stub_text(
     *,
-    is_image: bool,
     filename: str,
     artifact_id: str,
     content_type: str,
@@ -153,10 +169,12 @@ def _stub_text(
     in that JSON is the sandbox location when a conversation copy was stored.
     """
     url = f"/artifacts/{artifact_id}"
-    title = _provenance_title(server_name, tool_name)
-    label = md_escape(filename)
-    link_line = (
-        f'![{label}]({url} "{title}")' if is_image else f'[{label}]({url} "{title}")'
+    link_line = artifact_markdown_line(
+        artifact_id=artifact_id,
+        filename=filename,
+        content_type=content_type,
+        server_name=server_name,
+        tool_name=tool_name,
     )
     meta: dict[str, Any] = {
         "artifact_id": artifact_id,
@@ -344,7 +362,6 @@ class ArtifactInterceptor:
                 )
                 new_content.append(
                     _stub_text(
-                        is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -390,7 +407,6 @@ class ArtifactInterceptor:
                 )
                 new_content.append(
                     _stub_text(
-                        is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -570,7 +586,6 @@ class ArtifactInterceptor:
             )
             stubs.append(
                 _stub_text(
-                    is_image=content_type in INLINE_IMAGE_CONTENT_TYPES,
                     filename=filename,
                     artifact_id=artifact.id,
                     content_type=content_type,
