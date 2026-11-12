@@ -50,6 +50,7 @@ from src.services.generate_answer import (
     raise_if_deadline_expired,
     resolve_generated_model_name,
 )
+from src.services.agents.core.display import build_display_tool
 from src.services.agents.core.history_search import (
     build_history_tools,
     note_searchable_history,
@@ -1565,6 +1566,10 @@ async def generate_answer_agentic(
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
         step_start = time.perf_counter()
         held = sandbox_lease if sandbox_lease is not None else sandbox_session
+        # Append, do not rebuild the list. It may be a _MCPToolsWithClient,
+        # and a new list would drop the client strong reference.
+        if held is not None:
+            tools.append(build_display_tool(held.backend))
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -1949,6 +1954,10 @@ async def generate_answer_agentic_stream_helper(
             )
             if sandbox_lease is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
+        # Append, do not rebuild the list. It may be a _MCPToolsWithClient,
+        # and a new list would drop the client strong reference.
+        if sandbox_lease is not None:
+            tools.append(build_display_tool(sandbox_lease.backend))
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
