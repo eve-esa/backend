@@ -357,6 +357,11 @@ FEATURE_LANGFUSE_SCORES = getenv_or("FEATURE_LANGFUSE_SCORES").lower() == "true"
 FEATURE_CONVERSATION_DOCUMENTS = (
     getenv_or("FEATURE_CONVERSATION_DOCUMENTS").lower() == "true"
 )
+# On: POST /conversations/{id}/agui streams an agentic turn as AG-UI 1.0 events
+# (src/routers/agui.py). Off: the route answers 404 and the legacy
+# stream-generate-agentic route is the only agentic stream. Default off, like
+# FEATURE_JSC_MODEL: only "true" turns it on.
+FEATURE_AGUI_STREAM = getenv_or("FEATURE_AGUI_STREAM").lower() == "true"
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
