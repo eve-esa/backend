@@ -5,6 +5,9 @@
 # Test suite
 pytest==9.1.1
 pytest-asyncio==1.4.0
+# AG-UI transcript validator (tests/agui): the protocol models and the 1.0 JSON schema check.
+ag-ui-protocol==1.0.0
+jsonschema==4.26.0
 
 # Docs toolchain (mkdocs.yml)
 mkdocs==1.6.1

@@ -1,0 +1,6 @@
+data: {"type":"RUN_STARTED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","protocolVersion":"1.0","metadata":{"eve.traceId":"4481c48c462beed158f2fe9a26f5b456","eve.conversationId":"6a3f0c2e9b1d4e7f8a2b3c4d","eve.messageId":"6a3f0c4a9b1d4e7f8a2b3c55","eve.graph":"react"}}
+
+data: {"type":"TEXT_MESSAGE_CHUNK","messageId":"6a3f0c4a9b1d4e7f8a2b3c55","delta":"Partial ans"}
+
+data: {"type":"RUN_FINISHED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","metadata":{"eve.stopped":true}}
+
