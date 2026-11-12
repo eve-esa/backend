@@ -55,6 +55,8 @@ from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import get_owned_custom_model
 from src.services.hallucination_detector import (
     HallucinationDetector,
+    build_tool_evidence,
+    hallucination_answer_prompt,
     load_new_turn_history_prefix,
 )
 from src.services.langfuse_scores import schedule_feedback_scores
@@ -1415,6 +1417,7 @@ async def hallucination_detect(
             docs=build_context(message.documents),
             llm_type=message.request_input.llm_type,
             conversation=conversation_prefix,
+            tool_evidence=build_tool_evidence(getattr(message, "trace", None)),
         )
         total_latency = time.perf_counter() - total_start
 
@@ -1511,8 +1514,6 @@ async def stream_hallucination(
         import json
         import time
 
-        from src.utils.template_loader import get_template
-
         total_start = time.perf_counter()
         detector = HallucinationDetector()
         try:
@@ -1531,6 +1532,7 @@ async def stream_hallucination(
                 docs=build_context(message.documents),
                 llm_type=message.request_input.llm_type,
                 conversation=conversation_prefix,
+                tool_evidence=build_tool_evidence(getattr(message, "trace", None)),
             )
             detect_latency = time.perf_counter() - t0
 
@@ -1646,11 +1648,8 @@ async def stream_hallucination(
                 context = ""
 
             # Step 4: Stream final answer from LLM using the hallucination answer template
-            template = get_template(
-                "llm_answer_template", filename="hallucination_detector.yaml"
-            )
             # Inject retrieved context for better grounding
-            prompt = template.format(query=rewritten_question or message.input)
+            prompt = hallucination_answer_prompt(rewritten_question or message.input)
             if context:
                 prompt = f"{prompt}\n\nContext:\n{context}"
 
