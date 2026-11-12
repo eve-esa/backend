@@ -13,6 +13,10 @@ from src.services.mcp.artifact_ingestion import ArtifactInterceptor
 from src.services.mcp.retrieval_ingestion import RetrievalContextInterceptor
 from src.services.mcp.proxy_url import backend_mcp_proxy_url
 from src.services.mcp.tool_cache import get_or_load_mcp_tools
+from src.services.mcp.user_token_scope import (
+    announce_user_token_forwarded,
+    forwards_user_token,
+)
 from src.services.mcp_auth import get_cognito_token_provider
 from src.utils.error_logger import persist_policy_event
 
@@ -128,16 +132,20 @@ def _build_mcp_connections(
         else:
             if cognito_auth_header and "Authorization" not in headers:
                 headers["Authorization"] = cognito_auth_header
-            # Forward the caller's EVE credential so the MCP server
-            # impersonates the user on its downstream EVE API call
-            # (``X-EVE-Token`` → the server's ``_resolve_eve_token``).
-            # Without it the server falls back to its shared ``EVE_API_KEY``
-            # and user-scoped private collections are dropped by the
-            # backend's ownership check. The connection is cached for
-            # ``MCP_TOOLS_CACHE_TTL`` (300 s), well inside the EVE JWT
-            # lifetime, so the baked token stays valid for the cache window.
-            if mcp_proxy_bearer_token:
+            # Forward the caller's EVE credential only to a server that calls
+            # back into EVE as the user (retrieval: ``X-EVE-Token`` → the
+            # server's ``_resolve_eve_token``, so private collections pass the
+            # ownership check). The token can manage the user's API keys, so
+            # every other server gets none (``user_token_scope``). The
+            # connection is cached for ``MCP_TOOLS_CACHE_TTL`` (300 s), well
+            # inside the EVE JWT lifetime.
+            if mcp_proxy_bearer_token and forwards_user_token(
+                name=srv.name,
+                user_id=getattr(srv, "user_id", None),
+                forward_user_token=getattr(srv, "forward_user_token", None),
+            ):
                 headers["X-EVE-Token"] = mcp_proxy_bearer_token
+                announce_user_token_forwarded(srv.name)
             url = srv.config.url
 
         connection: Dict[str, Any] = {

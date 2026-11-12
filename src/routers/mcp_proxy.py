@@ -32,6 +32,10 @@ from src.middlewares.auth import (
 from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
+from src.services.mcp.user_token_scope import (
+    announce_user_token_forwarded,
+    forwards_user_token,
+)
 from src.services.oidc import IdentityProviderUnavailable
 from src.services.request_rate_limiter import (
     LIMITER_UNAVAILABLE_DETAIL,
@@ -66,11 +70,12 @@ _proxy_build_lock = asyncio.Lock()
 # user on downstream EVE API calls (e.g. ``eve_retrieval`` → ``POST /retrieve``).
 # Without it the MCP server falls back to its shared ``EVE_API_KEY`` and
 # user-scoped private collections are dropped by the backend's ownership check.
+# Set only for servers allowed to receive it (``user_token_scope``), else None.
 _user_eve_token_var: ContextVar[str | None] = ContextVar(
     "mcp_proxy_user_eve_token", default=None
 )
 
-# Cache of (server_name, user_id) → (agentcore_url, expiry_monotonic).
+# Cache of (server_name, user_id) → (agentcore_url, forward_user_token, expiry_monotonic).
 # Avoids a MongoDB round-trip on every proxy request when the result is stable.
 # TTL matches MCP_TOOLS_CACHE_TTL so both caches expire together.
 # Per-server_name locks ensure at most one concurrent cold-miss fetch.
@@ -501,7 +506,8 @@ class MCPProxyDispatcher:
         ``user_token`` is the caller's EVE credential, published to the
         per-request ``_user_eve_token_var`` contextvar so ``_DynamicBearerAuth``
         can forward it as ``X-EVE-Token`` to the upstream MCP server (see the
-        docstring there for why user-scoped retrieval depends on it).
+        docstring there for why user-scoped retrieval depends on it). It is
+        ``None`` for servers not allowed to receive it (``_resolve_proxy``).
         """
         # Publish the caller's token for the lifetime of this proxied call only:
         # the proxy app is shared across users, so the contextvar must not leak
@@ -614,16 +620,16 @@ class MCPProxyDispatcher:
         now = time.monotonic()
         cached = _server_url_cache.get(cache_key)
 
-        if cached and now < cached[1]:
-            agentcore_url = cached[0]
+        if cached and now < cached[2]:
+            agentcore_url, forward_token = cached[0], cached[1]
         else:
             lock = await _get_server_url_lock(server_name)
             async with lock:
                 # Re-check after acquiring lock — another coroutine may have
                 # already refreshed the entry while we were waiting.
                 cached = _server_url_cache.get(cache_key)
-                if cached and time.monotonic() < cached[1]:
-                    agentcore_url = cached[0]
+                if cached and time.monotonic() < cached[2]:
+                    agentcore_url, forward_token = cached[0], cached[1]
                 else:
                     mcp_servers = get_collection("mcp_servers")
                     server = await mcp_servers.find_one(
@@ -632,7 +638,7 @@ class MCPProxyDispatcher:
                             "enabled": True,
                             "$or": [{"user_id": user_id}, {"user_id": None}],
                         },
-                        {"config.url": 1},
+                        {"config.url": 1, "name": 1, "user_id": 1, "forward_user_token": 1},
                     )
                     if (
                         not server
@@ -643,8 +649,14 @@ class MCPProxyDispatcher:
                             f"MCP server '{server_name}' not found or not accessible"
                         )
                     agentcore_url = server["config"]["url"]
+                    forward_token = forwards_user_token(
+                        name=server.get("name", server_name),
+                        user_id=server.get("user_id"),
+                        forward_user_token=server.get("forward_user_token"),
+                    )
                     _server_url_cache[cache_key] = (
                         agentcore_url,
+                        forward_token,
                         time.monotonic() + MCP_TOOLS_CACHE_TTL,
                     )
                     logger.debug(
@@ -659,6 +671,12 @@ class MCPProxyDispatcher:
             raise RuntimeError("AgentCore authentication is not configured")
 
         proxy_app = await build_proxy_app(agentcore_url, provider)
+        # The caller's token goes upstream only to a server that calls back
+        # into EVE as the user; every other server gets the Cognito M2M token
+        # alone (the token can manage the user's API keys).
+        if not forward_token:
+            return proxy_app, principal, None
+        announce_user_token_forwarded(server_name)
         return proxy_app, principal, token
 
     @staticmethod
