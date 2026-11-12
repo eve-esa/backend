@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,9 @@ from src.services.mcp_auth import get_cognito_token_provider
 from src.utils.error_logger import persist_policy_event
 
 logger = logging.getLogger(__name__)
+
+# Tool metadata key naming the MCP server row a tool was loaded from.
+MCP_SERVER_METADATA_KEY = "eve_mcp_server"
 
 LatencyInterceptor = graphs_base_module().LatencyInterceptor
 
@@ -219,6 +223,14 @@ async def _discover_mcp_tools_uncached(
     async def _load_one(server_name: str) -> tuple[str, Optional[List[Any]]]:
         try:
             server_tools = await client.get_tools(server_name=server_name)
+            # The stream frames name the server from this stamp, not from the
+            # tool name prefix (`eve_retrieval_retrieve` has two underscores).
+            for tool in server_tools:
+                with contextlib.suppress(Exception):
+                    tool.metadata = {
+                        **(getattr(tool, "metadata", None) or {}),
+                        MCP_SERVER_METADATA_KEY: server_name,
+                    }
             logger.info(
                 "Loaded %d MCP tool(s) from server %r: %s",
                 len(server_tools),
