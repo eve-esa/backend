@@ -612,14 +612,16 @@ async def _acquire_locked(
         try:
             session = await asyncio.to_thread(attach_session, record)
         except SandboxGone:
-            logger.warning(
-                "sandbox.attach_failed conversation_id=%s sandbox_id=%s",
+            # Expired or removed at the provider: expected, not a failure.
+            # There is nothing to stop, so the entry goes and a new one starts.
+            logger.info(
+                "sandbox.gone conversation_id=%s provider=%s sandbox_id=%s",
                 conversation_id,
+                record.get("provider"),
                 record.get("sandbox_id"),
-                exc_info=True,
             )
             await guard.check()
-            await _replace(store, conversation_id, record, guard)
+            await store.delete(conversation_id)
             record = None
     if session is None or record is None:
         if record is not None:

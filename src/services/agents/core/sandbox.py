@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -48,6 +49,68 @@ _LARGE_TOOL_RESULTS = "/large_tool_results/"
 # rewrite the suffix of ``/large_tool_results/skills_1``. ``/tool_artifacts`` is
 # the conversation copy of an MCP artifact.
 _SHELL_PREFIXES = ("/large_tool_results", "/tool_artifacts", "/skills")
+
+
+# OpenSandbox logs every failed endpoint lookup at WARNING before it raises,
+# including the 404 for a sandbox that expired or was removed. Reattach and
+# kill expect that answer and log it themselves at INFO with ids only.
+_OPENSANDBOX_SDK_LOGGER = "opensandbox.sync.adapters.sandboxes_adapter"
+_OPENSANDBOX_GONE_LINE = re.compile(
+    r"\bsandbox \S+ not found\b|\bHTTP 4(04|10)\b", re.IGNORECASE
+)
+_expect_gone: ContextVar[bool] = ContextVar("sandbox_expect_gone", default=False)
+
+
+class _GoneLookupFilter(logging.Filter):
+    """Drop the SDK's WARNING for a gone sandbox, only inside our attach.
+
+    Outside ``_attach_opensandbox`` every line passes. Inside it, a timeout, a
+    5xx or an auth error keeps its WARNING. The readiness 404 the SDK retries
+    while a pod has no IP yet is not a gone sandbox and also keeps it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not _expect_gone.get():
+            return True
+        message = record.getMessage()
+        if not message.startswith("Failed to retrieve sandbox endpoint"):
+            return True
+        if "POD_IP_NOT_AVAILABLE" in message:
+            return True
+        return _OPENSANDBOX_GONE_LINE.search(message) is None
+
+
+# The SDK transport logs each retry at WARNING, also while execd starts and
+# the readiness ping meets a closed connection. A retry is expected. Retries
+# that run out raise, and attach or create logs that one at WARNING.
+_OPENSANDBOX_RETRY_LOGGERS = (
+    "opensandbox.transport._sync_retry",
+    "opensandbox.transport._async_retry",
+)
+
+
+class _RetryAsInfoFilter(logging.Filter):
+    """Log the SDK's ``retrying ...`` lines at INFO instead of WARNING."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.WARNING and str(record.msg).startswith(
+            "retrying "
+        ):
+            record.levelno = logging.INFO
+            record.levelname = logging.getLevelName(logging.INFO)
+        return True
+
+
+def _add_filter_once(name: str, filter_: logging.Filter) -> None:
+    target = logging.getLogger(name)
+    kind = type(filter_).__name__
+    if not any(type(f).__name__ == kind for f in target.filters):
+        target.addFilter(filter_)
+
+
+_add_filter_once(_OPENSANDBOX_SDK_LOGGER, _GoneLookupFilter())
+for _name in _OPENSANDBOX_RETRY_LOGGERS:
+    _add_filter_once(_name, _RetryAsInfoFilter())
 
 
 class SandboxError(RuntimeError):
@@ -364,11 +427,18 @@ def _start_opensandbox() -> SandboxSession:
     # protocol must raise SandboxError even when the package is not installed.
     image, config = _opensandbox_connection()
     from opensandbox import SandboxSync
-    remote = SandboxSync.create(
-        image,
-        connection_config=config,
-        timeout=timedelta(seconds=sandbox_busy_ttl_s()),
-    )
+    try:
+        remote = SandboxSync.create(
+            image,
+            connection_config=config,
+            timeout=timedelta(seconds=sandbox_busy_ttl_s()),
+        )
+    except Exception as exc:
+        logger.warning(
+            "sandbox.create_failed provider=opensandbox error=%s",
+            type(exc).__name__,
+        )
+        raise
     return _opensandbox_session(remote)
 
 
@@ -376,6 +446,8 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
     _image, config = _opensandbox_connection()
     from opensandbox import SandboxSync
     sandbox_id = record["sandbox_id"]
+    # Set and reset in this thread: the SDK logs from the same call stack.
+    token = _expect_gone.set(True)
     try:
         remote = SandboxSync.connect(sandbox_id, connection_config=config)
     except SandboxGone:
@@ -383,7 +455,14 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
     except Exception as exc:
         if getattr(exc, "status_code", None) in (404, 410):
             raise SandboxGone(f"opensandbox {sandbox_id} is gone") from exc
+        logger.warning(
+            "sandbox.connect_failed provider=opensandbox sandbox_id=%s error=%s",
+            sandbox_id,
+            type(exc).__name__,
+        )
         raise
+    finally:
+        _expect_gone.reset(token)
     return _opensandbox_session(remote, skills_digest=record.get("skills_digest", ""))
 
 
