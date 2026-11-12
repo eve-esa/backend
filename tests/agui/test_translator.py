@@ -22,12 +22,17 @@ import pytest
 
 from src.services.agui.translator import (
     AguiTranslator,
+    encode_sse,
     RunContext,
     pre_stream_error,
 )
 
 try:
-    from tests.agui.validator import validate
+    from tests.agui.validator import validate_transcript as _validate_transcript
+
+    def validate(transcript: str) -> List[Any]:
+        return _validate_transcript(transcript, thread_id=T, run_id=R)
+
 except ImportError:  # pragma: no cover - shim until the validator branch merges
 
     def validate(transcript: str) -> List[Any]:
@@ -697,3 +702,94 @@ def test_no_user_text_in_any_log_record(caplog):
         text = record.getMessage() + repr(record.args) + repr(record.__dict__)
         for secret in secrets:
             assert secret not in text, f"{record.name}:{record.levelname} logs user text"
+
+
+# ─── Wire and edge cases (B-S3) ───────────────────────────────────────────────
+
+
+def test_wire_body_from_the_sdk_encoder_validates():
+    # The route sends encode_sse (the SDK EventEncoder), not _sse: check that body.
+    translator = AguiTranslator(_ctx())
+    raw: List[Any] = list(translator.start())
+    for frame in [
+        f_status(),
+        f_tool_call("call_w1", "eve_retrieval_retrieve", {"query": "SAR"}, server="eve_retrieval", label="Searching EVE sources"),
+        f_tool_result("call_w1", "eve_retrieval_retrieve", "2 documents", server="eve_retrieval", duration_ms=50),
+        f_token("Answer."),
+        f_final("Answer.", endpoint=ENDPOINT, latencies={"total_s": 1.0}),
+    ]:
+        raw.extend(translator.translate(frame))
+    body = encode_sse(raw)
+
+    assert body.endswith("\n\n") and "\r" not in body
+    assert '"requested":null' in body  # a null inside eve.endpoint stays on the wire
+    assert not list(validate(body))
+
+
+def test_unknown_error_code_is_upstream_error():
+    events = _run([f_status(), f_error("weird_code", "x")])
+
+    _assert_run_error(events, "upstream_error", COPY_UPSTREAM)
+    _assert_valid(events)
+
+
+def test_result_for_an_unannounced_call_opens_the_call_first():
+    events = _run(
+        [
+            f_status(),
+            f_tool_result("call_u1", "gdacs_events", "1 event", server="gdacs", duration_ms=40),
+            f_token("One event."),
+            f_final("One event.", endpoint=ENDPOINT),
+        ]
+    )
+
+    assert _types(events)[3:6] == ["TOOL_CALL_START", "TOOL_CALL_END", "TOOL_CALL_RESULT"]
+    assert _one(events, "TOOL_CALL_RESULT")["toolCallId"] == "call_u1"
+    _assert_valid(events)
+
+
+def test_empty_answer_after_a_shown_tool_result_is_success():
+    # Decision 6: empty_answer only when no tool result was shown.
+    events = _run(
+        [
+            f_status(),
+            f_tool_call("call_s1", "dummy_image", {}, server="dummy_image", label="Rendering"),
+            f_tool_result("call_s1", "dummy_image", "image ready", server="dummy_image", duration_ms=30),
+            f_final("", artifact_ids=["6a3f0c4b9b1d4e7f8a2b3c61"], endpoint=ENDPOINT),
+        ]
+    )
+
+    assert _assert_ends_with(events, "RUN_FINISHED")["outcome"] == {"type": "success"}
+    _assert_valid(events)
+
+
+def test_success_closes_an_unanswered_call_with_a_not_run_result():
+    events = _run(
+        [
+            f_status(),
+            f_tool_call("call_g1", "eve_retrieval_retrieve", {"query": "x"}, server="eve_retrieval", label="Searching EVE sources"),
+            f_token("Answered without the tool."),
+            f_final("Answered without the tool.", endpoint=ENDPOINT),
+        ]
+    )
+
+    result = _one(events, "TOOL_CALL_RESULT")
+    assert result["toolCallId"] == "call_g1" and result["content"] == ""
+    assert result["metadata"] == {"eve.status": "not_run"}
+    _assert_valid(events)
+
+
+@pytest.mark.parametrize(
+    "code, status, header",
+    [
+        pytest.param("overloaded", 429, {"Retry-After": "10"}, id="overloaded-default-retry"),
+        pytest.param("run_id_conflict", 409, {}, id="run-id-conflict"),
+        pytest.param("no_such_code", 500, {}, id="unknown-is-internal"),
+    ],
+)
+def test_pre_stream_error_table(code, status, header):
+    error = pre_stream_error(code)
+
+    assert error.status_code == status
+    assert error.headers == header
+    assert error.body["detail"]["code"] == (code if status != 500 else "internal_error")

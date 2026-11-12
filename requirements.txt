@@ -5,6 +5,8 @@ uvicorn==0.54.0
 uvloop==0.23.0
 httptools==0.8.0
 fastapi==0.142.2
+# AG-UI 1.0 event models and SSE encoder for the agentic stream (src/services/agui).
+ag-ui-protocol==1.0.0
 python-dotenv==1.2.3
 langchain==1.4.9
 langchain-community==0.4.2
