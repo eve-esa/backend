@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 import yaml
 from dotenv import load_dotenv
 
-from src.constants import private_collection_name_for
+from src.constants import MODEL_CONTEXT_SIZE, private_collection_name_for
 
 # Default True so a local `.env` still wins over leftover shell exports.
 # Docker Compose sets LOAD_DOTENV_OVERRIDE=false so fixture URLs (and AUTH_*)
@@ -57,6 +57,19 @@ AGENTIC_TIMEOUT = int(os.getenv("AGENTIC_TIMEOUT", 120))
 # deepagents writes a tool result to /large_tool_results/ past this many
 # tokens. Passed to compile only when the graph declares the parameter.
 TOOL_RESULT_MAX_TOKENS = int(os.getenv("TOOL_RESULT_MAX_TOKENS", "20000"))
+# Deep-graph summarization. The chat models have no profile window, so the
+# fractions are applied to AGENT_CONTEXT_WINDOW_TOKENS. Passed to compile
+# only when the graph declares the parameter.
+AGENT_CONTEXT_WINDOW_TOKENS = int(
+    os.getenv("AGENT_CONTEXT_WINDOW_TOKENS", str(MODEL_CONTEXT_SIZE))
+)
+SUMMARY_TRIGGER_FRACTION = float(os.getenv("SUMMARY_TRIGGER_FRACTION", "0.85"))
+SUMMARY_KEEP_FRACTION = float(os.getenv("SUMMARY_KEEP_FRACTION", "0.10"))
+SUMMARY_MAX_TOKENS = int(os.getenv("SUMMARY_MAX_TOKENS", "2000"))
+TRUNCATE_ARGS_MAX_CHARS = int(os.getenv("TRUNCATE_ARGS_MAX_CHARS", "2000"))
+# Standing rules. Prepended to the deep system prompt, which compaction does
+# not rewrite. Empty means there is nothing to pin.
+PINNED_CONTEXT = os.getenv("PINNED_CONTEXT", "")
 
 SATCOM_SMALL_MODEL_NAME = os.getenv(
     "SATCOM_SMALL_MODEL_NAME", "esa-sceva/satcom-chat-8b"

@@ -18,13 +18,20 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import BackgroundTasks
 
 from src.config import (
+    AGENT_CONTEXT_WINDOW_TOKENS,
     AGENTIC_LLM_TYPE,
     AGENTIC_TIMEOUT,
     MODEL_TIMEOUT,
+    PINNED_CONTEXT,
+    SUMMARY_KEEP_FRACTION,
+    SUMMARY_MAX_TOKENS,
+    SUMMARY_TRIGGER_FRACTION,
     TOOL_RESULT_MAX_TOKENS,
+    TRUNCATE_ARGS_MAX_CHARS,
 )
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
+from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.user import User
 from src.services.custom_model_service import (
@@ -52,6 +59,7 @@ from src.services.generate_answer import (
 )
 from src.services.agents.core.display import build_display_tool
 from src.services.agents.core.history_search import (
+    SEARCH_NOTE,
     build_history_tools,
     note_searchable_history,
 )
@@ -1028,23 +1036,43 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
 
 
 def _build_initial_messages(
-    request: GenerationRequest, tools: List[Any], history: Optional[List[Any]] = None
+    request: GenerationRequest,
+    tools: List[Any],
+    history: Optional[List[Any]] = None,
+    prior: Optional[List[Any]] = None,
+    message_id: Optional[str] = None,
+    new_checkpoint: Optional[bool] = None,
+    agent_graph_type: Optional[str] = None,
 ) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
     Prepends :data:`_ARTIFACT_MARKDOWN_INSTRUCTION` as a ``SystemMessage``
     when MCP tools are in play, since only then can a tool result carry an
-    artifact stub worth guarding against being rewritten.
+    artifact stub worth guarding against being rewritten.  A ``deep`` turn
+    skips it: the deep agent carries the rule in its system prompt.
 
     First turn only: the checkpointed thread state keeps the turn-one copy
     visible on later turns, and injecting another one mid-conversation puts a
     ``system`` message after an ``assistant`` one, which strict chat templates
     refuse (Blablador: 400 "Unexpected role 'system' after role 'assistant'").
+    ``new_checkpoint`` overrides that guess. A deep turn that already has a
+    thread passes False even though ``history`` is empty.
+
+    ``prior`` is the stored turns seeded into a deep thread that has no
+    checkpoint. ``message_id`` is written on the new human message so a later
+    summary can name the range it covers.
     """
+    if new_checkpoint is None:
+        new_checkpoint = not history
     messages: List[Any] = []
-    if tools and SystemMessage and not history:
+    if tools and SystemMessage and new_checkpoint and agent_graph_type != "deep":
         messages.append(SystemMessage(content=_ARTIFACT_MARKDOWN_INSTRUCTION))
-    messages.append(HumanMessage(content=request.query))
+    if prior:
+        messages.extend(prior)
+    human_kwargs: Dict[str, Any] = {}
+    if message_id:
+        human_kwargs["additional_kwargs"] = {"eve_message_id": str(message_id)}
+    messages.append(HumanMessage(content=request.query, **human_kwargs))
     return messages
 
 
@@ -1209,6 +1237,17 @@ def _build_react_graph(
             compile_kwargs["skills"] = [_SKILLS_SOURCE]
     if _explicit_compile_param(agent, "tool_result_max_tokens"):
         compile_kwargs["tool_result_max_tokens"] = TOOL_RESULT_MAX_TOKENS
+    summary_kwargs = {
+        "context_window": AGENT_CONTEXT_WINDOW_TOKENS,
+        "summary_trigger_fraction": SUMMARY_TRIGGER_FRACTION,
+        "summary_keep_fraction": SUMMARY_KEEP_FRACTION,
+        "summary_max_tokens": SUMMARY_MAX_TOKENS,
+        "truncate_args_max_chars": TRUNCATE_ARGS_MAX_CHARS,
+        "recall_note": SEARCH_NOTE,
+    }
+    for name, value in summary_kwargs.items():
+        if _explicit_compile_param(agent, name):
+            compile_kwargs[name] = value
     return agent.compile(**compile_kwargs)
 
 
@@ -1370,6 +1409,46 @@ def _graph_on_policy(graph_name: Optional[str]):
 
 # ─── Conversation context ─────────────────────────────────────────────────────
 
+# Thread-state key of the deepagents summarization middleware, and the
+# ``additional_kwargs`` the EVE subclass puts on its summary message.
+SUMMARIZATION_EVENT_KEY = "_summarization_event"
+SUMMARY_TEXT_KEY = "eve_summary"
+SUMMARY_FIRST_ID_KEY = "eve_summary_first_message_id"
+SUMMARY_LAST_ID_KEY = "eve_summary_last_message_id"
+# Metadata LangChain middleware puts on its own model calls. Only the newer
+# streaming API filters those calls; stream_mode="messages" still yields them
+# from the model node, like answer tokens.
+_INTERNAL_CALL_KEY = "lc_internal_call"
+
+
+def _is_internal_model_call(metadata: Any) -> bool:
+    """True for a chunk from a middleware model call, such as the summary."""
+    if not isinstance(metadata, dict):
+        return False
+    return _INTERNAL_CALL_KEY in metadata or metadata.get("lc_source") == "summarization"
+
+
+# ``event`` of the custom stream payload the deep summarization middleware
+# writes around its summary call (agents ``SUMMARY_STREAM_EVENT``).
+SUMMARY_STREAM_EVENT = "eve_summarization"
+_SUMMARY_PHASES = ("started", "finished")
+
+
+def _summarizing_event(payload: Any) -> Optional[str]:
+    """SSE ``summarizing`` event for a custom stream payload, else None."""
+    if not isinstance(payload, dict) or payload.get("event") != SUMMARY_STREAM_EVENT:
+        return None
+    phase = payload.get("phase")
+    if phase not in _SUMMARY_PHASES:
+        return None
+    event = {
+        "type": "summarizing",
+        "phase": phase,
+        "first_message_id": payload.get("first_message_id"),
+        "last_message_id": payload.get("last_message_id"),
+    }
+    return f"data: {json.dumps(event)}\n\n"
+
 
 async def _fetch_conversation_context(
     conversation_id: Optional[str],
@@ -1386,6 +1465,177 @@ async def _fetch_conversation_context(
         return [], None
     history, summary = await _get_conversation_history_from_db(conversation_id)
     return history, summary
+
+
+def _agent_with_pinned_context(agent: Any) -> Any:
+    """Copy *agent* with the standing rules in its system prompt.
+
+    ``PINNED_CONTEXT`` goes in front and :data:`_ARTIFACT_MARKDOWN_INSTRUCTION`
+    at the end. The copy keeps the registry instance unchanged. Compaction
+    does not edit the system message, so both survive a summary; a
+    ``SystemMessage`` in the thread would leave the model's view at the cutoff.
+    """
+    system = str((getattr(agent, "prompts", None) or {}).get("system") or "").strip()
+    if _ARTIFACT_MARKDOWN_INSTRUCTION in system:
+        return agent
+    pinned = (PINNED_CONTEXT or "").strip()
+    parts = [p for p in (pinned, system, _ARTIFACT_MARKDOWN_INSTRUCTION) if p]
+    cloned = copy.copy(agent)
+    cloned.prompts = dict(getattr(agent, "prompts", None) or {})
+    cloned.prompts["system"] = "\n\n".join(parts)
+    return cloned
+
+
+async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
+    """True when this conversation already has a checkpoint.
+
+    A lookup error is treated as "the thread is there": seeding on top of a
+    thread that could not be read would duplicate it.
+    """
+    if checkpointer is None:
+        return False
+    try:
+        found = await checkpointer.aget_tuple(
+            {"configurable": {"thread_id": conversation_id}}
+        )
+    except Exception:
+        logger.warning(
+            "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
+        )
+        return True
+    return found is not None
+
+
+async def save_agent_summary(graph: Any, conversation_id: str) -> None:
+    """Copy the deep agent's latest summary onto ``Conversation.summary``.
+
+    The summarization middleware keeps its last compaction in the thread
+    state. Nothing is written until the agent has summarized, or when the
+    stored copy already matches.
+    """
+    try:
+        snapshot = await graph.aget_state(
+            {"configurable": {"thread_id": conversation_id}}
+        )
+        event = (getattr(snapshot, "values", None) or {}).get(SUMMARIZATION_EVENT_KEY)
+        message = (event or {}).get("summary_message")
+        extra = getattr(message, "additional_kwargs", None) or {}
+        text = extra.get(SUMMARY_TEXT_KEY)
+        if not text:
+            return
+        first_id = extra.get(SUMMARY_FIRST_ID_KEY)
+        last_id = extra.get(SUMMARY_LAST_ID_KEY)
+        convo = await Conversation.find_by_id(conversation_id)
+        if convo is None:
+            return
+        if (convo.summary, convo.summary_first_message_id, convo.summary_last_message_id) == (
+            text,
+            first_id,
+            last_id,
+        ):
+            return
+        convo.summary = text
+        convo.summary_first_message_id = first_id
+        convo.summary_last_message_id = last_id
+        await convo.save()
+    except Exception:
+        logger.warning(
+            "saving agent summary failed conversation=%s", conversation_id, exc_info=True
+        )
+
+
+def _schedule_after_turn(
+    agent_graph_type: str,
+    graph: Any,
+    conversation_id: Optional[str],
+    background_tasks: Optional[BackgroundTasks],
+) -> None:
+    """Keep ``Conversation.summary`` current once the turn is persisted.
+
+    The deep agent writes its own summary; the backend stores it. Graphs
+    without a summarizer keep the rolling summary.
+    """
+    if not conversation_id:
+        return
+    if agent_graph_type == "deep":
+        job, args = save_agent_summary, (graph, conversation_id)
+    else:
+        job, args = maybe_rollup_and_trim_history, (conversation_id,)
+    if background_tasks:
+        background_tasks.add_task(job, *args)
+    else:
+        asyncio.create_task(job(*args))
+
+
+async def _seed_turns(
+    conversation_id: str, exclude_message_id: Optional[str]
+) -> List[Any]:
+    """Stored turns as human/assistant messages, excluding the turn in progress.
+
+    Each human message carries ``eve_message_id`` so a summary can name the
+    range. The current message is already in the database with an empty
+    output; it is not part of the seed. The new human message added for this
+    turn carries that id instead.
+    """
+    cursor = (
+        Message.get_collection()
+        .find({"conversation_id": conversation_id}, {"input": 1, "output": 1})
+        .sort([("timestamp", 1), ("_id", 1)])
+    )
+    documents = await cursor.to_list(length=None)
+    if exclude_message_id:
+        documents = [
+            doc
+            for doc in documents
+            if str(doc.get("_id")) != str(exclude_message_id)
+        ]
+    elif documents:
+        documents = documents[:-1]
+    seeded: List[Any] = []
+    for doc in documents:
+        message_id = str(doc.get("_id"))
+        user = doc.get("input")
+        if user:
+            seeded.append(
+                HumanMessage(
+                    content=str(user),
+                    additional_kwargs={"eve_message_id": message_id},
+                )
+            )
+        output = doc.get("output")
+        if output:
+            seeded.append(AIMessage(content=str(output)))
+    return seeded
+
+
+async def _prepare_agent_context(
+    agent_graph_type: str,
+    conversation_id: Optional[str],
+    checkpointer: Any,
+    message_id: Optional[str],
+) -> tuple[List[Any], Optional[str], List[Any], bool, Any]:
+    """Return history, summary, seeded turns, new-checkpoint, and the agent.
+
+    A deep turn with a checkpoint uses that thread and no rolling summary.
+    Without one, the stored turns are seeded into the new thread. ``simple``
+    and ``react`` keep the rolling summary and the one-turn window.
+    """
+    history, summary = await _fetch_conversation_context(conversation_id)
+    prior: List[Any] = []
+    new_checkpoint = not history
+    agent = get_agent_graph(agent_graph_type)
+    if agent_graph_type == "deep" and conversation_id:
+        if await _checkpoint_exists(checkpointer, conversation_id):
+            history, summary = [], None
+            new_checkpoint = False
+        else:
+            prior = await _seed_turns(conversation_id, message_id)
+            history, summary = [], None
+            new_checkpoint = True
+        agent = _agent_with_pinned_context(agent)
+    elif agent_graph_type != "simple":
+        summary = note_searchable_history(summary)
+    return history, summary, prior, new_checkpoint, agent
 
 
 def _generation_unattributed_s(
@@ -1480,6 +1730,7 @@ async def generate_answer_agentic(
     *,
     user_id: str,
     conversation_id: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> tuple[
     str,
     List[Dict[str, Any]],
@@ -1502,10 +1753,8 @@ async def generate_answer_agentic(
         raise RuntimeError("LangGraph is not available — cannot run agentic generation")
 
     total_start = time.perf_counter()
-    # message_id is unset here: Message.create() in the router runs before this
-    # call and there's no clean way to thread it through this signature; artifacts
-    # are still linked via conversation_id, and the router attaches artifact_ids
-    # to the Message itself once this call returns.
+    # message_id tags the human message on the thread. Artifacts stay linked
+    # via conversation_id; the router attaches artifact_ids to the Message.
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
@@ -1532,12 +1781,10 @@ async def generate_answer_agentic(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary = await _fetch_conversation_context(conversation_id)
+        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+            agent_graph_type, conversation_id, checkpointer, message_id
+        )
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
-        if agent_graph_type != "simple":
-            summary = note_searchable_history(summary)
-
-        agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
         llm, llm_metadata = await _resolve_agentic_llm_client(
@@ -1625,7 +1872,17 @@ async def generate_answer_agentic(
                 set_llm_attributes(root_span, endpoint_metadata, include_answered=False)
                 try:
                     async for update in g.astream(
-                        {"messages": _build_initial_messages(request, tools, history)},
+                        {
+                            "messages": _build_initial_messages(
+                                request,
+                                tools,
+                                history,
+                                prior=prior,
+                                message_id=message_id,
+                                new_checkpoint=new_checkpoint,
+                                agent_graph_type=agent_graph_type,
+                            )
+                        },
                         config=config,
                         stream_mode="updates",
                     ):
@@ -1766,6 +2023,10 @@ async def generate_answer_agentic(
             # payload out into metadata.endpoint.
             **({"endpoint": endpoint_metadata} if endpoint_metadata else {}),
         }
+        # The router schedules the rolling summary for the other graphs: that
+        # job reads the message it saves.
+        if agent_graph_type == "deep" and conversation_id:
+            asyncio.create_task(save_agent_summary(graph, conversation_id))
 
         return (
             final_answer,
@@ -1924,12 +2185,10 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary = await _fetch_conversation_context(conversation_id)
+        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+            agent_graph_type, conversation_id, checkpointer, message_id
+        )
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
-        if agent_graph_type != "simple":
-            summary = note_searchable_history(summary)
-
-        agent = get_agent_graph(agent_graph_type)
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
         llm, llm_prompts = await _resolve_agentic_llm_client(
@@ -2114,9 +2373,19 @@ async def generate_answer_agentic_stream_helper(
                 # the spans it ends, not in the loop's finaliser.
                 async with contextlib.aclosing(
                     graph.astream(
-                        {"messages": _build_initial_messages(request, tools, history)},
+                        {
+                            "messages": _build_initial_messages(
+                                request,
+                                tools,
+                                history,
+                                prior=prior,
+                                message_id=message_id,
+                                new_checkpoint=new_checkpoint,
+                                agent_graph_type=agent_graph_type,
+                            )
+                        },
                         config=config,
-                        stream_mode=["messages", "updates"],
+                        stream_mode=["messages", "updates", "custom"],
                     )
                 ) as graph_stream:
                     async for mode, payload in graph_stream:
@@ -2133,6 +2402,12 @@ async def generate_answer_agentic_stream_helper(
                             )
                             yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                             return
+
+                        if mode == "custom":
+                            event = _summarizing_event(payload)
+                            if event is not None:
+                                yield event
+                            continue
 
                         if mode == "updates":
                             fallback.observe(payload)
@@ -2177,6 +2452,8 @@ async def generate_answer_agentic_stream_helper(
                             continue
 
                         chunk, metadata = payload
+                        if _is_internal_model_call(metadata):
+                            continue
                         node = metadata.get("langgraph_node", "")
                         if node != current_node:
                             if current_node:
@@ -2345,10 +2622,7 @@ async def generate_answer_agentic_stream_helper(
             artifact_ids=_collected_artifact_ids(),
         )
 
-        if background_tasks:
-            background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
-        else:
-            asyncio.create_task(maybe_rollup_and_trim_history(conversation_id))
+        _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
         final_emitted = True
         for event in _final_events(answer, latencies):

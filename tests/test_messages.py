@@ -728,7 +728,7 @@ async def test_create_agentic_message_only_resolves_owned_or_global_mcp_servers(
     captured = {}
 
     async def _capture_generate_answer_agentic(
-        request, user_id=None, conversation_id=None
+        request, user_id=None, conversation_id=None, message_id=None
     ):
         captured["mcp_server_configs"] = list(request.mcp_server_configs)
         return "Agentic answer", [], False, {}, {}, [], []
