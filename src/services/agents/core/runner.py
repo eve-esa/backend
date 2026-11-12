@@ -206,6 +206,26 @@ def _enrich_trace_entry_with_message_metadata(
             entry["invalid_tool_calls"] = invalid_tool_calls
 
 
+# Per string value in a streamed tool_call event. A write_file call carries a
+# whole file; the full arguments stay in Message.trace.
+STREAM_TOOL_ARG_MAX_CHARS = 500
+
+
+def _stream_tool_args(value: Any) -> Any:
+    """Tool call arguments for a stream event, long strings cut."""
+    if isinstance(value, str):
+        if len(value) <= STREAM_TOOL_ARG_MAX_CHARS:
+            return value
+        return value[:STREAM_TOOL_ARG_MAX_CHARS] + "…"
+    if isinstance(value, dict):
+        return {str(k): _stream_tool_args(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_stream_tool_args(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _stream_tool_args(str(value))
+
+
 def _serialise_trace_entry(
     msg: Any,
     *,
@@ -2278,7 +2298,7 @@ async def generate_answer_agentic_stream_helper(
                 label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
                 events.append(
-                    f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None})}\n\n"
+                    f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None, 'id': call_id, 'args': _stream_tool_args(args)})}\n\n"
                 )
             return events
 
@@ -2476,7 +2496,7 @@ async def generate_answer_agentic_stream_helper(
                                     started_at_s=started_at_s,
                                 )
                             )
-                            yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok', 'id': getattr(chunk, 'tool_call_id', None)})}\n\n"
                             continue
 
                         if AIMessage and isinstance(chunk, AIMessage):

@@ -25,6 +25,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from src.config import AGENTIC_TIMEOUT, MODEL_TIMEOUT
 from src.core.llm_manager import LLMManager
 from src.services.agents.core.runner import (
+    STREAM_TOOL_ARG_MAX_CHARS,
     _build_react_graph,
     _resolve_agentic_llm_client,
     _resolve_agentic_llm_type,
@@ -887,8 +888,45 @@ class TestStructuredToolEvents:
                 "tool": "dummy_search",
                 "label": "Calling dummy search",
                 "query": "sea ice",
+                "id": "call-1",
+                "args": {"query": "sea ice"},
             }
         ]
+
+    async def test_long_tool_call_arguments_are_cut_in_the_event(self):
+        content = "x" * (STREAM_TOOL_ARG_MAX_CHARS + 50)
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "write_file",
+                                "args": {
+                                    "file_path": "plot.py",
+                                    "content": content,
+                                    "lines": [content, 3],
+                                },
+                                "id": "call-1",
+                            }
+                        ],
+                    ),
+                    {"langgraph_node": "agent"},
+                ),
+                (AIMessage(content="done"), {"langgraph_node": "agent"}),
+            ],
+        )
+
+        events = await _stream_events(graph)
+
+        cut = "x" * STREAM_TOOL_ARG_MAX_CHARS + "…"
+        [call] = [e for e in events if e["type"] == "tool_call"]
+        assert call["args"] == {
+            "file_path": "plot.py",
+            "content": cut,
+            "lines": [cut, 3],
+        }
 
     async def test_tool_result_carries_tool_name_and_status(self):
         graph = _FakeStreamGraph(
@@ -911,6 +949,7 @@ class TestStructuredToolEvents:
                 "content": "x" * 200,
                 "tool": "dummy_search",
                 "status": "ok",
+                "id": "call-1",
             }
         ]
 
@@ -942,6 +981,8 @@ class TestStructuredToolEvents:
                 "tool": "dummy_search",
                 "label": "Calling dummy search",
                 "query": "sea ice",
+                "id": "call_0_dummy_search",
+                "args": {"query": "sea ice"},
             },
             {
                 "type": "tool_call",
@@ -949,6 +990,8 @@ class TestStructuredToolEvents:
                 "tool": "dummy_get_sample_report",
                 "label": "Calling dummy get sample report",
                 "query": None,
+                "id": "call_1_dummy_get_sample_report",
+                "args": {},
             },
         ]
 
