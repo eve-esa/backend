@@ -73,6 +73,15 @@ def _skill(name: str, description: str, body: str = "Do it.") -> SimpleNamespace
 
 
 def _graph(skills_root, model, checkpointer):
+    if skills_root is None:
+        # The runner's turn without a skills tree: no /skills/ route and no
+        # SkillsMiddleware, so the thread keeps whatever list it had.
+        return create_deep_agent(
+            model=model,
+            tools=[],
+            backend=CompositeBackend(default=StateBackend(), routes={}),
+            checkpointer=checkpointer,
+        )
     backend = CompositeBackend(
         default=StateBackend(),
         routes={"/skills/": FilesystemBackend(root_dir=skills_root, virtual_mode=True)},
@@ -102,6 +111,10 @@ class _World:
     def root(self, *skills):
         return build_skills_root(list(skills), self.packaged)
 
+    def backend_only(self, *skills):
+        """A tree with no packaged skills, as when the deep graph ships none."""
+        return build_skills_root(list(skills), None)
+
     async def turn(self, root, text: str, *, listed_root=None) -> dict:
         """One turn the way the runner drives it.
 
@@ -110,9 +123,11 @@ class _World:
         """
         config: dict = {"configurable": {"thread_id": THREAD}}
         found = await self.checkpointer.aget_tuple(config)
-        reload, metadata = await _skills_reload_input(found, THREAD, root)
-        if metadata:
-            config["metadata"] = metadata
+        reload: dict = {}
+        if root is not None:
+            reload, metadata = await _skills_reload_input(found, THREAD, root)
+            if metadata:
+                config["metadata"] = metadata
         payload = {"messages": [HumanMessage(content=text)], **reload}
         self.payloads.append(payload)
         graph = _graph(listed_root or root, self.model, self.checkpointer)
@@ -143,6 +158,28 @@ async def test_skill_enabled_mid_conversation_reaches_the_next_turn(world):
     assert "eo-basics" in world.model.prompts[0]
     assert "roll-dice" not in world.model.prompts[0]
     assert "roll-dice" in world.model.prompts[-1]
+
+
+async def test_first_turn_without_skills_then_one_skill_lists_it(world):
+    # The local e2e: no packaged skills, turn 1 with no skills (no tree, no
+    # middleware, no key), turn 2 with one skill.
+    await world.turn(None, "hi")
+    await world.turn(world.backend_only(_skill("ndvi-helper", "Vegetation index.")), "ndvi")
+
+    assert "ndvi-helper" not in world.model.prompts[0]
+    assert "ndvi-helper" in world.model.prompts[-1]
+
+
+async def test_a_turn_without_skills_does_not_hide_the_next_change(world):
+    # Turn 2 runs without a tree: no middleware, no key recorded, while the
+    # thread still holds turn 1's list. Turn 3 must list its own skill.
+    await world.turn(world.backend_only(_skill("roll-dice", "Roll dice.")), "roll")
+    await world.turn(None, "plain")
+    reload = await world.turn(world.backend_only(_skill("ndvi-helper", "Vegetation index.")), "ndvi")
+
+    assert reload == {"skills_metadata": None}
+    assert "ndvi-helper" in world.model.prompts[-1]
+    assert "roll-dice" not in world.model.prompts[-1]
 
 
 async def test_skill_disabled_mid_conversation_leaves_the_next_turn(world):
@@ -233,8 +270,9 @@ async def test_no_skills_or_no_conversation_is_untouched():
     assert await _skills_reload_input(found, None, "/x") == ({}, {})
 
 
-async def test_a_thread_from_before_the_check_records_the_key(world):
-    # Checkpoint written before the key existed: keep its list, start recording.
+async def test_a_thread_from_before_the_check_reloads_once(world):
+    # Checkpoint written before the key existed: its list may be stale, so
+    # list again once and start recording.
     root = world.root(_skill("roll-dice", "Roll dice."))
     found = SimpleNamespace(
         metadata={"source": "loop"},
@@ -243,6 +281,15 @@ async def test_a_thread_from_before_the_check_records_the_key(world):
 
     reload, metadata = await _skills_reload_input(found, THREAD, root)
 
+    assert reload == {"skills_metadata": None}
+    assert metadata == {KEY: skills_root_key(root)}
+
+
+async def test_no_checkpoint_does_not_reload(world):
+    root = world.root(_skill("roll-dice", "Roll dice."))
+
+    reload, metadata = await _skills_reload_input(None, THREAD, root)
+
     assert reload == {}
     assert metadata == {KEY: skills_root_key(root)}
 
@@ -250,7 +297,6 @@ async def test_a_thread_from_before_the_check_records_the_key(world):
 @pytest.mark.parametrize(
     "found",
     [
-        None,
         object(),
         SimpleNamespace(metadata="not a dict"),
         SimpleNamespace(metadata={KEY: 5}),
@@ -258,12 +304,12 @@ async def test_a_thread_from_before_the_check_records_the_key(world):
         SimpleNamespace(metadata={KEY: {"nested": "value"}}),
     ],
 )
-async def test_a_bad_checkpoint_value_keeps_the_list(world, found):
+async def test_an_unreadable_stored_key_counts_as_missing(world, found):
     root = world.root(_skill("roll-dice", "Roll dice."))
 
     reload, metadata = await _skills_reload_input(found, THREAD, root)
 
-    assert reload == {}
+    assert reload == {"skills_metadata": None}
     assert metadata == {KEY: skills_root_key(root)}
 
 

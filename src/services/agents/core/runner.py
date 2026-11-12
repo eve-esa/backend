@@ -1643,10 +1643,17 @@ async def _skills_reload_input(
     names resolve in listing order, so a list that differs from the local tree
     would force a reload on every turn.
 
-    Any failure keeps today's behaviour (no reload) and re-records the previous
-    key, so a change is still caught on the next turn. Known gaps, both
-    corrected on the next turn: a read from a lagging secondary, and two turns
-    on one thread at once, where the older one can write the old list back.
+    A stored key that is missing or differs from this turn's key reloads; only
+    equal keys keep the list. A key goes missing when the last turn ran with
+    no skills tree (no middleware, nothing recorded, the old list still in
+    state) or on a thread from before this check: one extra listing then.
+    With no checkpoint there is nothing to reload: the middleware lists anyway.
+
+    A scan failure keeps today's behaviour (no reload) and re-records the
+    previous key, so a change is still caught on the next turn. Known gaps,
+    both corrected on the next turn: a read from a lagging secondary, and two
+    turns on one thread at once, where the older one can write the old list
+    back.
     """
     if skills_root is None or not conversation_id:
         return {}, {}
@@ -1676,11 +1683,12 @@ async def _skills_reload_input(
         )
     recorded = wanted or stored
     metadata_out = {_SKILLS_KEY_METADATA: recorded} if recorded else {}
-    # No recorded key (first turn, or a thread from before this check): the
-    # middleware's own list stands and this turn records the key.
-    if wanted is None or stored is None or wanted == stored:
+    if checkpoint is None or wanted is None or wanted == stored:
         return {}, metadata_out
-    logger.info("skills changed since the last turn conversation=%s", conversation_id)
+    logger.info(
+        "skills changed or not recorded since the last turn conversation=%s",
+        conversation_id,
+    )
     return {"skills_metadata": None}, metadata_out
 
 
