@@ -43,6 +43,12 @@ CONVERSATION_DOCUMENT_EXTENSIONS = (".pdf", ".txt", ".md")
 CONVERSATION_DOCUMENT_DEADLINE_SECONDS = 80
 CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS = 10
 CONVERSATION_DOCUMENT_ROLLBACK_SECONDS = 15
+# Budget for the Qdrant point delete of one document, or of a conversation's
+# whole collection. delete_private_docs makes a few calls of at most
+# CONVERSATION_DOCUMENT_QDRANT_TIMEOUT_SECONDS each; this bounds them together,
+# well under the 120 s CloudFront timeout, so a hung Qdrant answers our 500 and
+# the rows stay for a retry.
+CONVERSATION_DOCUMENT_DELETE_SECONDS = 30
 
 EVE_PUBLIC_COLLECTION_NAME_PROD = "qwen-512-filtered"
 

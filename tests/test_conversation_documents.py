@@ -1137,3 +1137,349 @@ async def test_a_conversation_attached_before_its_collection_shared_its_id(
     finally:
         await Message.delete_many({"conversation_id": conversation.id})
         await _cleanup(user, conversation)
+
+
+# Review of #356: the last-document delete racing an upload, slots released by
+# whoever removed the rows, and deletes that stop on a hung Qdrant.
+
+
+async def test_an_upload_keeps_its_collection_when_the_last_document_is_deleted_meanwhile(
+    async_client, store, monkeypatch
+):
+    """The delete drops the collection after the upload got it, before its rows."""
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        [old] = await _attach(async_client, token, conversation, "old.txt")
+        real_bulk_create = Document.bulk_create.__func__
+
+        async def delete_lands_first(cls, documents):
+            resp = await _delete_doc(async_client, token, conversation.id, old["document_id"])
+            assert resp.status_code == 200, resp.text
+            assert await Collection.find_by_id(conversation.id) is None
+            return await real_bulk_create(cls, documents)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Document, "bulk_create", classmethod(delete_lands_first))
+            [new] = await _attach(async_client, token, conversation, "new.txt")
+
+        assert await Collection.find_by_id(conversation.id) is not None
+        listed = (await _list(async_client, token, conversation.id)).json()
+        assert [d["document_id"] for d in listed["documents"]] == [new["document_id"]]
+        assert await _slots(user) == 1
+
+        deleted = await async_client.delete(
+            f"/conversations/{conversation.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert deleted.status_code == 200, deleted.text
+        assert store.count(collection_id=conversation.id) == 0
+        assert await Document.count_documents({"collection_id": conversation.id}) == 0
+        assert await _slots(user) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+class _RowsArriveAfterTheCount:
+    """The upload inserts its row right after the delete counted none."""
+
+    def __init__(self, real, row):
+        self._real = real
+        self._row = row
+        self._counted = False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def count_documents(self, query, *args, **kwargs):
+        if not self._counted:
+            self._counted = True
+            await self._real.insert_one(self._row)
+            return 0
+        return await self._real.count_documents(query, *args, **kwargs)
+
+
+async def test_the_drop_puts_the_collection_back_when_rows_arrived_after_its_count(
+    monkeypatch,
+):
+    from src.services.conversation_documents import (
+        delete_conversation_collection_if_empty,
+        get_or_create_conversation_collection,
+    )
+
+    user, _ = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        collection = await get_or_create_conversation_collection(user.id, conversation.id)
+        primary = Document.get_primary_collection()
+        monkeypatch.setattr(
+            Document,
+            "get_primary_collection",
+            classmethod(
+                lambda cls: _RowsArriveAfterTheCount(
+                    primary,
+                    {"user_id": user.id, "collection_id": collection.id, "name": "a.txt"},
+                )
+            ),
+        )
+
+        await delete_conversation_collection_if_empty(collection)
+        monkeypatch.undo()
+
+        assert await Collection.find_by_id(collection.id) is not None
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_a_delete_of_the_last_document_raced_with_an_upload_leaves_no_orphans(
+    async_client, store
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        for round_ in range(4):
+            [last] = await _attach(async_client, token, conversation, f"last-{round_}.txt")
+
+            deleted, uploaded = await asyncio.gather(
+                _delete_doc(async_client, token, conversation.id, last["document_id"]),
+                async_client.post(
+                    f"/conversations/{conversation.id}/documents",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files=[_txt(f"new-{round_}.txt")],
+                ),
+            )
+
+            assert deleted.status_code == 200, deleted.text
+            assert uploaded.status_code == 200, uploaded.text
+            # Every row has a collection row over it, so list and chat see it.
+            assert await Collection.find_by_id(conversation.id) is not None
+            listed = (await _list(async_client, token, conversation.id)).json()
+            assert [d["name"] for d in listed["documents"]] == [f"new-{round_}.txt"]
+            [new] = uploaded.json()["documents"]
+            cleared = await _delete_doc(async_client, token, conversation.id, new["document_id"])
+            assert cleared.status_code == 200, cleared.text
+        assert store.count(collection_id=conversation.id) == 0
+        assert await _slots(user) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_the_conversation_delete_clears_rows_left_without_a_collection_row(
+    async_client, store
+):
+    """Rows keyed on the conversation id are found even with the row gone."""
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        row = await Document.create(
+            user_id=user.id, collection_id=conversation.id, name="orphan.txt", chunk_count=1
+        )
+        store.points = [
+            {"user_id": user.id, "collection_id": conversation.id, "document_id": row.id}
+        ]
+        await _set_slots(user, 1)
+
+        deleted = await async_client.delete(
+            f"/conversations/{conversation.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert deleted.status_code == 200, deleted.text
+        assert await Document.find_by_id(row.id) is None
+        assert store.count(collection_id=conversation.id) == 0
+        assert await _slots(user) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_the_cap_ignores_rows_a_failed_rollback_left(async_client, store):
+    """They can be neither listed nor deleted, so they must not hold the cap."""
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        [kept] = await _attach(async_client, token, conversation, "kept.txt")
+        for i in range(10):
+            await Document.create(
+                user_id=user.id, collection_id=conversation.id, name=f"left-{i}.txt"
+            )
+
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("next.txt")],
+        )
+
+        assert resp.status_code == 200, resp.text
+        listed = (await _list(async_client, token, conversation.id)).json()
+        assert [d["name"] for d in listed["documents"]] == ["kept.txt", "next.txt"]
+    finally:
+        await _cleanup(user, conversation)
+
+
+async def test_a_failed_upload_releases_only_the_rows_its_rollback_removed(
+    async_client, store, monkeypatch
+):
+    """A conversation delete during the upload already gave back its rows' slots."""
+    from src.core.vector_store_manager import VectorStoreManager
+    from src.services.conversation_documents import delete_conversation_documents
+
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        await _set_slots(user, 3)  # documents in the user's own collections
+        write_points = VectorStoreManager.add_document_list
+
+        async def cascade_then_fail(self, document_list, *, user_id, collection_id):
+            await write_points(
+                self, document_list, user_id=user_id, collection_id=collection_id
+            )
+            await delete_conversation_documents(user.id, conversation.id)
+            raise RuntimeError("embedding service down")
+
+        monkeypatch.setattr(VectorStoreManager, "add_document_list", cascade_then_fail)
+        resp = await async_client.post(
+            f"/conversations/{conversation.id}/documents",
+            headers={"Authorization": f"Bearer {token}"},
+            files=[_txt("a.txt"), _txt("b.txt")],
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"]["code"] == "conversation_document_failed"
+        # Reserved 2 (5), the cascade released 2 (3), the rollback removed none.
+        assert await _slots(user) == 3
+        assert await Document.count_documents({"collection_id": conversation.id}) == 0
+        assert store.count(collection_id=conversation.id) == 0
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_a_failed_release_after_the_row_is_gone_still_answers_200(
+    async_client, store, monkeypatch, caplog
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        [only] = await _attach(async_client, token, conversation, "a.txt")
+
+        async def broken_release(user_id, count):
+            raise RuntimeError("mongo refused")
+
+        monkeypatch.setattr(
+            "src.services.conversation_documents.release_private_document_slots",
+            broken_release,
+        )
+        deleted = await _delete_doc(async_client, token, conversation.id, only["document_id"])
+        retried = await _delete_doc(async_client, token, conversation.id, only["document_id"])
+
+        assert deleted.status_code == 200, deleted.text
+        assert retried.status_code == 404
+        assert await Document.find_by_id(only["document_id"]) is None
+        assert store.count(document_id=only["document_id"]) == 0
+        assert "private_document_slots_not_released" in caplog.text
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_a_failed_release_does_not_fail_the_conversation_delete(
+    async_client, store, monkeypatch, caplog
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        await _attach(async_client, token, conversation, "a.txt")
+
+        async def broken_release(user_id, count):
+            raise RuntimeError("mongo refused")
+
+        monkeypatch.setattr(
+            "src.services.conversation_documents.release_private_document_slots",
+            broken_release,
+        )
+        deleted = await async_client.delete(
+            f"/conversations/{conversation.id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert deleted.status_code == 200, deleted.text
+        assert await Collection.find_by_id(conversation.id) is None
+        assert await Document.count_documents({"collection_id": conversation.id}) == 0
+        assert "private_document_slots_not_released" in caplog.text
+    finally:
+        monkeypatch.undo()
+        await _cleanup(user, conversation)
+
+
+async def test_a_failed_row_delete_after_qdrant_keeps_the_document_for_a_retry(
+    async_client, store, monkeypatch
+):
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        [only] = await _attach(async_client, token, conversation, "a.txt")
+        primary = Document.get_primary_collection()
+
+        class RefusesDeletes:
+            def __getattr__(self, name):
+                return getattr(primary, name)
+
+            async def delete_one(self, *args, **kwargs):
+                raise RuntimeError("mongo refused")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                Document,
+                "get_primary_collection",
+                classmethod(lambda cls: RefusesDeletes()),
+            )
+            failed = await _delete_doc(
+                async_client, token, conversation.id, only["document_id"]
+            )
+
+        assert failed.status_code == 500
+        assert failed.json()["detail"]["code"] == "conversation_document_cleanup_failed"
+        assert await Document.find_by_id(only["document_id"]) is not None
+        assert await _slots(user) == 1
+
+        retried = await _delete_doc(async_client, token, conversation.id, only["document_id"])
+        assert retried.status_code == 200, retried.text
+        assert await _slots(user) == 0
+    finally:
+        await _cleanup(user, conversation)
+
+
+@pytest.mark.parametrize("whole_conversation", [False, True])
+async def test_a_hung_qdrant_stops_the_delete_within_its_deadline(
+    async_client, store, monkeypatch, whole_conversation
+):
+    monkeypatch.setattr(
+        "src.services.conversation_documents.CONVERSATION_DOCUMENT_DELETE_SECONDS", 0.3
+    )
+    user, token = await create_test_user_and_token()
+    conversation = await _conversation(user)
+    try:
+        [only] = await _attach(async_client, token, conversation, "a.txt")
+        store.delete_delay = 2.0
+
+        started = time.monotonic()
+        if whole_conversation:
+            resp = await async_client.delete(
+                f"/conversations/{conversation.id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        else:
+            resp = await _delete_doc(async_client, token, conversation.id, only["document_id"])
+        elapsed = time.monotonic() - started
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"]["code"] == "conversation_document_cleanup_failed"
+        assert elapsed < 1.5
+        # Mongo untouched: the row and its slot stay for the retry.
+        assert await Document.find_by_id(only["document_id"]) is not None
+        assert await _slots(user) == 1
+        assert await Conversation.find_by_id(conversation.id) is not None
+    finally:
+        await asyncio.sleep(2.0)  # let the abandoned delete finish before cleanup
+        await _cleanup(user, conversation)

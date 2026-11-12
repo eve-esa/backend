@@ -195,7 +195,8 @@ resp.raise_for_status()
 
 ### Notes
 
-- A 500 `conversation_document_cleanup_failed` changes nothing visible: retry it.
+- A 500 `conversation_document_cleanup_failed` means the document is still attached: retry it.
+- A retry, or the repeat of a request that ended in a 504 at the CDN, may answer 404: the first request deleted the document. A 404 on this DELETE means the document is gone.
 - `DELETE /conversations/{id}` removes all of a conversation's documents.
 
 ## Full API reference
