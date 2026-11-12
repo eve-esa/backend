@@ -71,11 +71,7 @@ from src.services.agents.core.sandbox import (
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
-from src.services.agents.core.skills import (
-    listed_skills_key,
-    resolve_skills_root,
-    skills_root_key,
-)
+from src.services.agents.core.skills import resolve_skills_root, skills_root_key
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
@@ -1604,14 +1600,15 @@ def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]
     ]
 
 
-async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
-    """True when this conversation already has a checkpoint.
+async def _read_checkpoint(checkpointer: Any, conversation_id: str) -> tuple[bool, Any]:
+    """Whether this conversation already has a checkpoint, and the tuple read.
 
     A lookup error is treated as "the thread is there": seeding on top of a
-    thread that could not be read would duplicate it.
+    thread that could not be read would duplicate it. The tuple is ``None``
+    then, and when no checkpointer or no checkpoint exists.
     """
     if checkpointer is None:
-        return False
+        return False, None
     try:
         found = await checkpointer.aget_tuple(
             {"configurable": {"thread_id": conversation_id}}
@@ -1620,49 +1617,71 @@ async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
         logger.warning(
             "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
         )
-        return True
-    return found is not None
+        return True, None
+    return found is not None, found
 
 
-# A slow checkpoint read must not hold the turn: past this the turn keeps
-# the checkpointed skill list, as it did before the reload check existed.
-_SKILLS_STATE_READ_TIMEOUT_S = 2.0
+# Checkpoint metadata key holding the skills key a turn ran with. LangGraph
+# copies string values of ``config["metadata"]`` onto every checkpoint the
+# turn writes, so the next turn reads it from the tuple it already has.
+_SKILLS_KEY_METADATA = "eve_skills_key"
+# Bound on the wait for the local tree scan, not on the scan: a thread cannot
+# be cancelled, so a late scan finishes in the background and fills the cache.
+_SKILLS_CHECK_TIMEOUT_S = 2.0
 
 
 async def _skills_reload_input(
-    checkpointer: Any, conversation_id: Optional[str], skills_root: Any
-) -> Dict[str, Any]:
-    """``{"skills_metadata": None}`` when this turn's skills differ from the thread's.
+    checkpoint: Any, conversation_id: Optional[str], skills_root: Any
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    """Graph input and config metadata that keep a thread's skill list current.
 
-    SkillsMiddleware loads the skill list once per thread and keeps it in the
-    checkpoint; ``None`` asks it to list ``/skills/`` again. The check reads
-    the checkpoint and parses the local tree, so an unchanged set costs no
-    sandbox round trip. Any doubt keeps the checkpointed list.
+    SkillsMiddleware lists ``/skills/`` once per thread and keeps the list in
+    the checkpoint; ``{"skills_metadata": None}`` asks it to list again. The
+    decision compares the key of this turn's local tree with the key the last
+    turn recorded in its checkpoint metadata, never with the checkpointed list:
+    on the sandbox path that list comes from the sandbox listing, and duplicate
+    names resolve in listing order, so a list that differs from the local tree
+    would force a reload on every turn.
+
+    Any failure keeps today's behaviour (no reload) and re-records the previous
+    key, so a change is still caught on the next turn. Known gaps, both
+    corrected on the next turn: a read from a lagging secondary, and two turns
+    on one thread at once, where the older one can write the old list back.
     """
-    if skills_root is None or checkpointer is None or not conversation_id:
-        return {}
+    if skills_root is None or not conversation_id:
+        return {}, {}
+    stored: Optional[str] = None
+    wanted: Optional[str] = None
     try:
-        found = await asyncio.wait_for(
-            checkpointer.aget_tuple({"configurable": {"thread_id": conversation_id}}),
-            timeout=_SKILLS_STATE_READ_TIMEOUT_S,
+        metadata = getattr(checkpoint, "metadata", None)
+        if isinstance(metadata, dict):
+            value = metadata.get(_SKILLS_KEY_METADATA)
+            stored = value if isinstance(value, str) and value else None
+        wanted = await asyncio.wait_for(
+            asyncio.to_thread(skills_root_key, skills_root),
+            timeout=_SKILLS_CHECK_TIMEOUT_S,
         )
-    except Exception:
+    except TimeoutError:
         logger.warning(
-            "skills reload check: checkpoint read failed conversation=%s",
+            "skills reload check: scan still running after %.1f s, kept the list "
+            "conversation=%s",
+            _SKILLS_CHECK_TIMEOUT_S,
             conversation_id,
-            exc_info=True,
         )
-        return {}
-    checkpoint = getattr(found, "checkpoint", None) or {}
-    held = (checkpoint.get("channel_values") or {}).get("skills_metadata")
-    if not isinstance(held, list):
-        # Not loaded yet: the middleware lists the tree on its own.
-        return {}
-    wanted = skills_root_key(skills_root)
-    if wanted is None or wanted == listed_skills_key(held):
-        return {}
+    except Exception as exc:
+        logger.warning(
+            "skills reload check failed, kept the list conversation=%s error=%s",
+            conversation_id,
+            type(exc).__name__,
+        )
+    recorded = wanted or stored
+    metadata_out = {_SKILLS_KEY_METADATA: recorded} if recorded else {}
+    # No recorded key (first turn, or a thread from before this check): the
+    # middleware's own list stands and this turn records the key.
+    if wanted is None or stored is None or wanted == stored:
+        return {}, metadata_out
     logger.info("skills changed since the last turn conversation=%s", conversation_id)
-    return {"skills_metadata": None}
+    return {"skills_metadata": None}, metadata_out
 
 
 async def save_agent_summary(graph: Any, conversation_id: str) -> None:
@@ -1772,19 +1791,22 @@ async def _prepare_agent_context(
     conversation_id: Optional[str],
     checkpointer: Any,
     message_id: Optional[str],
-) -> tuple[List[Any], Optional[str], List[Any], bool, Any]:
-    """Return history, summary, seeded turns, new-checkpoint, and the agent.
+) -> tuple[List[Any], Optional[str], List[Any], bool, Any, Any]:
+    """Return history, summary, seeded turns, new-checkpoint, agent, checkpoint.
 
     A deep turn with a checkpoint uses that thread and no rolling summary.
     Without one, the stored turns are seeded into the new thread. ``simple``
-    and ``react`` keep the rolling summary and the one-turn window.
+    and ``react`` keep the rolling summary and the one-turn window. The
+    checkpoint tuple is the deep turn's one read of the thread, or ``None``.
     """
     history, summary = await _fetch_conversation_context(conversation_id)
     prior: List[Any] = []
+    checkpoint: Any = None
     new_checkpoint = not history
     agent = get_agent_graph(agent_graph_type)
     if agent_graph_type == "deep" and conversation_id:
-        if await _checkpoint_exists(checkpointer, conversation_id):
+        exists, checkpoint = await _read_checkpoint(checkpointer, conversation_id)
+        if exists:
             history, summary = [], None
             new_checkpoint = False
         else:
@@ -1794,7 +1816,7 @@ async def _prepare_agent_context(
         agent = _agent_with_pinned_context(agent)
     elif agent_graph_type != "simple":
         summary = note_searchable_history(summary)
-    return history, summary, prior, new_checkpoint, agent
+    return history, summary, prior, new_checkpoint, agent, checkpoint
 
 
 def _generation_unattributed_s(
@@ -1940,7 +1962,14 @@ async def generate_answer_agentic(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -1998,9 +2027,15 @@ async def generate_answer_agentic(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}} if conversation_id else {}
-        skills_reload = await _skills_reload_input(
-            checkpointer, conversation_id, skills_root
-        )
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
         async def _run_graph(
             g: Any,
@@ -2351,7 +2386,14 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -2408,9 +2450,15 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}}
-        skills_reload = await _skills_reload_input(
-            checkpointer, conversation_id, skills_root
-        )
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
         gen_start = time.perf_counter()
         # First-answer budget. gen_start stays put: generation_latency uses it.

@@ -2561,7 +2561,9 @@ class TestSandboxInGeneration:
         # The conversation keeps the sandbox. Release drops local clients only,
         # and AgentCore's local close is a no-op so the session is not stopped.
         assert sandbox.closed == 0
-        assert names == ["_open_sync", "detach"]
+        # The spy sees every to_thread call: the skills reload check scans
+        # the local tree off the event loop between the open and the release.
+        assert names == ["_open_sync", "skills_root_key", "detach"]
         assert latencies["setup_sandbox_s"] >= 0
 
     async def test_no_conversation_destroys_the_sandbox(self, tmp_path, monkeypatch):

@@ -313,7 +313,7 @@ async def _run(monkeypatch, *, stream: bool, sandbox: bool):
     lease = SimpleNamespace(backend=backend) if sandbox else None
 
     async def _prepare(*_args, **_kwargs):
-        return [], None, [], True, agent
+        return [], None, [], True, agent, None
 
     async def _llm(*_args, **_kwargs):
         return object(), {}
