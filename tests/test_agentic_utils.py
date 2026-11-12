@@ -99,3 +99,37 @@ class TestExistingHelpersStillWork:
         assert len(parsed) == 1
         assert parsed[0]["name"] == "foo"
         assert parsed[0]["args"] == {"a": 1}
+
+    def test_json_array_form_is_a_tool_call(self):
+        """The history rewrite writes this shape, and the model copies it."""
+        content = (
+            '[TOOL_CALLS] [{"name": "display", "arguments": {"path": "plot.png"}}]'
+        )
+        parsed = parse_text_tool_calls(content)
+        assert len(parsed) == 1
+        assert parsed[0]["name"] == "display"
+        assert parsed[0]["args"] == {"path": "plot.png"}
+        calls, answer = split_tool_calls_and_answer_text(content + "\nShown.")
+        assert calls[0]["name"] == "display"
+        assert calls[0]["args"] == {"path": "plot.png"}
+        assert answer == "Shown."
+        assert "[TOOL_CALLS]" not in answer
+
+    def test_json_array_with_shell_escapes_is_a_tool_call(self):
+        """ImageMagick ``\\(`` is not valid JSON. The call must still run."""
+        content = (
+            '[TOOL_CALLS] [{"name": "execute", "arguments": {"command": '
+            '"convert \\( sample_green.png \\)"}}]'
+        )
+        parsed = parse_text_tool_calls(content)
+        assert parsed[0]["name"] == "execute"
+        assert parsed[0]["args"]["command"] == "convert \\( sample_green.png \\)"
+
+    def test_answer_after_a_repaired_call_keeps_its_backslashes(self):
+        content = (
+            '[TOOL_CALLS] [{"name": "execute", "arguments": {"command": '
+            '"convert \\( a.png \\)"}}]\nUse \\( to group.'
+        )
+        calls, answer = split_tool_calls_and_answer_text(content)
+        assert calls[0]["args"]["command"] == "convert \\( a.png \\)"
+        assert answer == "Use \\( to group."

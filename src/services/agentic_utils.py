@@ -54,8 +54,98 @@ def is_agentic_generation_request(
 # ─── Text-format tool-call parsing (EVE-Instruct / Mistral) ───────────────────
 
 
+def _call_args(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Arguments from either key the text format uses.
+
+    History is rewritten with ``arguments``. The ``name{...}`` form and some
+    model replies use ``args``. A string value is one more JSON object.
+    """
+    args = item.get("arguments", item.get("args", {}))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _relax_json_escapes(text: str) -> tuple[str, List[int]]:
+    """Keep valid JSON escapes and double the rest.
+
+    A shell command such as ``\\(`` is not a JSON escape. ``json.loads``
+    rejects the whole tool call, and the turn then ends with an empty answer.
+    Also returns the offsets in *text* where a backslash was inserted.
+    """
+    inserted: List[int] = []
+
+    def _escape(match: "re.Match[str]") -> str:
+        if match.group(1) in '"\\/bfnrtu':
+            return match.group(0)
+        inserted.append(match.start())
+        return "\\\\" + match.group(1)
+
+    return re.sub(r"\\(.)", _escape, text), inserted
+
+
+def _decode_json_value(text: str) -> tuple[Any, int]:
+    """Decode one JSON value. Return ``(value, end)`` with *end* in *text*.
+
+    The second try repairs invalid escapes, which lengthens the string, so
+    the end is mapped back to *text* before returning.
+    """
+    try:
+        return json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        repaired, inserted = _relax_json_escapes(text)
+        if not inserted:
+            raise
+        value, end = json.JSONDecoder().raw_decode(repaired)
+        shift = sum(1 for k, pos in enumerate(inserted) if pos + k < end)
+        return value, end - shift
+
+
+def _json_array_tool_calls(
+    text: str, *, start_index: int = 0
+) -> Optional[tuple[List[Dict[str, Any]], str]]:
+    """Parse ``[{"name": "...", "arguments": {...}}]`` and the text after it.
+
+    ``None`` when *text* is not that array. That is the shape written back
+    into the thread after a tool call, and the shape the model copies.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("["):
+        return None
+    try:
+        payload, end = _decode_json_value(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    calls: List[Dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        calls.append(
+            {
+                "id": f"call_{start_index + len(calls)}_{name}",
+                "name": name,
+                "args": _call_args(item),
+                "type": "tool_call",
+            }
+        )
+    lead = len(text) - len(stripped)
+    return calls, text[:lead] + stripped[end:]
+
+
 def parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
-    """Parse ``[TOOL_CALLS]tool_name{"key": "val"} ...`` into structured dicts.
+    """Parse ``[TOOL_CALLS]`` text into structured tool calls.
+
+    Two shapes. ``[TOOL_CALLS]tool_name{"key": "val"}`` is the Mistral form.
+    ``[TOOL_CALLS] [{"name": "tool_name", "arguments": {...}}]`` is the form
+    written into history, which the model then copies.
 
     Returns a list compatible with ``AIMessage.tool_calls``.
     """
@@ -65,6 +155,9 @@ def parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
     text = content[
         content.index(_TEXT_TOOL_CALL_MARKER) + len(_TEXT_TOOL_CALL_MARKER) :
     ].strip()
+    parsed = _json_array_tool_calls(text)
+    if parsed is not None:
+        return parsed[0]
     calls: List[Dict[str, Any]] = []
     i = 0
     while i < len(text):
@@ -144,6 +237,12 @@ def split_tool_calls_and_answer_text(content: str) -> tuple[List[Dict[str, Any]]
     while text.startswith(_TEXT_TOOL_CALL_MARKER):
         rest = text[len(_TEXT_TOOL_CALL_MARKER) :]
         stripped = rest.lstrip()
+        parsed = _json_array_tool_calls(stripped, start_index=len(calls))
+        if parsed is not None:
+            more, remainder = parsed
+            calls.extend(more)
+            text = remainder.lstrip("\n")
+            continue
         m = re.match(r"([A-Za-z_]\w*)", stripped)
         if not m:
             break
