@@ -2611,6 +2611,7 @@ async def generate_answer_agentic_stream_helper(
             generated_model_name=resolve_generated_model_name(endpoint_metadata),
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
+            clear_error=bool(answer),
         )
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)

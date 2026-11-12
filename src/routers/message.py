@@ -96,6 +96,58 @@ router = APIRouter()
 CHAT_RATE_LIMIT = Depends(enforce_request_rate("chat"))
 RETRIEVE_RATE_LIMIT = Depends(enforce_request_rate("retrieve"))
 
+# How long a retry waits for the generation it pre-empts to unwind. Two runs
+# on one conversation write to the same checkpoint thread.
+RETRY_PREEMPT_TIMEOUT_S = 30.0
+
+
+async def _signal_stop(conversation_id: str) -> Optional[str]:
+    """Cancel the conversation's in-flight generation; return its message id."""
+    cancel_mgr = get_cancel_manager()
+    # Prefer async lookup to support Redis-backed mapping across workers
+    try:
+        message_id = await cancel_mgr.get_message_for_conversation_async(
+            conversation_id
+        )  # type: ignore
+    except Exception:
+        message_id = cancel_mgr.get_message_for_conversation(conversation_id)
+    if not message_id:
+        return None
+
+    cancel_mgr.cancel(message_id)
+    try:
+        bus = get_stream_bus()
+        await bus.stop(message_id, f"data: {json.dumps({'type': 'stopped'})}\n\n")
+    except Exception as e:
+        logger.warning(
+            "generation.stop.signal_failed conversation_id=%s message_id=%s err=%s",
+            conversation_id,
+            message_id,
+            str(e),
+        )
+    return message_id
+
+
+async def _preempt_active_generation(conversation_id: str) -> None:
+    """Stop the conversation's in-flight generation and wait for it to end."""
+    message_id = await _signal_stop(conversation_id)
+    if not message_id:
+        return
+    logger.info(
+        "generation.retry.preempting conversation_id=%s message_id=%s",
+        conversation_id,
+        message_id,
+    )
+    finished = await get_cancel_manager().wait_until_finished(
+        conversation_id, message_id, RETRY_PREEMPT_TIMEOUT_S
+    )
+    if not finished:
+        logger.warning(
+            "generation.retry.preempt_timeout conversation_id=%s message_id=%s",
+            conversation_id,
+            message_id,
+        )
+
 
 def _agent_summarizes(prompts: Any) -> bool:
     """True when the agentic turn ran the deep graph.
@@ -715,6 +767,7 @@ async def retry(
             )
         ownership_validated = True
         await enforce_token_budget_or_raise(requesting_user)
+        await _preempt_active_generation(conversation_id)
 
         if is_agentic_generation_request(message.request_input, message):
             request = await _prepare_agentic_request(
@@ -1181,14 +1234,7 @@ async def stop_conversation(
                 detail="You are not allowed to access this conversation",
             )
 
-        cancel_mgr = get_cancel_manager()
-        # Prefer async lookup to support Redis-backed mapping across workers
-        try:
-            message_id = await cancel_mgr.get_message_for_conversation_async(
-                conversation_id
-            )  # type: ignore
-        except Exception:
-            message_id = cancel_mgr.get_message_for_conversation(conversation_id)
+        message_id = await _signal_stop(conversation_id)
         if not message_id:
             # Nothing active to stop; respond success for idempotency
             logger.info(
@@ -1197,26 +1243,12 @@ async def stop_conversation(
                 conversation_id,
             )
             return {"status": "no_active_generation"}
-
-        cancel_mgr.cancel(message_id)
-        try:
-            bus = get_stream_bus()
-            await bus.stop(
-                message_id, f"data: {json.dumps({'type': 'stopped'})}\n\n"
-            )
-            logger.info(
-                "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
-                requesting_user.id,
-                conversation_id,
-                message_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "generation.stop.signal_failed conversation_id=%s message_id=%s err=%s",
-                conversation_id,
-                message_id,
-                str(e),
-            )
+        logger.info(
+            "generation.stop.signaled user_id=%s conversation_id=%s message_id=%s",
+            requesting_user.id,
+            conversation_id,
+            message_id,
+        )
         return {"status": "stopping", "message_id": message_id}
     except HTTPException:
         raise
