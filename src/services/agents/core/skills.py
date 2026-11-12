@@ -255,3 +255,61 @@ def _copy_contents(source: Path, dest: Path) -> None:
             shutil.copytree(item, target)
         elif item.is_file():
             shutil.copy2(item, target)
+
+
+# What SkillsMiddleware shows the model about one skill. ``path`` is left out:
+# it names the mount, and the mount is the same ``/skills/`` on every turn.
+_LISTED_FIELDS = ("description", "license", "compatibility", "metadata", "allowed_tools")
+
+
+def _listed_key(skill: Any) -> Optional[tuple]:
+    if not isinstance(skill, dict) or not isinstance(skill.get("name"), str):
+        return None
+    values = []
+    for field in _LISTED_FIELDS:
+        value = skill.get(field)
+        if isinstance(value, dict):
+            value = tuple(sorted(value.items()))
+        elif isinstance(value, list):
+            value = tuple(value)
+        values.append(value)
+    return (skill["name"], *values)
+
+
+def listed_skills_key(skills_metadata: Sequence[Any]) -> frozenset:
+    """The skill set a checkpointed ``skills_metadata`` list holds."""
+    keys = (_listed_key(skill) for skill in skills_metadata or [])
+    return frozenset(key for key in keys if key is not None)
+
+
+def skills_root_key(root: Optional[Path]) -> Optional[frozenset]:
+    """The skill set SkillsMiddleware would list from *root* now.
+
+    Parsed on local disk with the library's own parser, so a reload decision
+    costs no sandbox round trip. ``None`` when the set cannot be computed;
+    the caller then keeps the checkpointed list.
+    """
+    try:
+        from deepagents.middleware.skills import _parse_skill_metadata
+    except ImportError:
+        return None
+    if root is None or not Path(root).is_dir():
+        return frozenset()
+    by_name: dict[str, Any] = {}
+    for folder in sorted(Path(root).iterdir()):
+        skill_md = folder / "SKILL.md"
+        if not folder.is_dir() or not skill_md.is_file():
+            continue
+        try:
+            content = skill_md.read_bytes().decode("utf-8")
+            parsed = _parse_skill_metadata(
+                content=content,
+                skill_path=f"/skills/{folder.name}/SKILL.md",
+                directory_name=folder.name,
+            )
+        except Exception:
+            logger.warning("Cannot read skill %s for the reload check", folder.name)
+            continue
+        if parsed is not None:
+            by_name[parsed["name"]] = parsed
+    return listed_skills_key(list(by_name.values()))

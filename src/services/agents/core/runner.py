@@ -71,7 +71,11 @@ from src.services.agents.core.sandbox import (
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
-from src.services.agents.core.skills import resolve_skills_root
+from src.services.agents.core.skills import (
+    listed_skills_key,
+    resolve_skills_root,
+    skills_root_key,
+)
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
@@ -1620,6 +1624,47 @@ async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
     return found is not None
 
 
+# A slow checkpoint read must not hold the turn: past this the turn keeps
+# the checkpointed skill list, as it did before the reload check existed.
+_SKILLS_STATE_READ_TIMEOUT_S = 2.0
+
+
+async def _skills_reload_input(
+    checkpointer: Any, conversation_id: Optional[str], skills_root: Any
+) -> Dict[str, Any]:
+    """``{"skills_metadata": None}`` when this turn's skills differ from the thread's.
+
+    SkillsMiddleware loads the skill list once per thread and keeps it in the
+    checkpoint; ``None`` asks it to list ``/skills/`` again. The check reads
+    the checkpoint and parses the local tree, so an unchanged set costs no
+    sandbox round trip. Any doubt keeps the checkpointed list.
+    """
+    if skills_root is None or checkpointer is None or not conversation_id:
+        return {}
+    try:
+        found = await asyncio.wait_for(
+            checkpointer.aget_tuple({"configurable": {"thread_id": conversation_id}}),
+            timeout=_SKILLS_STATE_READ_TIMEOUT_S,
+        )
+    except Exception:
+        logger.warning(
+            "skills reload check: checkpoint read failed conversation=%s",
+            conversation_id,
+            exc_info=True,
+        )
+        return {}
+    checkpoint = getattr(found, "checkpoint", None) or {}
+    held = (checkpoint.get("channel_values") or {}).get("skills_metadata")
+    if not isinstance(held, list):
+        # Not loaded yet: the middleware lists the tree on its own.
+        return {}
+    wanted = skills_root_key(skills_root)
+    if wanted is None or wanted == listed_skills_key(held):
+        return {}
+    logger.info("skills changed since the last turn conversation=%s", conversation_id)
+    return {"skills_metadata": None}
+
+
 async def save_agent_summary(graph: Any, conversation_id: str) -> None:
     """Copy the deep agent's latest summary onto ``Conversation.summary``.
 
@@ -1953,6 +1998,9 @@ async def generate_answer_agentic(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}} if conversation_id else {}
+        skills_reload = await _skills_reload_input(
+            checkpointer, conversation_id, skills_root
+        )
 
         async def _run_graph(
             g: Any,
@@ -1997,7 +2045,8 @@ async def generate_answer_agentic(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode="updates",
@@ -2359,6 +2408,9 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}}
+        skills_reload = await _skills_reload_input(
+            checkpointer, conversation_id, skills_root
+        )
 
         gen_start = time.perf_counter()
         # First-answer budget. gen_start stays put: generation_latency uses it.
@@ -2501,7 +2553,8 @@ async def generate_answer_agentic_stream_helper(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode=["messages", "updates", "custom"],
