@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from src.services.sources.descriptors import minimal_source, public_source, slug_for_provider
 
@@ -207,29 +207,6 @@ class CitationRewriter:
             out.append(self._take("["))
             i = start + 1
         return "".join(out)
-
-    def feed_paragraph(self, text: str, sep: str) -> Tuple[str, bool]:
-        """``feed`` for the first text of a new paragraph, with ``sep`` in front of it.
-
-        A possible marker held from before that ``text`` completes stays whole:
-        ``sep`` goes right after it. Returns the text safe to send now and
-        whether ``sep`` is in it; False while ``text`` only extends or closes
-        the held marker, so the caller passes ``sep`` again with the next text.
-        """
-        held = self._held
-        if held:
-            buffer = held + text
-            match = _MARKER.match(buffer)
-            if match:
-                cut = match.end() - len(held)
-                head = self.feed(text[:cut])
-                if cut == len(text):
-                    return head, False
-                return head + self.feed(sep + text[cut:]), True
-            prefix = _MARKER_PREFIX.match(buffer)
-            if prefix and prefix.end() == len(buffer) and len(buffer) <= MAX_HOLD_CHARS:
-                return self.feed(text), False
-        return self.feed(sep + text), True
 
     @property
     def held(self) -> str:

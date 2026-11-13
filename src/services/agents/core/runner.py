@@ -3032,10 +3032,13 @@ async def generate_answer_agentic_stream_helper(
         step_frames = _StepFrames(tools)
 
         turn_buffer: List[str] = []
-        # A model call ended (its node update, or the node changed): the next
-        # answer text starts a new paragraph. The break rides that text, so a
+        # A model call ended (its node update, the node changed, or the chunk
+        # id changed): the next answer text starts a new paragraph. The break rides that text, so a
         # Stop or an end before it stores none.
         paragraph_pending = False
+        # Chunk id of the model call that streamed last: a new id is a new
+        # call in the same node (a node retry, retry or fallback middleware).
+        model_call_id: Optional[str] = None
         current_node: Optional[str] = None
         # Tool calls already announced in the current agent step, keyed by
         # call id. One call can reach the stream up to three times (a complete
@@ -3144,14 +3147,26 @@ async def generate_answer_agentic_stream_helper(
             if not paragraph_pending:
                 return citation_rewriter.feed(tok)
             # The held text counts: it is streamed text the filter has not
-            # sent yet, and it may be the start of a handle ``tok`` closes.
+            # sent yet.
             so_far = _answer_text() + citation_rewriter.held
-            if not so_far or so_far.endswith("\n") or tok.startswith("\n"):
+            if not so_far:
                 paragraph_pending = False
                 return citation_rewriter.feed(tok)
-            out, placed = citation_rewriter.feed_paragraph(tok, PARAGRAPH_BREAK)
-            paragraph_pending = not placed
-            return out
+            if not tok.strip():
+                # A call that writes only whitespace: the break waits for
+                # the next text, so no blank paragraph and no double break.
+                return ""
+            paragraph_pending = False
+            # A marker is written inside one model call: a handle prefix held
+            # from the last call is plain text, sent before the break.
+            head = citation_rewriter.flush()
+            body = tok.lstrip(" \t")
+            tail = so_far.rstrip(" \t")
+            have = (len(tail) - len(tail.rstrip("\n"))) + (
+                len(body) - len(body.lstrip("\n"))
+            )
+            sep = PARAGRAPH_BREAK[: max(0, len(PARAGRAPH_BREAK) - have)]
+            return head + citation_rewriter.feed(sep + body)
 
         def _flush_turn_buffer_to_events() -> List[str]:
             nonlocal tokens_yielded, first_token_latency, citations_dirty
@@ -3397,6 +3412,13 @@ async def generate_answer_agentic_stream_helper(
                             continue
 
                         if AIMessage and isinstance(chunk, AIMessage):
+                            chunk_id = getattr(chunk, "id", None)
+                            if chunk_id:
+                                if model_call_id and chunk_id != model_call_id:
+                                    for event in _flush_turn_buffer_to_events():
+                                        yield event
+                                    paragraph_pending = True
+                                model_call_id = chunk_id
                             if getattr(chunk, "tool_calls", None):
                                 # Kept only so a ToolMessage without a name can be
                                 # traced back to the tool it answered.
