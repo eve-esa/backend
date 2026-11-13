@@ -24,7 +24,7 @@ from server import app
 from src.database.models.message import Message
 from src.routers import agui as agui_route
 from src.services.cancel_manager import get_cancel_manager
-from src.services.generate_answer import persist_runner_cancel
+from src.services.generate_answer import persist_message_state, persist_runner_cancel
 from tests.agui.test_agui_route import (  # noqa: F401  (fixtures)
     FakeBus,
     bus,
@@ -107,9 +107,9 @@ def cancel_calls(monkeypatch):
     calls: List[str] = []
     original = manager.cancel
 
-    def counting(message_id: str) -> None:
+    def counting(message_id: str, **kwargs: Any) -> None:
         calls.append(message_id)
-        original(message_id)
+        original(message_id, **kwargs)
 
     monkeypatch.setattr(manager, "cancel", counting)
     return calls
@@ -361,3 +361,142 @@ async def test_cancelled_request_task_is_not_a_stop(flag_on, cancellable, counti
     assert not fake.calls[0]["cancel_event"].is_set()
     fake.release.set()
     await asyncio.wait_for(fake.done.wait(), 5)
+
+
+# ─── B3 review: why a run ended, and one cancel ───────────────────────────────
+
+
+class SlowSaveRunner(CancellableRunner):
+    """On a cancel, saves the partial answer the way the runner does, slowly.
+
+    The real runner saves the partial output with ``persist_message_state``
+    inside its cancel handler: a second ``task.cancel()`` landing there aborts
+    the save and the stored answer stays empty.
+    """
+
+    def __init__(self, bus: FakeBus, frames: List[Dict[str, Any]], partial: str) -> None:
+        super().__init__(bus, frames)
+        self.partial = partial
+        self.saving = asyncio.Event()
+        self.saved = asyncio.Event()
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        message_id = kwargs["message_id"]
+        await kwargs["subscriber_ready"].wait()
+        try:
+            for frame in self.frames:
+                await self.bus.publish(message_id, sse(frame))
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            self.saving.set()
+            await asyncio.sleep(0.3)
+            await persist_message_state(
+                message_id, output=self.partial, stopped=kwargs["cancel_event"].is_set()
+            )
+            self.saved.set()
+        finally:
+            await self.bus.close(message_id)
+            self.done.set()
+
+
+@pytest.fixture
+def slow_save(monkeypatch, counting_bus):
+    def _install(frames, partial) -> SlowSaveRunner:
+        fake = SlowSaveRunner(counting_bus, frames, partial)
+        monkeypatch.setattr("src.routers.agui.run_agentic_generation_to_bus", fake)
+        return fake
+
+    return _install
+
+
+@SPECS
+async def test_disconnect_is_stored_as_client_disconnected(
+    flag_on, cancellable, counting_bus, owner, spec_version, caplog
+):
+    # Also what a deploy rollover looks like: the ALB closes the connection at
+    # the end of the deregistration delay, before the worker gets SIGTERM.
+    _, token, conversation = owner
+    fake = cancellable([f_status(), f_token("Partial ")])
+    client = Client(spec_version)
+
+    with caplog.at_level("INFO", logger="src.routers.agui"):
+        await client.run(
+            conversation.id, token, run_input(conversation.id), _seen("TEXT_MESSAGE_CONTENT")
+        )
+        await asyncio.wait_for(fake.done.wait(), 5)
+
+    stored = await _stored(conversation.id)
+    assert stored.stopped is True
+    assert stored.metadata["stop_reason"] == "client_disconnected"
+    assert any(
+        "agui.client_disconnected" in r.getMessage() and "reason=client_disconnected" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@SPECS
+async def test_disconnect_partial_answer_is_saved_with_its_reason(
+    flag_on, slow_save, owner, spec_version
+):
+    _, token, conversation = owner
+    fake = slow_save([f_status(), f_token("Partial ")], "Partial ")
+    client = Client(spec_version)
+
+    await client.run(conversation.id, token, run_input(conversation.id), _seen("TEXT_MESSAGE_CONTENT"))
+    await asyncio.wait_for(fake.done.wait(), 5)
+
+    stored = await _stored(conversation.id)
+    assert stored.output == "Partial "
+    assert stored.stopped is True
+    assert stored.metadata["stop_reason"] == "client_disconnected"
+
+
+async def test_user_stop_stores_no_reason(async_client, flag_on, cancellable, owner):
+    # POST /stop keeps its stored shape: stopped, no reason field.
+    _, token, conversation = owner
+    fake = cancellable([f_status(), f_token("Partial ")])
+    client = Client("2.3")
+    stopped = []
+
+    async def press_stop(events):
+        if stopped or not any(e["type"] == "TEXT_MESSAGE_CONTENT" for e in events):
+            return
+        response = await async_client.post(
+            f"/conversations/{conversation.id}/stop", headers={"Authorization": f"Bearer {token}"}
+        )
+        stopped.append(response.json()["status"])
+
+    await client.run(
+        conversation.id, token, run_input(conversation.id), lambda events: False, on_event=press_stop
+    )
+    await asyncio.wait_for(fake.done.wait(), 5)
+
+    stored = await _stored(conversation.id)
+    assert stored.stopped is True
+    assert "stop_reason" not in (stored.metadata or {})
+
+
+@SPECS
+async def test_disconnect_then_stop_cancels_once_and_keeps_the_partial_answer(
+    async_client, flag_on, slow_save, counting_bus, owner, spec_version
+):
+    _, token, conversation = owner
+    fake = slow_save([f_status(), f_token("Partial ")], "Partial ")
+    client = Client(spec_version)
+
+    await client.run(conversation.id, token, run_input(conversation.id), _seen("TEXT_MESSAGE_CONTENT"))
+    # The run is saving its partial answer when the Stop arrives (the EVE Stop
+    # aborts the fetch and posts /stop at once).
+    await asyncio.wait_for(fake.saving.wait(), 5)
+    response = await async_client.post(
+        f"/conversations/{conversation.id}/stop", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    await asyncio.wait_for(fake.done.wait(), 5)
+
+    assert fake.saved.is_set()
+    stored = await _stored(conversation.id)
+    assert stored.output == "Partial "
+    assert stored.stopped is True
