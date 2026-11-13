@@ -1148,6 +1148,7 @@ async def get_rag_context(
             filters=request.filters,
             private_collections_map=request.private_collections_map,
             user_id=request.user_id,
+            unfiltered_private_ids=request.unfiltered_private_collections,
         )
     except Exception as e:
         logger.error(f"Failed to get RAG context from vector store: {e}")

@@ -126,3 +126,57 @@ class TestIdempotence:
         assert sorted(request.collection_ids) == sorted(
             ["wikipedia-512", _OWNED[0].id]
         )
+
+
+class TestCollectionReads:
+    @pytest.mark.asyncio
+    async def test_only_ids_the_secondary_missed_are_read_on_the_primary(self):
+        """A collection created a moment ago may be missing on a secondary."""
+        from src.routers.message import apply_private_collections_to_request
+
+        fresh = SimpleNamespace(
+            id="68b0c0ffee000000000000a4",
+            name="Attached documents",
+            conversation_id="c1",
+        )
+        calls = []
+
+        async def find_all(filter_dict=None, primary=False, **_):
+            wanted = {str(oid) for oid in filter_dict["_id"]["$in"]}
+            calls.append((primary, wanted))
+            # The secondary lags behind: it does not have the fresh row yet.
+            rows = [*_OWNED, fresh] if primary else _OWNED
+            return [c for c in rows if c.id in wanted]
+
+        request = GenerationRequest(
+            query="q", private_collections=[_OWNED[0].id, fresh.id]
+        )
+        with patch(f"{_MESSAGE}.CollectionModel.find_all", find_all):
+            await apply_private_collections_to_request(request, _USER_ID)
+
+        assert calls == [
+            (False, {_OWNED[0].id, fresh.id}),
+            (True, {fresh.id}),
+        ]
+        assert request.private_collections_map == {
+            _OWNED[0].id: "notes",
+            fresh.id: "Attached documents",
+        }
+        # Only the attached documents skip the year and citation filters.
+        assert request.unfiltered_private_collections == [fresh.id]
+
+    @pytest.mark.asyncio
+    async def test_the_primary_is_not_read_when_the_secondary_has_every_id(self):
+        from src.routers.message import apply_private_collections_to_request
+
+        primaries = []
+
+        async def find_all(filter_dict=None, primary=False, **_):
+            primaries.append(primary)
+            return await _find_all(filter_dict)
+
+        request = GenerationRequest(query="q", private_collections=[_OWNED[0].id])
+        with patch(f"{_MESSAGE}.CollectionModel.find_all", find_all):
+            await apply_private_collections_to_request(request, _USER_ID)
+
+        assert primaries == [False]

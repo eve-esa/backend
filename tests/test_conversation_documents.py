@@ -31,7 +31,7 @@ from src.routers.message import apply_private_collections_to_request
 from src.schemas.generation_request import GenerationRequest
 from src.services.agents.core.registry import get_agent_graph
 from src.services.agents.core.runner import _rag_mcp_tool_defaults, _with_attached_documents
-from src.services.conversation_documents import searchable_document_names
+from src.services.conversation_documents import attached_document_names
 from tests.utils.cleaner import cleanup_models
 from tests.utils.documentdb import reject_pipeline_updates
 from tests.utils.utils import create_test_user_and_token
@@ -465,9 +465,25 @@ async def test_retrieve_right_after_the_upload_searches_the_conversation_collect
 
         assert request.private_collections_map == {collection_id: "Attached documents"}
         assert collection_id in request.collection_ids
+        # Known by its row, without the conversation id: no year or citations.
+        assert request.unfiltered_private_collections == [collection_id]
     finally:
         monkeypatch.undo()
         await _cleanup(user, conversation)
+
+
+async def _turn_request(user, conversation_id) -> GenerationRequest:
+    """A chat turn's request, prepared the way the message routes prepare it."""
+    request = GenerationRequest(query="what do the files say?")
+    await apply_private_collections_to_request(request, user.id, conversation_id)
+    return request
+
+
+async def _names_for_turn(user, conversation_id) -> list[str]:
+    request = await _turn_request(user, conversation_id)
+    if request.attached_collection_id is None:
+        return []
+    return await attached_document_names(request.attached_collection_id)
 
 
 async def test_the_turn_after_the_upload_names_the_document(
@@ -494,13 +510,10 @@ async def test_the_turn_after_the_upload_names_the_document(
             }
         )
 
-        assert await searchable_document_names(user.id, conversation.id) == [
-            "a.txt",
-            "b.txt",
-        ]
-        assert await searchable_document_names(user.id, other_conversation.id) == []
+        assert await _names_for_turn(user, conversation.id) == ["a.txt", "b.txt"]
+        assert await _names_for_turn(user, other_conversation.id) == []
         monkeypatch.setattr("src.config.FEATURE_CONVERSATION_DOCUMENTS", False)
-        assert await searchable_document_names(user.id, conversation.id) == []
+        assert await _names_for_turn(user, conversation.id) == []
     finally:
         monkeypatch.undo()
         await cleanup_models([other_conversation])
@@ -519,7 +532,7 @@ async def test_a_document_attached_mid_conversation_is_named_on_the_next_turn(
     try:
         agent = get_agent_graph("react")
         first_turn = await _with_attached_documents(
-            agent, [retrieve], user.id, conversation.id
+            agent, [retrieve], await _turn_request(user, conversation.id)
         )
         assert first_turn is agent
 
@@ -531,7 +544,9 @@ async def test_a_document_attached_mid_conversation_is_named_on_the_next_turn(
         assert resp.status_code == 200, resp.text
 
         next_turn = await _with_attached_documents(
-            get_agent_graph("react"), [retrieve], user.id, conversation.id
+            get_agent_graph("react"),
+            [retrieve],
+            await _turn_request(user, conversation.id),
         )
         instruction = next_turn.instruction_text(history=[], summary=None)
         assert '"a.txt"' in instruction

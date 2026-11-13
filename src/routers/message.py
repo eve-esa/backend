@@ -295,20 +295,24 @@ async def apply_private_collections_to_request(
 
     user_collections = []
     if collection_object_ids:
-        # Primary: the agent's retrieve call reaches POST /retrieve with the
-        # conversation collection in private_collections and no conversation
-        # id. On the turn right after the upload that created it, a secondary
-        # may not have the row yet, and a collection missing from
-        # private_collections_map is not searched.
         user_collections = await CollectionModel.find_all(
-            filter_dict={
-                "user_id": user_id,
-                "_id": {"$in": collection_object_ids},
-            },
-            primary=True,
+            filter_dict={"user_id": user_id, "_id": {"$in": collection_object_ids}}
         )
+        # The agent's retrieve call reaches POST /retrieve with the conversation
+        # collection in private_collections and no conversation id. On the turn
+        # right after the upload that created it, a secondary may not have the
+        # row yet, and a collection missing from private_collections_map is not
+        # searched. Only the ids the secondary did not return go to the primary.
+        found = {c.id for c in user_collections}
+        missing = [oid for oid in collection_object_ids if str(oid) not in found]
+        if missing:
+            user_collections += await CollectionModel.find_all(
+                filter_dict={"user_id": user_id, "_id": {"$in": missing}},
+                primary=True,
+            )
 
     attached = await collection_for_chat(user_id, conversation_id)
+    request.attached_collection_id = attached.id if attached is not None else None
     if attached is not None:
         if attached.id not in {c.id for c in user_collections}:
             user_collections.append(attached)
@@ -320,6 +324,12 @@ async def apply_private_collections_to_request(
             ]
 
     request.private_collections_map = {c.id: c.name for c in user_collections}
+    # Attached documents have no year or citation count, so the UI filters on
+    # those fields would hide them while the prompt says they are searched.
+    # Known by the row, so POST /retrieve (no conversation id) does the same.
+    request.unfiltered_private_collections = [
+        c.id for c in user_collections if getattr(c, "conversation_id", None)
+    ]
     request.user_id = user_id
     if user_collections:
         request.collection_ids = request.collection_ids + [

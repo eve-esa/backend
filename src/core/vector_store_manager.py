@@ -19,6 +19,7 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    Iterable,
     List,
     NamedTuple,
     Optional,
@@ -1368,6 +1369,7 @@ class VectorStoreManager:
         limit_per_collection: int,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> List[Any]:
         """
         Search public named collections and the shared private collection.
@@ -1380,7 +1382,9 @@ class VectorStoreManager:
         (https://qdrant.tech/documentation/concepts/filtering/#must). Public
         ``env`` filtering is skipped for Wiley and for collections that do not
         advertise an ``env`` payload field; a collection whose payload schema
-        cannot be read is skipped for the turn. Collections are searched
+        cannot be read is skipped for the turn. Private collections in
+        ``unfiltered_private_ids`` (a conversation's attached documents, which
+        carry no year or citations) get the tenant filter only. Collections are searched
         concurrently under one budget, ``QDRANT_RETRIEVAL_BUDGET_S``, and a
         collection that times out is skipped.
         """
@@ -1450,13 +1454,16 @@ class VectorStoreManager:
             converted = (self._to_generic_result(p, display_name) for p in points)
             return [conv for conv in converted if conv is not None]
 
+        unfiltered = set(unfiltered_private_ids or ())
+
         async def _search_private(collection_id: str) -> List[Any]:
+            client_filter = None if collection_id in unfiltered else query_filter
             tenant = build_private_tenant_filter(user_id, [collection_id])
-            private_filter = merge_must_filters(query_filter, list(tenant.must or []))
+            private_filter = merge_must_filters(client_filter, list(tenant.must or []))
             try:
                 async with asyncio.timeout_at(deadline):
                     if await self._missing_client_filter_index(
-                        PRIVATE_COLLECTION_NAME, query_filter
+                        PRIVATE_COLLECTION_NAME, client_filter
                     ):
                         return []
                     points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
@@ -1763,6 +1770,7 @@ class VectorStoreManager:
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> List[Any]:
         """
         Retrieve relevant documents for a given query from multiple collections.
@@ -1799,6 +1807,7 @@ class VectorStoreManager:
                 k,
                 private_collections_map,
                 user_id,
+                unfiltered_private_ids,
             )
 
             logger.info(
@@ -1823,6 +1832,7 @@ class VectorStoreManager:
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
@@ -1855,6 +1865,7 @@ class VectorStoreManager:
                 k,
                 private_collections_map,
                 user_id,
+                unfiltered_private_ids,
             )
             retrieval_latency = time.perf_counter() - t1
 

@@ -1,11 +1,12 @@
 """The agent learns which documents a conversation has, and the run records what it searched.
 
 Each turn of a conversation with attached documents names them in the system
-prompt, and ``metadata.prompts.retrieval_calls`` keeps the collections every
-retrieve call actually received. Sources shows an uploaded chunk under its
+prompt, and ``metadata.prompts.retrieval_call_collections`` keeps the
+collections every retrieve call actually received. Sources shows an uploaded chunk under its
 file name.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -82,32 +83,54 @@ def test_no_line_returns_the_same_agent():
     assert _agent_with_system_line(agent, None) is agent
 
 
+ATTACHED = SimpleNamespace(attached_collection_id="c1")
+
+
 async def test_the_line_is_added_only_when_a_retrieve_tool_can_search(monkeypatch):
     calls = []
 
-    async def names(user_id, conversation_id):
-        calls.append(conversation_id)
+    async def names(collection_id):
+        calls.append(collection_id)
         return ["report.pdf"]
 
-    monkeypatch.setattr(runner, "searchable_document_names", names)
+    monkeypatch.setattr(runner, "attached_document_names", names)
     agent = get_agent_graph("react")
+    nothing_attached = SimpleNamespace(attached_collection_id=None)
 
-    no_tool = await _with_attached_documents(agent, [], "u1", "c1")
-    no_conversation = await _with_attached_documents(agent, [RETRIEVE], "u1", None)
-    with_tool = await _with_attached_documents(agent, [RETRIEVE], "u1", "c1")
+    no_tool = await _with_attached_documents(agent, [], ATTACHED)
+    no_collection = await _with_attached_documents(agent, [RETRIEVE], nothing_attached)
+    with_tool = await _with_attached_documents(agent, [RETRIEVE], ATTACHED)
 
-    assert no_tool is agent and no_conversation is agent
+    assert no_tool is agent and no_collection is agent
+    # The collection the request resolved is used: no second lookup.
     assert calls == ["c1"]
     assert '"report.pdf"' in with_tool.prompts["system"]
 
 
 async def test_a_failed_lookup_keeps_the_turn_going(monkeypatch):
-    async def broken(user_id, conversation_id):
+    async def broken(collection_id):
         raise RuntimeError("mongo down")
 
-    monkeypatch.setattr(runner, "searchable_document_names", broken)
+    monkeypatch.setattr(runner, "attached_document_names", broken)
     agent = get_agent_graph("react")
-    assert await _with_attached_documents(agent, [RETRIEVE], "u1", "c1") is agent
+    assert await _with_attached_documents(agent, [RETRIEVE], ATTACHED) is agent
+
+
+async def test_a_slow_lookup_does_not_hold_up_the_turn(monkeypatch):
+    async def stalled(collection_id):
+        await asyncio.sleep(5)
+        return ["report.pdf"]
+
+    monkeypatch.setattr(runner, "attached_document_names", stalled)
+    monkeypatch.setattr(runner, "_ATTACHED_DOCUMENTS_LOOKUP_S", 0.05)
+    agent = get_agent_graph("react")
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await _with_attached_documents(agent, [RETRIEVE], ATTACHED)
+
+    assert result is agent
+    assert loop.time() - started < 1.0
 
 
 def _retrieval_result() -> CallToolResult:
@@ -187,3 +210,77 @@ class TestPrivateChunkTitle:
         payload = {"metadata": {}}
         _title_private_payload(payload)
         assert "title" not in payload
+
+
+# Wiring: each entry point runs the graph with the line in its system prompt.
+
+
+def _turn_with_documents():
+    from langchain_core.messages import AIMessage
+
+    from src.schemas.generation_request import GenerationRequest
+
+    request = GenerationRequest(query="what does the file say?", agent="react")
+    request.attached_collection_id = "c1"
+    answer = AIMessage(content="It says hello.")
+    return request, answer
+
+
+async def _names(collection_id):
+    return ["report.pdf"]
+
+
+async def test_the_sync_turn_persists_the_line_in_its_system_prompt(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from src.services.agents.core.runner import generate_answer_agentic
+    from tests.test_agentic_fallback import _FakeUpdatesGraph, _patched_runner
+
+    request, answer = _turn_with_documents()
+    monkeypatch.setattr(runner, "attached_document_names", _names)
+    graph = _FakeUpdatesGraph([{"agent": {"messages": [answer]}}])
+
+    with _patched_runner(
+        _build_tools=_async_return([RETRIEVE]),
+        get_agent_graph=MagicMock(return_value=get_agent_graph("react")),
+        _build_react_graph=MagicMock(return_value=graph),
+    ):
+        result = await generate_answer_agentic(
+            request, user_id="u1", conversation_id="conv-1"
+        )
+
+    prompts = result[4]
+    assert '"report.pdf"' in prompts["agent_prompts"]["system"]
+
+
+async def test_the_streamed_turn_persists_the_line_in_its_system_prompt(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.services.agents.core.runner import generate_answer_agentic_stream_helper
+    from tests.test_agentic_fallback import _FakeStreamGraph, _patched_runner
+
+    request, answer = _turn_with_documents()
+    monkeypatch.setattr(runner, "attached_document_names", _names)
+    graph = _FakeStreamGraph(messages=[(answer, {"langgraph_node": "agent"})])
+    persist = AsyncMock()
+
+    with _patched_runner(
+        _build_tools=_async_return([RETRIEVE]),
+        get_agent_graph=MagicMock(return_value=get_agent_graph("react")),
+        _build_react_graph=MagicMock(return_value=graph),
+        persist_message_state=persist,
+    ):
+        async for _event in generate_answer_agentic_stream_helper(
+            request, conversation_id="conv-1", message_id="m1", user_id="u1"
+        ):
+            pass
+
+    persist.assert_awaited_once()
+    prompts = persist.await_args.kwargs["prompts"]
+    assert '"report.pdf"' in prompts["agent_prompts"]["system"]
+
+
+def _async_return(value):
+    from unittest.mock import AsyncMock
+
+    return AsyncMock(return_value=value)

@@ -73,7 +73,7 @@ from src.services.agents.core.sandbox import (
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
 from src.services.agents.core.skills import resolve_skills_root
 from src.services.checkpoint_retention import build_mongo_checkpointer
-from src.services.conversation_documents import searchable_document_names
+from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
@@ -1508,6 +1508,8 @@ def _agent_with_pinned_context(agent: Any) -> Any:
 
 
 _DOCUMENT_NAME_MAX_CHARS = 120
+# Longest the attached-documents lookup may hold up the first token.
+_ATTACHED_DOCUMENTS_LOOKUP_S = 2.0
 
 
 def attached_documents_line(names: List[str]) -> Optional[str]:
@@ -1551,26 +1553,27 @@ def _agent_with_system_line(agent: Any, line: Optional[str]) -> Any:
     return cloned
 
 
-async def _with_attached_documents(
-    agent: Any,
-    tools: Any,
-    user_id: Optional[str],
-    conversation_id: Optional[str],
-) -> Any:
+async def _with_attached_documents(agent: Any, tools: Any, request: Any) -> Any:
     """*agent* naming the conversation's documents when a retrieve tool can search them.
 
-    A lookup failure leaves the turn without the line rather than failing it:
-    the conversation collection is still in ``private_collections``.
+    The collection comes from the request (``apply_private_collections_to_request``
+    already looked it up). A lookup that fails or takes longer than
+    ``_ATTACHED_DOCUMENTS_LOOKUP_S`` leaves the turn without the line rather
+    than failing or delaying it: the collection is still in
+    ``private_collections``.
     """
-    if not user_id or not conversation_id or not _rag_tool_names(tools):
+    collection_id = getattr(request, "attached_collection_id", None)
+    if not collection_id or not _rag_tool_names(tools):
         return agent
     try:
-        names = await searchable_document_names(user_id, conversation_id)
-    except Exception:
+        async with asyncio.timeout(_ATTACHED_DOCUMENTS_LOOKUP_S):
+            names = await attached_document_names(collection_id)
+    except Exception as e:
         logger.warning(
-            "Could not list attached documents conversation=%s",
-            conversation_id,
-            exc_info=True,
+            "Could not list attached documents collection=%s timeout=%s",
+            collection_id,
+            isinstance(e, TimeoutError),
+            exc_info=not isinstance(e, TimeoutError),
         )
         return agent
     return _agent_with_system_line(agent, attached_documents_line(names))
@@ -1579,8 +1582,10 @@ async def _with_attached_documents(
 def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]]:
     """The collections each retrieval call of this run searched, in call order.
 
-    Stored as ``metadata.prompts.retrieval_calls``: the tool calls in the trace
-    carry the model's arguments, before the runner replaced the UI-owned ones.
+    Stored as ``metadata.prompts.retrieval_call_collections``: the tool calls in
+    the trace carry the model's arguments, before the runner replaced the
+    UI-owned ones. Only calls that returned a result are listed; a call that
+    failed is not recorded by the interceptor.
     """
     ctx = get_retrieval_context()
     if ctx is None:
@@ -1889,7 +1894,7 @@ async def generate_answer_agentic(
         history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
-        agent = await _with_attached_documents(agent, tools, user_id, conversation_id)
+        agent = await _with_attached_documents(agent, tools, request)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
@@ -2124,7 +2129,7 @@ async def generate_answer_agentic(
             "agent_prompts": dict(agent.prompts),
             "agent_graph_type": agent_graph_type,
             "used_fallback_llm": fallback.used,
-            "retrieval_calls": _retrieval_call_collections(rag_tool_names),
+            "retrieval_call_collections": _retrieval_call_collections(rag_tool_names),
             **llm_metadata,
             # This function persists nothing itself: the router lifts the
             # payload out into metadata.endpoint.
@@ -2295,7 +2300,7 @@ async def generate_answer_agentic_stream_helper(
         history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
-        agent = await _with_attached_documents(agent, tools, user_id, conversation_id)
+        agent = await _with_attached_documents(agent, tools, request)
         setup_latencies["setup_loading_history_s"] = time.perf_counter() - step_start
         resolved_instruction = agent.instruction_text(history=history, summary=summary)
         step_start = time.perf_counter()
@@ -2722,7 +2727,7 @@ async def generate_answer_agentic_stream_helper(
                 "agent_prompts": dict(agent.prompts),
                 "agent_graph_type": agent_graph_type,
                 "used_fallback_llm": fallback.used,
-                "retrieval_calls": _retrieval_call_collections(rag_tool_names),
+                "retrieval_call_collections": _retrieval_call_collections(rag_tool_names),
                 **llm_prompts,
             },
             endpoint=endpoint_metadata,
