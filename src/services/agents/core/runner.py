@@ -229,6 +229,10 @@ def _enrich_trace_entry_with_message_metadata(
 # whole file; the full arguments stay in Message.trace.
 STREAM_TOOL_ARG_MAX_CHARS = 500
 
+# Between the answer text of two model calls in one turn (text, a tool call,
+# more text), so the stream and the stored answer do not glue them.
+PARAGRAPH_BREAK = "\n\n"
+
 
 def _stream_tool_args(value: Any) -> Any:
     """Tool call arguments for a stream event, long strings cut."""
@@ -3028,6 +3032,10 @@ async def generate_answer_agentic_stream_helper(
         step_frames = _StepFrames(tools)
 
         turn_buffer: List[str] = []
+        # A model call ended (its node update, or the node changed): the next
+        # answer text starts a new paragraph. The break rides that text, so a
+        # Stop or an end before it stores none.
+        paragraph_pending = False
         current_node: Optional[str] = None
         # Tool calls already announced in the current agent step, keyed by
         # call id. One call can reach the stream up to three times (a complete
@@ -3130,6 +3138,21 @@ async def generate_answer_agentic_stream_helper(
                 events.append(f"data: {json.dumps(frame)}\n\n")
             return events
 
+        def _feed_answer_text(tok: str) -> str:
+            """``tok`` through the citation filter, with the paragraph break it opens."""
+            nonlocal paragraph_pending
+            if not paragraph_pending:
+                return citation_rewriter.feed(tok)
+            # The held text counts: it is streamed text the filter has not
+            # sent yet, and it may be the start of a handle ``tok`` closes.
+            so_far = _answer_text() + citation_rewriter.held
+            if not so_far or so_far.endswith("\n") or tok.startswith("\n"):
+                paragraph_pending = False
+                return citation_rewriter.feed(tok)
+            out, placed = citation_rewriter.feed_paragraph(tok, PARAGRAPH_BREAK)
+            paragraph_pending = not placed
+            return out
+
         def _flush_turn_buffer_to_events() -> List[str]:
             nonlocal tokens_yielded, first_token_latency, citations_dirty
             if not turn_buffer:
@@ -3182,7 +3205,7 @@ async def generate_answer_agentic_stream_helper(
                 if not tok:
                     continue
                 version = citation_rewriter.version
-                tok = citation_rewriter.feed(tok)
+                tok = _feed_answer_text(tok)
                 if citing and citation_rewriter.version != version:
                     citations_dirty = True
                 if not tok:
@@ -3307,6 +3330,9 @@ async def generate_answer_agentic_stream_helper(
                                     # A new agent step: a call the last tools
                                     # step passed by is a ghost, not pending.
                                     step_frames.drop_unanswered()
+                                    # That model call is over: later answer
+                                    # text comes from another one.
+                                    paragraph_pending = True
                                 for msg in msgs:
                                     if ToolMessage and isinstance(msg, ToolMessage):
                                         answer_budget_started_at = time.perf_counter()
@@ -3359,6 +3385,8 @@ async def generate_answer_agentic_stream_helper(
                                     )
                             for event in _flush_turn_buffer_to_events():
                                 yield event
+                            # One model call never spans two nodes.
+                            paragraph_pending = True
                             node_start_time = time.perf_counter()
                             current_node = node
 
