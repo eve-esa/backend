@@ -51,7 +51,7 @@ _HANDLE_FULL = re.compile(r"S(\d{1,4})")
 _LITERAL_MARKER = re.compile(r"\[\s*(S\d{1,4}(?:\s*[,;]\s*S\d{1,4})*)\s*\]")
 _LITERAL_OPEN = re.compile(r"\[(?=\s*S\d)")
 # Fields a stored citation carries that are not part of the Source.
-_MARKER_FIELDS = ("n", "at", "origin")
+_MARKER_FIELDS = ("n", "at", "origin", "alias_handles")
 # The longest prefix held back before it is let through as text.
 MAX_HOLD_CHARS = 40
 
@@ -113,8 +113,9 @@ def _handle_number(handle: Any) -> Optional[int]:
 def prior_sources_from_rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
     """The Sources earlier turns stored (``metadata.citations`` and ``sources_retrieved``).
 
-    One entry per id, first seen wins, without the marker fields; entries with
-    no id or no ``S<k>`` handle are skipped.
+    One entry per id and handle, first seen wins, without the marker fields;
+    each ``alias_handles`` value gives one more entry for the same Source under
+    that handle. Entries with no id or no ``S<k>`` handle are skipped.
     """
     out: List[Dict[str, Any]] = []
     seen: set = set()
@@ -130,12 +131,15 @@ def prior_sources_from_rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
                 if not isinstance(entry, Mapping):
                     continue
                 sid = entry.get("id")
-                if not isinstance(sid, str) or not sid or sid in seen:
+                if not isinstance(sid, str) or not sid:
                     continue
-                if _handle_number(entry.get("handle")) is None:
-                    continue
-                seen.add(sid)
-                out.append({k: v for k, v in entry.items() if k not in _MARKER_FIELDS})
+                base = {k: v for k, v in entry.items() if k not in _MARKER_FIELDS}
+                aliases = entry.get("alias_handles")
+                for handle in [entry.get("handle"), *(aliases if isinstance(aliases, list) else [])]:
+                    if _handle_number(handle) is None or (sid, handle) in seen:
+                        continue
+                    seen.add((sid, handle))
+                    out.append({**base, "handle": handle})
     return out
 
 
@@ -244,24 +248,80 @@ class CitationRewriter:
     # ── what the client and the stored message read ──────────────────────
 
     def citations(self) -> List[Dict[str, Any]]:
-        """Cited Sources in display order, each with ``n``, ``at`` and ``origin``."""
+        """Cited Sources in display order, each with ``n``, ``at`` and ``origin``.
+
+        The first entry of a document also lists, under ``alias_handles``, the
+        handles of its passages nobody cited (see ``_listed``).
+        """
+        entries, aliases = self._listed()
         out: List[Dict[str, Any]] = []
-        order = sorted(
-            self.numbers.items(),
-            key=lambda kv: (kv[1], (self.offsets.get(kv[0]) or [0])[0]),
-        )
-        for sid, n in order:
-            source = self._registry.by_id(sid)
-            if source is None:
-                continue
+        for source in entries:
             entry = public_source(source)
-            entry.update({"n": n, "at": list(self.offsets.get(sid, [])), "origin": "model"})
+            sid = source["id"]
+            entry.update({"n": self.numbers[sid], "at": list(self.offsets.get(sid, [])), "origin": "model"})
+            if aliases.get(sid):
+                entry["alias_handles"] = aliases[sid]
             out.append(entry)
         return out
 
     def sources_retrieved(self) -> List[Dict[str, Any]]:
-        """Sources of the run nobody cited, minimal fields, in arrival order."""
-        return [minimal_source(s) for s in self._registry.sources if s["id"] not in self.numbers]
+        """One entry per document of the run nobody cited, minimal fields, in arrival order."""
+        _, aliases = self._listed()
+        cited_keys = self._cited_keys()
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+        for source in self._registry.sources:
+            key = _doc_key(source)
+            if source["id"] in self.numbers or key in cited_keys or key in seen:
+                continue
+            seen.add(key)
+            entry = minimal_source(source)
+            if aliases.get(source["id"]):
+                entry["alias_handles"] = aliases[source["id"]]
+            out.append(entry)
+        return out
+
+    def _cited_keys(self) -> set:
+        keys = set()
+        for sid in self.numbers:
+            source = self._registry.by_id(sid)
+            if source is not None:
+                keys.add(_doc_key(source))
+        return keys
+
+    def _listed(self) -> tuple:
+        """``(cited Sources in display order, {listed id: alias handles})``.
+
+        A document is listed once: by its cited passages, or by its first
+        passage in ``sources_retrieved``. The handles of its other passages
+        ride the first listed entry as ``alias_handles``, so the next turn can
+        still resolve them and never hands their numbers out again.
+        """
+        order = sorted(
+            self.numbers.items(),
+            key=lambda kv: (kv[1], (self.offsets.get(kv[0]) or [0])[0]),
+        )
+        cited: List[Dict[str, Any]] = []
+        representative: Dict[str, str] = {}  # document key -> listed id
+        for sid, _n in order:
+            source = self._registry.by_id(sid)
+            if source is None:
+                continue
+            cited.append(source)
+            representative.setdefault(_doc_key(source), sid)
+        aliases: Dict[str, List[str]] = {}
+        for source in self._registry.sources:
+            key = _doc_key(source)
+            if source["id"] in self.numbers:
+                continue
+            listed = representative.setdefault(key, source["id"])
+            if listed != source["id"]:
+                aliases.setdefault(listed, []).append(source["handle"])
+        return cited, aliases
+
+
+def _doc_key(source: Mapping[str, Any]) -> str:
+    return source.get("document_key") or source["id"]
 
 
 def strip_handles(text: str) -> str:

@@ -1188,3 +1188,14 @@ class TestSourcesRetrievedDedup:
         assert final["answer"] == "Old [1]. Other [2]. New [3]."
         keys = [c["document_key"] for c in final["citations"]]
         assert keys == ["doi:10.1155/2022/222", "doi:10.1155/2022/111", "doi:10.2000/other"]
+
+
+class TestWileyTitleCharacters:
+    @pytest.mark.parametrize("as_json", [False, True])
+    async def test_a_hyphen_u2010_survives_the_envelope_and_the_descriptor(self, flag_on, cite_context, as_json):
+        doc = _wiley_envelope_doc(as_json)
+        envelope = json.loads(doc["text"]) if as_json else doc["text"]
+        envelope["results"][0]["metadata"]["additionalMetadata"]["title"] = "Post‐Fire Snowpack"
+        doc["text"] = json.dumps(envelope) if as_json else envelope  # json.dumps escapes it as \\u2010
+        await _intercept(_retrieve_response(doc))
+        assert cite_context.sources.sources[0]["title"] == "Post‐Fire Snowpack"
