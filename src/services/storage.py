@@ -101,6 +101,11 @@ INLINE_CONTENT_TYPES = INLINE_IMAGE_CONTENT_TYPES | {
     "application/json",
 }
 
+# Tool and sandbox output gets the same allowlist minus PDF: a PDF opened in a
+# tab runs the browser's PDF viewer on bytes the user never chose, so it is
+# served as an opaque attachment. The user's own uploaded PDF stays inline.
+TOOL_INLINE_CONTENT_TYPES = INLINE_CONTENT_TYPES - {"application/pdf"}
+
 OPAQUE_CONTENT_TYPE = "application/octet-stream"
 
 # Text-like artifact types that have no magic bytes to sniff. Detecting them

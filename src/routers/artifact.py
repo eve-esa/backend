@@ -33,10 +33,16 @@ from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
 from src.services.artifact_cleanup import delete_artifact
+from src.services.mcp.artifact_ingestion import (
+    artifact_markdown_line,
+    clean_filename,
+    strip_format_chars,
+)
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
     INLINE_CONTENT_TYPES,
     OPAQUE_CONTENT_TYPE,
+    TOOL_INLINE_CONTENT_TYPES,
     ObjectNotFoundError,
     sniff_artifact_type,
     storage_service,
@@ -119,12 +125,16 @@ def require_uploads_enabled() -> None:
 def serving_headers(artifact: Artifact) -> tuple[str, str]:
     """Media type and ``Content-Disposition`` an artifact is served with.
 
-    Only the inline allowlist keeps its stored type. Anything else, including
-    rows stored as ``image/svg+xml`` or ``text/html`` before the type came
-    from the bytes, is served as ``application/octet-stream`` with
-    ``attachment``, so neither a browser tab nor a blob URL renders it.
+    Only the inline allowlist keeps its stored type: ``INLINE_CONTENT_TYPES``
+    for a user's upload, ``TOOL_INLINE_CONTENT_TYPES`` (no PDF) for tool and
+    sandbox output. Anything else, including rows stored as ``image/svg+xml``
+    or ``text/html`` before the type came from the bytes, is served as
+    ``application/octet-stream`` with ``attachment``, so neither a browser
+    tab nor a blob URL renders it.
     """
-    if artifact.content_type in INLINE_CONTENT_TYPES:
+    uploaded = getattr(artifact.source, "type", None) == "upload"
+    inline = INLINE_CONTENT_TYPES if uploaded else TOOL_INLINE_CONTENT_TYPES
+    if artifact.content_type in inline:
         return artifact.content_type, content_disposition("inline", artifact.filename)
     return OPAQUE_CONTENT_TYPE, content_disposition("attachment", artifact.filename)
 
@@ -138,9 +148,13 @@ def content_disposition(disposition: str, filename: Optional[str]) -> str:
     folded, the rest as ``_``) plus ``filename*=UTF-8''<percent-encoded>``.
     Control characters, quotes, backslashes and path separators become ``_``
     in both, so the header cannot be split or refused, nor the name used as
-    a path.
+    a path. Unicode format characters (bidi overrides, zero width) go, so a
+    saved file cannot show a reversed extension.
     """
-    name = _UNSAFE_FILENAME_CHARS.sub("_", filename or "").strip() or "artifact"
+    name = (
+        _UNSAFE_FILENAME_CHARS.sub("_", strip_format_chars(filename or "")).strip()
+        or "artifact"
+    )
     if name.isascii():
         return f'{disposition}; filename="{name}"'
     fallback = "".join(
@@ -210,7 +224,9 @@ async def upload_artifact(
     artifact = await Artifact.create(
         user_id=requesting_user.id,
         key=key,
-        filename=file.filename or f"artifact.{type_key}",
+        # Cleaned and capped once here, so the list, the header and the
+        # markdown all carry the same safe name.
+        filename=clean_filename(file.filename) if file.filename else f"artifact.{type_key}",
         content_type=content_type,
         size_bytes=len(data),
         source=ArtifactSource(type="upload"),
@@ -220,7 +236,12 @@ async def upload_artifact(
     return {
         "id": artifact.id,
         "url": url,
-        "markdown": f"![{artifact.filename}]({url})",
+        "markdown": artifact_markdown_line(
+            artifact_id=artifact.id,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            provenance=False,
+        ),
         "filename": artifact.filename,
         "content_type": artifact.content_type,
         "size_bytes": artifact.size_bytes,

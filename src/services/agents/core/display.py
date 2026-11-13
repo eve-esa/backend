@@ -34,7 +34,6 @@ from src.services.mcp.artifact_context import (
     get_artifact_context,
 )
 from src.services.mcp.artifact_ingestion import (
-    INLINE_IMAGE_CONTENT_TYPES,
     ArtifactInterceptor,
     _stub_text,
     detect_content_type,
@@ -142,7 +141,6 @@ def _reuse(artifact: Artifact, ctx: ArtifactRequestContext) -> str:
         ctx.collected_artifact_ids.append(artifact.id)
     source = artifact.source
     return _stub_text(
-        is_image=artifact.content_type in INLINE_IMAGE_CONTENT_TYPES,
         filename=artifact.filename,
         artifact_id=artifact.id,
         content_type=artifact.content_type,

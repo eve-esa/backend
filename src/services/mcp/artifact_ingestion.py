@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import weakref
 from typing import Any, List, Optional, Tuple
 
@@ -66,7 +67,11 @@ except Exception:
     _mcp_types_available = False
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+# Longest filename stored or shown. A longer one keeps its extension (up to
+# ``_MAX_KEPT_EXTENSION`` characters) and loses the end of its stem.
+MAX_FILENAME_CHARS = 255
+_MAX_KEPT_EXTENSION = 16
 _MARKDOWN_SPECIALS = re.compile(r'([\\\[\]()<>"])')
 
 
@@ -83,9 +88,30 @@ def detect_content_type(data: bytes, filename: Optional[str] = None) -> str:
     return ARTIFACT_TYPE_CONTENT_TYPES.get(kind, OPAQUE_CONTENT_TYPE)
 
 
+def strip_format_chars(text: str) -> str:
+    """Drop Unicode format characters (category Cf).
+
+    Bidi overrides and isolates (U+202A to U+202E, U+2066 to U+2069) would
+    show ``report<U+202E>fdp.exe`` as ``reportexe.pdf``; zero-width ones hide
+    characters. None of them belongs in a filename.
+    """
+    return "".join(char for char in text if unicodedata.category(char) != "Cf")
+
+
 def clean_filename(filename: str) -> str:
-    """Drop control characters (new lines included) from a tool filename."""
-    return _CONTROL_CHARS.sub(" ", str(filename)).strip() or "file"
+    """A filename safe to store and show: one line, no format characters, capped.
+
+    Control characters (new lines included) become spaces, Unicode format
+    characters go, and a name longer than ``MAX_FILENAME_CHARS`` is cut
+    before its extension.
+    """
+    name = _CONTROL_CHARS.sub(" ", strip_format_chars(str(filename))).strip() or "file"
+    if len(name) > MAX_FILENAME_CHARS:
+        stem, ext = os.path.splitext(name)
+        if len(ext) > _MAX_KEPT_EXTENSION:
+            ext = ""
+        name = stem[: MAX_FILENAME_CHARS - len(ext)] + ext
+    return name
 
 
 def md_escape(text: str) -> str:
@@ -135,19 +161,21 @@ def artifact_markdown_line(
     content_type: Optional[str],
     server_name: Optional[str] = None,
     tool_name: Optional[str] = None,
+    provenance: bool = True,
 ) -> str:
     """The one markdown reference to a stored artifact.
 
     An image embed only for the raster allowlist, a plain link for anything
-    else (SVG and HTML included). Used by the tool stub and by the stubs the
-    runner appends to an answer, so both always agree.
+    else (SVG and HTML included). Used by the tool stub, by the stubs the
+    runner appends to an answer and by the upload response, so all agree.
+    ``provenance=False`` drops the MCP title, for a user's own upload.
     """
     url = f"/artifacts/{artifact_id}"
-    title = _provenance_title(server_name, tool_name)
+    target = f'{url} "{_provenance_title(server_name, tool_name)}"' if provenance else url
     label = md_escape(filename or "file")
     if content_type in INLINE_IMAGE_CONTENT_TYPES:
-        return f'![{label}]({url} "{title}")'
-    return f'[{label}]({url} "{title}")'
+        return f"![{label}]({target})"
+    return f"[{label}]({target})"
 
 
 def _stub_text(

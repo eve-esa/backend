@@ -10,9 +10,15 @@ from src.database.models.artifact import Artifact, ArtifactSource
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.routers.artifact import content_disposition
-from src.services.mcp.artifact_ingestion import _provenance_title, artifact_markdown_line
+from src.services.mcp.artifact_ingestion import (
+    MAX_FILENAME_CHARS,
+    _provenance_title,
+    artifact_markdown_line,
+    clean_filename,
+)
 from src.services.storage import INLINE_CONTENT_TYPES, INLINE_IMAGE_CONTENT_TYPES
 from tests.test_artifacts import (
+    PDF_BYTES,
     PNG_BYTES,
     _cleanup_quota,
     _mock_generate_answer,
@@ -309,3 +315,125 @@ def test_provenance_title_cannot_break_out(server, tool):
     assert '"' not in title
     assert "\\" not in title
     assert title.startswith("MCP: ")
+
+
+# ---------------- Tool PDFs -----------------
+
+
+@pytest.mark.asyncio
+async def test_a_tool_pdf_is_served_as_an_opaque_attachment(async_client, monkeypatch):
+    """A PDF a tool or the sandbox wrote never opens in a browser tab."""
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact = await _seed(fake, user.id, "application/pdf", PDF_BYTES, "report.pdf")
+
+        resp = await async_client.get(f"/artifacts/{artifact.id}", headers=_auth(token))
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.headers["content-disposition"] == 'attachment; filename="report.pdf"'
+
+        await async_client.get(f"/artifacts/{artifact.id}/url", headers=_auth(token))
+        assert fake.last_presign["response_content_type"] == "application/octet-stream"
+        assert fake.last_presign["response_content_disposition"].startswith("attachment;")
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_an_uploaded_pdf_stays_inline(async_client, monkeypatch):
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        artifact_id = (
+            await _upload(async_client, token, "doc.pdf", PDF_BYTES, "application/pdf")
+        ).json()["id"]
+
+        resp = await async_client.get(f"/artifacts/{artifact_id}", headers=_auth(token))
+
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.headers["content-disposition"] == 'inline; filename="doc.pdf"'
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+# ---------------- Upload filename and markdown -----------------
+
+
+@pytest.mark.asyncio
+async def test_upload_markdown_escapes_the_filename(async_client, monkeypatch):
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        body = (
+            await _upload(async_client, token, "a](javascript:x).png", PNG_BYTES, "image/png")
+        ).json()
+
+        assert body["markdown"] == f"![a\\]\\(javascript:x\\).png](/artifacts/{body['id']})"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_markdown_links_a_pdf_instead_of_embedding_it(async_client, monkeypatch):
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        body = (
+            await _upload(async_client, token, "doc.pdf", PDF_BYTES, "application/pdf")
+        ).json()
+
+        assert body["markdown"] == f"[doc.pdf](/artifacts/{body['id']})"
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_filename_is_stored_clean_and_capped(async_client, monkeypatch):
+    _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        name = "x" * 1000 + "\u202egnp.exe\u2066" + ".png"
+        body = (await _upload(async_client, token, name, PNG_BYTES, "image/png")).json()
+
+        stored = (await Artifact.find_by_id(body["id"])).filename
+        assert stored == body["filename"]
+        assert len(stored) <= MAX_FILENAME_CHARS
+        assert stored.endswith(".png")
+        assert "\u202e" not in stored and "\u2066" not in stored
+    finally:
+        await _cleanup_quota(user.id)
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["report\u202efdp.exe", "a\u200bb\u2066c\u2069.txt", "x\u202a\u202b\u202c\u202d.csv"],
+)
+def test_clean_filename_drops_bidi_and_format_characters(raw):
+    cleaned = clean_filename(raw)
+    assert all(not (0x200B <= ord(c) <= 0x200F) for c in cleaned)
+    assert all(not (0x202A <= ord(c) <= 0x202E) for c in cleaned)
+    assert all(not (0x2066 <= ord(c) <= 0x2069) for c in cleaned)
+
+
+def test_clean_filename_caps_the_length_and_keeps_the_extension():
+    cleaned = clean_filename("a" * 400 + ".geojson")
+    assert len(cleaned) == MAX_FILENAME_CHARS
+    assert cleaned.endswith(".geojson")
+    assert clean_filename("b" * 400) == "b" * MAX_FILENAME_CHARS
+
+
+def test_header_filename_drops_bidi_characters():
+    header = content_disposition("attachment", "report\u202efdp.exe")
+    assert "\u202e" not in header
+    assert quote("\u202e") not in header
+    assert header == 'attachment; filename="reportfdp.exe"'
