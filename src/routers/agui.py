@@ -3,7 +3,7 @@
 Behind ``FEATURE_AGUI_STREAM`` (off: 404). The route takes the same guards as
 ``stream-generate-agentic`` in the same order, reads one ``RunAgentInput``,
 starts the same runner on the same stream bus, and pipes the legacy frames
-through ``AguiTranslator`` into SDK-encoded SSE events with the usual
+through ``AguiAdapter`` into SDK-encoded SSE events with the usual
 keepalive comment. Stop stays ``POST /conversations/{id}/stop``.
 
 History is kept by the server: only the trailing user message of the input is
@@ -12,7 +12,7 @@ read. ``forwardedProps.eve`` passes through an allowlist onto a
 
 Errors before the stream are HTTP errors with ``{"detail": {"code",
 "message"}}`` (contract 1.6); after the stream opened they travel as
-``RUN_ERROR`` (contract 1.7, inside the translator).
+``RUN_ERROR`` (contract 1.7, inside the adapter).
 
 Logging: codes, counts and ids only, never user text.
 """
@@ -47,8 +47,8 @@ from src.routers.message import (
     resolve_artifact_attachments,
 )
 from src.schemas.generation_request import GenerationRequest
-from src.services.agui.translator import (
-    AguiTranslator,
+from src.services.agui.adapter import (
+    AguiAdapter,
     RunContext,
     encode_sse,
     pre_stream_error,
@@ -387,7 +387,7 @@ async def create_agui_run(
             gen_task, conversation_id, message.id, cancel_event
         )
 
-        translator = AguiTranslator(
+        adapter = AguiAdapter(
             RunContext(
                 thread_id=conversation_id,
                 run_id=run_id,
@@ -402,7 +402,7 @@ async def create_agui_run(
         message_id = message.id
 
         async def _events():
-            yield encode_sse(translator.start())
+            yield encode_sse(adapter.start())
             # As on the legacy route, the response stays open until the runner
             # closes the bus after the token charge; nothing is sent after the
             # terminal event.
@@ -410,15 +410,15 @@ async def create_agui_run(
                 bus.subscribe(message_id, ready=subscriber_ready)
             ) as frames:
                 async for data in frames:
-                    if translator.terminated:
+                    if adapter.terminated:
                         continue
                     frame = _parse_frame(data)
                     if frame is None:
                         continue
-                    events = translator.translate(frame)
+                    events = adapter.adapt(frame)
                     if events:
                         yield encode_sse(events)
-            tail = translator.finish()
+            tail = adapter.finish()
             if tail:
                 yield encode_sse(tail)
 

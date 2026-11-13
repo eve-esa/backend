@@ -1,4 +1,4 @@
-"""Red tests for the AG-UI translator: legacy stream bus frames in, AG-UI 1.0 events out.
+"""Red tests for the AG-UI adapter: legacy stream bus frames in, AG-UI 1.0 events out.
 
 Every legacy frame below is built the way the agentic runner publishes it today
 (backend main 0c98821); the comment on each builder names the emission site.
@@ -8,7 +8,7 @@ runner for (``message_id`` on every frame, real tool status, ``server``,
 client ignores them.
 
 Events are compared as JSON dicts (camelCase, ``None`` dropped), so the tests
-do not depend on which event model the translator returns. Every transcript is
+do not depend on which event model the adapter returns. Every transcript is
 also checked by the shared transcript validator.
 """
 
@@ -20,8 +20,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 
-from src.services.agui.translator import (
-    AguiTranslator,
+from src.services.agui.adapter import (
+    AguiAdapter,
     encode_sse,
     RunContext,
     pre_stream_error,
@@ -151,7 +151,7 @@ def f_final(
     # (None when empty), trace_id. B-S2: endpoint, usage, message_id.
     # `error`: the late failure today persisted only in metadata.error while the
     # runner still sends `final` with latencies {} (runner.py:2708, 2741); the
-    # translator needs it on the frame to end with RUN_ERROR (contract decision 1).
+    # adapter needs it on the frame to end with RUN_ERROR (contract decision 1).
     frame: Dict[str, Any] = {
         "type": "final",
         "answer": answer,
@@ -200,12 +200,12 @@ def _as_dict(event: Any) -> Dict[str, Any]:
 
 
 def _run(frames: Iterable[Dict[str, Any]], *, graph: str = "react", finish: bool = True) -> List[Dict[str, Any]]:
-    translator = AguiTranslator(_ctx(graph))
-    out: List[Any] = list(translator.start())
+    adapter = AguiAdapter(_ctx(graph))
+    out: List[Any] = list(adapter.start())
     for frame in frames:
-        out.extend(translator.translate(frame))
+        out.extend(adapter.adapt(frame))
     if finish:
-        out.extend(translator.finish())
+        out.extend(adapter.finish())
     return [_as_dict(e) for e in out]
 
 
@@ -434,19 +434,19 @@ def test_tool_timeout_is_reported_on_the_result():
 
 
 def test_stop_mid_tool_cancels_and_closes_what_is_open():
-    translator = AguiTranslator(_ctx("deep"))
-    raw: List[Any] = list(translator.start())
+    adapter = AguiAdapter(_ctx("deep"))
+    raw: List[Any] = list(adapter.start())
     for frame in [
         f_status(),
         f_token("Let me check the archive."),
         f_tool_call("call_b2", "eotdl_search", {"query": "flood masks"}, server="eotdl", label="Searching EOTDL"),
         f_stopped(),
     ]:
-        raw.extend(translator.translate(frame))
-    assert translator.terminated is True
+        raw.extend(adapter.adapt(frame))
+    assert adapter.terminated is True
     # A second stopped from the Stop route and the bus close add nothing.
-    assert list(translator.translate(f_stopped())) == []
-    assert list(translator.finish()) == []
+    assert list(adapter.adapt(f_stopped())) == []
+    assert list(adapter.finish()) == []
     events = [_as_dict(e) for e in raw]
 
     assert _types(events) == [
@@ -709,8 +709,8 @@ def test_no_user_text_in_any_log_record(caplog):
 
 def test_wire_body_from_the_sdk_encoder_validates():
     # The route sends encode_sse (the SDK EventEncoder), not _sse: check that body.
-    translator = AguiTranslator(_ctx())
-    raw: List[Any] = list(translator.start())
+    adapter = AguiAdapter(_ctx())
+    raw: List[Any] = list(adapter.start())
     for frame in [
         f_status(),
         f_tool_call("call_w1", "eve_retrieval_retrieve", {"query": "SAR"}, server="eve_retrieval", label="Searching EVE sources"),
@@ -718,7 +718,7 @@ def test_wire_body_from_the_sdk_encoder_validates():
         f_token("Answer."),
         f_final("Answer.", endpoint=ENDPOINT, latencies={"total_s": 1.0}),
     ]:
-        raw.extend(translator.translate(frame))
+        raw.extend(adapter.adapt(frame))
     body = encode_sse(raw)
 
     assert body.endswith("\n\n") and "\r" not in body

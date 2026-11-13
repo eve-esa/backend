@@ -1,15 +1,17 @@
-"""Legacy stream bus frames of one agentic run, translated to AG-UI 1.0 events.
+"""Legacy stream bus frames of one agentic run, adapted to AG-UI 1.0 events.
 
-Pure: no FastAPI, no I/O, no clock. The route builds one ``AguiTranslator`` per
-run, calls ``start()`` before it subscribes to the bus, ``translate()`` once per
+The AG-UI spec calls this piece the bridge.
+
+Pure: no FastAPI, no I/O, no clock. The route builds one ``AguiAdapter`` per
+run, calls ``start()`` before it subscribes to the bus, ``adapt()`` once per
 legacy frame (already parsed from its ``data:`` line into a dict), and
 ``finish()`` when the bus closes. Each call returns the AG-UI events to send, in
 order, as ``ag_ui.core`` models; ``encode_sse`` turns them into the wire body
-through the SDK ``EventEncoder``. The translator holds the open text message,
+through the SDK ``EventEncoder``. The adapter holds the open text message,
 tool calls, steps and activities, closes them before the terminal event, and
 drops every frame after the first terminal one.
 
-Input rejected before the run starts never reaches the translator: it is an
+Input rejected before the run starts never reaches the adapter: it is an
 HTTP error with no event stream, shaped by ``pre_stream_error``.
 
 Logging: event types, ids and counts only. No user text, no tool arguments,
@@ -181,8 +183,8 @@ def _usage(rows: Any) -> Optional[List[TokenUsage]]:
     return aggregate_token_usage(entries) or None
 
 
-class AguiTranslator:
-    """Stateful translator for the frames of exactly one run."""
+class AguiAdapter:
+    """Stateful adapter for the frames of exactly one run."""
 
     def __init__(self, context: RunContext) -> None:
         self.context = context
@@ -237,7 +239,7 @@ class AguiTranslator:
             ]
         )
 
-    def translate(self, frame: LegacyFrame) -> List[AguiEvent]:
+    def adapt(self, frame: LegacyFrame) -> List[AguiEvent]:
         """Events for one legacy frame; empty after the terminal event."""
         if self._terminated or not isinstance(frame, Mapping):
             return []
