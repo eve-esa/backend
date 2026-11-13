@@ -619,7 +619,7 @@ S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
 
 # Generic artifact knobs, consumed by MCP tool-output ingestion.
 ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))
-ARTIFACT_MAX_PER_TOOL_CALL = int(os.getenv("ARTIFACT_MAX_PER_TOOL_CALL", 10))
+ARTIFACT_MAX_PER_TOOL_CALL = int(os.getenv("ARTIFACT_MAX_PER_TOOL_CALL", 100))
 ARTIFACT_RESOURCE_READ_TIMEOUT_S = int(
     os.getenv("ARTIFACT_RESOURCE_READ_TIMEOUT_S", 30)
 )

@@ -32,6 +32,12 @@ from src.services.mcp.artifact_context import (
     ArtifactRequestContext,
     get_artifact_context,
 )
+from src.services.mcp.tool_artifacts import (
+    file_path_for,
+    object_key,
+    sandbox_path,
+    upload_tool_artifacts,
+)
 from src.services.storage import guess_extension_from_content_type, storage_service
 
 logger = logging.getLogger(__name__)
@@ -95,29 +101,123 @@ def _stub_text(
     size_bytes: int,
     server_name: Optional[str] = None,
     tool_name: Optional[str] = None,
+    output_path: Optional[str] = None,
 ) -> "TextContent":
     """Build the one-TextContent-per-artifact stub replacing a persisted block.
 
     Line 1 is a markdown reference (image embed for images, plain link
     otherwise) carrying a title that attributes the originating MCP
     server/tool; line 2 is a one-line JSON payload with the same data so a
-    consumer that doesn't render markdown can still parse it out.
+    consumer that doesn't render markdown can still parse it out. ``path``
+    in that JSON is the sandbox location when a conversation copy was stored.
     """
     url = f"/artifacts/{artifact_id}"
     title = _provenance_title(server_name, tool_name)
     link_line = (
         f'![{filename}]({url} "{title}")' if is_image else f'[{filename}]({url} "{title}")'
     )
-    meta_line = json.dumps(
-        {
-            "artifact_id": artifact_id,
-            "url": url,
-            "content_type": content_type,
-            "filename": filename,
-            "size_bytes": size_bytes,
-        }
-    )
+    meta: dict[str, Any] = {
+        "artifact_id": artifact_id,
+        "url": url,
+        "content_type": content_type,
+        "filename": filename,
+        "size_bytes": size_bytes,
+    }
+    # The sandbox path, without the users/.../conversations/... prefix.
+    if output_path:
+        meta["path"] = output_path
+    meta_line = json.dumps(meta)
     return TextContent(type="text", text=f"{link_line}\n{meta_line}")
+
+
+def _stub_output_path(block: Any) -> Optional[str]:
+    """The sandbox path carried by a markdown stub, if this block is one."""
+    if not isinstance(block, TextContent):
+        return None
+    lines = block.text.split("\n", 1)
+    if len(lines) != 2:
+        return None
+    try:
+        meta = json.loads(lines[1])
+    except json.JSONDecodeError:
+        return None
+    path = meta.get("path") if isinstance(meta, dict) else None
+    if isinstance(path, str) and path.startswith("/tool_artifacts/"):
+        return path
+    return None
+
+
+def _rewrite_path_value(value: str, paths: list[str]) -> Optional[str]:
+    """The sandbox path that replaces *value*, when one was stored for that file."""
+    by_name = {os.path.basename(path): path for path in paths}
+    name = os.path.basename(value)
+    if name in by_name:
+        return by_name[name]
+    if len(paths) == 1:
+        return paths[0]
+    return None
+
+
+def _rewrite_path_object(payload: Any, paths: list[str]) -> bool:
+    """Set ``payload['path']`` to the sandbox path. True when it changed."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("path"), str):
+        return False
+    sandbox = _rewrite_path_value(payload["path"], paths)
+    if sandbox is None or sandbox == payload["path"]:
+        return False
+    payload["path"] = sandbox
+    return True
+
+
+def _fold_output_paths(
+    blocks: List[Any], structured: Any
+) -> tuple[List[Any], Any]:
+    """Put the sandbox path in the tool's own JSON and drop the stub.
+
+    A file tool returns ``{"path": "report.txt"}`` and the interceptor adds
+    a markdown stub beside it. The model should see one JSON object, with
+    ``path`` set to ``/tool_artifacts/{artifact_id}/{filename}``. A result with
+    no such JSON keeps the stub, which is how images and ``display`` render.
+    """
+    paths = [path for block in blocks if (path := _stub_output_path(block))]
+    if not paths:
+        return blocks, structured
+
+    used: set[str] = set()
+
+    def rewrite(payload: Any) -> bool:
+        if not _rewrite_path_object(payload, paths):
+            return False
+        used.add(payload["path"])
+        return True
+
+    rewritten: List[Any] = []
+    for block in blocks:
+        if isinstance(block, TextContent) and _stub_output_path(block) is None:
+            try:
+                payload = json.loads(block.text)
+            except json.JSONDecodeError:
+                payload = None
+            if rewrite(payload):
+                rewritten.append(
+                    TextContent(type="text", text=json.dumps(payload))
+                )
+                continue
+        rewritten.append(block)
+
+    folded_structured = structured
+    if isinstance(structured, dict):
+        folded_structured = json.loads(json.dumps(structured))
+        rewrite(folded_structured)
+
+    if not used:
+        return blocks, structured
+    kept = [
+        block
+        for block in rewritten
+        if _stub_output_path(block) not in used
+    ]
+    return kept, folded_structured
 
 
 def _warning_text(message: str) -> "TextContent":
@@ -196,7 +296,7 @@ class ArtifactInterceptor:
                 content_type = block.mimeType or "application/octet-stream"
                 ext = guess_extension_from_content_type(content_type)
                 filename = f"{tool_name}-{counter}.{ext}"
-                artifact = await self._persist(
+                artifact, output_path = await self._persist(
                     data, content_type, filename, ctx, tool_name, server_name
                 )
                 new_content.append(
@@ -208,6 +308,7 @@ class ArtifactInterceptor:
                         size_bytes=len(data),
                         server_name=server_name,
                         tool_name=tool_name,
+                        output_path=output_path,
                     )
                 )
                 persisted_count += 1
@@ -242,7 +343,7 @@ class ArtifactInterceptor:
                 filename = _filename_from_uri(getattr(resource, "uri", None)) or (
                     f"{tool_name}-{counter}.{ext}"
                 )
-                artifact = await self._persist(
+                artifact, output_path = await self._persist(
                     data, content_type, filename, ctx, tool_name, server_name
                 )
                 new_content.append(
@@ -254,6 +355,7 @@ class ArtifactInterceptor:
                         size_bytes=len(data),
                         server_name=server_name,
                         tool_name=tool_name,
+                        output_path=output_path,
                     )
                 )
                 persisted_count += 1
@@ -261,21 +363,30 @@ class ArtifactInterceptor:
 
             if isinstance(block, ResourceLink):
                 counter += 1
-                stubs = await self._resolve_resource_link(
+                resolved = await self._resolve_resource_link(
                     block, ctx, tool_name, server_name, counter, persisted_count
                 )
-                if stubs is None:
+                if resolved is None:
                     # Timeout, error, or an oversized item: leave the link untouched.
                     new_content.append(block)
                 else:
+                    # `resolved` carries the count of artifacts stored. Warning
+                    # stubs in the list are not stored artifacts, so the length
+                    # of that list must not advance the cap.
+                    stubs, persisted_count = resolved
                     new_content.extend(stubs)
-                    persisted_count += len(stubs)
                 continue
 
             # Unknown/future block types passthrough untouched.
             new_content.append(block)
 
-        return result.model_copy(update={"content": new_content})
+        content, structured = _fold_output_paths(
+            new_content, getattr(result, "structuredContent", None)
+        )
+        update: dict[str, Any] = {"content": content}
+        if structured is not None:
+            update["structuredContent"] = structured
+        return result.model_copy(update=update)
 
     async def _persist(
         self,
@@ -285,7 +396,7 @@ class ArtifactInterceptor:
         ctx: ArtifactRequestContext,
         tool_name: str,
         server_name: str,
-    ) -> Artifact:
+    ) -> tuple[Artifact, Optional[str]]:
         ext = guess_extension_from_content_type(content_type)
         key = storage_service.build_user_key(ctx.user_id, ext, prefix="artifacts")
         await storage_service.put_object(key, data, content_type)
@@ -303,7 +414,43 @@ class ArtifactInterceptor:
             message_id=ctx.message_id,
         )
         ctx.collected_artifact_ids.append(artifact.id)
-        return artifact
+        output_path = await self._copy_to_conversation(
+            artifact.id, filename, data, content_type, ctx
+        )
+        return artifact, output_path
+
+    async def _copy_to_conversation(
+        self,
+        artifact_id: str,
+        filename: str,
+        data: bytes,
+        content_type: str,
+        ctx: ArtifactRequestContext,
+    ) -> Optional[str]:
+        """Store the conversation copy and upload it to the live sandbox.
+
+        A failure here leaves the artifact in place. The model then gets the
+        artifact stub without a sandbox path.
+        """
+        if not ctx.conversation_id:
+            return None
+        try:
+            relative = file_path_for(artifact_id, filename)
+            await storage_service.put_object(
+                object_key(ctx.user_id, ctx.conversation_id, relative),
+                data,
+                content_type,
+            )
+            path = sandbox_path(relative)
+            await upload_tool_artifacts(ctx.sandbox_backend, path, data)
+            return path
+        except Exception:
+            logger.warning(
+                "tool_artifacts.copy_failed artifact_id=%s",
+                artifact_id,
+                exc_info=True,
+            )
+            return None
 
     async def _resolve_resource_link(
         self,
@@ -313,13 +460,15 @@ class ArtifactInterceptor:
         server_name: str,
         counter: int,
         persisted_count: int,
-    ) -> Optional[List["TextContent"]]:
+    ) -> Optional[tuple[List["TextContent"], int]]:
         """Fetch a ResourceLink's contents and persist them as artifacts.
 
-        Returns the list of stub TextContent blocks to substitute in, or None
-        if the link should be left untouched (fetch failure, timeout, or any
-        returned item exceeding the size limit — the whole link aborts rather
-        than partially persisting).
+        Returns the stub blocks to substitute in, plus the updated count of
+        artifacts stored for this tool call. Limit warnings are in the list
+        and are not included in the count. None means leave the link
+        untouched (fetch failure, timeout, or any returned item exceeding
+        the size limit — the whole link aborts rather than partially
+        persisting).
         """
         client = self._client_ref() if self._client_ref is not None else None
         if client is None:
@@ -372,7 +521,7 @@ class ArtifactInterceptor:
 
             ext = guess_extension_from_content_type(content_type)
             filename = uri_filename or f"{tool_name}-{counter}-{idx}.{ext}"
-            artifact = await self._persist(
+            artifact, output_path = await self._persist(
                 data, content_type, filename, ctx, tool_name, server_name
             )
             stubs.append(
@@ -384,8 +533,9 @@ class ArtifactInterceptor:
                     size_bytes=len(data),
                     server_name=server_name,
                     tool_name=tool_name,
+                    output_path=output_path,
                 )
             )
             persisted_count += 1
 
-        return stubs
+        return stubs, persisted_count

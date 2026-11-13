@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.messages import AIMessage
 
-from src.database.models.artifact import Artifact
+from src.database.models.artifact import Artifact, ArtifactSource
 from src.schemas.generation_request import GenerationRequest
 from src.services.agents.core.display import build_display_tool
 from src.services.agents.core.runner import (
@@ -171,6 +171,98 @@ async def test_a_space_in_the_name_still_stores(stored, with_context):
         assert "/artifacts/" in text
         assert ' "MCP: sandbox/display")' in text
         assert with_context.collected_artifact_ids
+    finally:
+        await _cleanup()
+
+
+async def _mcp_artifact(conversation_id="conv-1", filename="get_sample_image-1.png"):
+    return await Artifact.create(
+        user_id=USER_ID,
+        key=f"users/{USER_ID}/artifacts/sample.png",
+        filename=filename,
+        content_type="image/png",
+        size_bytes=1878,
+        source=ArtifactSource(
+            type="mcp_tool", mcp_server="dummy_image", tool_name="get_sample_image"
+        ),
+        conversation_id=conversation_id,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template",
+    [
+        "/artifacts/{id}",
+        "artifacts/{id}",
+        "https://storage.googleapis.com/bucket/artifacts/{id}",
+    ],
+)
+async def test_artifact_reference_returns_the_existing_stub(
+    stored, with_context, template
+):
+    backend = _Backend(error="file_not_found")
+    tool = build_display_tool(backend)
+
+    try:
+        artifact = await _mcp_artifact()
+        text = await tool.ainvoke({"path": template.format(id=artifact.id)})
+        assert text.split("\n", 1)[0] == (
+            f'![get_sample_image-1.png](/artifacts/{artifact.id} '
+            '"MCP: dummy_image/get_sample_image")'
+        )
+        assert _parse_stub(text)["artifact_id"] == artifact.id
+        assert with_context.collected_artifact_ids == [artifact.id]
+        assert backend.calls == []
+        assert stored.objects == {}
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_filename_of_a_tool_artifact_falls_back_after_a_sandbox_miss(
+    stored, with_context
+):
+    backend = _Backend(error="file_not_found")
+    tool = build_display_tool(backend)
+
+    try:
+        artifact = await _mcp_artifact()
+        text = await tool.ainvoke({"path": "get_sample_image-1.png"})
+        assert f"](/artifacts/{artifact.id} " in text
+        assert backend.calls == [["get_sample_image-1.png"]]
+        assert with_context.collected_artifact_ids == [artifact.id]
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_file_wins_over_an_artifact_with_the_same_name(
+    stored, with_context
+):
+    tool = build_display_tool(_Backend(content=PNG_BYTES))
+
+    try:
+        old = await _mcp_artifact(filename="plot.png")
+        text = await tool.ainvoke({"path": "plot.png"})
+        payload = _parse_stub(text)
+        assert payload["artifact_id"] != old.id
+        assert ' "MCP: sandbox/display")' in text
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_artifact_of_another_conversation_is_not_shown(stored, with_context):
+    tool = build_display_tool(_Backend(error="file_not_found"))
+
+    try:
+        artifact = await _mcp_artifact(conversation_id="conv-2")
+        by_ref = await tool.ainvoke({"path": f"/artifacts/{artifact.id}"})
+        by_name = await tool.ainvoke({"path": "get_sample_image-1.png"})
+        assert "no such artifact" in by_ref
+        assert "file_not_found" in by_name
+        assert with_context.collected_artifact_ids == []
     finally:
         await _cleanup()
 

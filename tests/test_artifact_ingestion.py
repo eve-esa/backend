@@ -146,6 +146,93 @@ async def test_image_content_persisted_and_stubbed(interceptor, with_context):
         await _cleanup()
 
 
+class _Sandbox:
+    def __init__(self):
+        self.files: list[tuple[str, bytes]] = []
+
+    def upload_files(self, files):
+        self.files.extend(files)
+        return [{} for _ in files]
+
+
+@pytest.mark.asyncio
+async def test_conversation_copy_is_uploaded_to_the_sandbox(interceptor, with_context):
+    """The conversation folder gets the bytes, and the live sandbox does too."""
+    icept, fake = interceptor
+    sandbox = _Sandbox()
+    with_context.sandbox_backend = sandbox
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+
+    out = await icept(_request(), _handler(result))
+
+    try:
+        payload = _parse_stub(out.content[0])
+        relative = f"{payload['artifact_id']}/search-1.png"
+        key = f"users/{USER_ID}/conversations/conv-1/tool_artifacts/{relative}"
+        assert payload["path"] == f"/tool_artifacts/{relative}"
+        assert fake.objects[key]["body"] == PNG_BYTES
+        assert sandbox.files == [(payload["path"], PNG_BYTES)]
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_json_path_becomes_the_sandbox_path_and_the_stub_is_dropped(
+    interceptor, with_context
+):
+    """The model sees the tool JSON with the sandbox path, not the markdown stub."""
+    icept, _fake = interceptor
+    data = b"report\nhello from files-test\n"
+    resource = EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri="file:///report.txt",
+            mimeType="text/plain",
+            blob=base64.b64encode(data).decode("ascii"),
+        ),
+    )
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text='{"path": "report.txt"}'),
+            resource,
+        ],
+        structuredContent={"path": "report.txt"},
+    )
+
+    out = await icept(_request(name="make_report", server_name="files_test"), _handler(result))
+
+    try:
+        assert len(out.content) == 1
+        payload = json.loads(out.content[0].text)
+        assert set(payload) == {"path"}
+        assert payload["path"].startswith("/tool_artifacts/")
+        assert payload["path"].endswith("/report.txt")
+        assert "/artifacts/" not in out.content[0].text
+        assert out.structuredContent == payload
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_no_conversation_skips_the_conversation_copy(interceptor):
+    icept, fake = interceptor
+    ctx, token = set_artifact_context(user_id=USER_ID)
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+    try:
+        out = await icept(_request(), _handler(result))
+        payload = _parse_stub(out.content[0])
+        assert "path" not in payload
+        assert len(fake.objects) == 1
+        assert ctx.collected_artifact_ids == [payload["artifact_id"]]
+    finally:
+        reset_artifact_context(token)
+        await _cleanup()
+
+
 @pytest.mark.asyncio
 async def test_stub_title_strips_quotes_and_falls_back_to_mcp(interceptor, with_context):
     """The provenance title strips embedded quotes and degrades to a bare 'MCP'."""
@@ -412,9 +499,106 @@ async def test_max_per_tool_call_cap_respected(interceptor, with_context, monkey
         assert "artifact_id" in first_payload
         assert out.content[1].text == "artifact skipped: limit reached"
         assert len(with_context.collected_artifact_ids) == 1
-        assert len(fake.objects) == 1
+        assert len(fake.objects) == 2
     finally:
         await _cleanup()
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_limit_warning_stubs_do_not_consume_the_cap(
+    interceptor, with_context, monkeypatch
+):
+    """A ResourceLink warning stub is not a stored artifact.
+
+    The cap counts artifacts written, not stub blocks. A link that returns
+    one limit warning and a persisted count still under the cap must leave
+    room for the next block.
+    """
+    icept, _fake = interceptor
+    monkeypatch.setattr(
+        "src.services.mcp.artifact_ingestion.ARTIFACT_MAX_PER_TOOL_CALL", 1
+    )
+
+    async def _resolve(
+        self, block, ctx, tool_name, server_name, counter, persisted_count
+    ):
+        return (
+            [TextContent(type="text", text="artifact skipped: limit reached")],
+            persisted_count,
+        )
+
+    async def _persist(
+        self, data, content_type, filename, ctx, tool_name, server_name
+    ):
+        artifact = SimpleNamespace(id="art-1")
+        ctx.collected_artifact_ids.append(artifact.id)
+        return artifact, None
+
+    monkeypatch.setattr(ArtifactInterceptor, "_resolve_resource_link", _resolve)
+    monkeypatch.setattr(ArtifactInterceptor, "_persist", _persist)
+
+    link = ResourceLink(
+        type="resource_link", name="data.bin", uri="resource://tool/data.bin"
+    )
+    result = CallToolResult(
+        content=[
+            link,
+            ImageContent(type="image", data=PNG_B64, mimeType="image/png"),
+        ]
+    )
+
+    out = await icept(_request(), _handler(result))
+
+    assert out.content[0].text == "artifact skipped: limit reached"
+    assert _parse_stub(out.content[1])["artifact_id"] == "art-1"
+    assert with_context.collected_artifact_ids == ["art-1"]
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_resource_link_count_excludes_limit_warnings(
+    interceptor, with_context, monkeypatch
+):
+    """A capped link stores two artifacts and reports that count, not three stubs."""
+    icept, _fake = interceptor
+    monkeypatch.setattr(
+        "src.services.mcp.artifact_ingestion.ARTIFACT_MAX_PER_TOOL_CALL", 2
+    )
+
+    async def _persist(
+        self, data, content_type, filename, ctx, tool_name, server_name
+    ):
+        artifact = SimpleNamespace(id=f"art-{len(ctx.collected_artifact_ids) + 1}")
+        ctx.collected_artifact_ids.append(artifact.id)
+        return artifact, None
+
+    monkeypatch.setattr(ArtifactInterceptor, "_persist", _persist)
+    blob = base64.b64encode(b"abc").decode("ascii")
+    session = _FakeSession(
+        contents=[
+            BlobResourceContents(
+                uri=f"resource://tool/{name}",
+                mimeType="application/octet-stream",
+                blob=blob,
+            )
+            for name in ("a.bin", "b.bin", "c.bin")
+        ]
+    )
+    client = _FakeBoundClient(session)
+    icept.bind_client(client)
+    link = ResourceLink(
+        type="resource_link", name="bundle", uri="resource://tool/bundle"
+    )
+
+    stubs, count = await icept._resolve_resource_link(
+        link, with_context, "search", "wiley", 1, 0
+    )
+
+    assert count == 2
+    assert len(stubs) == 3
+    assert stubs[2].text == "artifact skipped: limit reached"
+    assert with_context.collected_artifact_ids == ["art-1", "art-2"]
 
 
 # ---------------- (f) storage failure: fail-open -----------------

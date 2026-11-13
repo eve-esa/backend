@@ -43,10 +43,11 @@ _SKILLS_PREFIX = "/skills/"
 _CONVERSATION_HISTORY = "/conversation_history/"
 _LARGE_TOOL_RESULTS = "/large_tool_results/"
 # writeFiles stores these under the session cwd. The shell rewrite points a
-# command at that directory. Longest prefix first, and neither has a trailing
+# command at that directory. Longest prefix first, and none has a trailing
 # slash, so ``/skills`` itself is covered. A raw replace of ``/skills`` would
-# rewrite the suffix of ``/large_tool_results/skills_1``.
-_SHELL_PREFIXES = ("/large_tool_results", "/skills")
+# rewrite the suffix of ``/large_tool_results/skills_1``. ``/tool_artifacts`` is
+# the conversation copy of an MCP artifact.
+_SHELL_PREFIXES = ("/large_tool_results", "/tool_artifacts", "/skills")
 
 
 class SandboxError(RuntimeError):
