@@ -107,6 +107,38 @@ class _RetryAsInfoFilter(logging.Filter):
         return True
 
 
+# A user Stop cancels the tool call while the SDK thread still streams the
+# command; the closed HTTP stream then fails the read (``Errno 9``) and the
+# SDK logs ERROR "Failed to run command". ``asyncio.to_thread`` copies the
+# context, so the thread holds the turn's Stop binding and sees an event set
+# after it started. A Stop is not an error; without one the ERROR stays.
+_OPENSANDBOX_COMMAND_LOGGERS = (
+    "opensandbox.sync.adapters.command_adapter",
+    "opensandbox.adapters.command_adapter",
+)
+_COMMAND_FAILED = "Failed to run command"
+
+
+class _StoppedCommandFilter(logging.Filter):
+    """Log a command failure caused by a user Stop at INFO, with the reason."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.WARNING or record.msg != _COMMAND_FAILED:
+            return True
+        from src.observability.context import stop_requested
+
+        if not stop_requested():
+            return True
+        exc = record.exc_info[1] if record.exc_info else None
+        record.msg = "%s: turn stopped by the user reason=stop error=%s"
+        record.args = (_COMMAND_FAILED, type(exc).__name__ if exc else "none")
+        record.exc_info = None
+        record.exc_text = None
+        record.levelno = logging.INFO
+        record.levelname = logging.getLevelName(logging.INFO)
+        return True
+
+
 # Marks our filters on the SDK loggers. A module reload (local development)
 # builds new ContextVars, so an older instance is replaced, not kept.
 _FILTER_MARK = "_eve_sandbox_filter"
@@ -125,6 +157,8 @@ def _add_filter_once(name: str, filter_: logging.Filter) -> None:
 _add_filter_once(_OPENSANDBOX_SDK_LOGGER, _GoneLookupFilter())
 for _name in _OPENSANDBOX_RETRY_LOGGERS:
     _add_filter_once(_name, _RetryAsInfoFilter())
+for _name in _OPENSANDBOX_COMMAND_LOGGERS:
+    _add_filter_once(_name, _StoppedCommandFilter())
 
 
 class SandboxError(RuntimeError):

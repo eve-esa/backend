@@ -218,3 +218,62 @@ def test_retries_that_run_out_log_one_warning_with_the_id(monkeypatch, caplog):
         "sandbox.connect_failed provider=opensandbox sandbox_id=sb-gone "
         "error=SandboxApiException"
     ]
+
+
+# A user Stop while a command runs: the cancel closes the HTTP stream under
+# the SDK thread, which logs ERROR "Failed to run command" (Errno 9). A Stop is
+# not an error; the same line without a Stop is.
+
+_COMMAND_LOGGER = "opensandbox.sync.adapters.command_adapter"
+
+
+async def _command_fails_in_a_thread(stop_during_run: bool):
+    import asyncio
+    import threading
+
+    from src.observability import context as obs_context
+
+    stop = asyncio.Event()
+    started = threading.Event()
+    go_on = threading.Event()
+
+    def run_command():
+        started.set()
+        go_on.wait(5)
+        logging.getLogger(_COMMAND_LOGGER).error(
+            "Failed to run command", exc_info=OSError(9, "Bad file descriptor")
+        )
+
+    token = obs_context._turn_stop.set(obs_context._TurnStop(stop))
+    try:
+        worker = asyncio.create_task(asyncio.to_thread(run_command))
+        await asyncio.to_thread(started.wait, 5)
+        if stop_during_run:
+            stop.set()  # pressed after the thread copied its context
+        go_on.set()
+        await worker
+    finally:
+        obs_context._turn_stop.reset(token)
+
+
+async def test_a_command_cut_by_a_user_stop_logs_info_with_the_reason(caplog):
+    with caplog.at_level(logging.DEBUG):
+        await _command_fails_in_a_thread(stop_during_run=True)
+
+    (record,) = [r for r in caplog.records if r.name == _COMMAND_LOGGER]
+    assert record.levelname == "INFO"
+    assert record.exc_info is None
+    assert record.getMessage() == (
+        "Failed to run command: turn stopped by the user reason=stop error=OSError"
+    )
+    assert _warnings(caplog) == []
+
+
+async def test_a_command_failure_without_a_stop_keeps_its_error(caplog):
+    with caplog.at_level(logging.DEBUG):
+        await _command_fails_in_a_thread(stop_during_run=False)
+
+    (record,) = [r for r in caplog.records if r.name == _COMMAND_LOGGER]
+    assert record.levelname == "ERROR"
+    assert record.getMessage() == "Failed to run command"
+    assert record.exc_info is not None
