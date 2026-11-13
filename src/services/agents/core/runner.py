@@ -524,6 +524,36 @@ class _StepFrames:
                 self._trace_steps[fields["tool_call_id"]] = step
 
 
+_USAGE_COUNT_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "input_token_details",
+    "output_token_details",
+)
+
+
+def _usage_row(
+    message: Any, endpoint_key: Optional[str], model_name: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """One ``final.usage`` row: the counts of one model call, no content.
+
+    ``provider`` is our endpoint key, ``model`` the provider's model id when
+    the message names it. None when the provider reported no count.
+    """
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return None
+    row = {k: usage[k] for k in _USAGE_COUNT_KEYS if usage.get(k) is not None}
+    if not row:
+        return None
+    if endpoint_key:
+        row["provider"] = endpoint_key
+    if model_name or endpoint_key:
+        row["model"] = model_name or endpoint_key
+    return row
+
+
 def _endpoint_switch_frame(endpoint: Optional[Dict[str, Any]]) -> Optional[str]:
     """``model_fallback`` frame when the chain skipped the requested endpoint
     because its circuit is open; None otherwise."""
@@ -2695,6 +2725,8 @@ async def generate_answer_agentic_stream_helper(
     # the calls it cut, from the in-loop check or from the cancel handler.
     trace_entries: List[Dict[str, Any]] = []
     step_frames: Optional[_StepFrames] = None
+    # One row per model call that reported token counts (``final.usage``).
+    usage_rows: List[Dict[str, Any]] = []
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -2725,9 +2757,13 @@ async def generate_answer_agentic_stream_helper(
                 "artifact_ids": _collected_artifact_ids(),
                 "trace_id": trace_id,
             }
+            if endpoint_metadata:
+                final["endpoint"] = endpoint_metadata
+            if usage_rows:
+                final["usage"] = list(usage_rows)
             if error is not None:
                 # A failure after streamed text: the legacy client ignores
-                # it, the AG-UI translator maps it to RUN_ERROR. The code
+                # it, the AG-UI adapter maps it to RUN_ERROR. The code
                 # only: ``message`` is raw exception text.
                 final["error"] = {"code": error["code"]}
             return [f"data: {json.dumps(final)}\n\n"]
@@ -3129,6 +3165,12 @@ async def generate_answer_agentic_stream_helper(
                                 for msg in msgs:
                                     if ToolMessage and isinstance(msg, ToolMessage):
                                         answer_budget_started_at = time.perf_counter()
+                                    if AIMessage and isinstance(msg, AIMessage):
+                                        row = _usage_row(
+                                            msg, *_step_model(msg, update_node)
+                                        )
+                                        if row is not None:
+                                            usage_rows.append(row)
                                     if not (
                                         AIMessage
                                         and isinstance(msg, AIMessage)

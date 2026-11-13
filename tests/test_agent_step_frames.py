@@ -567,6 +567,57 @@ class TestFinalError:
         [final] = _of(events, "final")
         assert "error" not in final
 
+    async def test_final_carries_the_endpoint_and_one_usage_row_per_model_call(self):
+        endpoint = {"requested": "main", "chain": ["main"], "answered": "main",
+                    "attempts": [], "circuit_open": [], "substituted": False}
+        step = AIMessage(
+            content="",
+            tool_calls=[{"name": "ls", "args": {}, "id": "c1"}],
+            response_metadata={"model_name": "eve-instruct"},
+            usage_metadata={"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        )
+        last = AIMessage(
+            content="done",
+            usage_metadata={"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+        )
+        events, _ = await _run(
+            _Graph(
+                [
+                    ("updates", {"agent": {"messages": [step]}}),
+                    _result("ls", "c1"),
+                    _answer("done"),
+                    ("updates", {"agent": {"messages": [last]}}),
+                ]
+            ),
+            _resolve_agentic_llm_client=AsyncMock(
+                return_value=(MagicMock(), {"endpoint": endpoint})
+            ),
+        )
+
+        [final] = _of(events, "final")
+        assert final["endpoint"]["answered"] == "main"
+        assert final["usage"] == [
+            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+             "provider": "main", "model": "eve-instruct"},
+            {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25,
+             "provider": "main", "model": "main"},
+        ]
+
+    async def test_late_failure_final_keeps_endpoint_and_error(self):
+        endpoint = {"requested": "main", "chain": ["main"], "answered": "main",
+                    "attempts": [], "circuit_open": [], "substituted": False}
+        events, _ = await _run(
+            _Graph([_answer("partial")], raise_exc=RuntimeError("boom")),
+            _resolve_agentic_llm_client=AsyncMock(
+                return_value=(MagicMock(), {"endpoint": endpoint})
+            ),
+        )
+
+        [final] = _of(events, "final")
+        assert final["error"] == {"code": "upstream_error"}
+        assert final["endpoint"]["requested"] == "main"
+        assert "usage" not in final
+
     async def test_empty_answer_ends_with_an_empty_final_and_no_error(self):
         events, _ = await _run(_Graph([]))
 
