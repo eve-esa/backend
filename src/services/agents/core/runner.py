@@ -8,6 +8,7 @@ cancellation, error logging, token consumption, and stream bus publishing.
 import asyncio
 import contextlib
 import copy
+import functools
 import inspect
 import json
 import logging
@@ -1135,8 +1136,12 @@ def _with_request_rag_defaults(
 
         object.__setattr__(bound_tool, "invoke", invoke_with_defaults)
 
+    # functools.wraps keeps the wrapped signature: the graph's tool node reads
+    # it to find the ``runtime`` parameter, and without it the MCP request
+    # carries no runtime, so the retrieval Sources lose their tool call id.
     original_coroutine = getattr(bound_tool, "coroutine", None)
     if callable(original_coroutine):
+        @functools.wraps(original_coroutine)
         async def coroutine_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return await original_coroutine(
                 *args,
@@ -1147,6 +1152,7 @@ def _with_request_rag_defaults(
 
     original_func = getattr(bound_tool, "func", None)
     if callable(original_func):
+        @functools.wraps(original_func)
         def func_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return original_func(
                 *args,

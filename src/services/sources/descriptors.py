@@ -42,8 +42,23 @@ _MINIMAL_KEYS = (
 )
 # Locator keys that tell two passages of one document apart.
 _POSITIONAL_LOCATOR_KEYS = frozenset(
-    {"page", "page_end", "section", "table", "figure", "line_start", "line_end", "stac_item_id"}
+    {"page", "page_end", "section", "table", "figure", "line_start", "line_end", "stac_item_id", "chunk"}
 )
+# The chunk position ingestion appends to a document id (Wiley:
+# ``10.1155/2022/7936392_0000``): not part of the DOI or the document.
+_CHUNK_SUFFIX = re.compile(r"_(\d{4})$")
+# Markdown the passage drops (sources standard: ``passage`` is plain text).
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_REF_LINK = re.compile(r"\[([^\]]+)\]\[[^\]]*\]")
+_MD_BOLD = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
+_MD_ITALIC_STAR = re.compile(r"(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])")
+_MD_ITALIC_UNDERSCORE = re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])")
+_MD_STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+_MD_CODE = re.compile(r"`+([^`]*)`+")
+_MD_LINE_MARK = re.compile(r"^\s*(?:>\s?)+|^\s*(?:[-*+]|\d{1,3}[.)])\s+")
+_HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 _WEB_PAGE_PROVIDERS = frozenset({"esa-rag-scraped-qwen3-newpipeline", "wikipedia-512"})
 _SENTENCE_END = re.compile(r"[.!?](?=\s)|\n")
 _TILE = re.compile(r"_T(\d{2}[A-Z]{3})_")
@@ -79,6 +94,49 @@ def source_id(provider: str, document_key: str, locator: Mapping[str, Any], pass
         json.dumps(parts, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()
     return f"src_{digest[:16]}"
+
+
+def split_chunk_suffix(value: str) -> tuple:
+    """``(value without the chunk suffix, chunk index or None)``."""
+    match = _CHUNK_SUFFIX.search(value)
+    if not match:
+        return value, None
+    return value[: match.start()], int(match.group(1))
+
+
+def markdown_to_text(text: str) -> tuple:
+    """``(plain text, last heading or None)`` for a markdown passage.
+
+    Headings leave the text (the last one is returned for the locator),
+    links and images keep their label, emphasis, code marks, quote and list
+    marks and HTML tags go. Lines are joined with one space. Snake case and
+    arithmetic (``band_ratio``, ``2*3``) are left alone.
+    """
+    heading: Optional[str] = None
+    lines: List[str] = []
+    for line in str(text or "").splitlines():
+        match = _MD_HEADING.match(line)
+        if match:
+            heading = match.group(1).strip() or heading
+            continue
+        line = _MD_LINE_MARK.sub("", line)
+        if line.strip() in ("", "---", "***", "___"):
+            continue
+        lines.append(line.strip())
+    plain = " ".join(lines)
+    plain = _MD_IMAGE.sub(r"\1", plain)
+    plain = _MD_LINK.sub(r"\1", plain)
+    plain = _MD_REF_LINK.sub(r"\1", plain)
+    plain = _MD_CODE.sub(r"\1", plain)
+    plain = _HTML_TAG.sub("", plain)
+    plain = _MD_BOLD.sub(r"\2", plain)
+    plain = _MD_STRIKE.sub(r"\1", plain)
+    plain = _MD_ITALIC_STAR.sub(r"\1", plain)
+    plain = _MD_ITALIC_UNDERSCORE.sub(r"\1", plain)
+    plain = re.sub(r"\s+", " ", plain).strip()
+    if not plain and heading:
+        plain = heading
+    return plain, heading
 
 
 def cut_passage(text: str, limit: int) -> str:
@@ -121,7 +179,7 @@ def _doi_from(*values: Any) -> Optional[str]:
             if lowered.startswith(prefix):
                 value = value[len(prefix):]
                 break
-        value = value.split("#", 1)[0]
+        value = split_chunk_suffix(value.split("#", 1)[0])[0]
         if value.startswith("10.") and "/" in value:
             return value
     return None
@@ -211,6 +269,9 @@ def source_from_document(
 
     file_name = _first(merged.get("source_name"), merged.get("filename"), merged.get("source"))
     url = _http(_first(merged.get("url"), merged.get("link")))
+    if url and "doi.org/" in url.lower():
+        # A DOI link carries the same chunk suffix as the DOI.
+        url = split_chunk_suffix(url)[0]
     doi = _doi_from(merged.get("doi"), merged.get("link"), merged.get("url"), doc.get("id"))
     document_id = merged.get("document_id") if isinstance(merged.get("document_id"), str) else None
     if kind == "user_file":
@@ -227,7 +288,21 @@ def source_from_document(
     else:
         document_key = f"title:{title}"
 
+    plain, heading = markdown_to_text(text)
+    if not plain:
+        return None
+
     locator: Dict[str, Any] = {}
+    chunk = next(
+        (
+            index
+            for index in (
+                split_chunk_suffix(v)[1] for v in (doc.get("id"), merged.get("doi")) if isinstance(v, str)
+            )
+            if index is not None
+        ),
+        None,
+    )
     page = _int_or_none(_first(merged.get("page"), merged.get("page_number")))
     if page is not None:
         # As stored by ingestion: whether chunk payloads keep a PDF page, and
@@ -238,13 +313,17 @@ def source_from_document(
         locator["section"] = str(headers[-1])
     elif isinstance(merged.get("section"), str):
         locator["section"] = merged["section"]
+    elif heading:
+        locator["section"] = heading
+    if chunk is not None:
+        locator["chunk"] = chunk
     if url:
         locator["url"] = url
     if doi:
         locator["doi"] = doi
 
     limit = LICENSED_PASSAGE_MAX_CHARS if provider["visibility"] == "licensed" else PASSAGE_MAX_CHARS
-    passage = cut_passage(text, limit)
+    passage = cut_passage(plain, limit)
 
     if kind == "user_file":
         open_target: Dict[str, Any] = {"type": "viewer", "document_id": document_id}
