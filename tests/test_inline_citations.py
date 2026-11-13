@@ -1010,3 +1010,123 @@ class TestAguiFixes:
                 line = "data: " + json.dumps(_scrub(json.loads(line[6:])), separators=(",", ":"), ensure_ascii=False)
             lines.append(line)
         assert "\n".join(lines) + "\n" == BASELINE.read_text()
+
+
+# ── local turn findings: tool call id, chunk suffix, markdown passages ─────
+
+
+class TestLocalTurnFindings:
+    async def test_retrieve_keeps_its_tool_call_id_through_the_rag_wrapper(self):
+        from langchain_core.messages import AIMessage
+        from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+        from langgraph.prebuilt import ToolNode
+        from mcp.types import Tool as MCPTool
+
+        from src.schemas.generation_request import GenerationRequest
+        from src.services.agents.core.runner import _with_request_rag_defaults
+
+        seen: List[Any] = []
+
+        async def spy(request, handler):
+            seen.append(getattr(getattr(request, "runtime", None), "tool_call_id", None))
+            return await handler(request)
+
+        session = SimpleNamespace(
+            call_tool=AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text="{}")]))
+        )
+        schema = {
+            "type": "object",
+            "properties": {name: {"type": "string"} for name in ("query", "public_collections", "k")},
+            "required": ["query"],
+        }
+
+        def mcp_tool(name: str, server: str):
+            return convert_mcp_tool_to_langchain_tool(
+                session,
+                MCPTool(name=name, description="d", inputSchema=schema),
+                tool_interceptors=[spy],
+                server_name=server,
+                tool_name_prefix=True,
+            )
+
+        request = GenerationRequest(query="q", llm_type="main", agent="react", public_collections=["qwen-512-filtered"])
+        retrieve = _with_request_rag_defaults(mcp_tool("retrieve", "eve_retrieval"), request)
+        stac = mcp_tool("search_stac", "cdse")
+        from langgraph.graph import END, START, MessagesState, StateGraph
+
+        builder = StateGraph(MessagesState)
+        builder.add_node("tools", ToolNode([retrieve, stac]))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        message = AIMessage(content="", tool_calls=[
+            {"name": retrieve.name, "args": {"query": "SAR"}, "id": "call-7"},
+            {"name": stac.name, "args": {"query": "S2"}, "id": "call-8"},
+        ])
+        await builder.compile().ainvoke({"messages": [message]})
+        assert set(seen) == {"call-7", "call-8"}
+
+    def test_chunk_suffix_leaves_the_doi_and_the_document_key(self):
+        def chunk(index: int, text: str) -> dict:
+            return {
+                "id": f"10.1155/2022/7936392_{index:04d}",
+                "collection_name": "Wiley AI Gateway",
+                "text": text,
+                "metadata": {"additionalMetadata": {"title": "Burn severity", "journalTitle": "J"}},
+            }
+
+        first = source_from_document(extract_document_data(chunk(0, "First passage.")), rank=0)
+        second = source_from_document(extract_document_data(chunk(1, "Second passage.")), rank=1)
+        for source in (first, second):
+            assert source["document_key"] == "doi:10.1155/2022/7936392"
+            assert source["locator"]["doi"] == "10.1155/2022/7936392"
+            assert source["open"] == {"type": "url", "href": "https://doi.org/10.1155/2022/7936392"}
+        assert (first["locator"]["chunk"], second["locator"]["chunk"]) == (0, 1)
+        assert first["id"] != second["id"]
+
+    def test_chunk_suffix_on_a_payload_doi(self):
+        doc = _public_doc()
+        doc["payload"]["doi"] = "10.1000/example_0003"
+        doc["payload"]["url"] = "https://doi.org/10.1000/example_0003"
+        source = source_from_document(extract_document_data(doc), rank=0)
+        assert source["document_key"] == "doi:10.1000/example"
+        assert source["locator"]["doi"] == "10.1000/example"
+
+    async def test_two_chunks_of_one_article_share_the_number(self, flag_on):
+        def chunk(index: int) -> dict:
+            return {
+                "id": f"10.1155/2022/7936392_{index:04d}",
+                "collection_name": "Wiley AI Gateway",
+                "text": f"Passage number {index}.",
+                "metadata": {"additionalMetadata": {"title": "Burn severity"}},
+            }
+
+        payloads = [(_retrieve_response(chunk(0), chunk(1)), "retrieve", "eve_retrieval", "call-1")]
+        events, _ = await _cited_run(["One [S1]. Two [S2]."], payloads=payloads)
+        final = _of(events, "final")[0]
+        assert final["answer"] == "One [1]. Two [1]."
+        assert [c["n"] for c in final["citations"]] == [1, 1]
+        assert all(c["tool_call_id"] == "call-1" for c in final["citations"])
+
+    def test_passage_is_plain_text(self):
+        text = (
+            "## Methods\n\nWe used **dNBR** thresholds [2016](#jgrf21659-bib-0045) and *field* plots"
+            " from __Evros__.\n\n- See ![Figure 2](fig2.png) and `NBR`.\n> Quoted <sup>a</sup> note."
+        )
+        source = source_from_document(extract_document_data(_public_doc(text, headers=())), rank=0)
+        assert source["passage"] == (
+            "We used dNBR thresholds 2016 and field plots from Evros. See Figure 2 and NBR. Quoted a note."
+        )
+        assert source["locator"]["section"] == "Methods"
+
+    def test_plain_text_keeps_snake_case_and_maths(self):
+        source = source_from_document(
+            extract_document_data(_public_doc("The band_ratio is 2*3 and a_b stays.", headers=())), rank=0
+        )
+        assert source["passage"] == "The band_ratio is 2*3 and a_b stays."
+
+    def test_long_markdown_passage_is_cut_at_a_sentence_after_stripping(self):
+        text = "# Title\n\n" + "A [linked](https://x.org/very/long/path) sentence here. " * 30
+        source = source_from_document(extract_document_data(_public_doc(text, headers=())), rank=0)
+        assert len(source["passage"]) <= PASSAGE_MAX_CHARS
+        assert source["passage"].endswith("sentence here.")
+        assert "](" not in source["passage"] and "#" not in source["passage"]
