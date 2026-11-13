@@ -11,6 +11,13 @@ through the SDK ``EventEncoder``. The adapter holds the open text message,
 tool calls, steps and activities, closes them before the terminal event, and
 drops every frame after the first terminal one.
 
+What a standard AG-UI client needs (decision 0008): each model call is its own
+assistant message (the first keeps the answer messageId, the next ones
+``<messageId>:assistant:<n>``), its tool calls point at it by
+``parentMessageId``, and a new call starts at the first text or tool call after
+a tool result; text deltas pass through untouched, so the texts concatenate to
+the stored answer. Tool arguments and results stay valid JSON when cut.
+
 Input rejected before the run starts never reaches the adapter: it is an
 HTTP error with no event stream, shaped by ``pre_stream_error``.
 
@@ -25,6 +32,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -88,6 +97,23 @@ RUN_ERROR_MESSAGES: Dict[str, str] = {
 _FALLBACK_ERROR_CODE = "upstream_error"
 
 _TOOL_STATUSES = frozenset({"ok", "error", "timeout", "denied"})
+
+# Tool arguments and results travel as previews (contract D4) and must stay
+# valid JSON for a standard client: long strings are shortened inside the value
+# with TRUNCATION_MARK, long arrays keep their head plus one count string, and a
+# result the runner cut mid-document is closed at its last complete value.
+# The string bound leaves room for the runner's own cut (500 chars plus the mark).
+TRUNCATION_MARK = "…"
+ARG_STRING_MAX_CHARS = 500
+RESULT_STRING_MAX_CHARS = 500
+PREVIEW_ARRAY_MAX_ITEMS = 20
+PREVIEW_OBJECT_MAX_KEYS = 50
+PREVIEW_MAX_DEPTH = 8
+RESULT_TEXT_MAX_CHARS = 2000
+
+# Assistant message id of the n-th model call of the run, from the second on;
+# the first keeps the answer messageId (decision 0008).
+_SEGMENT_ID = "{message_id}:assistant:{n}"
 
 # HTTP errors answered instead of the stream (contract 1.6).
 _PRE_STREAM_ERRORS: Dict[str, tuple] = {
@@ -176,6 +202,225 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def _bound_preview(
+    value: Any, *, max_chars: int, depth: int = 0
+) -> Tuple[Any, bool]:
+    """``value`` with long strings, arrays and objects cut; and whether anything was.
+
+    A string is cut inside its value and ends with ``TRUNCATION_MARK``; an array
+    keeps ``PREVIEW_ARRAY_MAX_ITEMS`` items plus a ``"… N more"`` string; an
+    object keeps ``PREVIEW_OBJECT_MAX_KEYS`` keys plus a ``"…"`` key with the
+    count. The result is always JSON-serialisable.
+    """
+    if isinstance(value, str):
+        # One char of slack: a string the runner already cut (max plus the mark)
+        # is not cut again.
+        if len(value) <= max_chars + len(TRUNCATION_MARK):
+            return value, False
+        return value[:max_chars] + TRUNCATION_MARK, True
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value), False  # NaN and infinity are not JSON
+    if value is None or isinstance(value, (bool, int, float)):
+        return value, False
+    if depth >= PREVIEW_MAX_DEPTH:
+        return TRUNCATION_MARK, True
+    if isinstance(value, Mapping):
+        out: Dict[str, Any] = {}
+        cut = False
+        items = list(value.items())
+        for key, item in items[:PREVIEW_OBJECT_MAX_KEYS]:
+            out[str(key)], item_cut = _bound_preview(item, max_chars=max_chars, depth=depth + 1)
+            cut = cut or item_cut
+        if len(items) > PREVIEW_OBJECT_MAX_KEYS:
+            out[TRUNCATION_MARK] = f"{len(items) - PREVIEW_OBJECT_MAX_KEYS} more keys"
+            cut = True
+        return out, cut
+    if isinstance(value, (list, tuple)):
+        head: List[Any] = []
+        cut = False
+        for item in list(value)[:PREVIEW_ARRAY_MAX_ITEMS]:
+            bounded, item_cut = _bound_preview(item, max_chars=max_chars, depth=depth + 1)
+            head.append(bounded)
+            cut = cut or item_cut
+        if len(value) > PREVIEW_ARRAY_MAX_ITEMS:
+            head.append(f"{TRUNCATION_MARK} {len(value) - PREVIEW_ARRAY_MAX_ITEMS} more")
+            cut = True
+        return head, cut
+    return _bound_preview(str(value), max_chars=max_chars, depth=depth)
+
+
+# A complete JSON scalar, and the start of one that may still go on.
+_JSON_SCALAR = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null")
+_JSON_SCALAR_PREFIX = re.compile(
+    r"-?(?:0|[1-9][0-9]*)?(?:\.[0-9]*)?(?:[eE][+-]?[0-9]*)?|t(?:r(?:ue?)?)?|f(?:a(?:l(?:se?)?)?)?|n(?:u(?:ll?)?)?"
+)
+
+
+def _complete_escapes(body: str) -> str:
+    """``body`` (the inside of a JSON string) without a trailing partial escape."""
+    i, last = 0, 0
+    while i < len(body):
+        if body[i] == "\\":
+            step = 6 if body[i + 1 : i + 2] == "u" else 2
+            if i + step > len(body):
+                break
+            i += step
+        else:
+            i += 1
+        last = i
+    return body[:last]
+
+
+def close_json_prefix(text: str) -> Optional[str]:
+    """A JSON document cut at an arbitrary char, closed as valid JSON; None if not.
+
+    ``text`` must be a prefix of a JSON document: anything that breaks the JSON
+    grammar before its end (prose in brackets, words after the document) gives
+    None. A string value cut inside keeps its text plus ``TRUNCATION_MARK``; a
+    cut key, a key without its value, or a scalar that may go on (``tru``,
+    ``12``) is dropped back to the last complete value; open arrays and objects
+    are closed.
+    """
+    # Each stack entry: [container, expected]; expected is what may come next:
+    # "key" (or the close), "colon", "value" (or the close) or "comma".
+    stack: List[List[str]] = []
+    cuts: List[Tuple[int, str]] = []
+    in_string = False
+    string_start = 0
+    string_is_key = False
+    scalar_start: Optional[int] = None
+    started = False
+
+    def closers() -> str:
+        return "".join("}" if kind == "{" else "]" for kind, _ in reversed(stack))
+
+    def value_done(end: int) -> None:
+        if stack:
+            stack[-1][1] = "comma"
+            cuts.append((end, closers()))
+
+    def value_allowed() -> bool:
+        return (not stack and not started) or (bool(stack) and stack[-1][1] == "value")
+
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                in_string = False
+                if string_is_key:
+                    stack[-1][1] = "colon"
+                else:
+                    value_done(i + 1)
+            i += 1
+            continue
+        if scalar_start is not None:
+            if c not in ",]}" and not c.isspace():
+                i += 1
+                continue
+            if not _JSON_SCALAR.fullmatch(text[scalar_start:i]):
+                return None
+            scalar_start = None
+            value_done(i)
+            if not stack:
+                return None  # a bare scalar followed by more text
+        if c.isspace():
+            pass
+        elif c in "{[":
+            if not value_allowed():
+                return None
+            started = True
+            stack.append([c, "key" if c == "{" else "value"])
+            cuts.append((i + 1, closers()))
+        elif c in "}]":
+            want = "{" if c == "}" else "["
+            if not stack or stack[-1][0] != want or stack[-1][1] not in ("key", "value", "comma"):
+                return None
+            stack.pop()
+            if not stack:
+                if text[i + 1 :].strip():
+                    return None  # words after a complete document
+                cuts.append((i + 1, ""))
+                break
+            value_done(i + 1)
+        elif c == ",":
+            if not stack or stack[-1][1] != "comma":
+                return None
+            stack[-1][1] = "key" if stack[-1][0] == "{" else "value"
+        elif c == ":":
+            if not stack or stack[-1][1] != "colon":
+                return None
+            stack[-1][1] = "value"
+        elif c == '"':
+            string_is_key = bool(stack) and stack[-1][0] == "{" and stack[-1][1] == "key"
+            if not string_is_key and not value_allowed():
+                return None
+            started = True
+            in_string = True
+            string_start = i
+        else:
+            if not value_allowed():
+                return None
+            started = True
+            scalar_start = i
+        i += 1
+
+    if scalar_start is not None and not _JSON_SCALAR_PREFIX.fullmatch(text[scalar_start:]):
+        return None
+    candidates: List[str] = []
+    if in_string and not string_is_key:
+        body = _complete_escapes(text[string_start + 1 :])
+        candidates.append(text[: string_start + 1] + body + TRUNCATION_MARK + '"' + closers())
+    candidates.extend(text[:end] + tail for end, tail in reversed(cuts))
+    for candidate in candidates:
+        try:
+            json.loads(candidate)
+        except ValueError:
+            continue
+        return candidate
+    return None
+
+
+def _preview_args(args: Mapping[str, Any]) -> Tuple[str, bool]:
+    """``TOOL_CALL_ARGS`` text for ``args`` and whether the adapter cut it."""
+    bounded, cut = _bound_preview(dict(args), max_chars=ARG_STRING_MAX_CHARS)
+    return json.dumps(bounded, ensure_ascii=False, default=str), cut
+
+
+def _preview_result(content: Any) -> Tuple[str, bool]:
+    """``TOOL_CALL_RESULT.content`` and whether it is cut.
+
+    JSON stays JSON: a complete document is sent as is unless it is too long; a
+    document the runner cut (its 200-char preview) is closed at its last
+    complete value. Any other text is sent as text.
+    """
+    if content is None:
+        return "", False
+    if not isinstance(content, str):
+        bounded, cut = _bound_preview(content, max_chars=RESULT_STRING_MAX_CHARS)
+        return json.dumps(bounded, ensure_ascii=False, default=str), cut
+    head = content.lstrip()[:1]
+    if head in ("{", "["):
+        try:
+            parsed = json.loads(content)
+        except ValueError:
+            closed = close_json_prefix(content)
+            if closed is not None:
+                bounded, _ = _bound_preview(json.loads(closed), max_chars=RESULT_STRING_MAX_CHARS)
+                return json.dumps(bounded, ensure_ascii=False), True
+        else:
+            bounded, cut = _bound_preview(parsed, max_chars=RESULT_STRING_MAX_CHARS)
+            if not cut:
+                return content, False
+            return json.dumps(bounded, ensure_ascii=False), True
+    if len(content) > RESULT_TEXT_MAX_CHARS:
+        return content[:RESULT_TEXT_MAX_CHARS] + TRUNCATION_MARK, True
+    return content, False
+
+
 def _frame_call_id(frame: LegacyFrame) -> Optional[str]:
     """The runner's run-unique ``tool_call_id`` (B-S2), else the raw model id."""
     return _str_or_none(frame.get("tool_call_id")) or _str_or_none(frame.get("id"))
@@ -230,6 +475,13 @@ class AguiAdapter:
         self._summary_open: Optional[ActivitySnapshotEvent] = None
         self._emitted = 0
         self._last_started: Optional[str] = None
+        # One assistant message per model call (decision 0008): the n-th call's
+        # text and tool calls share its id. A call ends where the tools ran: the
+        # first text or tool call after a tool result opens the next one.
+        self._segment = 1
+        self._segment_used = False
+        self._result_since_segment = False
+        self._text_message_id = context.message_id
 
     # ── public interface ────────────────────────────────────────────────────
 
@@ -325,24 +577,25 @@ class AguiAdapter:
         label = _str_or_none(frame.get("label"))
         if label:
             metadata["eve.label"] = label
-        if frame.get("args_truncated") is True:
-            metadata["eve.argsTruncated"] = True
         args = frame.get("args")
         if not isinstance(args, Mapping):
             args = {}
-        events.extend(self._start_tool_call(tool_call_id, name, metadata or None))
-        events.append(
-            ToolCallArgsEvent(
-                tool_call_id=tool_call_id,
-                delta=json.dumps(args, ensure_ascii=False, default=str),
+        delta, cut = _preview_args(args)
+        if cut or frame.get("args_truncated") is True:
+            metadata["eve.argsTruncated"] = True
+        events.extend(
+            self._start_tool_call(
+                tool_call_id, name, metadata or None, self._segment_message_id()
             )
         )
+        events.append(ToolCallArgsEvent(tool_call_id=tool_call_id, delta=delta))
         events.extend(self._end_tool_call(tool_call_id))
         self._pending_by_raw.setdefault(raw_id, deque()).append(tool_call_id)
         return events
 
     def _on_tool_result(self, frame: LegacyFrame) -> List[AguiEvent]:
-        events: List[AguiEvent] = []
+        # The model call that asked for the tools is over: its text ends here.
+        events: List[AguiEvent] = self._close_text()
         raw_id = _frame_call_id(frame)
         pending = self._pending_by_raw.get(raw_id)
         if pending:
@@ -354,14 +607,16 @@ class AguiAdapter:
             name = _str_or_none(frame.get("tool")) or "tool"
             tool_call_id = self._mint_tool_call_id(raw_id, name)
             events.extend(self._close_thinking())
-            events.extend(self._close_text())
-            events.extend(self._start_tool_call(tool_call_id, name, None))
+            events.extend(
+                self._start_tool_call(tool_call_id, name, None, self._current_message_id())
+            )
             events.extend(self._end_tool_call(tool_call_id))
             logger.debug("agui.result_without_call tool_call_id=%s", tool_call_id)
         if tool_call_id in self._pending_results:
             self._pending_results.remove(tool_call_id)
         self._last_by_raw[raw_id] = tool_call_id
         self._tool_result_seen = True
+        self._result_since_segment = True
 
         status = frame.get("status")
         if not isinstance(status, str) or not status:
@@ -375,11 +630,9 @@ class AguiAdapter:
         duration = frame.get("duration_ms")
         if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
             metadata["eve.durationMs"] = duration
-        content = frame.get("content")
-        if content is None:
-            content = ""
-        elif not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False, default=str)
+        content, cut = _preview_result(frame.get("content"))
+        if cut:
+            metadata["eve.contentTruncated"] = True
         events.append(
             ToolCallResultEvent(
                 message_id=self._tool_result_message_id(tool_call_id),
@@ -610,11 +863,12 @@ class AguiAdapter:
         events: List[AguiEvent] = []
         if not self._text_open:
             self._text_open = True
-            events.append(TextMessageStartEvent(message_id=self.context.message_id, role="assistant"))
+            self._text_message_id = self._segment_message_id()
+            events.append(TextMessageStartEvent(message_id=self._text_message_id, role="assistant"))
         self._text_streamed = True
         events.append(
             TextMessageContentEvent(
-                message_id=self.context.message_id, delta=delta, metadata=metadata
+                message_id=self._text_message_id, delta=delta, metadata=metadata
             )
         )
         return events
@@ -632,7 +886,7 @@ class AguiAdapter:
             metadata["eve.endpoint"] = dict(endpoint)
         if extra:
             metadata.update(extra)
-        return [TextMessageEndEvent(message_id=self.context.message_id, metadata=metadata or None)]
+        return [TextMessageEndEvent(message_id=self._text_message_id, metadata=metadata or None)]
 
     def _close_summary(self) -> List[AguiEvent]:
         if self._summary_open is None:
@@ -659,15 +913,34 @@ class AguiAdapter:
         self._used_tool_ids.add(candidate)
         return candidate
 
+    def _current_message_id(self) -> str:
+        """The assistant message id of the model call in progress."""
+        self._segment_used = True
+        if self._segment == 1:
+            return self.context.message_id
+        return _SEGMENT_ID.format(message_id=self.context.message_id, n=self._segment)
+
+    def _segment_message_id(self) -> str:
+        """The id for new text or a new tool call: a new model call after a tool result."""
+        if self._result_since_segment and self._segment_used:
+            self._segment += 1
+            self._segment_used = False
+        self._result_since_segment = False
+        return self._current_message_id()
+
     def _start_tool_call(
-        self, tool_call_id: str, name: str, metadata: Optional[Dict[str, Any]]
+        self,
+        tool_call_id: str,
+        name: str,
+        metadata: Optional[Dict[str, Any]],
+        parent_message_id: str,
     ) -> List[AguiEvent]:
         self._open_tools.append(tool_call_id)
         return [
             ToolCallStartEvent(
                 tool_call_id=tool_call_id,
                 tool_call_name=name,
-                parent_message_id=self.context.message_id,
+                parent_message_id=parent_message_id,
                 metadata=metadata,
             )
         ]

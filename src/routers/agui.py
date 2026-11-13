@@ -4,7 +4,10 @@ Behind ``FEATURE_AGUI_STREAM`` (off: 404). The route takes the same guards as
 ``stream-generate-agentic`` in the same order, reads one ``RunAgentInput``,
 starts the same runner on the same stream bus, and pipes the legacy frames
 through ``AguiAdapter`` into SDK-encoded SSE events with the usual
-keepalive comment. Stop stays ``POST /conversations/{id}/stop``.
+keepalive comment. Stop is ``POST /conversations/{id}/stop`` or, as AG-UI
+clients do it, closing the request: a response that ends before its terminal
+event cancels the run on the same path as Stop (decision 0008). The legacy
+stream route keeps running after a disconnect.
 
 History is kept by the server: only the trailing user message of the input is
 read. ``forwardedProps.eve`` passes through an allowlist onto a
@@ -33,6 +36,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from starlette.types import Receive, Scope, Send
 
 from src import config
 from src.config import AGENTIC_TURN_DEADLINE
@@ -117,6 +121,12 @@ RUN_ID_STORE_TIMEOUT_S = 0.5
 # The response ends at the turn deadline plus this margin even if the bus close
 # is lost: the stream then ends with RUN_ERROR stream_incomplete.
 STREAM_DEADLINE_MARGIN_S = 60.0
+# The stopped frame of a disconnect goes out like the Stop route's, bounded:
+# the response is already gone and nobody waits for it.
+DISCONNECT_STOP_TIMEOUT_S = 2.0
+_STOPPED_FRAME = f"data: {json.dumps({'type': 'stopped'})}\n\n"
+# Strong references to the stop publishes until they end.
+_disconnect_stops: set = set()
 
 _CLAIM_STORE = "store"
 _CLAIM_LOCAL = "local"
@@ -595,9 +605,10 @@ async def create_agui_run(
             if tail:
                 yield encode_sse(tail)
 
-        response = StreamingResponse(
+        response = AguiStreamingResponse(
             with_sse_keepalive(_events(), interval=KEEPALIVE_INTERVAL_S),
             media_type="text/event-stream",
+            on_close=lambda: _stop_on_disconnect(adapter, cancel_event, message_id),
         )
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Connection"] = "keep-alive"
@@ -619,6 +630,72 @@ async def create_agui_run(
         )
         if gen_task is None:
             slot.release()
+
+
+class AguiStreamingResponse(StreamingResponse):
+    """A ``StreamingResponse`` that calls ``on_close`` once the response is over.
+
+    Over in every way but a cancel of the request task: the body ended, the
+    client disconnected (ASGI 2.3, a task listening for ``http.disconnect``;
+    2.4, a write that fails), or a send raised. ``on_close`` decides from the run state whether that was a
+    disconnect; it is synchronous so a cancelled request still runs it whole.
+    The body is closed afterwards, so nothing more is produced for it.
+    """
+
+    def __init__(self, content: Any, *, on_close: Any, **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        cancelled = False
+        try:
+            await super().__call__(scope, receive, send)
+        except asyncio.CancelledError:
+            # The request task itself was cancelled (the worker shutting
+            # down), not a client that left: the run is handled as before.
+            cancelled = True
+            raise
+        finally:
+            if not cancelled:
+                try:
+                    self._on_close()
+                except Exception as exc:
+                    logger.warning("agui.on_close_failed error_type=%s", type(exc).__name__)
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
+
+
+async def _publish_disconnect_stop(message_id: str) -> None:
+    """The Stop route's ``bus.stop``: the stopped frame, then the bus close."""
+    try:
+        await asyncio.wait_for(
+            get_stream_bus().stop(message_id, _STOPPED_FRAME), DISCONNECT_STOP_TIMEOUT_S
+        )
+    except Exception as exc:
+        logger.warning(
+            "agui.disconnect_stop_failed message_id=%s error_type=%s",
+            message_id,
+            type(exc).__name__,
+        )
+
+
+def _stop_on_disconnect(
+    adapter: AguiAdapter, cancel_event: asyncio.Event, message_id: str
+) -> None:
+    """Cancel the run like ``POST /stop`` when the response ended before its terminal event.
+
+    Nothing to do after a terminal event (the run is over; the bus may still be
+    open for the token charge) or after a Stop already set the cancel event.
+    """
+    if adapter.terminated or cancel_event.is_set():
+        return
+    logger.info("agui.client_disconnected message_id=%s", message_id)
+    get_cancel_manager().cancel(message_id)
+    task = asyncio.get_running_loop().create_task(_publish_disconnect_stop(message_id))
+    _disconnect_stops.add(task)
+    task.add_done_callback(_disconnect_stops.discard)
 
 
 async def _record_failure(message: Message, exc: BaseException) -> None:

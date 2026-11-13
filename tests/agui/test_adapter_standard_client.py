@@ -166,6 +166,24 @@ def test_non_json_tool_result_is_left_as_text():
     _assert_valid(events)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[Command succeeded with exit code 0]",
+        "{not json at all",
+        '[1, 2] and then prose',
+        '{"a": 1} trailing words',
+    ],
+)
+def test_bracketed_text_that_is_not_json_is_left_as_text(text):
+    events = _tool_turn({"command": "ls"}, text)
+
+    result = _result(events, "call_1")
+    assert result["content"] == text
+    assert "eve.contentTruncated" not in result["metadata"]
+    _assert_valid(events)
+
+
 def test_complete_json_result_is_sent_as_is():
     content = '{"status": "ok",  "count": 3}'
     events = _tool_turn({"query": "q"}, content)
@@ -270,3 +288,24 @@ def test_parallel_tool_calls_of_one_model_call_share_the_parent():
     assert len(_of(events, "TEXT_MESSAGE_START")) == 2
     assert "TOOL_CALL_RESULT" in _types(events)
     _assert_valid(events)
+
+
+def test_every_prefix_of_a_json_document_closes_as_valid_json():
+    from src.services.agui.adapter import close_json_prefix
+
+    doc = json.dumps(
+        {
+            "documents": [
+                {"title": "Sentinel-1 \"IW\" mode", "score": 0.91, "year": 2024, "tags": ["sar", "flood"]},
+                {"title": "Café \\ notes\nline", "score": -1.5e-3, "open": True, "doi": None},
+            ],
+            "count": 2,
+            "empty": {},
+            "list": [],
+        },
+        ensure_ascii=True,
+    )
+    for end in range(1, len(doc) + 1):
+        closed = close_json_prefix(doc[:end])
+        assert closed is not None, doc[:end]
+        json.loads(closed)
