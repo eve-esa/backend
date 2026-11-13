@@ -1,0 +1,32 @@
+data: {"type":"RUN_STARTED","metadata":{"eve.traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","eve.conversationId":"6a3f0c2e9b1d4e7f8a2b3c4d","eve.messageId":"m1","eve.graph":"react"},"threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","protocolVersion":"1.0"}
+
+data: {"type":"STEP_STARTED","stepName":"thinking"}
+
+data: {"type":"STEP_FINISHED","stepName":"thinking"}
+
+data: {"type":"TOOL_CALL_START","metadata":{"eve.server":"eve_retrieval","eve.label":"Calling eve retrieval retrieve"},"toolCallId":"call-1","toolCallName":"eve_retrieval_retrieve","parentMessageId":"m1"}
+
+data: {"type":"TOOL_CALL_ARGS","toolCallId":"call-1","delta":"{\"query\": \"SAR\"}"}
+
+data: {"type":"TOOL_CALL_END","toolCallId":"call-1"}
+
+data: {"type":"TOOL_CALL_RESULT","metadata":{"eve.status":"ok","eve.server":"eve_retrieval","eve.durationMs":0},"messageId":"m1:tool:call-1","toolCallId":"call-1","content":"{\"retrieved_docs\": [{\"id\": 7, \"collection_name\": \"qwen-512-filtered\", \"score\": 0.8, \"payload\": {\"text\": \"SAR sees through clouds.\", \"title\": \"SAR basics\", \"doi\": \"10.1000/x\"}}]}","role":"tool"}
+
+data: {"type":"STEP_STARTED","stepName":"thinking"}
+
+data: {"type":"STEP_FINISHED","stepName":"thinking"}
+
+data: {"type":"TEXT_MESSAGE_START","messageId":"m1","role":"assistant"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"m1","delta":"SAR is radar"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"m1","delta":" [1] in band C"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"m1","delta":", see [a] and x[2]."}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"m1","delta":" Done."}
+
+data: {"type":"TEXT_MESSAGE_END","metadata":{"eve.endpoint":{"requested":"main","chain":["main"],"answered":"main","attempts":[],"circuit_open":[],"substituted":false}},"messageId":"m1"}
+
+data: {"type":"RUN_FINISHED","metadata":{"eve.latencies":{"first_token_latency":0,"generation_latency":0,"total_latency":0,"node_tools_s":0,"node_agent_s":0,"setup_mcp_tool_loading_s":0,"setup_checkpointer_s":0,"setup_loading_history_s":0,"setup_llm_resolve_s":0,"setup_graph_compile_s":0,"generation_unattributed_s":0,"other_latency_s":0}},"threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","outcome":{"type":"success"}}
+

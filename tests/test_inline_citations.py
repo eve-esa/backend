@@ -15,7 +15,7 @@ import logging
 import re
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp.types import CallToolResult, TextContent
@@ -342,7 +342,7 @@ class TestInterceptor:
     async def test_handles_reach_the_model_without_ids(self, flag_on, cite_context):
         result = await _intercept(_retrieve_response(_private_doc(), _public_doc()))
         slim = json.loads(result.content[0].text)
-        assert [d["ref"] for d in slim["retrieved_docs"]] == ["S1", "S2"]
+        assert [d["eve_ref"] for d in slim["retrieved_docs"]] == ["S1", "S2"]
         assert slim["citation_instruction"] == CITATION_INSTRUCTION
         text = result.content[0].text
         assert not UUID_RE.search(text)
@@ -357,7 +357,7 @@ class TestInterceptor:
         response = _retrieve_response(_public_doc())
         result = await _intercept(response)
         assert json.loads(result.content[0].text) == slim_retrieval_response_for_model(response)
-        assert "ref" not in result.content[0].text
+        assert "eve_ref" not in result.content[0].text
         assert cite_context.sources.sources == []
 
     async def test_sync_run_gets_no_handles(self, flag_on):
@@ -366,7 +366,7 @@ class TestInterceptor:
             result = await _intercept(_retrieve_response(_public_doc()))
         finally:
             reset_retrieval_context(token)
-        assert "ref" not in result.content[0].text
+        assert "eve_ref" not in result.content[0].text
         assert ctx.sources.sources == []
 
     async def test_stac_items_get_handles(self, flag_on, cite_context):
@@ -374,7 +374,7 @@ class TestInterceptor:
             _stac_response(), request=_request(name="search_stac", server="cdse", call_id="call-2")
         )
         body = json.loads(result.content[0].text)
-        assert body["items"][0]["ref"] == "S1"
+        assert body["items"][0]["eve_ref"] == "S1"
         assert body["citation_instruction"] == CITATION_INSTRUCTION
         assert result.structuredContent is None
         [source] = cite_context.sources.sources
@@ -390,7 +390,7 @@ class TestInterceptor:
         await _intercept(_retrieve_response(_public_doc()))
         result = await _intercept(_retrieve_response(_public_doc(), _private_doc()), request=_request(call_id="call-9"))
         slim = json.loads(result.content[0].text)
-        assert [d["ref"] for d in slim["retrieved_docs"]] == ["S1", "S2"]
+        assert [d["eve_ref"] for d in slim["retrieved_docs"]] == ["S1", "S2"]
 
 
 # ── runner, stream, persistence, AG-UI ──────────────────────────────────────
@@ -431,21 +431,48 @@ def _ai(text):
     return AIMessageChunk(content=text)
 
 
-async def _cited_run(answer_parts, payloads=None, cancel_event=None, before_each=None, **kw):
+_RUNNER = "src.services.agents.core.runner"
+
+
+async def _cited_run(
+    answer_parts,
+    payloads=None,
+    cancel_event=None,
+    before_each=None,
+    prior=None,
+    loader=None,
+    tail=(),
+    raise_exc=None,
+    tools=None,
+    **kw,
+):
+    """One streamed turn: a retrieval call, its result, the answer tokens, then ``tail``.
+
+    ``prior`` is what the conversation already stored (the Sources earlier
+    turns cited or retrieved); ``loader`` replaces the whole lookup.
+    """
     payloads = payloads if payloads is not None else [
         (_retrieve_response(_public_doc(), _private_doc()), "retrieve", "eve_retrieval", "call-1")
     ]
     graph = _Graph(
-        [_call(RETRIEVE, {"query": "SAR"}, "call-1"), _result(RETRIEVE, "call-1", content="{}"), *_tokens(*answer_parts)],
+        [
+            _call(RETRIEVE, {"query": "SAR"}, "call-1"),
+            _result(RETRIEVE, "call-1", content="{}"),
+            *_tokens(*answer_parts),
+            *tail,
+        ],
+        raise_exc=raise_exc,
         before_each=before_each or _fill(1, payloads),
     )
-    return await run_runner(
-        graph,
-        tools=[_tool(RETRIEVE, "eve_retrieval")],
-        cancel_event=cancel_event,
-        _resolve_agentic_llm_client=_resolver(),
-        **kw,
-    )
+    loader = loader or AsyncMock(return_value=list(prior or []))
+    with patch(f"{_RUNNER}._load_prior_sources", loader, create=True):
+        return await run_runner(
+            graph,
+            tools=tools or [_tool(RETRIEVE, "eve_retrieval")],
+            cancel_event=cancel_event,
+            _resolve_agentic_llm_client=_resolver(),
+            **kw,
+        )
 
 
 def _persist_kwargs(applied) -> Dict[str, Any]:
@@ -454,13 +481,25 @@ def _persist_kwargs(applied) -> Dict[str, Any]:
 
 class TestRunner:
     async def test_flag_off_frames_and_row_are_unchanged(self, flag_off):
-        events, applied = await _cited_run(["SAR is radar [S1]."])
+        events, applied = await _cited_run(["SAR is radar [1]."])
         final = _of(events, "final")[0]
         assert "citations" not in final and "sources_retrieved" not in final
-        assert "".join(t["content"] for t in _of(events, "token")) == "SAR is radar [S1]."
+        assert "".join(t["content"] for t in _of(events, "token")) == "SAR is radar [1]."
         assert all(set(t) == {"type", "content"} for t in _of(events, "token"))
         kwargs = _persist_kwargs(applied)
         assert "citations" not in kwargs and "sources_retrieved" not in kwargs
+
+    async def test_flag_off_strips_handles_left_in_the_thread(self, flag_off):
+        # A handle a flag-on turn left in the thread never reaches the user.
+        events, applied = await _cited_run(["SAR is radar [S", "1]. More [S2, S3]."])
+        answer = "".join(t["content"] for t in _of(events, "token"))
+        assert answer == "SAR is radar . More ."
+        final = _of(events, "final")[0]
+        assert final["answer"] == answer
+        assert "citations" not in final and "sources_retrieved" not in final
+        kwargs = _persist_kwargs(applied)
+        assert kwargs["output"] == answer
+        assert "citations" not in kwargs
 
     async def test_valid_citation_streams_persists_and_finals(self, flag_on):
         events, applied = await _cited_run(["SAR is radar [S", "1]. Files say so [S2]", "."])
@@ -598,3 +637,372 @@ class TestPersist:
             "citations": [{"id": "src_a", "n": 1, "at": [0]}],
             "sources_retrieved": [],
         }
+
+
+# ── review fixes: handles across turns ──────────────────────────────────────
+
+
+def _other_doc() -> dict:
+    doc = _public_doc("Optical sensors need daylight.", point=777, headers=("3. Optical",))
+    doc["payload"].update({"url": "https://doi.org/10.2000/other", "doi": "10.2000/other", "title": "Optical remote sensing"})
+    return doc
+
+
+def _stored_row(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """A messages row as a turn left it (only the fields the next turn reads)."""
+    return {"metadata": {"citations": kwargs["citations"], "sources_retrieved": kwargs["sources_retrieved"]}}
+
+
+class TestConversationHandles:
+    def test_seeded_registry_continues_after_the_highest_handle(self):
+        registry = SourceRegistry()
+        registry.seed([
+            {"id": "src_a", "handle": "S1", "document_key": "doi:a", "title": "A"},
+            {"id": "src_b", "handle": "S3", "document_key": "url:b", "title": "B"},
+        ])
+        assert registry.get("S1")["id"] == "src_a"
+        assert registry.register({"id": "src_new", "document_key": "doi:n", "title": "N"}) == "S4"
+        # The same Source retrieved again keeps the handle the thread already holds.
+        assert registry.register({"id": "src_b", "document_key": "url:b", "title": "B"}) == "S3"
+        assert [s["handle"] for s in registry.sources] == ["S4", "S3"]
+
+    def test_a_cited_earlier_handle_resolves_to_the_stored_source(self):
+        registry = SourceRegistry()
+        registry.seed([{"id": "src_a", "handle": "S1", "document_key": "doi:a", "title": "A"}])
+        registry.register({"id": "src_new", "document_key": "doi:n", "title": "N"})
+        text, rewriter = _rewrite(registry, ["Old [S1]. New [S2]."])
+        assert text == "Old [1]. New [2]."
+        assert [(c["id"], c["n"]) for c in rewriter.citations()] == [("src_a", 1), ("src_new", 2)]
+        # An earlier Source nobody cited this turn is not listed again.
+        assert rewriter.sources_retrieved() == []
+
+    def test_prior_sources_from_stored_rows(self):
+        from src.services.sources.citations import prior_sources_from_rows
+
+        rows = [
+            {"metadata": {"citations": [{"id": "src_a", "handle": "S1", "n": 1, "at": [3], "origin": "model", "title": "A"}],
+                          "sources_retrieved": [{"id": "src_b", "handle": "S2", "title": "B"}]}},
+            {"metadata": {"citations": [{"id": "src_a", "handle": "S1", "n": 1, "at": [9], "origin": "model"}]}},
+            {"metadata": {"sources_retrieved": [{"id": "src_c"}, {"handle": "S9"}, "junk"]}},
+            {"metadata": None},
+            {},
+        ]
+        prior = prior_sources_from_rows(rows)
+        assert [(s["id"], s["handle"]) for s in prior] == [("src_a", "S1"), ("src_b", "S2")]
+        assert all(k not in prior[0] for k in ("n", "at", "origin"))
+
+    async def test_two_turns_on_one_thread(self, flag_on):
+        _, applied1 = await _cited_run(["SAR is radar [S1]."])
+        turn1 = _persist_kwargs(applied1)
+        [cited1] = turn1["citations"]
+        assert cited1["handle"] == "S1"
+        assert [s["handle"] for s in turn1["sources_retrieved"]] == ["S2"]
+
+        payloads = [(_retrieve_response(_other_doc()), "retrieve", "eve_retrieval", "call-1")]
+        events, applied2 = await _cited_run(
+            ["Old [S1]. New [S3]. Your file [S2]."],
+            payloads=payloads,
+            prior=_prior_from(turn1),
+        )
+        final = _of(events, "final")[0]
+        assert final["answer"] == "Old [1]. New [2]. Your file [3]."
+        cits = final["citations"]
+        assert [c["id"] for c in cits] == [cited1["id"], cits[1]["id"], turn1["sources_retrieved"][0]["id"]]
+        assert cits[1]["handle"] == "S3" and cits[1]["title"] == "Optical remote sensing"
+        assert final["sources_retrieved"] == []
+        assert marker_spans(final["answer"], cits) == ["[1]", "[2]", "[3]"]
+
+    async def test_a_failed_lookup_hands_out_no_handles(self, flag_on):
+        seen: List[str] = []
+
+        def hook(index):
+            if index == 1:
+                ctx = get_retrieval_context()
+                result = RetrievalContextInterceptor()._reduce(
+                    _tool_result(_retrieve_response(_public_doc())), RETRIEVE, tool_call_id="call-1", server_name="eve_retrieval"
+                )
+                seen.append(result.content[0].text)
+                assert ctx is not None
+
+        events, applied = await _cited_run(
+            ["Earlier [S1]."], before_each=hook, loader=AsyncMock(side_effect=TimeoutError())
+        )
+        assert "eve_ref" not in seen[0]
+        final = _of(events, "final")[0]
+        assert final["answer"] == "Earlier ."
+        assert "citations" not in final
+
+
+def _prior_from(kwargs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from src.services.sources.citations import prior_sources_from_rows
+
+    return prior_sources_from_rows([_stored_row(kwargs)])
+
+
+# ── review fixes: raw handles on the paths that do not rewrite ─────────────
+
+
+class TestStripHandles:
+    def test_strip_handles(self):
+        from src.services.sources.citations import strip_handles
+
+        assert strip_handles("A [S1] b [S2, S3] c [1] d [S") == "A  b  c [1] d [S"
+
+    async def test_sync_route_strips_handles(self, flag_on):
+        from langchain_core.messages import AIMessage
+
+        from src.services.agents.core.runner import generate_answer_agentic
+        from tests.test_agentic_fallback import _FakeUpdatesGraph, _patched_runner
+
+        graph = _FakeUpdatesGraph([{"agent": {"messages": [AIMessage(content="Answer [S1] and [S2; S3].")]}}])
+        from src.schemas.generation_request import GenerationRequest
+
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+            final_answer, *_ = await generate_answer_agentic(request, user_id="test-user", conversation_id="c1")
+        assert final_answer == "Answer  and ."
+
+
+# ── review fixes: held text, Stop, timeout, error ───────────────────────────
+
+
+def _summary_lines(caplog) -> List[str]:
+    return [r.getMessage() for r in caplog.records if "citations.summary" in r.getMessage()]
+
+
+class TestHeldTextAndOutcomes:
+    async def test_stop_flushes_the_held_text_and_carries_citations(self, flag_on, caplog):
+        caplog.set_level(logging.INFO)
+        cancel = asyncio.Event()
+        fill = _fill(1, [(_retrieve_response(_public_doc(), _private_doc()), "retrieve", "eve_retrieval", "call-1")])
+
+        def hook(index):
+            fill(index)
+            if index == 3:
+                cancel.set()
+
+        events, applied = await _cited_run(["SAR is radar [S", "1]."], cancel_event=cancel, before_each=hook)
+        assert events[-1]["type"] == "stopped"
+        streamed = "".join(t["content"] for t in _of(events, "token"))
+        assert streamed == "SAR is radar [S"
+        kwargs = _persist_kwargs(applied)
+        assert kwargs["output"] == streamed
+        stopped = events[-1]
+        assert stopped["citations"] == []
+        assert [s["provider"] for s in stopped["sources_retrieved"]] == ["qwen-512-filtered", "my-collections"]
+        assert any("outcome=stopped" in line for line in _summary_lines(caplog))
+
+        adapter = AguiAdapter(RunContext(thread_id=T, run_id=R, message_id="m1", trace_id="a" * 32, graph="react"))
+        out: List[Any] = list(adapter.start())
+        for frame in events:
+            out.extend(adapter.adapt(frame))
+        body = encode_sse(out)
+        assert validate_transcript(body, thread_id=T, run_id=R) == []
+        parsed = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+        [end] = [e for e in parsed if e["type"] == "TEXT_MESSAGE_END"]
+        assert end["metadata"]["eve.citations"] == []
+        assert len(end["metadata"]["eve.sourcesRetrieved"]) == 2
+
+    async def test_timeout_flushes_the_held_text(self, flag_on, caplog):
+        caplog.set_level(logging.INFO)
+        events, applied = await _cited_run(["Answer [S1] then [S"], raise_exc=TimeoutError("deadline"))
+        streamed = "".join(t["content"] for t in _of(events, "token"))
+        assert streamed == "Answer [1] then [S"
+        final = _of(events, "final")[0]
+        assert final["answer"] == streamed
+        assert final["error"]["code"]
+        assert _persist_kwargs(applied)["output"] == streamed
+        assert [c["n"] for c in _persist_kwargs(applied)["citations"]] == [1]
+        assert any("outcome=timeout" in line for line in _summary_lines(caplog))
+
+    async def test_error_flushes_the_held_text(self, flag_on, caplog):
+        caplog.set_level(logging.INFO)
+        events, applied = await _cited_run(["Answer [S"], raise_exc=RuntimeError("boom"))
+        streamed = "".join(t["content"] for t in _of(events, "token"))
+        assert streamed == "Answer [S"
+        assert _of(events, "final")[0]["answer"] == streamed
+        assert _persist_kwargs(applied)["output"] == streamed
+        assert any("outcome=error" in line for line in _summary_lines(caplog))
+
+    async def test_cancel_without_a_frame_stores_only_what_was_streamed(self, flag_on, caplog):
+        from tests.test_agent_step_frames import _runner
+        from src.schemas.generation_request import GenerationRequest
+        from src.services.agents.core.runner import generate_answer_agentic_stream_helper
+
+        caplog.set_level(logging.INFO)
+        graph = _Graph(
+            [_call(RETRIEVE, {"query": "SAR"}, "call-1"), _result(RETRIEVE, "call-1", content="{}"), *_tokens("Text [S")],
+            raise_exc=asyncio.CancelledError(),
+            before_each=_fill(1, [(_retrieve_response(_public_doc()), "retrieve", "eve_retrieval", "call-1")]),
+        )
+        frames: List[Dict[str, Any]] = []
+        with patch(f"{_RUNNER}._load_prior_sources", AsyncMock(return_value=[]), create=True), _runner(
+            graph, [_tool(RETRIEVE, "eve_retrieval")], _resolve_agentic_llm_client=_resolver()
+        ) as applied:
+            with pytest.raises(asyncio.CancelledError):
+                async for event in generate_answer_agentic_stream_helper(
+                    GenerationRequest(query="hi", llm_type="main", agent="react"),
+                    conversation_id="c1", message_id="m1", user_id="test-user",
+                ):
+                    frames.append(json.loads(event.removeprefix("data: ").strip()))
+        streamed = "".join(f["content"] for f in frames if f["type"] == "token")
+        assert streamed == "Text "
+        assert _persist_kwargs(applied)["output"] == streamed
+        assert any("outcome=cancelled" in line for line in _summary_lines(caplog))
+
+    async def test_a_dedup_only_token_sends_its_offset_on_the_next_token(self, flag_on):
+        payloads = [(
+            _retrieve_response(_public_doc(), _public_doc("Another passage.", point=9, headers=())),
+            "retrieve", "eve_retrieval", "call-1",
+        )]
+        events, _ = await _cited_run(["Both [S1]", "[S2]", " end."], payloads=payloads)
+        tokens = _of(events, "token")
+        assert [t["content"] for t in tokens] == ["Both [1]", " end."]
+        assert len(tokens[0]["citations"]) == 1
+        assert [c["at"] for c in tokens[1]["citations"]] == [[5], [5]]
+
+
+class TestCodePointOffsets:
+    def test_emoji_before_a_marker(self):
+        text, rewriter = _rewrite(_registry(A), ["🛰️ SAR ", "[S1] and 𝔼 [S1]."])
+        assert text == "🛰️ SAR [1] and 𝔼 [1]."
+        at = rewriter.citations()[0]["at"]
+        assert at == [len("🛰️ SAR "), len("🛰️ SAR [1] and 𝔼 ")]
+        assert marker_spans(text, rewriter.citations()) == ["[1]", "[1]"]
+
+
+# ── review fixes: model view ────────────────────────────────────────────────
+
+
+def _wiley_envelope_doc(as_json: bool = False) -> dict:
+    envelope = {
+        "success": True,
+        "query": "ocean heat",
+        "count": 2,
+        "results": [
+            {"text": "Ocean heat content rose in the upper layer. " * 12, "chunk_index": 0,
+             "metadata": {"additionalMetadata": {"title": "Paper 1", "link": "https://doi.org/10.1029/a"}}},
+            {"text": "Deep ocean warming lags. Cite [S4] here.", "chunk_index": 1,
+             "metadata": {"additionalMetadata": {"title": "Paper 2", "link": "https://doi.org/10.1029/b"}}},
+        ],
+    }
+    return {"id": None, "collection_name": "Wiley AI Gateway", "text": json.dumps(envelope) if as_json else envelope, "metadata": {}}
+
+
+class TestModelViewFixes:
+    async def test_handle_key_is_namespaced_and_written_last(self, flag_on, cite_context):
+        stac = _stac_response()
+        stac["items"][0]["eve_ref"] = "S9"
+        stac["items"][0]["ref"] = "S9"
+        result = await _intercept(stac, request=_request(name="search_stac", server="cdse", call_id="call-2"))
+        item = json.loads(result.content[0].text)["items"][0]
+        assert item["eve_ref"] == "S1"
+        doc = _public_doc()
+        doc["payload"]["eve_ref"] = "S9"
+        result = await _intercept(_retrieve_response(doc), request=_request(call_id="call-3"))
+        slim_doc = json.loads(result.content[0].text)["retrieved_docs"][0]
+        assert slim_doc["eve_ref"] == "S2"
+        assert "S9" not in json.dumps(slim_doc)
+
+    async def test_literal_handles_in_passages_are_neutralised(self, flag_on, cite_context):
+        doc = _public_doc("Earlier work [S3] shows ice loss; see [S1, S2].")
+        stac = _stac_response()
+        stac["items"][0]["note"] = "cite [S2]"
+        result = await _intercept(_retrieve_response(doc))
+        text = result.content[0].text
+        assert "[S3" not in text and "[S1" not in text
+        assert "S3" in text  # the words stay, only the bracket goes
+        result = await _intercept(stac, request=_request(name="search_stac", server="cdse", call_id="call-2"))
+        assert "[S2" not in result.content[0].text
+
+    async def test_flag_off_passages_are_not_touched(self, flag_off, cite_context):
+        response = _retrieve_response(_public_doc("Earlier work [S3] shows ice loss."))
+        result = await _intercept(response)
+        assert "[S3]" in result.content[0].text
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    async def test_wiley_envelope_passages_get_handles(self, flag_on, cite_context, as_json):
+        result = await _intercept(_retrieve_response(_wiley_envelope_doc(as_json)))
+        slim_doc = json.loads(result.content[0].text)["retrieved_docs"][0]
+        envelope = slim_doc["text"] if isinstance(slim_doc["text"], dict) else json.loads(slim_doc["text"])
+        assert [r["eve_ref"] for r in envelope["results"]] == ["S1", "S2"]
+        assert "[S4" not in result.content[0].text
+        sources = cite_context.sources.sources
+        assert [(s["provider"], s["title"]) for s in sources] == [("wiley", "Paper 1"), ("wiley", "Paper 2")]
+        assert all(len(s["passage"]) <= LICENSED_PASSAGE_MAX_CHARS for s in sources)
+
+    async def test_wiley_cap_applies_to_the_stored_documents_not_the_model(self, flag_on, cite_context):
+        result = await _intercept(_retrieve_response(_wiley_doc()))
+        slim_doc = json.loads(result.content[0].text)["retrieved_docs"][0]
+        full = _wiley_doc()["text"]
+        assert len(slim_doc["text"]) == len(full)  # the model reads what it read before
+        [stored] = cite_context.calls[0].documents
+        assert len(stored["text"]) <= LICENSED_PASSAGE_MAX_CHARS
+        assert stored["text"].endswith(".")
+
+    async def test_wiley_cap_is_off_with_the_flag(self, flag_off, cite_context):
+        await _intercept(_retrieve_response(_wiley_doc()))
+        [stored] = cite_context.calls[0].documents
+        assert len(stored["text"]) == len(_wiley_doc()["text"])
+
+
+# ── review fixes: AG-UI ─────────────────────────────────────────────────────
+
+GEOCODE = "geocode_search"
+BASELINE = __import__("pathlib").Path(__file__).parent / "agui" / "fixtures" / "flag_off_citations_baseline_d6c1fb9.txt"
+
+
+def _transcript(events) -> str:
+    adapter = AguiAdapter(RunContext(thread_id=T, run_id=R, message_id="m1", trace_id="a" * 32, graph="react"))
+    out: List[Any] = list(adapter.start())
+    for frame in events:
+        out.extend(adapter.adapt(frame))
+    out.extend(adapter.finish())
+    return encode_sse(out)
+
+
+def _scrub(obj):
+    if isinstance(obj, dict):
+        return {
+            k: (0 if any(w in k.lower() for w in ("latenc", "duration", "_s")) and isinstance(v, (int, float)) else _scrub(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_scrub(v) for v in obj]
+    return obj
+
+
+class TestAguiFixes:
+    async def test_citations_ride_run_finished_when_a_tool_call_closed_the_text(self, flag_on):
+        events, _ = await _cited_run(
+            ["SAR is radar [S1]."],
+            tail=[_call(GEOCODE, {"q": "Rome"}, "call-2"), _result(GEOCODE, "call-2", content="ok")],
+            tools=[_tool(RETRIEVE, "eve_retrieval"), _tool(GEOCODE, "geocode")],
+        )
+        body = _transcript(events)
+        assert validate_transcript(body, thread_id=T, run_id=R) == []
+        parsed = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+        ends = [e for e in parsed if e["type"] == "TEXT_MESSAGE_END"]
+        assert all("eve.citations" not in (e.get("metadata") or {}) for e in ends)
+        [finished] = [e for e in parsed if e["type"] == "RUN_FINISHED"]
+        assert [c["n"] for c in finished["metadata"]["eve.citations"]] == [1]
+        assert [s["provider"] for s in finished["metadata"]["eve.sourcesRetrieved"]] == ["my-collections"]
+
+    async def test_flag_off_transcript_matches_the_baseline_bytes(self, flag_off):
+        from langchain_core.messages import AIMessageChunk
+
+        doc = {"id": 7, "collection_name": "qwen-512-filtered", "score": 0.8,
+               "payload": {"text": "SAR sees through clouds.", "title": "SAR basics", "doi": "10.1000/x"}}
+        tokens = ["SAR is radar", " [1] in band C", ", see [a] and x[2].", " Done."]
+        graph = _Graph([
+            _call(RETRIEVE, {"query": "SAR"}, "call-1"),
+            _result(RETRIEVE, "call-1", content=json.dumps({"retrieved_docs": [doc]})),
+            *[("messages", (AIMessageChunk(content=t), {"langgraph_node": "agent"})) for t in tokens],
+        ])
+        events, _ = await run_runner(graph, tools=[_tool(RETRIEVE, "eve_retrieval")], _resolve_agentic_llm_client=_resolver())
+        lines = []
+        for line in _transcript(events).splitlines():
+            if line.startswith("data: "):
+                line = "data: " + json.dumps(_scrub(json.loads(line[6:])), separators=(",", ":"), ensure_ascii=False)
+            lines.append(line)
+        assert "\n".join(lines) + "\n" == BASELINE.read_text()
