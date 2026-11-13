@@ -19,6 +19,7 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    Iterable,
     List,
     NamedTuple,
     Optional,
@@ -87,6 +88,24 @@ def looks_like_mongo_id(value: str) -> bool:
 def is_private_qdrant_collection(name: str) -> bool:
     """True when ``name`` is any env's physical private Qdrant collection."""
     return bool(name) and name in ALL_PRIVATE_COLLECTION_NAMES
+
+
+def _title_private_payload(payload: Dict[str, Any]) -> None:
+    """Give an uploaded chunk its file name as ``title``, in place.
+
+    Uploads store the name in ``metadata.source_name`` and never set a title,
+    and Sources shows "Title not available" for a chunk without one. Done on
+    read, so chunks uploaded before this change get it too.
+    """
+    title = payload.get("title")
+    if title and title != "None":
+        return
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    name = metadata.get("source_name") or metadata.get("filename")
+    if isinstance(name, str) and name.strip():
+        payload["title"] = name.strip()
 
 
 def eve_public_collection_names() -> set[str]:
@@ -1350,6 +1369,7 @@ class VectorStoreManager:
         limit_per_collection: int,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> List[Any]:
         """
         Search public named collections and the shared private collection.
@@ -1362,7 +1382,9 @@ class VectorStoreManager:
         (https://qdrant.tech/documentation/concepts/filtering/#must). Public
         ``env`` filtering is skipped for Wiley and for collections that do not
         advertise an ``env`` payload field; a collection whose payload schema
-        cannot be read is skipped for the turn. Collections are searched
+        cannot be read is skipped for the turn. Private collections in
+        ``unfiltered_private_ids`` (a conversation's attached documents, which
+        carry no year or citations) get the tenant filter only. Collections are searched
         concurrently under one budget, ``QDRANT_RETRIEVAL_BUDGET_S``, and a
         collection that times out is skipped.
         """
@@ -1432,13 +1454,16 @@ class VectorStoreManager:
             converted = (self._to_generic_result(p, display_name) for p in points)
             return [conv for conv in converted if conv is not None]
 
+        unfiltered = set(unfiltered_private_ids or ())
+
         async def _search_private(collection_id: str) -> List[Any]:
+            client_filter = None if collection_id in unfiltered else query_filter
             tenant = build_private_tenant_filter(user_id, [collection_id])
-            private_filter = merge_must_filters(query_filter, list(tenant.must or []))
+            private_filter = merge_must_filters(client_filter, list(tenant.must or []))
             try:
                 async with asyncio.timeout_at(deadline):
                     if await self._missing_client_filter_index(
-                        PRIVATE_COLLECTION_NAME, query_filter
+                        PRIVATE_COLLECTION_NAME, client_filter
                     ):
                         return []
                     points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
@@ -1468,6 +1493,8 @@ class VectorStoreManager:
                 display_name = name_map.get(
                     logical_id, logical_id or PRIVATE_COLLECTION_NAME
                 )
+                if isinstance(payload, dict):
+                    _title_private_payload(payload)
                 conv = self._to_generic_result(scored, display_name)
                 if conv is not None:
                     results.append(conv)
@@ -1743,6 +1770,7 @@ class VectorStoreManager:
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> List[Any]:
         """
         Retrieve relevant documents for a given query from multiple collections.
@@ -1779,6 +1807,7 @@ class VectorStoreManager:
                 k,
                 private_collections_map,
                 user_id,
+                unfiltered_private_ids,
             )
 
             logger.info(
@@ -1803,6 +1832,7 @@ class VectorStoreManager:
         filters: Optional[Dict[str, Any]] = None,
         private_collections_map: Optional[Dict[str, str]] = None,
         user_id: Optional[str] = None,
+        unfiltered_private_ids: Optional[Iterable[str]] = None,
     ) -> tuple[List[Any], Dict[str, Optional[float]]]:
         """
         Retrieve relevant documents and measure query embedding and Qdrant retrieval latencies.
@@ -1835,6 +1865,7 @@ class VectorStoreManager:
                 k,
                 private_collections_map,
                 user_id,
+                unfiltered_private_ids,
             )
             retrieval_latency = time.perf_counter() - t1
 

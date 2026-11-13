@@ -647,3 +647,41 @@ def test_collection_delete_skips_the_document_index():
     manager.client.count.return_value = SimpleNamespace(count=0)
     manager.delete_points_for_collection("user-1", PRIVATE_ID)
     manager.client.create_payload_index.assert_not_called()
+
+
+@pytest.mark.parametrize("indexed", [set(), {"year", "n_citations"}])
+async def test_attached_documents_are_searched_without_the_year_and_citation_filters(
+    indexed,
+):
+    """Uploads have no year or citations: the filters would hide them.
+
+    Without an index the collection would be skipped; with one, the ``must``
+    would match none of their points. Other private collections keep them.
+    """
+    attached, own = "6ab27b3b8bc8659543f544a1", PRIVATE_ID
+    manager = _manager_with_mock_client(
+        indexed_fields={PRIVATE_COLLECTION_NAME: indexed}
+    )
+    year = FieldCondition(key="year", range=Range(gte=2015, lte=2024))
+    citations = FieldCondition(key="n_citations", range=Range(gte=10))
+    await manager._search_across_collections(
+        collection_names=[attached, own],
+        query_vector=[0.1],
+        score_threshold=0.0,
+        query_filter=Filter(must=[year, citations]),
+        limit_per_collection=3,
+        private_collections_map={attached: "Attached documents", own: "Docs A"},
+        user_id="user-1",
+        unfiltered_private_ids=[attached],
+    )
+
+    by_collection = {}
+    for call in manager.aclient.query_points.call_args_list:
+        must = call.kwargs["query_filter"].must
+        collection_id = next(c for c in must if c.key == "collection_id")
+        by_collection[collection_id.match.value] = [c.key for c in must]
+    assert by_collection[attached] == ["user_id", "collection_id"]
+    if indexed:
+        assert by_collection[own] == ["user_id", "collection_id", "year", "n_citations"]
+    else:
+        assert own not in by_collection

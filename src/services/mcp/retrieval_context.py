@@ -26,11 +26,15 @@ class RetrievalCall:
     ``documents`` are the complete Document-shaped records (id, score,
     payload, ...) as ``extract_document_data`` builds them; ``latencies`` is the
     ``latencies`` object the /retrieve endpoint returned, if any.
+    ``collections`` holds the collection arguments the tool actually received,
+    after the runner put the UI selection and the conversation collection in;
+    the model's own tool call in the trace does not show them.
     """
 
     tool_name: str
     documents: List[Dict[str, Any]] = field(default_factory=list)
     latencies: Dict[str, Any] = field(default_factory=dict)
+    collections: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

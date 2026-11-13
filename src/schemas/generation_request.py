@@ -126,6 +126,8 @@ class GenerationRequest(BaseModel):
 
     _collection_ids: List[str] = PrivateAttr(default_factory=list)
     _private_collections_map: Dict[str, str] = PrivateAttr(default_factory=dict)
+    _unfiltered_private_collections: List[str] = PrivateAttr(default_factory=list)
+    _attached_collection_id: Optional[str] = PrivateAttr(default=None)
     _mcp_server_configs: List[Any] = PrivateAttr(default_factory=list)
     _skill_configs: List[Any] = PrivateAttr(default_factory=list)
     _mcp_proxy_bearer_token: Optional[str] = PrivateAttr(default=None)
@@ -148,6 +150,32 @@ class GenerationRequest(BaseModel):
     @private_collections_map.setter
     def private_collections_map(self, value: Dict[str, str]) -> None:
         self._private_collections_map = value
+
+    @property
+    def unfiltered_private_collections(self) -> List[str]:
+        """Private collections searched without the year and citation filters.
+
+        A conversation's attached documents: uploads carry neither field, so
+        those filters would drop the whole collection.
+        """
+        return self._unfiltered_private_collections
+
+    @unfiltered_private_collections.setter
+    def unfiltered_private_collections(self, value: List[str]) -> None:
+        self._unfiltered_private_collections = list(value) if value else []
+
+    @property
+    def attached_collection_id(self) -> Optional[str]:
+        """The collection of documents attached to this request's conversation.
+
+        Set by ``apply_private_collections_to_request``, so the agent can name
+        those documents without looking the collection up a second time.
+        """
+        return self._attached_collection_id
+
+    @attached_collection_id.setter
+    def attached_collection_id(self, value: Optional[str]) -> None:
+        self._attached_collection_id = value
 
     @property
     def mcp_server_configs(self) -> List[Any]:
