@@ -66,6 +66,11 @@ ACTIVITY_SUMMARIZING = "eve.summarizing"
 CUSTOM_SOURCES = "eve.sources"
 CUSTOM_ARTIFACTS = "eve.artifacts"
 CUSTOM_NOTICE = "eve.notice"
+# Inline citations (sources standard, section 3) ride the assistant message:
+# the marker list on TEXT_MESSAGE_CONTENT when one closes, and the final lists
+# on the last TEXT_MESSAGE_END.
+META_CITATIONS = "eve.citations"
+META_SOURCES_RETRIEVED = "eve.sourcesRetrieved"
 NOTICE_INPUT_PART_SKIPPED = "input_part_skipped"
 _NOTICE_MESSAGES = {
     NOTICE_INPUT_PART_SKIPPED: "Some attachments could not be used and were left out.",
@@ -300,7 +305,9 @@ class AguiAdapter:
         if not isinstance(content, str) or not content:
             return []
         events = self._close_thinking()
-        events.extend(self._text_delta(content))
+        citations = frame.get("citations")
+        metadata = {META_CITATIONS: citations} if isinstance(citations, list) else None
+        events.extend(self._text_delta(content, metadata))
         return events
 
     def _on_tool_call(self, frame: LegacyFrame) -> List[AguiEvent]:
@@ -389,6 +396,7 @@ class AguiAdapter:
         if not isinstance(documents, list):
             return []
         raw_id = _str_or_none(frame.get("tool_call_id"))
+        sources = frame.get("sources")
         tool_call_id = self._last_by_raw.get(raw_id)
         if tool_call_id is None:
             pending = self._pending_by_raw.get(raw_id)
@@ -401,12 +409,11 @@ class AguiAdapter:
         if tool_call_id is None:
             logger.debug("agui.sources_dropped documents=%d", len(documents))
             return []
-        return [
-            CustomEvent(
-                name=CUSTOM_SOURCES,
-                value={"toolCallId": tool_call_id, "documents": documents},
-            )
-        ]
+        value: Dict[str, Any] = {"toolCallId": tool_call_id, "documents": documents}
+        if isinstance(sources, list):
+            # Sources standard section 3: the descriptors beside the legacy list.
+            value["sources"] = sources
+        return [CustomEvent(name=CUSTOM_SOURCES, value=value)]
 
     def _on_summarizing(self, frame: LegacyFrame) -> List[AguiEvent]:
         phase = frame.get("phase")
@@ -448,12 +455,18 @@ class AguiAdapter:
         )
         usage = _usage(frame.get("usage"))
 
+        citation_meta: Dict[str, Any] = {}
+        if isinstance(frame.get("citations"), list):
+            citation_meta[META_CITATIONS] = frame["citations"]
+        if isinstance(frame.get("sources_retrieved"), list):
+            citation_meta[META_SOURCES_RETRIEVED] = frame["sources_retrieved"]
+
         events = self._close_thinking()
         if not self._text_streamed and answer:
             # A text-format turn flushed at the end, or a final with no token
             # frame before it: the answer still travels as standard text.
             events.extend(self._text_delta(answer))
-        events.extend(self._close_text(endpoint))
+        events.extend(self._close_text(endpoint, citation_meta))
 
         artifact_ids = frame.get("artifact_ids")
         if isinstance(artifact_ids, list):
@@ -579,21 +592,35 @@ class AguiAdapter:
         self._thinking_open = False
         return [StepFinishedEvent(step_name=STEP_THINKING)]
 
-    def _text_delta(self, delta: str) -> List[AguiEvent]:
+    def _text_delta(
+        self, delta: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> List[AguiEvent]:
         events: List[AguiEvent] = []
         if not self._text_open:
             self._text_open = True
             events.append(TextMessageStartEvent(message_id=self.context.message_id, role="assistant"))
         self._text_streamed = True
-        events.append(TextMessageContentEvent(message_id=self.context.message_id, delta=delta))
+        events.append(
+            TextMessageContentEvent(
+                message_id=self.context.message_id, delta=delta, metadata=metadata
+            )
+        )
         return events
 
-    def _close_text(self, endpoint: Optional[Mapping[str, Any]] = None) -> List[AguiEvent]:
+    def _close_text(
+        self,
+        endpoint: Optional[Mapping[str, Any]] = None,
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> List[AguiEvent]:
         if not self._text_open:
             return []
         self._text_open = False
-        metadata = {"eve.endpoint": dict(endpoint)} if endpoint is not None else None
-        return [TextMessageEndEvent(message_id=self.context.message_id, metadata=metadata)]
+        metadata: Dict[str, Any] = {}
+        if endpoint is not None:
+            metadata["eve.endpoint"] = dict(endpoint)
+        if extra:
+            metadata.update(extra)
+        return [TextMessageEndEvent(message_id=self.context.message_id, metadata=metadata or None)]
 
     def _close_summary(self) -> List[AguiEvent]:
         if self._summary_open is None:

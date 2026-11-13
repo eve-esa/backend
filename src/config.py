@@ -362,6 +362,12 @@ FEATURE_CONVERSATION_DOCUMENTS = (
 # stream-generate-agentic route is the only agentic stream. Default off, like
 # FEATURE_JSC_MODEL: only "true" turns it on.
 FEATURE_AGUI_STREAM = getenv_or("FEATURE_AGUI_STREAM").lower() == "true"
+# On: agentic turns hand the model each retrieved passage and STAC item with a
+# run-local handle (S1, S2, ...), rewrite the handles the answer cites into [n]
+# markers and persist message.metadata.citations and sources_retrieved
+# (src/services/sources). Off: the model context, the stream and the stored
+# message are unchanged. Default off, like FEATURE_JSC_MODEL.
+FEATURE_INLINE_CITATIONS = getenv_or("FEATURE_INLINE_CITATIONS").lower() == "true"
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()

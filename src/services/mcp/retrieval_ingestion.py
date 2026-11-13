@@ -13,6 +13,11 @@ message; the model gets the same JSON shape reduced to what it needs to
 answer: collection name, chunk text and the descriptive metadata (title, url,
 doi, year, authors, ...).
 
+With ``FEATURE_INLINE_CITATIONS`` each passage, and each item of a
+``search_stac`` result, also gets a run-local ``ref`` (``S1``, ``S2``, ...) and
+the reduced result one sentence on how to cite it; the Source descriptors go to
+the same request context (``sources``), never to the model.
+
 Follows the ``ToolCallInterceptor`` protocol from ``langchain-mcp-adapters``.
 Fail-open: any error leaves the original result untouched.
 """
@@ -21,8 +26,11 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from src import config
 from src.services.mcp.retrieval_context import get_retrieval_context, RetrievalCall
-from src.utils.helpers import extract_documents_from_retrieval_payload
+from src.services.sources.citations import CITATION_INSTRUCTION, SourceRegistry
+from src.services.sources.descriptors import source_from_document, source_from_stac_item
+from src.utils.helpers import extract_document_data, extract_documents_from_retrieval_payload
 
 logger = logging.getLogger(__name__)
 
@@ -96,18 +104,89 @@ def slim_document_for_model(doc: Dict[str, Any]) -> Dict[str, Any]:
     return slim
 
 
-def slim_retrieval_response_for_model(response: Dict[str, Any]) -> Dict[str, Any]:
-    """Rebuild a ``/retrieve`` response with only what the model needs."""
-    docs = response.get("retrieved_docs") or []
-    slim: Dict[str, Any] = {
-        "retrieved_docs": [
-            slim_document_for_model(d) for d in docs if isinstance(d, dict)
-        ]
-    }
+def slim_retrieval_response_for_model(
+    response: Dict[str, Any],
+    refs: Optional[List[Optional[str]]] = None,
+) -> Dict[str, Any]:
+    """Rebuild a ``/retrieve`` response with only what the model needs.
+
+    ``refs`` holds one handle (or None) per dict document, in order; with it
+    every slim document carries its ``ref`` and the response the citation
+    instruction.
+    """
+    docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
+    slim_docs: List[Dict[str, Any]] = []
+    for index, doc in enumerate(docs):
+        slim_doc = slim_document_for_model(doc)
+        ref = refs[index] if refs is not None and index < len(refs) else None
+        if ref:
+            slim_doc = {"ref": ref, **slim_doc}
+        slim_docs.append(slim_doc)
+    slim: Dict[str, Any] = {"retrieved_docs": slim_docs}
     for key in _RESPONSE_KEYS_KEPT:
         if response.get(key) not in (None, ""):
             slim[key] = response[key]
+    if refs is not None and any(refs):
+        slim["citation_instruction"] = CITATION_INSTRUCTION
     return slim
+
+
+def register_retrieval_sources(
+    registry: SourceRegistry,
+    response: Dict[str, Any],
+    tool_call_id: Optional[str],
+) -> List[Optional[str]]:
+    """One handle per dict document of ``response`` (None for a document with no text)."""
+    refs: List[Optional[str]] = []
+    docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
+    for rank, doc in enumerate(docs):
+        source = source_from_document(
+            extract_document_data(doc), rank=rank, tool_call_id=tool_call_id
+        )
+        refs.append(registry.register(source) if source is not None else None)
+    return refs
+
+
+def _parse_stac_response(text: Any) -> Optional[Dict[str, Any]]:
+    """The parsed ``search_stac`` result (``{catalog, items: [...]}``), or None."""
+    if not isinstance(text, str) or not text.lstrip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
+        return None
+    if "catalog" not in parsed:
+        return None
+    return parsed
+
+
+def register_stac_sources(
+    registry: SourceRegistry,
+    response: Dict[str, Any],
+    *,
+    provider: str,
+    tool_call_id: Optional[str],
+) -> Dict[str, Any]:
+    """``response`` with a ``ref`` on every item that became a Source."""
+    items: List[Any] = []
+    any_ref = False
+    for rank, item in enumerate(response.get("items") or []):
+        source = (
+            source_from_stac_item(item, provider=provider, rank=rank, tool_call_id=tool_call_id)
+            if isinstance(item, dict)
+            else None
+        )
+        if source is None:
+            items.append(item)
+            continue
+        items.append({"ref": registry.register(source), **item})
+        any_ref = True
+    out = {**response, "items": items}
+    if any_ref:
+        out["citation_instruction"] = CITATION_INSTRUCTION
+    return out
 
 
 def _parse_retrieval_response(text: Any) -> Optional[Dict[str, Any]]:
@@ -147,6 +226,12 @@ def _collection_args(request: Any) -> Dict[str, Any]:
     }
 
 
+def _tool_call_id(request: Any) -> Optional[str]:
+    """The LangChain tool call id from the graph runtime, when there is one."""
+    value = getattr(getattr(request, "runtime", None), "tool_call_id", None)
+    return value if isinstance(value, str) and value else None
+
+
 class RetrievalContextInterceptor:
     """Stash the full retrieval documents, hand the model a reduced copy.
 
@@ -171,7 +256,11 @@ class RetrievalContextInterceptor:
 
         try:
             return self._reduce(
-                result, _graph_tool_name(request), _collection_args(request)
+                result,
+                _graph_tool_name(request),
+                _collection_args(request),
+                tool_call_id=_tool_call_id(request),
+                server_name=str(getattr(request, "server_name", "") or ""),
             )
         except Exception:
             logger.warning(
@@ -188,10 +277,16 @@ class RetrievalContextInterceptor:
         result: "CallToolResult",
         tool_name: str,
         collections: Optional[Dict[str, Any]] = None,
+        *,
+        tool_call_id: Optional[str] = None,
+        server_name: str = "",
     ) -> "CallToolResult":
         ctx = get_retrieval_context()
         if ctx is None:
             return result
+        # Only a run that rewrites the handles hands them out: a sync agentic
+        # turn would store raw [S1] text.
+        citations_on = bool(ctx.cite and config.FEATURE_INLINE_CITATIONS)
 
         new_content: List[Any] = []
         rewritten = False
@@ -201,7 +296,28 @@ class RetrievalContextInterceptor:
                 continue
             response = _parse_retrieval_response(block.text)
             if response is None:
-                new_content.append(block)
+                stac = (
+                    _parse_stac_response(block.text)
+                    if citations_on
+                    and not getattr(result, "isError", False)
+                    and tool_name.endswith("search_stac")
+                    else None
+                )
+                if stac is None:
+                    new_content.append(block)
+                    continue
+                with_refs = register_stac_sources(
+                    ctx.sources,
+                    stac,
+                    provider=(server_name or "stac").lower(),
+                    tool_call_id=tool_call_id,
+                )
+                new_content.append(
+                    block.model_copy(
+                        update={"text": json.dumps(with_refs, ensure_ascii=False)}
+                    )
+                )
+                rewritten = True
                 continue
 
             latencies = response.get("latencies")
@@ -213,7 +329,12 @@ class RetrievalContextInterceptor:
                     collections=dict(collections or {}),
                 )
             )
-            slim = slim_retrieval_response_for_model(response)
+            refs = (
+                register_retrieval_sources(ctx.sources, response, tool_call_id)
+                if citations_on
+                else None
+            )
+            slim = slim_retrieval_response_for_model(response, refs)
             new_content.append(
                 block.model_copy(
                     update={"text": json.dumps(slim, ensure_ascii=False)}
