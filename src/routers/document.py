@@ -38,9 +38,13 @@ from src.services.private_document_limit import (
 )
 from src.services.request_rate_limiter import enforce_request_rate
 from src.services.conversation_documents import (
+    count_attached_documents,
     delete_conversation_collection_if_empty,
+    delete_conversation_document as delete_attached_document,
     get_conversation_collection,
     get_or_create_conversation_collection,
+    keep_conversation_collection,
+    list_conversation_documents as list_attached_documents,
 )
 
 # Setup
@@ -72,15 +76,19 @@ async def _rollback_uploaded_docs(
     *,
     qdrant_timeout_s: Optional[float] = None,
     abandon_on_cancel: bool = False,
-) -> None:
+) -> int:
     """Remove Mongo rows and any Qdrant points written for a failed upload.
+
+    Returns how many rows this call deleted (0 if the row delete failed): a
+    delete that ran meanwhile may have removed some of them and released their
+    slots already.
 
     ``qdrant_timeout_s`` and ``abandon_on_cancel`` let a caller with a deadline
     bound the rollback: a delete still running when the caller gives up is left
     to finish on its own thread.
     """
     if not created_docs:
-        return
+        return 0
     vector_store = (
         VectorStoreManager()
         if qdrant_timeout_s is None
@@ -104,7 +112,7 @@ async def _rollback_uploaded_docs(
                 exc_info=True,
             )
     try:
-        await DocumentModel.delete_many(
+        return await DocumentModel.delete_many(
             {"_id": {"$in": [ObjectId(doc.id) for doc in created_docs]}}
         )
     except Exception:
@@ -112,6 +120,7 @@ async def _rollback_uploaded_docs(
             "Failed to roll back Mongo documents after upload error",
             exc_info=True,
         )
+        return 0
 
 
 @router.get(
@@ -398,13 +407,7 @@ async def upload_conversation_documents(
     # Counted without creating the collection: an upload refused below must not
     # leave an empty collection behind for every chat turn to search.
     existing = await get_conversation_collection(requesting_user.id, conversation_id)
-    attached = (
-        await DocumentModel.get_primary_collection().count_documents(
-            {"collection_id": existing.id}
-        )
-        if existing
-        else 0
-    )
+    attached = await count_attached_documents(existing.id) if existing else 0
     # Two uploads racing past this count can exceed the cap by the smaller
     # batch; the private document counter below stays exact either way.
     if attached + len(files) > MAX_CONVERSATION_DOCUMENTS:
@@ -440,6 +443,10 @@ async def upload_conversation_documents(
                 for file in files
             ]
         )
+        # A delete of the conversation's last document may have dropped the
+        # collection between get_or_create and the insert above: put it back,
+        # or these rows would sit under a collection nothing can find.
+        await keep_conversation_collection(collection)
         names = [file.filename for file in files]
         with anyio.fail_after(CONVERSATION_DOCUMENT_DEADLINE_SECONDS):
             result = await document_service.add_documents(
@@ -481,13 +488,12 @@ async def upload_conversation_documents(
         skipped_docs = [doc for doc in created_docs if doc.id not in ingested]
         if skipped_docs:
             created_docs = [doc for doc in created_docs if doc.id in ingested]
-            if await _rollback_conversation_upload(
+            removed = await _rollback_conversation_upload(
                 requesting_user.id, collection.id, skipped_docs
-            ):
-                await release_private_document_slots(
-                    requesting_user.id, len(skipped_docs)
-                )
-                slots_held -= len(skipped_docs)
+            )
+            if removed:
+                await release_private_document_slots(requesting_user.id, removed)
+                slots_held -= removed
 
         for doc in created_docs:
             await DocumentModel.get_collection().update_one(
@@ -511,16 +517,18 @@ async def upload_conversation_documents(
             "skipped": [doc.name for doc in skipped_docs],
         }
     except Exception as e:
-        rolled_back = True
+        # Slots go back only with the rows this upload removed itself: rows the
+        # rollback could not remove keep theirs, and rows a delete removed
+        # meanwhile were released by that delete. Before any row exists, the
+        # whole reservation goes back.
+        to_release = slots_held
         if created_docs:
-            rolled_back = await _rollback_conversation_upload(
+            to_release = await _rollback_conversation_upload(
                 requesting_user.id, collection.id, created_docs
             )
-        # Slots go back only with the rows: rows the rollback could not remove
-        # keep theirs, so the counter still matches what the user holds.
-        if slots_held and rolled_back:
-            await release_private_document_slots(requesting_user.id, slots_held)
-        if collection is not None and rolled_back:
+        if to_release:
+            await release_private_document_slots(requesting_user.id, to_release)
+        if collection is not None:
             await delete_conversation_collection_if_empty(collection)
         if isinstance(e, TimeoutError):
             raise _conversation_document_error(
@@ -544,14 +552,16 @@ async def upload_conversation_documents(
 
 async def _rollback_conversation_upload(
     user_id: str, collection_id: str, docs: List[DocumentModel]
-) -> bool:
+) -> int:
     """Roll back an attached-documents upload within its time budget.
 
-    Returns False when the budget runs out first: the request still answers in
-    time, and the log names the documents left for a manual cleanup.
+    Returns how many rows it deleted, 0 when the budget runs out first: the
+    request still answers in time, and the log names the documents left for a
+    manual cleanup.
     """
+    removed = 0
     with anyio.move_on_after(CONVERSATION_DOCUMENT_ROLLBACK_SECONDS) as scope:
-        await _rollback_uploaded_docs(
+        removed = await _rollback_uploaded_docs(
             user_id,
             collection_id,
             docs,
@@ -564,8 +574,88 @@ async def _rollback_conversation_upload(
             collection_id,
             ",".join(doc.id for doc in docs),
         )
-        return False
-    return True
+        return 0
+    return removed
+
+
+async def _require_own_conversation(conversation_id: str, user: User) -> None:
+    """404 when the feature is off, or the conversation is missing or not the user's."""
+    if not config.FEATURE_CONVERSATION_DOCUMENTS:
+        raise HTTPException(status_code=404, detail="Not Found")
+    # Primary and 404 for the same reasons as the upload route above.
+    conversation = await Conversation.find_by_id_on_primary(conversation_id)
+    if not conversation or conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+@router.get("/conversations/{conversation_id}/documents")
+async def list_conversation_documents(
+    conversation_id: str = Path(..., description="Conversation ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    List the documents attached to one conversation, oldest first.
+
+    A document appears once its upload has finished, so every entry has a
+    ``chunk_count`` above 0.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Per document: its id, name, chunk count, file type and size.
+
+    Raises:
+        HTTPException: 404 if the feature is off or the conversation is not
+        found or belongs to another user.
+    """
+    await _require_own_conversation(conversation_id, requesting_user)
+    documents = await list_attached_documents(requesting_user.id, conversation_id)
+    return {
+        "documents": [
+            {
+                "document_id": doc.id,
+                "name": doc.name,
+                "chunk_count": doc.chunk_count,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+            }
+            for doc in documents
+        ]
+    }
+
+
+@router.delete("/conversations/{conversation_id}/documents/{document_id}")
+async def delete_conversation_document(
+    conversation_id: str = Path(..., description="Conversation ID"),
+    document_id: str = Path(..., description="Document ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Remove one document from a conversation: its points, its row and its slot.
+
+    Args:
+        conversation_id (str): Conversation identifier.
+        document_id (str): Document identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if the feature is off, the conversation is not found
+        or belongs to another user, or the document is not attached to it or
+        its upload is still running; 500 ``conversation_document_cleanup_failed``
+        if it could not be deleted, which a retry can finish. A retry may
+        answer 404 when an earlier request already deleted the document.
+    """
+    await _require_own_conversation(conversation_id, requesting_user)
+    if not await delete_attached_document(
+        requesting_user.id, conversation_id, document_id
+    ):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"message": "Document deleted successfully"}
 
 
 @router.delete("/collections/{collection_id}/documents/{document_id}")

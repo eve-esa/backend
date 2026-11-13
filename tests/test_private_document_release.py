@@ -2,6 +2,7 @@ import io
 
 import pytest
 from bson import ObjectId
+from pymongo.errors import OperationFailure
 
 from src.database.models.collection import Collection
 from src.database.models.document import Document
@@ -161,3 +162,15 @@ async def test_release_logs_a_warning_when_attempts_run_out(monkeypatch, caplog)
         assert await _counter(user.id) == 1
     finally:
         await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_the_guard_also_covers_collections_pinned_to_the_primary(monkeypatch):
+    reject_pipeline_updates(monkeypatch)
+
+    with pytest.raises(OperationFailure) as refused:
+        await User.get_primary_collection().update_one(
+            {"_id": ObjectId()}, [{"$set": {"private_document_count": 0}}]
+        )
+
+    assert refused.value.code == 14

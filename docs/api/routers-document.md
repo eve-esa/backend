@@ -147,6 +147,58 @@ Deletes a document and associated vectors.
 
 - Destructive operation; retrieval quality may change.
 
+## List a conversation's documents
+
+`GET /conversations/{conversation_id}/documents`
+
+::: routers.document.list_conversation_documents
+    options:
+      show_root_heading: false
+      show_source: false
+
+### Usage
+
+```python
+resp = requests.get(
+    f"{BASE_URL}/conversations/{CONVERSATION_ID}/documents",
+    headers=headers,
+    timeout=30,
+)
+resp.raise_for_status()
+print(resp.json()["documents"])
+```
+
+### Notes
+
+- Answers 404 while `FEATURE_CONVERSATION_DOCUMENTS` is off, and for another user's conversation.
+- A document appears once its upload has finished.
+
+## Delete one document from a conversation
+
+`DELETE /conversations/{conversation_id}/documents/{document_id}`
+
+::: routers.document.delete_conversation_document
+    options:
+      show_root_heading: false
+      show_source: false
+
+### Usage
+
+```python
+resp = requests.delete(
+    f"{BASE_URL}/conversations/{CONVERSATION_ID}/documents/{DOCUMENT_ID}",
+    headers=headers,
+    timeout=30,
+)
+resp.raise_for_status()
+```
+
+### Notes
+
+- A 500 `conversation_document_cleanup_failed` means the document is still attached: retry it.
+- A retry, or the repeat of a request that ended in a 504 at the CDN, may answer 404: the first request deleted the document. A 404 on this DELETE means the document is gone.
+- `DELETE /conversations/{id}` removes all of a conversation's documents.
+
 ## Full API reference
 
 For exhaustive schema details, use [Swagger API](https://eve-esa.github.io/eve-guide/backend-swagger/).
