@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from src.services.sources.descriptors import minimal_source, public_source
+from src.services.sources.descriptors import minimal_source, public_source, slug_for_provider
 
 # The key the handle rides under in the model view, written after every other
 # field so a source field of the same name cannot replace it.
@@ -115,7 +115,8 @@ def prior_sources_from_rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
 
     One entry per id and handle, first seen wins, without the marker fields;
     each ``alias_handles`` value gives one more entry for the same Source under
-    that handle. Entries with no id or no ``S<k>`` handle are skipped.
+    that handle. Entries with no id or no ``S<k>`` handle are skipped. An
+    entry stored before ``slug`` existed gets it from its ``provider``.
     """
     out: List[Dict[str, Any]] = []
     seen: set = set()
@@ -134,6 +135,8 @@ def prior_sources_from_rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
                 if not isinstance(sid, str) or not sid:
                     continue
                 base = {k: v for k, v in entry.items() if k not in _MARKER_FIELDS}
+                if "slug" not in base:
+                    base["slug"] = slug_for_provider(base.get("provider"), base.get("kind"))
                 aliases = entry.get("alias_handles")
                 for handle in [entry.get("handle"), *(aliases if isinstance(aliases, list) else [])]:
                     if _handle_number(handle) is None or (sid, handle) in seen:

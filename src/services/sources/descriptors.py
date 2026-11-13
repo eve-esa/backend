@@ -16,7 +16,11 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from src.constants import PUBLIC_COLLECTIONS, WILEY_PUBLIC_COLLECTIONS
+from src.constants import (
+    PUBLIC_COLLECTION_SLUG_PREFIXES,
+    PUBLIC_COLLECTIONS,
+    WILEY_PUBLIC_COLLECTIONS,
+)
 
 PASSAGE_MAX_CHARS = 600
 # Licensed content (Wiley) until the licence answer: half the general cap.
@@ -33,6 +37,7 @@ _MINIMAL_KEYS = (
     "kind",
     "provider",
     "provider_label",
+    "slug",
     "visibility",
     "title",
     "document_key",
@@ -63,6 +68,9 @@ _WEB_PAGE_PROVIDERS = frozenset({"esa-rag-scraped-qwen3-newpipeline", "wikipedia
 _SENTENCE_END = re.compile(r"[.!?](?=\s)|\n")
 _TILE = re.compile(r"_T(\d{2}[A-Z]{3})_")
 _LEVEL = re.compile(r"-(l[0-9][a-z]?)(?:-|$)", re.IGNORECASE)
+_SLUG_SEPARATORS = re.compile(r"[^a-z0-9]+")
+# Providers of the user's own files: no slug, the UI names them "Your files".
+_PRIVATE_PROVIDERS = frozenset({"my-collections", "conversation"})
 
 
 def _wiley_labels() -> Dict[str, str]:
@@ -73,11 +81,47 @@ def _public_by_label() -> Dict[str, Dict[str, str]]:
     """Public collection by its alias or its name: retrieval reports the alias."""
     out: Dict[str, Dict[str, str]] = {}
     for c in PUBLIC_COLLECTIONS:
-        entry = {"key": c["name"], "label": c.get("alias") or c["name"]}
+        entry = {"key": c["name"], "label": c.get("alias") or c["name"], "slug": _catalog_slug(c)}
         out[c["name"]] = entry
         if c.get("alias"):
             out[c["alias"]] = entry
     return out
+
+
+def derive_slug(value: Any) -> Optional[str]:
+    """Lowercase letters and digits, every other run of characters one ``-``; None when empty."""
+    slug = _SLUG_SEPARATORS.sub("-", str(value or "").lower()).strip("-")
+    return slug or None
+
+
+def _catalog_slug(entry: Mapping[str, Any]) -> Optional[str]:
+    return entry.get("slug") or derive_slug(entry.get("alias") or entry.get("name"))
+
+
+def collection_slug(name: Any) -> Optional[str]:
+    """The provider slug of a public or licensed collection, by name or alias.
+
+    Catalog entries (``src/constants.py``) give theirs; a name outside the
+    catalog takes the slug of a known prefix, else one derived from the name.
+    """
+    name = str(name or "")
+    for entry in list(WILEY_PUBLIC_COLLECTIONS) + list(PUBLIC_COLLECTIONS):
+        if name in (entry.get("name"), entry.get("alias")):
+            return _catalog_slug(entry)
+    for prefix, slug in PUBLIC_COLLECTION_SLUG_PREFIXES.items():
+        if name.startswith(prefix):
+            return slug
+    return derive_slug(name)
+
+
+def slug_for_provider(provider: Any, kind: Any = None) -> Optional[str]:
+    """The slug of a stored Source's ``provider`` key: None for the user's own files.
+
+    For Sources stored before ``slug`` existed.
+    """
+    if kind == "user_file" or provider in _PRIVATE_PROVIDERS:
+        return None
+    return collection_slug(provider)
 
 
 def source_id(provider: str, document_key: str, locator: Mapping[str, Any], passage: str = "") -> str:
@@ -223,21 +267,51 @@ def _is_private(doc: Mapping[str, Any], merged: Mapping[str, Any]) -> bool:
     ))
 
 
-def _provider_for(doc: Mapping[str, Any], merged: Mapping[str, Any]) -> Dict[str, str]:
-    """``{key, label, visibility, kind}`` for one retrieval document."""
+def _provider_for(doc: Mapping[str, Any], merged: Mapping[str, Any]) -> Dict[str, Any]:
+    """``{key, label, slug, visibility, kind}`` for one retrieval document."""
     name = str(doc.get("collection_name") or "")
     if _is_private(doc, merged):
         if name == CONVERSATION_COLLECTION_NAME:
-            return {"key": "conversation", "label": "This conversation", "visibility": "private", "kind": "user_file"}
-        return {"key": "my-collections", "label": "My collections", "visibility": "private", "kind": "user_file"}
+            return {
+                "key": "conversation",
+                "label": "This conversation",
+                "slug": None,
+                "visibility": "private",
+                "kind": "user_file",
+            }
+        return {
+            "key": "my-collections",
+            "label": "My collections",
+            "slug": None,
+            "visibility": "private",
+            "kind": "user_file",
+        }
     if name in _wiley_labels():
-        return {"key": "wiley", "label": name, "visibility": "licensed", "kind": "document"}
+        return {
+            "key": "wiley",
+            "label": name,
+            "slug": collection_slug(name),
+            "visibility": "licensed",
+            "kind": "document",
+        }
     public = _public_by_label().get(name)
     if public is not None:
         kind = "web_page" if public["key"] in _WEB_PAGE_PROVIDERS else "document"
-        return {"key": public["key"], "label": public["label"], "visibility": "public", "kind": kind}
+        return {
+            "key": public["key"],
+            "label": public["label"],
+            "slug": public["slug"],
+            "visibility": "public",
+            "kind": kind,
+        }
     key = name or "unknown"
-    return {"key": key, "label": name or "Unknown source", "visibility": "public", "kind": "document"}
+    return {
+        "key": key,
+        "label": name or "Unknown source",
+        "slug": collection_slug(key),
+        "visibility": "public",
+        "kind": "document",
+    }
 
 
 def _passage_text(doc: Mapping[str, Any]) -> str:
@@ -341,6 +415,7 @@ def source_from_document(
         "kind": kind,
         "provider": provider["key"],
         "provider_label": provider["label"],
+        "slug": provider["slug"],
         "visibility": provider["visibility"],
         "title": title,
         "document_key": document_key,
@@ -444,6 +519,7 @@ def source_from_stac_item(
         "kind": "stac_item",
         "provider": provider,
         "provider_label": provider,
+        "slug": derive_slug(provider),
         "visibility": "public",
         "title": _stac_title(item),
         "document_key": document_key,
