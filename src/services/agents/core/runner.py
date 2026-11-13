@@ -267,12 +267,39 @@ def _tool_server(tool: Any) -> Optional[str]:
     return None
 
 
-def _tool_failure_status(content: Any) -> str:
-    """``timeout`` or ``error`` for a ToolMessage with status ``error``."""
-    text = stringify_tool_content(content).lower()
-    if "timeout" in text or "timed out" in text:
-        return "timeout"
-    return "error"
+# Content prefixes the agents react tools node writes for a failed call. Up to
+# the agents fix it leaves ``ToolMessage.status`` at its default, so the prefix
+# is the only failure signal there. ``Error:`` (LangChain ToolNode, deep) is
+# only stripped before the timeout check: a result may start with it.
+_TOOL_ERROR_PREFIXES = ("Tool error:", "Unknown tool:")
+_TOOL_ERROR_HEADS = _TOOL_ERROR_PREFIXES + ("Error:",)
+# Timeout words, matched only at the head of the error text and before any
+# quote, where exception names and messages sit: an echoed query or argument
+# (quoted, or later in the text) cannot turn a plain error into a timeout.
+_TIMEOUT_HEAD = re.compile(r"timeout|timed out", re.IGNORECASE)
+_TIMEOUT_HEAD_CHARS = 60
+
+
+def _tool_status(lc_status: Any, content: Any) -> str:
+    """``ok``, ``error`` or ``timeout`` for one ToolMessage."""
+    text = stringify_tool_content(content).lstrip()
+    if lc_status != "error" and not text.startswith(_TOOL_ERROR_PREFIXES):
+        return "ok"
+    if text.startswith("Unknown tool:"):
+        return "error"
+    prefix = next((p for p in _TOOL_ERROR_HEADS if text.startswith(p)), "")
+    head = text[len(prefix) :]
+    head = re.split(r"['\"]", head[:_TIMEOUT_HEAD_CHARS], maxsplit=1)[0]
+    return "timeout" if _TIMEOUT_HEAD.search(head) else "error"
+
+
+def _tool_duration_ms(message: Any) -> Optional[int]:
+    """The call's own time when the tools node stamped it (agents fix)."""
+    meta = getattr(message, "response_metadata", None)
+    value = meta.get("duration_ms") if isinstance(meta, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return int(value)
 
 
 def _utc_now_iso() -> str:
@@ -282,12 +309,19 @@ def _utc_now_iso() -> str:
 class _StepFrames:
     """Ids, kinds, servers, status and durations of the tool steps of one run.
 
-    ``tool_call_id`` is the model's call id, unique within the run: a missing
-    id is generated, a raw id already used by another call gets ``~2``, ``~3``
-    (text-format models repeat ``call_1_x`` across steps). A call with the
-    same tool and arguments as a call whose result failed is a retry: it keeps
-    that call's id and counts ``attempt``. Durations use ``time.monotonic`` so
-    the ``perf_counter`` clocks of the latencies are left alone.
+    ``tool_call_id`` is unique within the run: a missing raw id is generated,
+    a raw id already used by another call gets ``~2``, ``~3`` (text-format
+    models repeat ``call_1_x`` across steps). A call with the same tool and
+    arguments as a call whose result failed is a retry: it gets its own id,
+    counts ``attempt`` and names the failed attempt in ``retry_of``.
+
+    ``duration_ms`` is the call's own time when the tools node stamps it on
+    the ToolMessage; otherwise it runs from the announcement to the result,
+    which on a multi-call step includes the calls that ran before it. Clocks
+    use ``time.monotonic`` so the ``perf_counter`` latencies are left alone.
+
+    The trace steps written by ``annotate_trace_calls`` stay referenced, so a
+    Stop or a ghost call updates the persisted trace in place.
     """
 
     def __init__(self, tools: Any = ()) -> None:
@@ -302,6 +336,9 @@ class _StepFrames:
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._failed: Dict[str, tuple] = {}
         self._fields_by_announce_key: Dict[str, Dict[str, Any]] = {}
+        self._trace_steps: Dict[str, Dict[str, Any]] = {}
+        self._seq = 0
+        self._last_result_seq = 0
 
     @staticmethod
     def call_key(name: str, args: Any) -> str:
@@ -338,15 +375,18 @@ class _StepFrames:
         *,
         announce_key: str,
         model: Optional[str] = None,
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Fields for a tool_call frame; records the call as pending."""
+        """Fields for a tool_call frame; records the call as pending.
+
+        ``model`` is always our endpoint key (``main``, ``fallback``, ...);
+        ``model_name`` the provider's own model id, when the message has one.
+        """
         safe_args = args if isinstance(args, dict) else {}
         key = self.call_key(name, args)
         retried = self._failed.pop(key, None)
-        if retried is not None:
-            step_id, attempt = retried[0], retried[1] + 1
-        else:
-            step_id, attempt = self._new_id(raw_id), 1
+        step_id = self._new_id(raw_id)
+        attempt = retried[1] + 1 if retried is not None else 1
         self._used.add(step_id)
         if raw_id:
             self._step_by_raw[str(raw_id)] = step_id
@@ -361,23 +401,35 @@ class _StepFrames:
             **extra,
         }
         if retried is not None:
-            fields["retry_of"] = step_id
+            fields["retry_of"] = retried[0]
         if model:
             fields["model"] = model
+        if model_name:
+            fields["model_name"] = model_name
         if _stream_args_truncated(args):
             fields["args_truncated"] = True
+        self._seq += 1
         self._pending[step_id] = {
             "name": name,
             "key": key,
             "started": time.monotonic(),
             "attempt": attempt,
+            "retry_of": fields.get("retry_of"),
             "server": server,
             "kind": kind,
+            "seq": self._seq,
         }
         self._fields_by_announce_key[announce_key] = fields
         return fields
 
-    def result(self, name: Any, raw_id: Any, lc_status: Any, content: Any) -> Dict[str, Any]:
+    def result(
+        self,
+        name: Any,
+        raw_id: Any,
+        lc_status: Any,
+        content: Any,
+        duration_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Fields for a tool_result frame; pairs it with its pending call."""
         step_id: Optional[str] = None
         if raw_id:
@@ -392,7 +444,9 @@ class _StepFrames:
         if step_id is None:
             step_id = str(raw_id) if raw_id else self._new_id(None)
             self._used.add(step_id)
-        status = _tool_failure_status(content) if lc_status == "error" else "ok"
+        self._seq += 1
+        self._last_result_seq = self._seq
+        status = _tool_status(lc_status, content)
         tool = str(name or "")
         fields: Dict[str, Any] = {
             "tool_call_id": step_id,
@@ -401,30 +455,59 @@ class _StepFrames:
             "server": state["server"] if state else self._server_by_tool.get(tool),
             "attempt": state["attempt"] if state else 1,
         }
-        if state is not None:
+        if duration_ms is not None:
+            fields["duration_ms"] = duration_ms
+        elif state is not None:
             fields["duration_ms"] = int(
                 round((time.monotonic() - state["started"]) * 1000)
             )
-            if state["attempt"] > 1:
-                fields["retry_of"] = step_id
+        if state is not None and state.get("retry_of"):
+            fields["retry_of"] = state["retry_of"]
         if status != "ok":
             fields["error_code"] = "timeout" if status == "timeout" else "tool_error"
             if state is not None:
                 self._failed[state["key"]] = (step_id, state["attempt"])
         return fields
 
+    def drop_unanswered(self) -> int:
+        """Forget calls a tools step already passed by without a result.
+
+        Called at each agent update: a call announced before the last result
+        and still pending is a ghost (a text-format call no tool ran). It is
+        neither finished nor cancelled; its trace step reads ``not_run``.
+        """
+        stale = [
+            sid
+            for sid, state in self._pending.items()
+            if state["seq"] < self._last_result_seq
+        ]
+        for sid in stale:
+            self._pending.pop(sid, None)
+            step = self._trace_steps.get(sid)
+            if step is not None:
+                step["status"] = "not_run"
+        return len(stale)
+
     def cancel_pending(self) -> List[Dict[str, Any]]:
-        """Pending calls as ``cancelled`` entries; clears them."""
+        """Pending calls as ``cancelled`` entries; clears them.
+
+        Their trace steps get the same status and duration, so the stored
+        trace says which calls a Stop cut.
+        """
         now = time.monotonic()
-        cancelled = [
-            {
+        cancelled = []
+        for step_id, state in self._pending.items():
+            entry = {
                 "tool_call_id": step_id,
                 "status": "cancelled",
                 "attempt": state["attempt"],
                 "duration_ms": int(round((now - state["started"]) * 1000)),
             }
-            for step_id, state in self._pending.items()
-        ]
+            cancelled.append(entry)
+            step = self._trace_steps.get(step_id)
+            if step is not None:
+                step["status"] = "cancelled"
+                step["duration_ms"] = entry["duration_ms"]
         self._pending.clear()
         return cancelled
 
@@ -436,7 +519,9 @@ class _StepFrames:
             )
             fields = self._fields_by_announce_key.get(key)
             if fields is not None:
-                call["step"] = dict(fields)
+                step = dict(fields)
+                call["step"] = step
+                self._trace_steps[fields["tool_call_id"]] = step
 
 
 def _endpoint_switch_frame(endpoint: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -2606,6 +2691,10 @@ async def generate_answer_agentic_stream_helper(
     root_span: Any = None
     trace_id: Optional[str] = current_trace_id()
     sandbox_lease: Any = None
+    # Bound before the try: a Stop that lands mid-run persists the trace with
+    # the calls it cut, from the in-loop check or from the cancel handler.
+    trace_entries: List[Dict[str, Any]] = []
+    step_frames: Optional[_StepFrames] = None
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -2766,7 +2855,6 @@ async def generate_answer_agentic_stream_helper(
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         fallback = _FallbackUse()
-        trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
         # Separate from node_start_time/node_latencies above (kept for
@@ -2783,18 +2871,55 @@ async def generate_answer_agentic_stream_helper(
         # update) and must open one chip only. Cleared when a tool answers.
         announced_tool_calls: set = set()
 
-        def _step_model(msg: Any = None) -> Optional[str]:
-            """Model behind a step: the message's own name, else the endpoint."""
+        def _step_model(msg: Any = None, node: Optional[str] = None) -> tuple:
+            """(endpoint key, provider model id) behind a step.
+
+            The key is always ours (``main``, ``fallback``, ...); the provider
+            id comes from the message, when it carries one.
+            """
             meta = getattr(msg, "response_metadata", None) or {}
             name = meta.get("model_name") or meta.get("model")
-            if isinstance(name, str) and name:
-                return name
-            if fallback.used:
-                return LLMType.Fallback.value
-            return (endpoint_metadata or {}).get("answered")
+            provider = name if isinstance(name, str) and name else None
+            if fallback.used or node == "agent_fallback":
+                return LLMType.Fallback.value, provider
+            return (endpoint_metadata or {}).get("answered"), provider
+
+        def _record_tool_result(chunk: Any, node: str) -> Dict[str, Any]:
+            """Trace entry and step fields for one ToolMessage; the frame."""
+            graph_messages.append(chunk)
+            announced_tool_calls.clear()
+            started_at_s, entry_latency_s = trace_timeline.tool_step(
+                getattr(chunk, "tool_call_id", None),
+                at=time.perf_counter(),
+            )
+            result_fields = step_frames.result(
+                getattr(chunk, "name", None),
+                getattr(chunk, "tool_call_id", None),
+                getattr(chunk, "status", None),
+                chunk.content,
+                duration_ms=_tool_duration_ms(chunk),
+            )
+            tool_entry = _serialise_trace_entry(
+                chunk,
+                node=node,
+                latency_s=entry_latency_s,
+                started_at_s=started_at_s,
+            )
+            tool_entry["step"] = dict(result_fields)
+            trace_entries.append(tool_entry)
+            result_frame: Dict[str, Any] = {
+                "type": "tool_result",
+                "content": stringify_tool_content(chunk.content)[:200],
+                "tool": getattr(chunk, "name", None),
+                "id": getattr(chunk, "tool_call_id", None),
+            }
+            result_frame.update(result_fields)
+            return result_frame
 
         def _tool_call_events(
-            tool_calls: List[Any], model: Optional[str] = None
+            tool_calls: List[Any],
+            model: Optional[str] = None,
+            model_name: Optional[str] = None,
         ) -> List[str]:
             nonlocal answer_budget_started_at
             events: List[str] = []
@@ -2826,13 +2951,16 @@ async def generate_answer_agentic_stream_helper(
                     "id": call_id,
                     "args": _stream_tool_args(args),
                 }
+                if model is None:
+                    model, model_name = _step_model()
                 frame.update(
                     step_frames.call(
                         tname,
                         args,
                         call_id,
                         announce_key=key,
-                        model=model or _step_model(),
+                        model=model,
+                        model_name=model_name,
                     )
                 )
                 events.append(f"data: {json.dumps(frame)}\n\n")
@@ -2938,6 +3066,19 @@ async def generate_answer_agentic_stream_helper(
                 ) as graph_stream:
                     async for mode, payload in graph_stream:
                         if cancelled():
+                            # The event that trips the check is often the
+                            # result of the call the Stop waited on: that call
+                            # finished, so it is paired before the rest is cut.
+                            if mode == "messages" and ToolMessage:
+                                stop_chunk = payload[0] if isinstance(payload, tuple) else None
+                                if isinstance(stop_chunk, ToolMessage):
+                                    _record_tool_result(
+                                        stop_chunk,
+                                        (payload[1] or {}).get("langgraph_node", ""),
+                                    )
+                            # The cut calls go to the stored trace, not to the
+                            # stream: the Stop route already closed it.
+                            step_frames.cancel_pending()
                             cancel_documents, cancel_use_rag = _retrieval_state()
                             await persist_message_state(
                                 message_id,
@@ -2946,15 +3087,10 @@ async def generate_answer_agentic_stream_helper(
                                 output="".join(accumulated),
                                 documents=cancel_documents,
                                 use_rag=cancel_use_rag,
+                                trace=trace_entries or None,
                                 artifact_ids=_collected_artifact_ids(),
                             )
-                            stopped_frame: Dict[str, Any] = {"type": "stopped"}
-                            # Not as tool_result frames: the legacy client
-                            # would mark the chips done.
-                            cancelled_calls = step_frames.cancel_pending()
-                            if cancelled_calls:
-                                stopped_frame["cancelled_tool_calls"] = cancelled_calls
-                            yield f"data: {json.dumps(stopped_frame)}\n\n"
+                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
                             return
 
                         if mode == "custom":
@@ -2984,6 +3120,12 @@ async def generate_answer_agentic_stream_helper(
                                 )
                                 if not isinstance(msgs, list):
                                     msgs = [msgs]
+                                if AIMessage and any(
+                                    isinstance(m, AIMessage) for m in msgs
+                                ):
+                                    # A new agent step: a call the last tools
+                                    # step passed by is a ghost, not pending.
+                                    step_frames.drop_unanswered()
                                 for msg in msgs:
                                     if ToolMessage and isinstance(msg, ToolMessage):
                                         answer_budget_started_at = time.perf_counter()
@@ -3008,7 +3150,8 @@ async def generate_answer_agentic_stream_helper(
                                     # The update carries the complete arguments,
                                     # so the tool call is announced from here.
                                     call_events = _tool_call_events(
-                                        msg.tool_calls, model=_step_model(msg)
+                                        msg.tool_calls,
+                                        *_step_model(msg, update_node),
                                     )
                                     step_frames.annotate_trace_calls(agent_entry)
                                     for event in call_events:
@@ -3034,34 +3177,7 @@ async def generate_answer_agentic_stream_helper(
 
                         if ToolMessage and isinstance(chunk, ToolMessage):
                             answer_budget_started_at = time.perf_counter()
-                            graph_messages.append(chunk)
-                            announced_tool_calls.clear()
-                            preview = stringify_tool_content(chunk.content)[:200]
-                            started_at_s, entry_latency_s = trace_timeline.tool_step(
-                                getattr(chunk, "tool_call_id", None),
-                                at=time.perf_counter(),
-                            )
-                            result_fields = step_frames.result(
-                                getattr(chunk, "name", None),
-                                getattr(chunk, "tool_call_id", None),
-                                getattr(chunk, "status", None),
-                                chunk.content,
-                            )
-                            tool_entry = _serialise_trace_entry(
-                                chunk,
-                                node=node,
-                                latency_s=entry_latency_s,
-                                started_at_s=started_at_s,
-                            )
-                            tool_entry["step"] = dict(result_fields)
-                            trace_entries.append(tool_entry)
-                            result_frame: Dict[str, Any] = {
-                                "type": "tool_result",
-                                "content": preview,
-                                "tool": getattr(chunk, "name", None),
-                                "id": getattr(chunk, "tool_call_id", None),
-                            }
-                            result_frame.update(result_fields)
+                            result_frame = _record_tool_result(chunk, node)
                             yield f"data: {json.dumps(result_frame)}\n\n"
                             continue
 
@@ -3078,7 +3194,8 @@ async def generate_answer_agentic_stream_helper(
                                     AIMessageChunk and isinstance(chunk, AIMessageChunk)
                                 ):
                                     for event in _tool_call_events(
-                                        chunk.tool_calls, model=_step_model(chunk)
+                                        chunk.tool_calls,
+                                        *_step_model(chunk, node),
                                     ):
                                         yield event
                                 continue
@@ -3218,6 +3335,9 @@ async def generate_answer_agentic_stream_helper(
         if final_emitted or (isinstance(exc, GeneratorExit) and not stop):
             raise
         logger.info("Agentic generation cancelled")
+        if step_frames is not None:
+            # Same worker Stop: the route cancelled this task mid-call.
+            step_frames.cancel_pending()
         cancelled_documents, cancelled_use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
@@ -3225,6 +3345,7 @@ async def generate_answer_agentic_stream_helper(
             output="".join(accumulated),
             documents=cancelled_documents,
             use_rag=cancelled_use_rag,
+            trace=trace_entries or None,
             stopped=stop,
             error=None if stop else build_error_payload(exc),
             artifact_ids=_collected_artifact_ids(),

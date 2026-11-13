@@ -16,11 +16,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from src.routers import message as message_router
 from src.schemas.generation_request import GenerationRequest
+from src.services.agents.core import runner as runner_module
 from src.services.agents.core.runner import (
     STREAM_TOOL_ARG_MAX_CHARS,
     generate_answer_agentic_stream_helper,
+    run_agentic_generation_to_bus,
 )
+from src.services.cancel_manager import CancelManager
+from src.services.stream_bus import StreamBus
 
 _RUNNER = "src.services.agents.core.runner"
 
@@ -105,14 +110,29 @@ def _call(name, args, call_id):
     return ("updates", {"agent": {"messages": [AIMessage(content="", tool_calls=[call])]}})
 
 
-def _result(name, call_id, content="ok", status="success"):
+def _calls(*calls):
+    """One agent step that asks several tools at once."""
+    tool_calls = [{"name": n, "args": a, "id": i} for n, a, i in calls]
+    return ("updates", {"agent": {"messages": [AIMessage(content="", tool_calls=tool_calls)]}})
+
+
+def _result(name, call_id, content="ok", status="success", duration_ms=None):
+    extra = {"response_metadata": {"duration_ms": duration_ms}} if duration_ms is not None else {}
     return (
         "messages",
         (
-            ToolMessage(content=content, name=name, tool_call_id=call_id, status=status),
+            ToolMessage(
+                content=content, name=name, tool_call_id=call_id, status=status, **extra
+            ),
             {"langgraph_node": "tools"},
         ),
     )
+
+
+def _react_failure(name, call_id, exc):
+    """What the agents react tools node (pin v0.5.5) returns for a raising tool:
+    the error text as content and the default status."""
+    return _result(name, call_id, content=f"Tool error: {exc}")
 
 
 def _answer(text="done"):
@@ -195,7 +215,9 @@ class TestToolCallFields:
 
 
 class TestStepModel:
-    async def test_call_names_the_model_from_the_message(self):
+    async def test_model_is_the_endpoint_key_and_the_provider_id_is_separate(self):
+        endpoint = {"requested": "main", "chain": ["main"], "answered": "main",
+                    "attempts": [], "circuit_open": [], "substituted": False}
         message = AIMessage(
             content="",
             tool_calls=[{"name": "ls", "args": {}, "id": "c1"}],
@@ -203,10 +225,33 @@ class TestStepModel:
         )
         events, _ = await _run(
             _Graph([("updates", {"agent": {"messages": [message]}}), _answer()]),
+            _resolve_agentic_llm_client=AsyncMock(
+                return_value=(MagicMock(), {"endpoint": endpoint})
+            ),
         )
 
         [call] = _of(events, "tool_call")
-        assert call["model"] == "eve-instruct"
+        assert call["model"] == "main"
+        assert call["model_name"] == "eve-instruct"
+
+    async def test_a_fallback_node_step_names_the_fallback_endpoint(self):
+        endpoint = {"requested": "main", "chain": ["main"], "answered": "main",
+                    "attempts": [], "circuit_open": [], "substituted": False}
+        message = AIMessage(
+            content="",
+            tool_calls=[{"name": "ls", "args": {}, "id": "c1"}],
+            response_metadata={"model_name": "mistral-small-latest"},
+        )
+        events, _ = await _run(
+            _Graph([("updates", {"agent_fallback": {"messages": [message]}}), _answer()]),
+            _resolve_agentic_llm_client=AsyncMock(
+                return_value=(MagicMock(), {"endpoint": endpoint})
+            ),
+        )
+
+        [call] = _of(events, "tool_call")
+        assert call["model"] == "fallback"
+        assert call["model_name"] == "mistral-small-latest"
 
     async def test_call_falls_back_to_the_answering_endpoint(self):
         endpoint = {"requested": "main", "chain": ["main"], "answered": "main",
@@ -220,6 +265,7 @@ class TestStepModel:
 
         [call] = _of(events, "tool_call")
         assert call["model"] == "main"
+        assert "model_name" not in call
 
 
 class TestToolResultFields:
@@ -279,7 +325,103 @@ class TestToolResultFields:
         assert result["status"] == "timeout"
         assert result["error_code"] == "timeout"
 
-    async def test_retried_call_keeps_its_id_with_attempt_two(self):
+    async def test_react_tool_error_without_status_is_an_error(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _call(RETRIEVE, {"query": "q"}, "call-1"),
+                    _react_failure(RETRIEVE, "call-1", "HTTP 500 from upstream"),
+                    _answer(),
+                ]
+            ),
+        )
+
+        [result] = _of(events, "tool_result")
+        assert result["status"] == "error"
+        assert result["error_code"] == "tool_error"
+
+    async def test_react_mcp_timeout_without_status_is_a_timeout(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _call(RETRIEVE, {"query": "q"}, "call-1"),
+                    _react_failure(
+                        RETRIEVE,
+                        "call-1",
+                        "Timed out while waiting for response to ClientRequest. "
+                        "Waited 30.0 seconds.",
+                    ),
+                    _answer(),
+                ]
+            ),
+        )
+
+        [result] = _of(events, "tool_result")
+        assert result["status"] == "timeout"
+        assert result["error_code"] == "timeout"
+
+    async def test_unknown_tool_is_an_error(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _call("nope", {}, "call-1"),
+                    _result("nope", "call-1", content="Unknown tool: nope"),
+                    _answer(),
+                ]
+            ),
+        )
+
+        [result] = _of(events, "tool_result")
+        assert result["status"] == "error"
+
+    async def test_a_query_that_says_timeout_does_not_make_a_timeout(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _call(RETRIEVE, {"query": "timeout"}, "call-1"),
+                    _react_failure(
+                        RETRIEVE, "call-1", "no index for query 'timeout handling'"
+                    ),
+                    _answer(),
+                ]
+            ),
+        )
+
+        [result] = _of(events, "tool_result")
+        assert result["status"] == "error"
+
+    async def test_a_result_that_mentions_timeout_is_ok(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _call(RETRIEVE, {"query": "q"}, "call-1"),
+                    _result(RETRIEVE, "call-1", content="Docs on timeout handling"),
+                    _answer(),
+                ]
+            ),
+        )
+
+        [result] = _of(events, "tool_result")
+        assert result["status"] == "ok"
+
+    async def test_each_call_of_a_step_reports_its_own_duration(self):
+        events, _ = await _run(
+            _Graph(
+                [
+                    _calls(("ls", {"path": "/a"}, "c1"), ("ls", {"path": "/b"}, "c2")),
+                    _result("ls", "c1", duration_ms=5),
+                    _result("ls", "c2", duration_ms=1200),
+                    _answer(),
+                ]
+            ),
+        )
+
+        assert [(r["tool_call_id"], r["duration_ms"]) for r in _of(events, "tool_result")] == [
+            ("c1", 5),
+            ("c2", 1200),
+        ]
+
+    async def test_retry_gets_a_new_id_and_points_at_the_failed_attempt(self):
         events, _ = await _run(
             _Graph(
                 [
@@ -294,12 +436,12 @@ class TestToolResultFields:
 
         calls = _of(events, "tool_call")
         results = _of(events, "tool_result")
-        assert [c["tool_call_id"] for c in calls] == ["call-1", "call-1"]
+        assert [c["tool_call_id"] for c in calls] == ["call-1", "call-2"]
         assert [c["attempt"] for c in calls] == [1, 2]
         assert [c["id"] for c in calls] == ["call-1", "call-2"]
         assert [(r["tool_call_id"], r["attempt"], r["status"]) for r in results] == [
             ("call-1", 1, "error"),
-            ("call-1", 2, "ok"),
+            ("call-2", 2, "ok"),
         ]
         assert "retry_of" not in calls[0] and "retry_of" not in results[0]
         assert calls[1]["retry_of"] == "call-1"
@@ -425,6 +567,28 @@ class TestFinalError:
         [final] = _of(events, "final")
         assert "error" not in final
 
+    async def test_empty_answer_ends_with_an_empty_final_and_no_error(self):
+        events, _ = await _run(_Graph([]))
+
+        [final] = _of(events, "final")
+        assert final["answer"] == ""
+        assert "error" not in final
+        assert _of(events, "error") == []
+
+    async def test_error_before_text_with_a_pending_call_is_an_error_frame(self):
+        events, _ = await _run(
+            _Graph(
+                [_call(RETRIEVE, {"query": "q"}, "call-1")],
+                raise_exc=RuntimeError("boom"),
+            ),
+        )
+
+        [error] = _of(events, "error")
+        assert error["code"] == "upstream_error"
+        assert _of(events, "final") == []
+        assert _of(events, "tool_result") == []
+        assert events[-1]["type"] == "error"
+
 
 class TestPersistedTrace:
     async def test_trace_steps_carry_the_frame_fields(self):
@@ -454,32 +618,197 @@ class TestPersistedTrace:
         assert tool_entry["status"] == "error"
 
 
-class TestStopWithPendingCall:
-    async def test_stopped_frame_lists_cancelled_calls(self):
-        cancel = asyncio.Event()
+class _BlockingGraph(_Graph):
+    """Like ``_Graph``, but waits on ``gate`` before the event at ``block_at``:
+    a tool still running when the Stop lands."""
 
-        def stop_before_answer(index):
-            if index == 1:
-                cancel.set()
+    def __init__(self, events, block_at, gate=None):
+        super().__init__(events)
+        self._block_at = block_at
+        self.gate = gate or asyncio.Event()
+        self.blocked = asyncio.Event()
 
-        events, _ = await _run(
-            _Graph(
-                [_call(RETRIEVE, {"query": "q"}, "call-1"), _answer()],
-                before_each=stop_before_answer,
-            ),
-            cancel_event=cancel,
+    async def astream(self, *args, **kwargs):
+        for index, event in enumerate(self._events):
+            if index == self._block_at:
+                self.blocked.set()
+                await self.gate.wait()
+            yield event
+
+
+def _local_cancel_manager():
+    cm = CancelManager()
+    cm._is_redis_enabled = lambda: False
+    return cm
+
+
+@contextlib.asynccontextmanager
+async def _route_turn(graph, tools=()):
+    """What the agentic stream route runs, on the in-process bus and cancel
+    manager: message registered, bus runner task, one subscriber."""
+    bus = StreamBus()
+    cm = _local_cancel_manager()
+    frames = []
+    ready = asyncio.Event()
+
+    async def _subscribe():
+        async for data in bus.subscribe("m1", ready=ready):
+            frame = json.loads(data.removeprefix("data: ").strip())
+            # The opening thinking notice is not under test here.
+            if frame.get("type") != "status":
+                frames.append(frame)
+
+    with _runner(graph, tools) as applied, contextlib.ExitStack() as stack:
+        for target in (
+            "src.routers.message.get_cancel_manager",
+            "src.services.cancel_manager.get_cancel_manager",
+            "src.services.generate_answer.get_cancel_manager",
+        ):
+            stack.enter_context(patch(target, MagicMock(return_value=cm)))
+        stack.enter_context(patch("src.routers.message.get_stream_bus", MagicMock(return_value=bus)))
+        stack.enter_context(patch(f"{_RUNNER}.get_stream_bus", MagicMock(return_value=bus)))
+        stack.enter_context(patch.object(runner_module.User, "find_by_id", AsyncMock(return_value=None)))
+        stack.enter_context(patch.object(runner_module.Message, "find_by_id", AsyncMock(return_value=None)))
+        stack.enter_context(patch(f"{_RUNNER}.persist_runner_cancel", AsyncMock()))
+        cancel_event = cm.create("m1")
+        cm.link_conversation("c1", "m1")
+        subscriber = asyncio.create_task(_subscribe())
+        task = asyncio.create_task(
+            run_agentic_generation_to_bus(
+                GenerationRequest(query="hi", llm_type="main", agent="react"),
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+                cancel_event=cancel_event,
+                subscriber_ready=ready,
+            )
         )
+        cm.set_task("m1", task)
+        turn = SimpleNamespace(
+            bus=bus, cm=cm, frames=frames, task=task, subscriber=subscriber,
+            cancel_event=cancel_event, applied=applied,
+        )
+        try:
+            yield turn
+        finally:
+            for pending in (task, subscriber):
+                if not pending.done():
+                    pending.cancel()
+                with contextlib.suppress(BaseException):
+                    await pending
 
-        [stopped] = _of(events, "stopped")
-        [cancelled] = stopped["cancelled_tool_calls"]
-        assert cancelled["tool_call_id"] == "call-1"
-        assert cancelled["status"] == "cancelled"
-        # No tool_result: the legacy client would mark the chip done.
-        assert _of(events, "tool_result") == []
+
+def _stopped_persist(applied):
+    calls = [
+        c for c in applied["persist_message_state"].await_args_list
+        if c.kwargs.get("stopped") is True
+    ]
+    assert calls, "the turn was never persisted as stopped"
+    return calls[-1].kwargs
+
+
+def _trace_steps(trace):
+    return {
+        call["step"]["tool_call_id"]: call["step"]
+        for entry in trace or []
+        for call in entry.get("tool_calls") or []
+        if "step" in call
+    }
+
+
+class TestStopThroughTheRoute:
+    async def test_same_worker_stop_mid_tool_persists_the_cut_call(self):
+        graph = _BlockingGraph(
+            [_call(RETRIEVE, {"query": "q"}, "call-1"), _result(RETRIEVE, "call-1"), _answer()],
+            block_at=1,
+        )
+        async with _route_turn(graph, tools=[_tool(RETRIEVE, "eve_retrieval")]) as turn:
+            await asyncio.wait_for(graph.blocked.wait(), 5)
+            assert await message_router._signal_stop("c1") == "m1"
+            await asyncio.wait_for(turn.task, 5)
+            await asyncio.wait_for(turn.subscriber, 5)
+
+        persisted = _stopped_persist(turn.applied)
+        step = _trace_steps(persisted["trace"])["call-1"]
+        assert step["status"] == "cancelled"
+        assert isinstance(step["duration_ms"], int)
+        # The client got the route's plain stopped frame, no result for the chip.
+        assert [f["type"] for f in turn.frames] == ["tool_call", "stopped"]
+        assert turn.frames[-1] == {"type": "stopped"}
+
+    async def test_cross_worker_stop_cuts_the_unfinished_call_only(self):
+        # The Stop lands on another worker: it sets the cancel flag (here the
+        # event, as the Redis subscription does) and ends the stream; this
+        # worker's task is not cancelled and sees the flag on its next event,
+        # the finished result of the first call.
+        graph = _BlockingGraph(
+            [
+                _calls((RETRIEVE, {"query": "a"}, "call-1"), (RETRIEVE, {"query": "b"}, "call-2")),
+                _result(RETRIEVE, "call-1"),
+                _result(RETRIEVE, "call-2"),
+                _answer(),
+            ],
+            block_at=1,
+        )
+        async with _route_turn(graph, tools=[_tool(RETRIEVE, "eve_retrieval")]) as turn:
+            await asyncio.wait_for(graph.blocked.wait(), 5)
+            turn.cancel_event.set()
+            await turn.bus.stop("m1", f"data: {json.dumps({'type': 'stopped'})}\n\n")
+            await asyncio.wait_for(turn.subscriber, 5)
+            graph.gate.set()
+            await asyncio.wait_for(turn.task, 5)
+
+        persisted = _stopped_persist(turn.applied)
+        steps = _trace_steps(persisted["trace"])
+        assert steps["call-2"]["status"] == "cancelled"
+        assert "status" not in steps["call-1"]
+        [tool_entry] = [e for e in persisted["trace"] if e.get("role") == "tool"]
+        assert tool_entry["step"]["tool_call_id"] == "call-1"
+        assert tool_entry["step"]["status"] == "ok"
+        assert [f["type"] for f in turn.frames] == ["tool_call", "tool_call", "stopped"]
+        assert all("cancelled_tool_calls" not in f for f in turn.frames)
+
+    async def test_stop_before_the_first_token(self):
+        graph = _BlockingGraph([_answer("never")], block_at=0)
+        async with _route_turn(graph) as turn:
+            await asyncio.wait_for(graph.blocked.wait(), 5)
+            await message_router._signal_stop("c1")
+            await asyncio.wait_for(turn.task, 5)
+            await asyncio.wait_for(turn.subscriber, 5)
+
+        persisted = _stopped_persist(turn.applied)
+        assert persisted["output"] == ""
+        assert persisted["trace"] is None
+        assert turn.frames == [{"type": "stopped"}]
+
+    async def test_a_ghost_call_is_neither_cancelled_nor_finished(self):
+        # call-ghost is announced with call-1 but no tool answers it (the
+        # text-format repeat): the next agent step leaves it behind.
+        graph = _BlockingGraph(
+            [
+                _calls(("ls", {"path": "/a"}, "call-1"), ("ls", {"path": "/g"}, "call-ghost")),
+                _result("ls", "call-1"),
+                _call("ls", {"path": "/b"}, "call-2"),
+                _result("ls", "call-2"),
+            ],
+            block_at=3,
+        )
+        async with _route_turn(graph) as turn:
+            await asyncio.wait_for(graph.blocked.wait(), 5)
+            await message_router._signal_stop("c1")
+            await asyncio.wait_for(turn.task, 5)
+
+        steps = _trace_steps(_stopped_persist(turn.applied)["trace"])
+        assert steps["call-ghost"]["status"] == "not_run"
+        assert steps["call-2"]["status"] == "cancelled"
+        assert "status" not in steps["call-1"]
 
 
 class TestNoUserTextInLogs:
-    async def test_args_and_query_never_reach_the_log(self, caplog):
+    async def test_guard_args_and_query_never_reach_the_log(self, caplog):
+        """Guard: this diff adds no log line. It keeps a later one from logging
+        args, results or the question. The agents tools node logs its own
+        exception text, outside this runner."""
         caplog.set_level(logging.DEBUG)
         await _run(
             _Graph(
