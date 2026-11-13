@@ -110,6 +110,18 @@ PREVIEW_ARRAY_MAX_ITEMS = 20
 PREVIEW_OBJECT_MAX_KEYS = 50
 PREVIEW_MAX_DEPTH = 8
 RESULT_TEXT_MAX_CHARS = 2000
+# The runner sends the first 200 chars of every tool result (runner.py,
+# ``tool_result`` frame): a result of that length or more was cut there.
+RUNNER_RESULT_PREVIEW_CHARS = 200
+# A cut JSON result longer than this is cut here before it is closed, so the
+# close stays bounded whatever the runner sends.
+RESULT_CLOSE_MAX_CHARS = 20_000
+# Candidates tried when closing a cut document: the first one parses unless the
+# document had an invalid escape, and then the earlier ones fail too.
+_CLOSE_MAX_ATTEMPTS = 4
+# A UTF-16 half with no partner: Python keeps a pair as one code point, so any
+# char in this range is lone, and UTF-8 cannot encode it.
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 # Assistant message id of the n-th model call of the run, from the second on;
 # the first keeps the answer messageId (decision 0008).
@@ -189,8 +201,46 @@ def pre_stream_error(
 
 
 def encode_sse(events: Iterable[AguiEvent]) -> str:
-    """The SSE body for ``events``: one ``data:`` line per event, LF only."""
-    return "".join(_ENCODER.encode(event) for event in events)
+    """The SSE body for ``events``: one ``data:`` line per event, LF only.
+
+    Never raises: an event that does not serialize (a lone UTF-16 half in a
+    tool result or a token) goes out with the offending chars replaced by
+    U+FFFD, so the stream and the run stay in step.
+    """
+    return "".join(_encode_event(event) for event in events)
+
+
+def _scrub(value: Any) -> Any:
+    """``value`` with every lone surrogate replaced by U+FFFD, recursively."""
+    if isinstance(value, str):
+        return _LONE_SURROGATE.sub("\ufffd", value)
+    if isinstance(value, Mapping):
+        return {_scrub(k): _scrub(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub(v) for v in value]
+    return value
+
+
+def _encode_event(event: AguiEvent) -> str:
+    try:
+        return _ENCODER.encode(event)
+    except Exception as exc:
+        logger.warning(
+            "agui.encode_fallback event_type=%s error_type=%s",
+            getattr(event, "type", "?"),
+            type(exc).__name__,
+        )
+    try:
+        data = _scrub(event.model_dump(mode="python", by_alias=True))
+    except Exception as exc:
+        logger.error("agui.encode_failed error_type=%s", type(exc).__name__)
+        return ": encode_failed\n\n"
+    try:
+        return _ENCODER.encode(type(event).model_validate(data))
+    except Exception:
+        return "data: " + json.dumps(
+            data, ensure_ascii=False, separators=(",", ":"), default=str
+        ) + "\n\n"
 
 
 def normalize_error_code(code: Any) -> str:
@@ -213,6 +263,8 @@ def _bound_preview(
     count. The result is always JSON-serialisable.
     """
     if isinstance(value, str):
+        # A lone UTF-16 half (a pair the runner's cut split) cannot be encoded.
+        value = _LONE_SURROGATE.sub("", value)
         # One char of slack: a string the runner already cut (max plus the mark)
         # is not cut again.
         if len(value) <= max_chars + len(TRUNCATION_MARK):
@@ -229,7 +281,7 @@ def _bound_preview(
         cut = False
         items = list(value.items())
         for key, item in items[:PREVIEW_OBJECT_MAX_KEYS]:
-            out[str(key)], item_cut = _bound_preview(item, max_chars=max_chars, depth=depth + 1)
+            out[_LONE_SURROGATE.sub("", str(key))], item_cut = _bound_preview(item, max_chars=max_chars, depth=depth + 1)
             cut = cut or item_cut
         if len(items) > PREVIEW_OBJECT_MAX_KEYS:
             out[TRUNCATION_MARK] = f"{len(items) - PREVIEW_OBJECT_MAX_KEYS} more keys"
@@ -256,19 +308,49 @@ _JSON_SCALAR_PREFIX = re.compile(
 )
 
 
+# The rest of a JSON string body: up to its closing quote, or to the end of a
+# cut document (a lone backslash at the very end is left out).
+_STRING_BODY = re.compile(r'(?:[^"\\]|\\.)*', re.S)
+# A scalar runs to the next separator or space.
+_SCALAR_RUN = re.compile(r"[^,\]}\s]*")
+_SPACES = re.compile(r"\s*")
+_PARTIAL_UNICODE_ESCAPE = re.compile(r"\\u[0-9a-fA-F]{0,3}\Z")
+_HIGH_SURROGATE_ESCAPE = re.compile(r"\\u[dD][89abAB][0-9a-fA-F]{2}\Z")
+
+
+def _is_escape_start(body: str, at: int) -> bool:
+    """True when the backslash at ``at`` starts an escape (is not itself escaped)."""
+    k = at
+    while k > 0 and body[k - 1] == "\\":
+        k -= 1
+    return (at - k) % 2 == 0
+
+
 def _complete_escapes(body: str) -> str:
-    """``body`` (the inside of a JSON string) without a trailing partial escape."""
-    i, last = 0, 0
-    while i < len(body):
-        if body[i] == "\\":
-            step = 6 if body[i + 1 : i + 2] == "u" else 2
-            if i + step > len(body):
-                break
-            i += step
-        else:
-            i += 1
-        last = i
-    return body[:last]
+    """``body`` (the inside of a JSON string) cut back to a code point boundary.
+
+    Drops a trailing partial escape (``\\``, ``\\u00``) and then a trailing
+    high-surrogate escape whose low half was cut off: json.loads would turn it
+    into a lone surrogate that UTF-8 cannot encode.
+    """
+    trailing = len(body) - len(body.rstrip("\\"))
+    if trailing % 2:
+        body = body[:-1]
+    match = _PARTIAL_UNICODE_ESCAPE.search(body)
+    if match and _is_escape_start(body, match.start()):
+        body = body[: match.start()]
+    match = _HIGH_SURROGATE_ESCAPE.search(body)
+    if match and _is_escape_start(body, match.start()):
+        body = body[: match.start()]
+    return body
+
+
+def _closers(node: Optional[Tuple[str, Any]]) -> str:
+    out: List[str] = []
+    while node is not None:
+        out.append("}" if node[0] == "{" else "]")
+        node = node[1]
+    return "".join(out)
 
 
 def close_json_prefix(text: str) -> Optional[str]:
@@ -280,24 +362,28 @@ def close_json_prefix(text: str) -> Optional[str]:
     cut key, a key without its value, or a scalar that may go on (``tru``,
     ``12``) is dropped back to the last complete value; open arrays and objects
     are closed.
+
+    Linear in ``len(text)``: string bodies, scalars and spaces are skipped with
+    one regex match each, a cut point keeps a reference to the (shared, linked)
+    stack of open containers instead of a copy, and only the candidates tried
+    are built.
     """
     # Each stack entry: [container, expected]; expected is what may come next:
     # "key" (or the close), "colon", "value" (or the close) or "comma".
     stack: List[List[str]] = []
-    cuts: List[Tuple[int, str]] = []
-    in_string = False
-    string_start = 0
+    # The open containers again, as a linked list (kind, parent): a cut point
+    # keeps the node of its moment, so closing it never copies the stack.
+    node: Optional[Tuple[str, Any]] = None
+    cuts: List[Tuple[int, Optional[Tuple[str, Any]]]] = []
+    open_string: Optional[int] = None
     string_is_key = False
-    scalar_start: Optional[int] = None
+    scalar_tail: Optional[int] = None
     started = False
-
-    def closers() -> str:
-        return "".join("}" if kind == "{" else "]" for kind, _ in reversed(stack))
 
     def value_done(end: int) -> None:
         if stack:
             stack[-1][1] = "comma"
-            cuts.append((end, closers()))
+            cuts.append((end, node))
 
     def value_allowed() -> bool:
         return (not stack and not started) or (bool(stack) and stack[-1][1] == "value")
@@ -305,45 +391,41 @@ def close_json_prefix(text: str) -> Optional[str]:
     i, n = 0, len(text)
     while i < n:
         c = text[i]
-        if in_string:
-            if c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                in_string = False
-                if string_is_key:
-                    stack[-1][1] = "colon"
-                else:
-                    value_done(i + 1)
-            i += 1
-            continue
-        if scalar_start is not None:
-            if c not in ",]}" and not c.isspace():
-                i += 1
-                continue
-            if not _JSON_SCALAR.fullmatch(text[scalar_start:i]):
-                return None
-            scalar_start = None
-            value_done(i)
-            if not stack:
-                return None  # a bare scalar followed by more text
         if c.isspace():
-            pass
-        elif c in "{[":
+            i = _SPACES.match(text, i).end()
+            continue
+        if c == '"':
+            is_key = bool(stack) and stack[-1][0] == "{" and stack[-1][1] == "key"
+            if not is_key and not value_allowed():
+                return None
+            started = True
+            end = _STRING_BODY.match(text, i + 1).end()
+            if end >= n or text[end] != '"':
+                open_string, string_is_key = i, is_key
+                break
+            if is_key:
+                stack[-1][1] = "colon"
+            else:
+                value_done(end + 1)
+            i = end + 1
+            continue
+        if c in "{[":
             if not value_allowed():
                 return None
             started = True
             stack.append([c, "key" if c == "{" else "value"])
-            cuts.append((i + 1, closers()))
+            node = (c, node)
+            cuts.append((i + 1, node))
         elif c in "}]":
             want = "{" if c == "}" else "["
             if not stack or stack[-1][0] != want or stack[-1][1] not in ("key", "value", "comma"):
                 return None
             stack.pop()
+            node = node[1] if node is not None else None
             if not stack:
                 if text[i + 1 :].strip():
                     return None  # words after a complete document
-                cuts.append((i + 1, ""))
+                cuts.append((i + 1, None))
                 break
             value_done(i + 1)
         elif c == ",":
@@ -354,28 +436,36 @@ def close_json_prefix(text: str) -> Optional[str]:
             if not stack or stack[-1][1] != "colon":
                 return None
             stack[-1][1] = "value"
-        elif c == '"':
-            string_is_key = bool(stack) and stack[-1][0] == "{" and stack[-1][1] == "key"
-            if not string_is_key and not value_allowed():
-                return None
-            started = True
-            in_string = True
-            string_start = i
         else:
             if not value_allowed():
                 return None
             started = True
-            scalar_start = i
+            end = _SCALAR_RUN.match(text, i).end()
+            if end >= n:
+                scalar_tail = i
+                break
+            if not _JSON_SCALAR.fullmatch(text[i:end]):
+                return None
+            value_done(end)
+            if not stack:
+                return None  # a bare scalar followed by more text
+            i = end
+            continue
         i += 1
 
-    if scalar_start is not None and not _JSON_SCALAR_PREFIX.fullmatch(text[scalar_start:]):
+    if scalar_tail is not None and not _JSON_SCALAR_PREFIX.fullmatch(text[scalar_tail:]):
         return None
-    candidates: List[str] = []
-    if in_string and not string_is_key:
-        body = _complete_escapes(text[string_start + 1 :])
-        candidates.append(text[: string_start + 1] + body + TRUNCATION_MARK + '"' + closers())
-    candidates.extend(text[:end] + tail for end, tail in reversed(cuts))
-    for candidate in candidates:
+
+    def candidates() -> Iterable[str]:
+        if open_string is not None and not string_is_key:
+            body = _complete_escapes(text[open_string + 1 :])
+            yield text[: open_string + 1] + body + TRUNCATION_MARK + '"' + _closers(node)
+        for end, at in reversed(cuts):
+            yield text[:end] + _closers(at)
+
+    for attempt, candidate in enumerate(candidates()):
+        if attempt >= _CLOSE_MAX_ATTEMPTS:
+            break
         try:
             json.loads(candidate)
         except ValueError:
@@ -390,35 +480,38 @@ def _preview_args(args: Mapping[str, Any]) -> Tuple[str, bool]:
     return json.dumps(bounded, ensure_ascii=False, default=str), cut
 
 
-def _preview_result(content: Any) -> Tuple[str, bool]:
+def _preview_result(content: Any, runner_cut: bool = False) -> Tuple[str, bool]:
     """``TOOL_CALL_RESULT.content`` and whether it is cut.
 
     JSON stays JSON: a complete document is sent as is unless it is too long; a
     document the runner cut (its 200-char preview) is closed at its last
-    complete value. Any other text is sent as text.
+    complete value. Any other text is sent as text, without lone UTF-16
+    halves. ``runner_cut``: the runner already cut the content, so it is
+    flagged whatever happens here.
     """
     if content is None:
-        return "", False
+        return "", runner_cut
     if not isinstance(content, str):
         bounded, cut = _bound_preview(content, max_chars=RESULT_STRING_MAX_CHARS)
-        return json.dumps(bounded, ensure_ascii=False, default=str), cut
+        return json.dumps(bounded, ensure_ascii=False, default=str), cut or runner_cut
     head = content.lstrip()[:1]
     if head in ("{", "["):
         try:
             parsed = json.loads(content)
         except ValueError:
-            closed = close_json_prefix(content)
+            closed = close_json_prefix(content[:RESULT_CLOSE_MAX_CHARS])
             if closed is not None:
                 bounded, _ = _bound_preview(json.loads(closed), max_chars=RESULT_STRING_MAX_CHARS)
                 return json.dumps(bounded, ensure_ascii=False), True
         else:
             bounded, cut = _bound_preview(parsed, max_chars=RESULT_STRING_MAX_CHARS)
             if not cut:
-                return content, False
+                return content, runner_cut
             return json.dumps(bounded, ensure_ascii=False), True
+    content = _LONE_SURROGATE.sub("", content)
     if len(content) > RESULT_TEXT_MAX_CHARS:
         return content[:RESULT_TEXT_MAX_CHARS] + TRUNCATION_MARK, True
-    return content, False
+    return content, runner_cut
 
 
 def _frame_call_id(frame: LegacyFrame) -> Optional[str]:
@@ -482,6 +575,8 @@ class AguiAdapter:
         self._segment_used = False
         self._result_since_segment = False
         self._text_message_id = context.message_id
+        # Text message ids already ended: a message is never reopened.
+        self._closed_text_ids: set = set()
 
     # ── public interface ────────────────────────────────────────────────────
 
@@ -630,7 +725,11 @@ class AguiAdapter:
         duration = frame.get("duration_ms")
         if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0:
             metadata["eve.durationMs"] = duration
-        content, cut = _preview_result(frame.get("content"))
+        raw_content = frame.get("content")
+        runner_cut = frame.get("content_truncated") is True or (
+            isinstance(raw_content, str) and len(raw_content) >= RUNNER_RESULT_PREVIEW_CHARS
+        )
+        content, cut = _preview_result(raw_content, runner_cut)
         if cut:
             metadata["eve.contentTruncated"] = True
         events.append(
@@ -863,7 +962,14 @@ class AguiAdapter:
         events: List[AguiEvent] = []
         if not self._text_open:
             self._text_open = True
-            self._text_message_id = self._segment_message_id()
+            message_id = self._segment_message_id()
+            if message_id in self._closed_text_ids:
+                # Text after a tool call inside one model call (the text-format
+                # flush): its message ended at the call, so the text goes on
+                # under the next assistant message id.
+                self._segment += 1
+                message_id = self._current_message_id()
+            self._text_message_id = message_id
             events.append(TextMessageStartEvent(message_id=self._text_message_id, role="assistant"))
         self._text_streamed = True
         events.append(
@@ -881,6 +987,7 @@ class AguiAdapter:
         if not self._text_open:
             return []
         self._text_open = False
+        self._closed_text_ids.add(self._text_message_id)
         metadata: Dict[str, Any] = {}
         if endpoint is not None:
             metadata["eve.endpoint"] = dict(endpoint)

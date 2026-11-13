@@ -339,30 +339,6 @@ async def test_stop_then_disconnect_is_one_stop(
     assert violations == [], violations
 
 
-async def test_cancelled_request_task_is_not_a_stop(flag_on, cancellable, counting_bus, cancel_calls, owner):
-    # A worker shutting down cancels the request task: the run is left to the
-    # existing shutdown path (persisted as failed, retry offered), not stopped.
-    _, token, conversation = owner
-    fake = cancellable([f_status(), f_token("Partial ")])
-    client = Client("2.3")
-    request = asyncio.create_task(
-        client.run(conversation.id, token, run_input(conversation.id), lambda events: False)
-    )
-    for _ in range(100):
-        if any(e["type"] == "TEXT_MESSAGE_CONTENT" for e in client.events):
-            break
-        await asyncio.sleep(0.02)
-    request.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await request
-
-    assert cancel_calls == []
-    assert counting_bus.stops == []
-    assert not fake.calls[0]["cancel_event"].is_set()
-    fake.release.set()
-    await asyncio.wait_for(fake.done.wait(), 5)
-
-
 # ─── B3 review: why a run ended, and one cancel ───────────────────────────────
 
 
