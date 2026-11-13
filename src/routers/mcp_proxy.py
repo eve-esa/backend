@@ -79,7 +79,7 @@ _user_eve_token_var: ContextVar[str | None] = ContextVar(
 # Avoids a MongoDB round-trip on every proxy request when the result is stable.
 # TTL matches MCP_TOOLS_CACHE_TTL so both caches expire together.
 # Per-server_name locks ensure at most one concurrent cold-miss fetch.
-_server_url_cache: dict[tuple[str, str], tuple[str, float]] = {}
+_server_url_cache: dict[tuple[str, str], tuple[str, bool, float]] = {}
 _server_url_locks: dict[str, asyncio.Lock] = {}
 _server_url_registry_lock = asyncio.Lock()
 
@@ -632,6 +632,9 @@ class MCPProxyDispatcher:
                     agentcore_url, forward_token = cached[0], cached[1]
                 else:
                     mcp_servers = get_collection("mcp_servers")
+                    # A user row and a global row can share a name. The
+                    # caller's own row wins: BSON orders null before every
+                    # string or ObjectId, so a descending sort puts it first.
                     server = await mcp_servers.find_one(
                         {
                             "name": server_name,
@@ -639,6 +642,7 @@ class MCPProxyDispatcher:
                             "$or": [{"user_id": user_id}, {"user_id": None}],
                         },
                         {"config.url": 1, "name": 1, "user_id": 1, "forward_user_token": 1},
+                        sort=[("user_id", -1)],
                     )
                     if (
                         not server
@@ -671,9 +675,9 @@ class MCPProxyDispatcher:
             raise RuntimeError("AgentCore authentication is not configured")
 
         proxy_app = await build_proxy_app(agentcore_url, provider)
-        # The caller's token goes upstream only to a server that calls back
-        # into EVE as the user; every other server gets the Cognito M2M token
-        # alone (the token can manage the user's API keys).
+        # The caller's token goes upstream only to a server allowed to receive
+        # it (``user_token_scope``). The Cognito client-credentials bearer is
+        # sent by ``_DynamicBearerAuth`` on every proxied call, whatever the row.
         if not forward_token:
             return proxy_app, principal, None
         announce_user_token_forwarded(server_name)

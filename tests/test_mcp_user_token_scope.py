@@ -237,3 +237,18 @@ async def test_token_never_logged_and_receivers_announced_once(caplog):
         "mcp.user_token_forwarded server=eve_retrieval",
         "mcp.user_token_forwarded server=eve_retrieval_dev",
     ]
+
+
+async def test_proxy_lookup_asks_for_the_callers_row_first():
+    collection = MagicMock()
+    collection.find_one = AsyncMock(return_value=_row("eve_retrieval"))
+    principal = Principal(_USER_ID, AUTH_TYPE_API_KEY, "key-1")
+    scope = {"headers": [(b"authorization", f"Bearer {_TOKEN}".encode())]}
+    with patch(
+        f"{_PROXY}.resolve_principal_from_bearer_token", AsyncMock(return_value=principal)
+    ), patch(f"{_PROXY}.get_collection", return_value=collection), patch(
+        f"{_PROXY}.get_cognito_token_provider", return_value=MagicMock()
+    ), patch(f"{_PROXY}.build_proxy_app", AsyncMock(return_value=object())):
+        await MCPProxyDispatcher(main_app=None)._resolve_proxy(scope, "eve_retrieval")
+
+    assert collection.find_one.await_args.kwargs["sort"] == [("user_id", -1)]
