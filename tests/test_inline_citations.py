@@ -1130,3 +1130,61 @@ class TestLocalTurnFindings:
         assert len(source["passage"]) <= PASSAGE_MAX_CHARS
         assert source["passage"].endswith("sentence here.")
         assert "](" not in source["passage"] and "#" not in source["passage"]
+
+
+# ── sources_retrieved: one entry per uncited document ───────────────────────
+
+
+B2 = {"id": "src_b2", "document_key": "url:b", "title": "B, second passage"}
+C = {"id": "src_c", "document_key": "doi:c", "title": "C"}
+C2 = {"id": "src_c2", "document_key": "doi:c", "title": "C, second passage"}
+
+
+class TestSourcesRetrievedDedup:
+    def test_one_entry_per_document_and_none_for_a_cited_document(self):
+        _, rewriter = _rewrite(_registry(A, A2, B, B2, C, C2), ["Fact [S1]."])
+        assert [s["id"] for s in rewriter.sources_retrieved()] == ["src_b", "src_c"]
+
+    def test_nothing_cited_still_one_entry_per_document(self):
+        _, rewriter = _rewrite(_registry(A, B, A2, B2), ["No markers."])
+        assert [s["document_key"] for s in rewriter.sources_retrieved()] == ["doi:a", "url:b"]
+
+    async def test_wiley_chunks_of_cited_and_uncited_articles(self, flag_on):
+        def chunk(article: str, index: int) -> dict:
+            return {
+                "id": f"10.1155/2022/{article}_{index:04d}",
+                "collection_name": "Wiley AI Gateway",
+                "text": f"Passage {index} of {article}.",
+                "metadata": {"additionalMetadata": {"title": f"Article {article}"}},
+            }
+
+        docs = [chunk("111", 0), chunk("111", 1), chunk("222", 0), chunk("111", 2), chunk("222", 1)]
+        payloads = [(_retrieve_response(*docs), "retrieve", "eve_retrieval", "call-1")]
+        events, applied = await _cited_run(["Cited [S2]."], payloads=payloads)
+        final = _of(events, "final")[0]
+        assert {c["document_key"] for c in final["citations"]} == {"doi:10.1155/2022/111"}
+        assert [s["document_key"] for s in final["sources_retrieved"]] == ["doi:10.1155/2022/222"]
+        assert _persist_kwargs(applied)["sources_retrieved"] == final["sources_retrieved"]
+
+    async def test_handles_of_merged_passages_survive_the_next_turn(self, flag_on):
+        def chunk(article: str, index: int) -> dict:
+            return {
+                "id": f"10.1155/2022/{article}_{index:04d}",
+                "collection_name": "Wiley AI Gateway",
+                "text": f"Passage {index} of {article}.",
+                "metadata": {"additionalMetadata": {"title": f"Article {article}"}},
+            }
+
+        docs = [chunk("111", 0), chunk("111", 1), chunk("222", 0), chunk("222", 1)]
+        _, applied1 = await _cited_run(
+            ["Cited [S1]."], payloads=[(_retrieve_response(*docs), "retrieve", "eve_retrieval", "call-1")]
+        )
+        turn1 = _persist_kwargs(applied1)
+        assert [s["document_key"] for s in turn1["sources_retrieved"]] == ["doi:10.1155/2022/222"]
+
+        payloads = [(_retrieve_response(_other_doc()), "retrieve", "eve_retrieval", "call-1")]
+        events, _ = await _cited_run(["Old [S4]. Other [S2]. New [S5]."], payloads=payloads, prior=_prior_from(turn1))
+        final = _of(events, "final")[0]
+        assert final["answer"] == "Old [1]. Other [2]. New [3]."
+        keys = [c["document_key"] for c in final["citations"]]
+        assert keys == ["doi:10.1155/2022/222", "doi:10.1155/2022/111", "doi:10.2000/other"]
