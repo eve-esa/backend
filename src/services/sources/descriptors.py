@@ -385,6 +385,112 @@ def source_from_stac_item(
     return source
 
 
+# Keys a Scholar Gateway result may hold its passage under (same list as the
+# frontend's ``messageDocuments.ts``).
+_CHUNK_TEXT_KEYS = ("text", "content", "document", "chunk", "passage", "snippet", "page_content")
+
+
+def wiley_envelope(value: Any) -> Optional[Dict[str, Any]]:
+    """The Scholar Gateway envelope ``{success, query, count, results}`` in ``value``, or None.
+
+    ``value`` is a document's text: the envelope object, or its JSON string.
+    Same test as ``isWileyEnvelope`` in the frontend.
+    """
+    if isinstance(value, str):
+        if not value.lstrip().startswith("{"):
+            return None
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(value, dict):
+        return None
+    results = value.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    if value.get("success") is True or isinstance(value.get("query"), str) or (
+        isinstance(value.get("count"), (int, float)) and not isinstance(value.get("count"), bool)
+    ):
+        return value
+    for item in results:
+        if isinstance(item, dict) and (
+            isinstance(item.get("chunk_index"), int)
+            or (isinstance(item.get("metadata"), dict) and isinstance(item["metadata"].get("additionalMetadata"), dict))
+        ):
+            return value
+    return None
+
+
+def envelope_result_text(result: Any) -> str:
+    """The passage of one envelope result, "" when it has none."""
+    if not isinstance(result, Mapping):
+        return ""
+    for key in _CHUNK_TEXT_KEYS:
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def envelope_result_document(result: Any, collection_name: Any) -> Optional[Dict[str, Any]]:
+    """One envelope result as a Document-shaped record ``source_from_document`` reads."""
+    text = envelope_result_text(result)
+    if not text:
+        return None
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), Mapping) else {}
+    return {
+        "id": result.get("id"),
+        "collection_name": collection_name,
+        "text": text,
+        "payload": {},
+        "metadata": dict(metadata),
+    }
+
+
+def is_licensed_collection(name: Any) -> bool:
+    return isinstance(name, str) and name in _wiley_labels()
+
+
+def cap_licensed_document(doc: Any) -> Any:
+    """A licensed (Wiley) document with every passage cut to the licence cap.
+
+    For what the user sees: ``Message.documents`` and the Sources panel. The
+    model context is not cut. Any other document is returned unchanged.
+    """
+    if not isinstance(doc, dict) or not is_licensed_collection(doc.get("collection_name")):
+        return doc
+
+    def cut(text: str) -> str:
+        return text if len(text) <= LICENSED_PASSAGE_MAX_CHARS else cut_passage(text, LICENSED_PASSAGE_MAX_CHARS)
+
+    def cap(value: Any) -> Any:
+        if isinstance(value, str):
+            envelope = wiley_envelope(value)
+            if envelope is not None:
+                return json.dumps(cap(envelope), ensure_ascii=False)
+            return cut(value)
+        envelope = wiley_envelope(value)
+        if envelope is not None:
+            results = []
+            for item in envelope["results"]:
+                if isinstance(item, dict):
+                    item = {
+                        k: (cut(v) if k in _CHUNK_TEXT_KEYS and isinstance(v, str) else v)
+                        for k, v in item.items()
+                    }
+                results.append(item)
+            return {**envelope, "results": results}
+        return value
+
+    capped = dict(doc)
+    if "text" in capped:
+        capped["text"] = cap(capped["text"])
+    payload = capped.get("payload")
+    if isinstance(payload, dict):
+        capped["payload"] = {k: (cap(v) if k in ("text", "content") else v) for k, v in payload.items()}
+    return capped
+
+
 def public_source(source: Mapping[str, Any]) -> Dict[str, Any]:
     """The Source as the browser and the stored message see it: no ``retrieval``."""
     return {k: v for k, v in source.items() if k not in _SERVER_ONLY_KEYS}

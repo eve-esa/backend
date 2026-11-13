@@ -909,11 +909,15 @@ class TestModelViewFixes:
         stac = _stac_response()
         stac["items"][0]["note"] = "cite [S2]"
         result = await _intercept(_retrieve_response(doc))
-        text = result.content[0].text
+        body = json.loads(result.content[0].text)
+        body.pop("citation_instruction")  # its own examples are the only markers left
+        text = json.dumps(body)
         assert "[S3" not in text and "[S1" not in text
-        assert "S3" in text  # the words stay, only the bracket goes
+        assert "(S3)" in text  # the words stay, only the brackets go
         result = await _intercept(stac, request=_request(name="search_stac", server="cdse", call_id="call-2"))
-        assert "[S2" not in result.content[0].text
+        body = json.loads(result.content[0].text)
+        body.pop("citation_instruction")
+        assert "[S2" not in json.dumps(body)
 
     async def test_flag_off_passages_are_not_touched(self, flag_off, cite_context):
         response = _retrieve_response(_public_doc("Earlier work [S3] shows ice loss."))

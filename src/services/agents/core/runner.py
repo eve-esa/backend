@@ -91,7 +91,13 @@ from src.services.mcp.retrieval_context import (
     reset_retrieval_context,
     set_retrieval_context,
 )
-from src.services.sources.citations import CitationRewriter, citation_payload
+from src.services.sources.citations import (
+    CitationRewriter,
+    SourceRegistry,
+    citation_payload,
+    prior_sources_from_rows,
+    strip_handles,
+)
 from src.services.mcp.tool_loader import (
     MCP_SERVER_METADATA_KEY,
     _MCPToolsWithClient,
@@ -2305,6 +2311,64 @@ def _build_agentic_latencies(
 # ─── Non-streaming generation ─────────────────────────────────────────────────
 
 
+# FEATURE_INLINE_CITATIONS: handles are conversation scoped. A streamed turn
+# reads the Sources earlier turns stored before it hands out new ones; the
+# newest rows carry the highest handles, so the cap never lets a new handle
+# collide with one already in the thread.
+_PRIOR_SOURCES_TIMEOUT_S = 2.0
+_PRIOR_SOURCES_MAX_MESSAGES = 200
+
+
+async def _load_prior_sources(
+    conversation_id: str, message_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """The Sources earlier messages of the conversation stored, with their handles."""
+    cursor = (
+        Message.get_collection()
+        .find(
+            {
+                "conversation_id": conversation_id,
+                "$or": [
+                    {"metadata.citations": {"$exists": True}},
+                    {"metadata.sources_retrieved": {"$exists": True}},
+                ],
+            },
+            {"metadata.citations": 1, "metadata.sources_retrieved": 1},
+        )
+        .sort("timestamp", -1)
+        .limit(_PRIOR_SOURCES_MAX_MESSAGES)
+    )
+    rows = [
+        row
+        async for row in cursor
+        if message_id is None or str(row.get("_id")) != str(message_id)
+    ]
+    return prior_sources_from_rows(rows)
+
+
+async def _seed_conversation_sources(
+    registry: SourceRegistry, conversation_id: str, message_id: Optional[str]
+) -> bool:
+    """Seed ``registry`` from the conversation; False when the lookup failed.
+
+    Without the earlier handles a new one could take a number the thread
+    already uses and turn a cited passage into the wrong Source, so the
+    caller then runs the turn without handles.
+    """
+    try:
+        prior = await asyncio.wait_for(
+            _load_prior_sources(conversation_id, message_id),
+            _PRIOR_SOURCES_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning(
+            "citations.prior_sources_unavailable error=%s", type(exc).__name__
+        )
+        return False
+    registry.seed(prior)
+    return True
+
+
 async def generate_answer_agentic(
     request: GenerationRequest,
     *,
@@ -2580,6 +2644,9 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
+        # This route hands out no handles, but the model may copy one an
+        # earlier streamed turn left in the thread: it never reaches the user.
+        final_answer = strip_handles(final_answer)
         final_answer = await append_missing_artifact_stubs(
             final_answer, list(artifact_ctx.collected_artifact_ids)
         )
@@ -2729,13 +2796,15 @@ async def generate_answer_agentic_stream_helper(
     step_frames: Optional[_StepFrames] = None
     # One row per model call that reported token counts (``final.usage``).
     usage_rows: List[Dict[str, Any]] = []
-    # FEATURE_INLINE_CITATIONS: turns the handles the answer cites into [n]
-    # markers. None with the flag off: tokens, frames and the stored message
-    # stay as they were.
-    citation_rewriter: Optional[CitationRewriter] = None
-    if src_config.FEATURE_INLINE_CITATIONS:
-        _retrieval_ctx.cite = True
-        citation_rewriter = CitationRewriter(_retrieval_ctx.sources)
+    # The answer filter for [S<k>] handles. With FEATURE_INLINE_CITATIONS and
+    # the conversation's earlier Sources read (``citing``), it turns cited
+    # handles into [n] markers. Otherwise it knows no Source and only strips
+    # the handles the model may copy from the thread (an earlier flag-on turn):
+    # frames and the stored message carry no citation fields.
+    citing = False
+    citation_rewriter = CitationRewriter(SourceRegistry())
+    # A change to the marker list not yet sent on a token frame.
+    citations_dirty = False
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -2744,23 +2813,34 @@ async def generate_answer_agentic_stream_helper(
         return list(artifact_ctx.collected_artifact_ids) or None
 
     def _answer_text() -> str:
-        """The answer so far, with any text the citation filter still holds."""
-        if citation_rewriter is not None:
-            rest = citation_rewriter.flush()
-            if rest:
-                accumulated.append(rest)
+        """The answer as streamed so far (text the citation filter holds is not in it)."""
         return "".join(accumulated)
+
+    def _held_token_events() -> List[str]:
+        """Text the citation filter still holds, as one token frame, and into the answer.
+
+        Called before every terminal frame that follows streamed text, so the
+        stored answer is what the user saw.
+        """
+        rest = citation_rewriter.flush()
+        if not rest:
+            return []
+        accumulated.append(rest)
+        if output_format == "json":
+            return [f"data: {json.dumps({'type': 'token', 'content': rest})}\n\n"]
+        return [f"data: {rest}\n\n"]
 
     def _citation_fields() -> Dict[str, Any]:
         """``citations`` and ``sources_retrieved`` for the frame and the row; {} when off."""
-        return citation_payload(citation_rewriter)
+        return citation_payload(citation_rewriter) if citing else {}
 
-    def _log_citations() -> None:
-        if citation_rewriter is None:
+    def _log_citations(outcome: str) -> None:
+        if not citing:
             return
         # Counts only: never the answer, a passage or a handle's text.
         logger.info(
-            "citations.summary cited=%d markers=%d invalid=%d sources=%d",
+            "citations.summary outcome=%s cited=%d markers=%d invalid=%d sources=%d",
+            outcome,
             len(citation_rewriter.numbers),
             citation_rewriter.markers_seen - citation_rewriter.invalid,
             citation_rewriter.invalid,
@@ -2823,6 +2903,14 @@ async def generate_answer_agentic_stream_helper(
             return
 
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
+
+        if src_config.FEATURE_INLINE_CITATIONS:
+            citing = await _seed_conversation_sources(
+                _retrieval_ctx.sources, conversation_id, message_id
+            )
+            _retrieval_ctx.cite = citing
+            if citing:
+                citation_rewriter = CitationRewriter(_retrieval_ctx.sources)
 
         setup_latencies: Dict[str, float] = {}
 
@@ -3037,7 +3125,7 @@ async def generate_answer_agentic_stream_helper(
             return events
 
         def _flush_turn_buffer_to_events() -> List[str]:
-            nonlocal tokens_yielded, first_token_latency
+            nonlocal tokens_yielded, first_token_latency, citations_dirty
             if not turn_buffer:
                 return []
             items = list(turn_buffer)
@@ -3087,42 +3175,27 @@ async def generate_answer_agentic_stream_helper(
             for tok in answer_items:
                 if not tok:
                     continue
-                marker_closed = False
-                if citation_rewriter is not None:
-                    recorded = citation_rewriter.markers_seen - citation_rewriter.invalid
-                    tok = citation_rewriter.feed(tok)
-                    marker_closed = (
-                        citation_rewriter.markers_seen - citation_rewriter.invalid
-                        > recorded
-                    )
-                    if not tok:
-                        continue
+                version = citation_rewriter.version
+                tok = citation_rewriter.feed(tok)
+                if citing and citation_rewriter.version != version:
+                    citations_dirty = True
+                if not tok:
+                    # Held, or a marker that only added an offset: the change
+                    # rides on the next token that carries text.
+                    continue
                 tokens_yielded += 1
                 accumulated.append(tok)
                 if output_format == "json":
                     token_frame: Dict[str, Any] = {"type": "token", "content": tok}
-                    if marker_closed:
-                        # The whole list so far, only on the token that closed
-                        # a marker (sources standard, section 3).
+                    if citations_dirty:
+                        # The whole list so far, only on a token after a
+                        # marker changed it (sources standard, section 3).
                         token_frame["citations"] = citation_rewriter.citations()
+                        citations_dirty = False
                     events.append(f"data: {json.dumps(token_frame)}\n\n")
                 else:
                     events.append(f"data: {tok}\n\n")
             return events
-
-        def _flush_citation_hold() -> List[str]:
-            """The text held after the last token, sent as one last token."""
-            nonlocal tokens_yielded
-            if citation_rewriter is None:
-                return []
-            rest = citation_rewriter.flush()
-            if not rest:
-                return []
-            tokens_yielded += 1
-            accumulated.append(rest)
-            if output_format == "json":
-                return [f"data: {json.dumps({'type': 'token', 'content': rest})}\n\n"]
-            return [f"data: {rest}\n\n"]
 
         graph_exc: Optional[Exception] = None
         try:
@@ -3176,6 +3249,7 @@ async def generate_answer_agentic_stream_helper(
                             # The cut calls go to the stored trace, not to the
                             # stream: the Stop route already closed it.
                             step_frames.cancel_pending()
+                            held_events = _held_token_events()
                             cancel_documents, cancel_use_rag = _retrieval_state()
                             await persist_message_state(
                                 message_id,
@@ -3188,7 +3262,10 @@ async def generate_answer_agentic_stream_helper(
                                 artifact_ids=_collected_artifact_ids(),
                                 **_citation_fields(),
                             )
-                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            _log_citations("stopped")
+                            for event in held_events:
+                                yield event
+                            yield f"data: {json.dumps({'type': 'stopped', **_citation_fields()})}\n\n"
                             return
 
                         if mode == "custom":
@@ -3331,10 +3408,8 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
-                for event in _flush_citation_hold():
-                    yield event
         except Exception as exc:
-            answer = _answer_text()
+            answer = _answer_text() or citation_rewriter.held
             if not _recoverable_after_agent_fallback(
                 fallback_used=fallback.used, has_answer=bool(answer)
             ):
@@ -3345,6 +3420,9 @@ async def generate_answer_agentic_stream_helper(
                 "persisting streamed answer: %s",
                 exc,
             )
+
+        for event in _held_token_events():
+            yield event
 
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
@@ -3426,7 +3504,7 @@ async def generate_answer_agentic_stream_helper(
             clear_error=bool(answer),
             **_citation_fields(),
         )
-        _log_citations()
+        _log_citations("answer")
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
@@ -3459,6 +3537,9 @@ async def generate_answer_agentic_stream_helper(
             artifact_ids=_collected_artifact_ids(),
             **_citation_fields(),
         )
+        # No frame can follow here: text the filter still holds was never
+        # shown, so it stays out of the stored answer.
+        _log_citations("stopped" if stop else "cancelled")
         if not stop:
             # Worker shutdown or the deadline: a failed turn with its partial
             # output, and the cancel goes on to the caller.
@@ -3476,6 +3557,7 @@ async def generate_answer_agentic_stream_helper(
             error=exc,
             graph=agent_graph_type,
         )
+        held_events = _held_token_events()
         answer = await append_missing_artifact_stubs(
             _answer_text(), _collected_artifact_ids()
         )
@@ -3493,9 +3575,12 @@ async def generate_answer_agentic_stream_helper(
                 **_attribution(),
                 **_citation_fields(),
             )
+        _log_citations("timeout")
         if final_emitted:
             return
         if answer:
+            for event in held_events:
+                yield event
             for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:
@@ -3513,6 +3598,7 @@ async def generate_answer_agentic_stream_helper(
             graph=agent_graph_type,
         )
         error_info = build_error_payload(exc)
+        held_events = _held_token_events()
         answer = _answer_text()
         error_documents, error_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
@@ -3527,9 +3613,12 @@ async def generate_answer_agentic_stream_helper(
                 **_attribution(),
                 **_citation_fields(),
             )
+        _log_citations("error")
         if final_emitted:
             return
         if answer:
+            for event in held_events:
+                yield event
             for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:

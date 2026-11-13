@@ -143,12 +143,18 @@ EVENT_METADATA_KEYS: dict[str, tuple[frozenset[str], Any, str]] = {
     "eve.durationMs": (frozenset({"TOOL_CALL_RESULT"}), _is_int, "integer"),
     "eve.contentTruncated": (frozenset({"TOOL_CALL_RESULT"}), _is_bool, "boolean"),
     "eve.endpoint": (frozenset({"TEXT_MESSAGE_END"}), _is_obj, "object"),
+    # RUN_FINISHED is the fallback when the text message was already closed (a
+    # tool call after the last text, or a Stop with no text open).
     "eve.citations": (
-        frozenset({"TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END"}),
+        frozenset({"TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED"}),
         _is_citation_list,
         "a list of cited Sources with id, n and at",
     ),
-    "eve.sourcesRetrieved": (frozenset({"TEXT_MESSAGE_END"}), _is_source_list, "a list of Sources"),
+    "eve.sourcesRetrieved": (
+        frozenset({"TEXT_MESSAGE_END", "RUN_FINISHED"}),
+        _is_source_list,
+        "a list of Sources",
+    ),
     "eve.latencies": (frozenset({"RUN_FINISHED"}), _is_obj, "object"),
     "eve.stopped": (frozenset({"RUN_FINISHED"}), _is_bool, "boolean"),
     "eve.error.code": (frozenset({"RUN_ERROR"}), _is_error_code, "a section 1.7 code"),

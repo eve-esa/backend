@@ -1,7 +1,11 @@
-"""Run-local handles and the inline citation rewrite (sources standard, section 4).
+"""Conversation handles and the inline citation rewrite (sources standard, section 4).
 
 ``SourceRegistry`` gives every Source of one run a handle, ``S1``, ``S2``, ...,
-in arrival order; the same Source seen twice keeps its first handle.
+in arrival order; the same Source seen twice keeps its first handle. Handles
+are conversation scoped: the tool results that carry them stay in the
+checkpoint thread the model reads on the next turn, so a run is seeded with
+the Sources earlier turns stored (``seed``), continues after the highest
+handle, and resolves an earlier handle to its stored Source.
 ``CitationRewriter`` sits on the answer token stream: it holds back a possible
 ``[S..]`` marker until it is complete, turns each known handle into ``[n]``,
 records where it put the marker, and drops an unknown handle. Every recorded
@@ -23,14 +27,18 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from src.services.sources.descriptors import minimal_source, public_source
 
+# The key the handle rides under in the model view, written after every other
+# field so a source field of the same name cannot replace it.
+HANDLE_KEY = "eve_ref"
+
 CITATION_INSTRUCTION = (
-    "Each passage carries a ref such as S1. After a sentence that uses a passage, "
-    "write its ref in square brackets, for example [S1] or [S1][S3]. "
-    "Only use refs that appear in tool results."
+    "Each passage carries an eve_ref such as S1. After a sentence that uses a passage, "
+    "write its eve_ref in square brackets, for example [S1] or [S1][S3]. "
+    "Only use eve_ref values that appear in tool results."
 )
 
 # A complete marker: one or more handles, separated by commas or semicolons.
@@ -38,24 +46,52 @@ _MARKER = re.compile(r"\[(S\d{1,4}(?:\s*[,;]\s*S\d{1,4})*)\]")
 # Any prefix of a marker that could still complete.
 _MARKER_PREFIX = re.compile(r"\[(?:S\d{0,4}(?:\s*[,;]\s*(?:S\d{0,4})?)*)?")
 _HANDLE = re.compile(r"S\d{1,4}")
+_HANDLE_FULL = re.compile(r"S(\d{1,4})")
+# A handle written in source text, in a form the rewriter would read.
+_LITERAL_MARKER = re.compile(r"\[\s*(S\d{1,4}(?:\s*[,;]\s*S\d{1,4})*)\s*\]")
+_LITERAL_OPEN = re.compile(r"\[(?=\s*S\d)")
+# Fields a stored citation carries that are not part of the Source.
+_MARKER_FIELDS = ("n", "at", "origin")
 # The longest prefix held back before it is let through as text.
 MAX_HOLD_CHARS = 40
 
 
 @dataclass
 class SourceRegistry:
-    """The Sources of one run, by handle and by id."""
+    """The Sources of one run, by handle and by id, over the conversation's earlier ones."""
 
     sources: List[Dict[str, Any]] = field(default_factory=list)
     _by_id: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     _by_handle: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Sources earlier turns stored, by id and by handle: resolvable, not listed.
+    _prior_by_id: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    _prior_by_handle: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    _next: int = 1
+
+    def seed(self, prior: Iterable[Mapping[str, Any]]) -> None:
+        """Earlier turns' Sources (``prior_sources_from_rows``): new handles start after theirs."""
+        for source in prior:
+            handle, sid = source.get("handle"), source.get("id")
+            number = _handle_number(handle)
+            if number is None or not isinstance(sid, str) or not sid:
+                continue
+            entry = dict(source)
+            self._prior_by_id.setdefault(sid, entry)
+            self._prior_by_handle.setdefault(handle, entry)
+            self._next = max(self._next, number + 1)
 
     def register(self, source: Dict[str, Any]) -> str:
         """Add ``source`` and return its handle; a known id keeps its handle."""
         known = self._by_id.get(source["id"])
         if known is not None:
             return known["handle"]
-        handle = f"S{len(self.sources) + 1}"
+        earlier = self._prior_by_id.get(source["id"])
+        if earlier is not None and earlier["handle"] not in self._by_handle:
+            # Retrieved again: the thread already names it by this handle.
+            handle = earlier["handle"]
+        else:
+            handle = f"S{self._next}"
+            self._next += 1
         source["handle"] = handle
         self.sources.append(source)
         self._by_id[source["id"]] = source
@@ -63,7 +99,62 @@ class SourceRegistry:
         return handle
 
     def get(self, handle: str) -> Optional[Dict[str, Any]]:
-        return self._by_handle.get(handle)
+        return self._by_handle.get(handle) or self._prior_by_handle.get(handle)
+
+    def by_id(self, source_id: str) -> Optional[Dict[str, Any]]:
+        return self._by_id.get(source_id) or self._prior_by_id.get(source_id)
+
+
+def _handle_number(handle: Any) -> Optional[int]:
+    match = _HANDLE_FULL.fullmatch(handle) if isinstance(handle, str) else None
+    return int(match.group(1)) if match else None
+
+
+def prior_sources_from_rows(rows: Iterable[Any]) -> List[Dict[str, Any]]:
+    """The Sources earlier turns stored (``metadata.citations`` and ``sources_retrieved``).
+
+    One entry per id, first seen wins, without the marker fields; entries with
+    no id or no ``S<k>`` handle are skipped.
+    """
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in rows or []:
+        metadata = row.get("metadata") if isinstance(row, Mapping) else None
+        if not isinstance(metadata, Mapping):
+            continue
+        for key in ("citations", "sources_retrieved"):
+            entries = metadata.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                sid = entry.get("id")
+                if not isinstance(sid, str) or not sid or sid in seen:
+                    continue
+                if _handle_number(entry.get("handle")) is None:
+                    continue
+                seen.add(sid)
+                out.append({k: v for k, v in entry.items() if k not in _MARKER_FIELDS})
+    return out
+
+
+def neutralise_handles(value: Any) -> Any:
+    """``value`` with every handle written in source text taken out of marker form.
+
+    ``[S3]`` becomes ``(S3)`` and a lone ``[S`` becomes ``(S``, in every string
+    of a nested structure, so a passage that quotes a handle cannot be copied
+    into the answer and rewritten to a real Source.
+    """
+    if isinstance(value, str):
+        if "[" not in value:
+            return value
+        return _LITERAL_OPEN.sub("(", _LITERAL_MARKER.sub(r"(\1)", value))
+    if isinstance(value, dict):
+        return {k: neutralise_handles(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [neutralise_handles(v) for v in value]
+    return value
 
 
 class CitationRewriter:
@@ -79,6 +170,8 @@ class CitationRewriter:
         self.offsets: Dict[str, List[int]] = {}  # source id -> marker offsets
         self.invalid = 0
         self.markers_seen = 0
+        # Bumped whenever ``citations()`` would change: a new number or offset.
+        self.version = 0
 
     def feed(self, text: str) -> str:
         """Rewritten text that is safe to send now; a possible marker is held back."""
@@ -108,6 +201,11 @@ class CitationRewriter:
             i = start + 1
         return "".join(out)
 
+    @property
+    def held(self) -> str:
+        """Text held back as a possible marker, not yet sent."""
+        return self._held
+
     def flush(self) -> str:
         """The held text, as plain text: the stream ended inside a possible marker."""
         held, self._held = self._held, ""
@@ -128,7 +226,9 @@ class CitationRewriter:
             sid = source["id"]
             doc_key = source.get("document_key") or sid
             n = self._doc_numbers.setdefault(doc_key, len(self._doc_numbers) + 1)
-            self.numbers.setdefault(sid, n)
+            if sid not in self.numbers:
+                self.numbers[sid] = n
+                self.version += 1
             if self._last is not None and self._last[0] == n and self._last[2] == self._emitted:
                 at = self._last[1]
             else:
@@ -138,20 +238,20 @@ class CitationRewriter:
             offsets = self.offsets.setdefault(sid, [])
             if at not in offsets:
                 offsets.append(at)
+                self.version += 1
         return "".join(parts)
 
     # ── what the client and the stored message read ──────────────────────
 
     def citations(self) -> List[Dict[str, Any]]:
         """Cited Sources in display order, each with ``n``, ``at`` and ``origin``."""
-        by_id = {s["id"]: s for s in self._registry.sources}
         out: List[Dict[str, Any]] = []
         order = sorted(
             self.numbers.items(),
             key=lambda kv: (kv[1], (self.offsets.get(kv[0]) or [0])[0]),
         )
         for sid, n in order:
-            source = by_id.get(sid)
+            source = self._registry.by_id(sid)
             if source is None:
                 continue
             entry = public_source(source)
@@ -162,6 +262,16 @@ class CitationRewriter:
     def sources_retrieved(self) -> List[Dict[str, Any]]:
         """Sources of the run nobody cited, minimal fields, in arrival order."""
         return [minimal_source(s) for s in self._registry.sources if s["id"] not in self.numbers]
+
+
+def strip_handles(text: str) -> str:
+    """``text`` without any ``[S<k>]`` handle: the rewrite with no known Source.
+
+    For the paths that hand out no handles (the sync agentic route, the flag
+    off) but whose model may still copy one from the checkpoint thread.
+    """
+    rewriter = CitationRewriter(SourceRegistry())
+    return rewriter.feed(text or "") + rewriter.flush()
 
 
 def citation_payload(rewriter: Optional[CitationRewriter]) -> Dict[str, Any]:

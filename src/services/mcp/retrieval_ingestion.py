@@ -13,10 +13,14 @@ message; the model gets the same JSON shape reduced to what it needs to
 answer: collection name, chunk text and the descriptive metadata (title, url,
 doi, year, authors, ...).
 
-With ``FEATURE_INLINE_CITATIONS`` each passage, and each item of a
-``search_stac`` result, also gets a run-local ``ref`` (``S1``, ``S2``, ...) and
-the reduced result one sentence on how to cite it; the Source descriptors go to
-the same request context (``sources``), never to the model.
+With ``FEATURE_INLINE_CITATIONS`` on a streamed run each passage (each result
+of a Wiley envelope included), and each item of a ``search_stac`` result, also
+gets a conversation handle under ``eve_ref`` (``S1``, ``S2``, ...) and the
+reduced result one sentence on how to cite it; the Source descriptors go to the
+same request context (``sources``), never to the model. Handles quoted inside
+the source text are taken out of marker form first, and the stored documents
+of a licensed provider (Wiley) are cut to the licence cap; the model context
+keeps the full passage.
 
 Follows the ``ToolCallInterceptor`` protocol from ``langchain-mcp-adapters``.
 Fail-open: any error leaves the original result untouched.
@@ -24,12 +28,23 @@ Fail-open: any error leaves the original result untouched.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from src import config
 from src.services.mcp.retrieval_context import get_retrieval_context, RetrievalCall
-from src.services.sources.citations import CITATION_INSTRUCTION, SourceRegistry
-from src.services.sources.descriptors import source_from_document, source_from_stac_item
+from src.services.sources.citations import (
+    CITATION_INSTRUCTION,
+    HANDLE_KEY,
+    SourceRegistry,
+    neutralise_handles,
+)
+from src.services.sources.descriptors import (
+    cap_licensed_document,
+    envelope_result_document,
+    source_from_document,
+    source_from_stac_item,
+    wiley_envelope,
+)
 from src.utils.helpers import extract_document_data, extract_documents_from_retrieval_payload
 
 logger = logging.getLogger(__name__)
@@ -104,30 +119,64 @@ def slim_document_for_model(doc: Dict[str, Any]) -> Dict[str, Any]:
     return slim
 
 
+# One handle per document: a string, or one handle (or None) per result of a
+# Wiley envelope, or None for a document that became no Source.
+DocRefs = Union[None, str, List[Optional[str]]]
+
+
+def _with_handle(value: Dict[str, Any], handle: str) -> Dict[str, Any]:
+    """``value`` with the handle written last, so no field of its own replaces it."""
+    out = {k: v for k, v in value.items() if k != HANDLE_KEY}
+    out[HANDLE_KEY] = handle
+    return out
+
+
+def _envelope_with_handles(text: Any, refs: List[Optional[str]]) -> Any:
+    """The envelope in ``text`` with each result's handle, in the shape it came in."""
+    envelope = wiley_envelope(text)
+    if envelope is None:
+        return text
+    results = []
+    for index, item in enumerate(envelope["results"]):
+        ref = refs[index] if index < len(refs) else None
+        results.append(_with_handle(item, ref) if ref and isinstance(item, dict) else item)
+    out = {**envelope, "results": results}
+    return json.dumps(out, ensure_ascii=False) if isinstance(text, str) else out
+
+
 def slim_retrieval_response_for_model(
     response: Dict[str, Any],
-    refs: Optional[List[Optional[str]]] = None,
+    refs: Optional[List[DocRefs]] = None,
 ) -> Dict[str, Any]:
     """Rebuild a ``/retrieve`` response with only what the model needs.
 
-    ``refs`` holds one handle (or None) per dict document, in order; with it
-    every slim document carries its ``ref`` and the response the citation
-    instruction.
+    ``refs`` (citations on) holds one ``DocRefs`` per dict document, in order;
+    with it the source text loses any handle written in marker form, every
+    slim document carries its handle under ``eve_ref`` (inside the envelope
+    results for Wiley), and the response the citation instruction.
     """
     docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
     slim_docs: List[Dict[str, Any]] = []
     for index, doc in enumerate(docs):
         slim_doc = slim_document_for_model(doc)
-        ref = refs[index] if refs is not None and index < len(refs) else None
-        if ref:
-            slim_doc = {"ref": ref, **slim_doc}
+        if refs is not None:
+            if isinstance(slim_doc.get("metadata"), dict):
+                slim_doc["metadata"].pop(HANDLE_KEY, None)
+            slim_doc = neutralise_handles(slim_doc)
+            ref = refs[index] if index < len(refs) else None
+            if isinstance(ref, str):
+                slim_doc = _with_handle(slim_doc, ref)
+            elif isinstance(ref, list):
+                slim_doc["text"] = _envelope_with_handles(slim_doc.get("text"), ref)
         slim_docs.append(slim_doc)
     slim: Dict[str, Any] = {"retrieved_docs": slim_docs}
     for key in _RESPONSE_KEYS_KEPT:
         if response.get(key) not in (None, ""):
             slim[key] = response[key]
-    if refs is not None and any(refs):
-        slim["citation_instruction"] = CITATION_INSTRUCTION
+    if refs is not None:
+        slim = neutralise_handles(slim)
+        if any(refs):
+            slim["citation_instruction"] = CITATION_INSTRUCTION
     return slim
 
 
@@ -135,14 +184,45 @@ def register_retrieval_sources(
     registry: SourceRegistry,
     response: Dict[str, Any],
     tool_call_id: Optional[str],
-) -> List[Optional[str]]:
-    """One handle per dict document of ``response`` (None for a document with no text)."""
-    refs: List[Optional[str]] = []
+) -> List[DocRefs]:
+    """One ``DocRefs`` per dict document of ``response``.
+
+    A Wiley document whose text is a Scholar Gateway envelope gives one Source
+    per result; a document with no text gives none.
+    """
+    refs: List[DocRefs] = []
     docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
-    for rank, doc in enumerate(docs):
-        source = source_from_document(
-            extract_document_data(doc), rank=rank, tool_call_id=tool_call_id
+    rank = 0
+    for doc in docs:
+        data = extract_document_data(doc)
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        envelope = next(
+            (
+                env
+                for env in (
+                    wiley_envelope(data.get("text")),
+                    wiley_envelope(payload.get("text")),
+                    wiley_envelope(payload.get("content")),
+                )
+                if env is not None
+            ),
+            None,
         )
+        if envelope is not None:
+            result_refs: List[Optional[str]] = []
+            for result in envelope["results"]:
+                record = envelope_result_document(result, data.get("collection_name"))
+                source = (
+                    source_from_document(record, rank=rank, tool_call_id=tool_call_id)
+                    if record is not None
+                    else None
+                )
+                rank += 1
+                result_refs.append(registry.register(source) if source is not None else None)
+            refs.append(result_refs if any(result_refs) else None)
+            continue
+        source = source_from_document(data, rank=rank, tool_call_id=tool_call_id)
+        rank += 1
         refs.append(registry.register(source) if source is not None else None)
     return refs
 
@@ -169,7 +249,7 @@ def register_stac_sources(
     provider: str,
     tool_call_id: Optional[str],
 ) -> Dict[str, Any]:
-    """``response`` with a ``ref`` on every item that became a Source."""
+    """``response`` with its source text neutralised and a handle on every item that became a Source."""
     items: List[Any] = []
     any_ref = False
     for rank, item in enumerate(response.get("items") or []):
@@ -179,11 +259,12 @@ def register_stac_sources(
             else None
         )
         if source is None:
-            items.append(item)
+            items.append(neutralise_handles(item))
             continue
-        items.append({"ref": registry.register(source), **item})
+        items.append(_with_handle(neutralise_handles(item), registry.register(source)))
         any_ref = True
-    out = {**response, "items": items}
+    out = neutralise_handles({k: v for k, v in response.items() if k != "items"})
+    out["items"] = items
     if any_ref:
         out["citation_instruction"] = CITATION_INSTRUCTION
     return out
@@ -321,10 +402,15 @@ class RetrievalContextInterceptor:
                 continue
 
             latencies = response.get("latencies")
+            documents = extract_documents_from_retrieval_payload(response)
+            if citations_on:
+                # The licence cap applies to what the user sees, not to the
+                # passage the model reads.
+                documents = [cap_licensed_document(d) for d in documents]
             ctx.calls.append(
                 RetrievalCall(
                     tool_name=tool_name,
-                    documents=extract_documents_from_retrieval_payload(response),
+                    documents=documents,
                     latencies=dict(latencies) if isinstance(latencies, dict) else {},
                     collections=dict(collections or {}),
                 )
