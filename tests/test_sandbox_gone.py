@@ -12,6 +12,7 @@ import pytest
 
 opensandbox_config = pytest.importorskip("opensandbox.config")
 
+from src.services.agents.core import sandbox as sandbox_module  # noqa: E402
 from src.services.agents.core.sandbox import (  # noqa: E402
     SandboxGone,
     _attach_opensandbox,
@@ -114,7 +115,8 @@ def test_a_not_found_line_outside_attach_keeps_its_warning(caplog):
 
 
 # Readiness retries: the SDK transport logs every retry at WARNING while execd
-# starts. A retry is expected; only retries that run out are a warning.
+# starts. Inside our create and connect a retry is expected and only retries
+# that run out are a warning; elsewhere a retry keeps its WARNING.
 
 _RETRY_LOGGER = "opensandbox.transport._sync_retry"
 
@@ -131,6 +133,54 @@ def _retrying_transport(handler, max_retries=3):
 
 
 def test_a_readiness_retry_that_recovers_logs_info_not_warning(caplog):
+    # Inside our create or connect call, where the SDK runs the readiness ping.
+    quiet = sandbox_module._quiet_retries.set(True)
+    try:
+        _flaky_get(caplog)
+    finally:
+        sandbox_module._quiet_retries.reset(quiet)
+
+    retried = [r for r in caplog.records if r.name == _RETRY_LOGGER]
+    assert len(retried) == 1
+    assert retried[0].getMessage().startswith("retrying GET ")
+    assert retried[0].levelname == "INFO"
+    assert _warnings(caplog) == []
+
+
+def test_a_retry_inside_a_tool_call_keeps_its_warning(caplog):
+    # A command run or an upload mid-turn: an outage there must leave a WARNING.
+    _flaky_get(caplog)
+
+    retried = [r for r in caplog.records if r.name == _RETRY_LOGGER]
+    assert [r.levelname for r in retried] == ["WARNING"]
+
+
+def test_a_reloaded_module_replaces_its_filters():
+    logger_name = "eve.test.sandbox_filters"
+    target = logging.getLogger(logger_name)
+
+    class _RetryAsInfoFilter(logging.Filter):  # the class from an older load
+        pass
+
+    old = _RetryAsInfoFilter()
+    setattr(old, sandbox_module._FILTER_MARK, "_RetryAsInfoFilter")
+    target.addFilter(old)
+    unrelated = logging.Filter()
+    target.addFilter(unrelated)
+    try:
+        new = sandbox_module._RetryAsInfoFilter()
+        sandbox_module._add_filter_once(logger_name, new)
+        sandbox_module._add_filter_once(logger_name, sandbox_module._RetryAsInfoFilter())
+
+        ours = [f for f in target.filters if hasattr(f, sandbox_module._FILTER_MARK)]
+        assert len(ours) == 1 and old not in target.filters
+        assert unrelated in target.filters
+    finally:
+        for f in list(target.filters):
+            target.removeFilter(f)
+
+
+def _flaky_get(caplog):
     calls = {"n": 0}
 
     def flaky_ping(request: httpx.Request) -> httpx.Response:
@@ -142,12 +192,6 @@ def test_a_readiness_retry_that_recovers_logs_info_not_warning(caplog):
     with caplog.at_level(logging.DEBUG):
         with httpx.Client(transport=_retrying_transport(flaky_ping)) as client:
             assert client.get("http://host.docker.internal:1/proxy/44772/ping").status_code == 200
-
-    retried = [r for r in caplog.records if r.name == _RETRY_LOGGER]
-    assert len(retried) == 1
-    assert retried[0].getMessage().startswith("retrying GET ")
-    assert retried[0].levelname == "INFO"
-    assert _warnings(caplog) == []
 
 
 def test_retries_that_run_out_log_one_warning_with_the_id(monkeypatch, caplog):

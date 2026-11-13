@@ -81,31 +81,45 @@ class _GoneLookupFilter(logging.Filter):
 
 
 # The SDK transport logs each retry at WARNING, also while execd starts and
-# the readiness ping meets a closed connection. A retry is expected. Retries
-# that run out raise, and attach or create logs that one at WARNING.
+# the readiness ping meets a closed connection. Inside our create and connect
+# calls (which run that ping) a retry is expected, and retries that run out
+# raise and are logged once at WARNING by ``_start_opensandbox`` or
+# ``_attach_opensandbox``. Everywhere else (command runs, file uploads inside
+# a tool call) a retry keeps its WARNING, so an outage mid-turn still shows.
 _OPENSANDBOX_RETRY_LOGGERS = (
     "opensandbox.transport._sync_retry",
     "opensandbox.transport._async_retry",
 )
+_quiet_retries: ContextVar[bool] = ContextVar("sandbox_quiet_retries", default=False)
 
 
 class _RetryAsInfoFilter(logging.Filter):
-    """Log the SDK's ``retrying ...`` lines at INFO instead of WARNING."""
+    """Log the SDK's ``retrying ...`` lines at INFO inside create and connect."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno == logging.WARNING and str(record.msg).startswith(
-            "retrying "
+        if (
+            _quiet_retries.get()
+            and record.levelno == logging.WARNING
+            and str(record.msg).startswith("retrying ")
         ):
             record.levelno = logging.INFO
             record.levelname = logging.getLevelName(logging.INFO)
         return True
 
 
+# Marks our filters on the SDK loggers. A module reload (local development)
+# builds new ContextVars, so an older instance is replaced, not kept.
+_FILTER_MARK = "_eve_sandbox_filter"
+
+
 def _add_filter_once(name: str, filter_: logging.Filter) -> None:
     target = logging.getLogger(name)
     kind = type(filter_).__name__
-    if not any(type(f).__name__ == kind for f in target.filters):
-        target.addFilter(filter_)
+    for old in list(target.filters):
+        if getattr(old, _FILTER_MARK, None) == kind:
+            target.removeFilter(old)
+    setattr(filter_, _FILTER_MARK, kind)
+    target.addFilter(filter_)
 
 
 _add_filter_once(_OPENSANDBOX_SDK_LOGGER, _GoneLookupFilter())
@@ -427,6 +441,7 @@ def _start_opensandbox() -> SandboxSession:
     # protocol must raise SandboxError even when the package is not installed.
     image, config = _opensandbox_connection()
     from opensandbox import SandboxSync
+    quiet = _quiet_retries.set(True)
     try:
         remote = SandboxSync.create(
             image,
@@ -439,6 +454,8 @@ def _start_opensandbox() -> SandboxSession:
             type(exc).__name__,
         )
         raise
+    finally:
+        _quiet_retries.reset(quiet)
     return _opensandbox_session(remote)
 
 
@@ -448,6 +465,7 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
     sandbox_id = record["sandbox_id"]
     # Set and reset in this thread: the SDK logs from the same call stack.
     token = _expect_gone.set(True)
+    quiet = _quiet_retries.set(True)
     try:
         remote = SandboxSync.connect(sandbox_id, connection_config=config)
     except SandboxGone:
@@ -462,6 +480,7 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
         )
         raise
     finally:
+        _quiet_retries.reset(quiet)
         _expect_gone.reset(token)
     return _opensandbox_session(remote, skills_digest=record.get("skills_digest", ""))
 

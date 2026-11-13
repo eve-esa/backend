@@ -83,7 +83,10 @@ def _install(monkeypatch, clock):
         return _session(state, sandbox_id, provider, "digest-1", metadata)
 
     def attach(record):
-        if state["dead"]:
+        dead = state["dead"]
+        if isinstance(dead, BaseException):
+            raise SandboxGone("dead") from dead
+        if dead:
             raise SandboxGone("dead")
         transient = state.get("transient")
         if isinstance(transient, BaseException):
@@ -308,8 +311,9 @@ async def test_a_gone_sandbox_drops_its_entry_and_a_new_one_starts(
     assert again is not None
     assert again.fresh is True
     assert again.session.sandbox_id != lease.session.sandbox_id
-    # Gone is not a failure: no stop call for a sandbox that is not there.
-    assert state["killed"] == []
+    # Gone is not a failure, but the stop still runs: a wrong "gone" verdict
+    # must not leave a running sandbox behind.
+    assert state["killed"] == [lease.session.sandbox_id]
     record = await sandbox_store.get("c1")
     assert record is not None
     assert record["sandbox_id"] == again.session.sandbox_id
@@ -320,8 +324,28 @@ async def test_a_gone_sandbox_drops_its_entry_and_a_new_one_starts(
     assert gone[0].exc_info is None
     assert gone[0].getMessage() == (
         f"sandbox.gone conversation_id=c1 provider=agentcore "
-        f"sandbox_id={lease.session.sandbox_id}"
+        f"sandbox_id={lease.session.sandbox_id} reason=provider_status"
     )
+
+
+class ResourceNotFoundException(Exception):
+    """Stands for the boto3 error a wrong interpreter identifier also raises."""
+
+
+async def test_a_gone_line_names_the_provider_error(monkeypatch, clock, caplog):
+    state = _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+    state["dead"] = ResourceNotFoundException("no such session")
+
+    with caplog.at_level("DEBUG"):
+        await acquire_sandbox("c1", None)
+
+    (gone,) = [r for r in caplog.records if r.getMessage().startswith("sandbox.gone")]
+    assert gone.getMessage().endswith("reason=ResourceNotFoundException")
+    assert "no such session" not in gone.getMessage()
+    assert state["killed"] == [lease.session.sandbox_id]
 
 
 async def test_an_attach_timeout_keeps_the_entry_and_logs_no_gone(
