@@ -71,7 +71,11 @@ from src.services.agents.core.sandbox import (
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
-from src.services.agents.core.skills import resolve_skills_root, skills_root_key
+from src.services.agents.core.skills import (
+    cached_skills_root_key,
+    resolve_skills_root,
+    skills_root_key,
+)
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
@@ -1600,12 +1604,18 @@ def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]
     ]
 
 
+# Stands for a checkpoint that exists but could not be read. The thread may
+# hold a stale skill list, so the skills check lists again.
+_CHECKPOINT_UNREADABLE = object()
+
+
 async def _read_checkpoint(checkpointer: Any, conversation_id: str) -> tuple[bool, Any]:
     """Whether this conversation already has a checkpoint, and the tuple read.
 
     A lookup error is treated as "the thread is there": seeding on top of a
-    thread that could not be read would duplicate it. The tuple is ``None``
-    then, and when no checkpointer or no checkpoint exists.
+    thread that could not be read would duplicate it. The tuple is then
+    ``_CHECKPOINT_UNREADABLE``; it is ``None`` when no checkpointer or no
+    checkpoint exists.
     """
     if checkpointer is None:
         return False, None
@@ -1617,7 +1627,7 @@ async def _read_checkpoint(checkpointer: Any, conversation_id: str) -> tuple[boo
         logger.warning(
             "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
         )
-        return True, None
+        return True, _CHECKPOINT_UNREADABLE
     return found is not None, found
 
 
@@ -1628,6 +1638,30 @@ _SKILLS_KEY_METADATA = "eve_skills_key"
 # Bound on the wait for the local tree scan, not on the scan: a thread cannot
 # be cancelled, so a late scan finishes in the background and fills the cache.
 _SKILLS_CHECK_TIMEOUT_S = 2.0
+# Checks that ran out of time in this process. Under load the wait mostly
+# measures the default executor queue, so each one is an INFO line with the
+# running count, not a WARNING per turn.
+_skills_check_timeouts = 0
+
+
+def _stored_skills_key(checkpoint: Any) -> Optional[str]:
+    metadata = getattr(checkpoint, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(_SKILLS_KEY_METADATA)
+    return value if isinstance(value, str) and value else None
+
+
+def _has_skills_load_errors(checkpoint: Any) -> bool:
+    """True when the last listing on this thread reported errors."""
+    state = getattr(checkpoint, "checkpoint", None)
+    if not isinstance(state, dict):
+        return False
+    values = state.get("channel_values")
+    if not isinstance(values, dict):
+        return False
+    errors = values.get("skills_load_errors")
+    return isinstance(errors, list) and bool(errors)
 
 
 async def _skills_reload_input(
@@ -1647,47 +1681,62 @@ async def _skills_reload_input(
     equal keys keep the list. A key goes missing when the last turn ran with
     no skills tree (no middleware, nothing recorded, the old list still in
     state) or on a thread from before this check: one extra listing then.
-    With no checkpoint there is nothing to reload: the middleware lists anyway.
+    Also reloaded: a checkpoint that could not be read, and a thread whose
+    last listing reported errors (a failed listing would otherwise stick to
+    the thread until the key changes). With no checkpoint there is nothing to
+    reload: the middleware lists anyway.
 
-    A scan failure keeps today's behaviour (no reload) and re-records the
-    previous key, so a change is still caught on the next turn. Known gaps,
-    both corrected on the next turn: a read from a lagging secondary, and two
-    turns on one thread at once, where the older one can write the old list
-    back.
+    A scan failure or timeout keeps the list and re-records the previous key,
+    so a change is still caught on a later turn; with no previous key nothing
+    is recorded and the next turn reloads. Known gaps: a read from a lagging
+    secondary can return an older checkpoint whose key equals this turn's
+    key (a change made and reverted in between), and two turns on one thread
+    at once can write the old list back; both stay until the key changes
+    again.
     """
     if skills_root is None or not conversation_id:
         return {}, {}
-    stored: Optional[str] = None
-    wanted: Optional[str] = None
-    try:
-        metadata = getattr(checkpoint, "metadata", None)
-        if isinstance(metadata, dict):
-            value = metadata.get(_SKILLS_KEY_METADATA)
-            stored = value if isinstance(value, str) and value else None
-        wanted = await asyncio.wait_for(
-            asyncio.to_thread(skills_root_key, skills_root),
-            timeout=_SKILLS_CHECK_TIMEOUT_S,
-        )
-    except TimeoutError:
-        logger.warning(
-            "skills reload check: scan still running after %.1f s, kept the list "
-            "conversation=%s",
-            _SKILLS_CHECK_TIMEOUT_S,
-            conversation_id,
-        )
-    except Exception as exc:
-        logger.warning(
-            "skills reload check failed, kept the list conversation=%s error=%s",
-            conversation_id,
-            type(exc).__name__,
-        )
+    global _skills_check_timeouts
+    unreadable = checkpoint is _CHECKPOINT_UNREADABLE
+    stored = None if unreadable else _stored_skills_key(checkpoint)
+    wanted = cached_skills_root_key(skills_root)
+    if wanted is None:
+        try:
+            wanted = await asyncio.wait_for(
+                asyncio.to_thread(skills_root_key, skills_root),
+                timeout=_SKILLS_CHECK_TIMEOUT_S,
+            )
+        except TimeoutError:
+            _skills_check_timeouts += 1
+            logger.info(
+                "skills reload check: no key within %.1f s, kept the list "
+                "conversation=%s timeouts=%d",
+                _SKILLS_CHECK_TIMEOUT_S,
+                conversation_id,
+                _skills_check_timeouts,
+            )
+        except Exception as exc:
+            logger.warning(
+                "skills reload check failed, kept the list conversation=%s error=%s",
+                conversation_id,
+                type(exc).__name__,
+            )
     recorded = wanted or stored
     metadata_out = {_SKILLS_KEY_METADATA: recorded} if recorded else {}
-    if checkpoint is None or wanted is None or wanted == stored:
+    if checkpoint is None or wanted is None:
+        return {}, metadata_out
+    if unreadable:
+        reason = "unreadable_checkpoint"
+    elif _has_skills_load_errors(checkpoint):
+        reason = "load_errors"
+    elif stored is None:
+        reason = "not_recorded"
+    elif wanted != stored:
+        reason = "changed"
+    else:
         return {}, metadata_out
     logger.info(
-        "skills changed or not recorded since the last turn conversation=%s",
-        conversation_id,
+        "skills reload conversation=%s reason=%s", conversation_id, reason
     )
     return {"skills_metadata": None}, metadata_out
 
@@ -1805,7 +1854,8 @@ async def _prepare_agent_context(
     A deep turn with a checkpoint uses that thread and no rolling summary.
     Without one, the stored turns are seeded into the new thread. ``simple``
     and ``react`` keep the rolling summary and the one-turn window. The
-    checkpoint tuple is the deep turn's one read of the thread, or ``None``.
+    checkpoint tuple is the deep turn's one read of the thread, ``None``, or
+    ``_CHECKPOINT_UNREADABLE`` when the read failed.
     """
     history, summary = await _fetch_conversation_context(conversation_id)
     prior: List[Any] = []

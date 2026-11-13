@@ -142,6 +142,9 @@ class _World:
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     skills_module._tree_key.cache_clear()
+    monkeypatch.setattr(skills_module, "_ROOT_KEYS", {})
+    # Several tests edit an unaddressed tree in place between turns.
+    monkeypatch.setattr(skills_module, "_UNADDRESSED_KEY_TTL_S", 0)
     return _World(tmp_path, monkeypatch)
 
 
@@ -351,12 +354,100 @@ async def test_a_slow_scan_is_bounded_and_finishes_in_the_background(
     assert reload == {}
     assert metadata == {KEY: "old"}
     (record,) = [r for r in caplog.records if "skills reload check" in r.getMessage()]
-    assert record.levelno == logging.WARNING
+    # Under load the wait measures the executor queue: no WARNING per turn.
+    assert record.levelno == logging.INFO
     assert record.exc_info is None
-    assert "still running" in record.getMessage()
+    assert "timeouts=" in record.getMessage()
     assert not finished.is_set()
     release.set()
     assert await asyncio.to_thread(finished.wait, 5)
+
+
+async def test_a_slow_scan_without_a_stored_key_records_nothing(world, monkeypatch):
+    # Nothing to re-record: the next turn finds no key and reloads.
+    monkeypatch.setattr(runner, "skills_root_key", lambda _root: threading.Event().wait(1))
+    monkeypatch.setattr(runner, "_SKILLS_CHECK_TIMEOUT_S", 0.01)
+
+    reload, metadata = await _skills_reload_input(
+        SimpleNamespace(metadata={}), THREAD, world.root()
+    )
+
+    assert reload == {} and metadata == {}
+
+
+async def test_an_unreadable_checkpoint_reloads_and_records_the_key(world):
+    root = world.root(_skill("roll-dice", "Roll dice."))
+
+    reload, metadata = await _skills_reload_input(
+        runner._CHECKPOINT_UNREADABLE, THREAD, root
+    )
+
+    assert reload == {"skills_metadata": None}
+    assert metadata == {KEY: skills_root_key(root)}
+
+
+async def test_an_unreadable_checkpoint_and_no_key_records_nothing(world, monkeypatch):
+    def _boom(_root):
+        raise OSError("disk")
+
+    monkeypatch.setattr(runner, "skills_root_key", _boom)
+
+    reload, metadata = await _skills_reload_input(
+        runner._CHECKPOINT_UNREADABLE, THREAD, world.root()
+    )
+
+    assert reload == {}
+    assert metadata == {}, "no key recorded, so the next turn reloads"
+
+
+async def test_a_listing_with_errors_reloads_on_the_next_turn(world):
+    root = world.root(_skill("roll-dice", "Roll dice."))
+    key = skills_root_key(root)
+    failed = SimpleNamespace(
+        metadata={KEY: key},
+        checkpoint={"channel_values": {"skills_metadata": [], "skills_load_errors": ["x"]}},
+    )
+    clean = SimpleNamespace(
+        metadata={KEY: key},
+        checkpoint={"channel_values": {"skills_metadata": [], "skills_load_errors": []}},
+    )
+
+    assert (await _skills_reload_input(failed, THREAD, root))[0] == {"skills_metadata": None}
+    assert (await _skills_reload_input(clean, THREAD, root))[0] == {}
+
+
+async def test_an_addressed_tree_is_scanned_once(world, monkeypatch):
+    root = world.root(_skill("roll-dice", "Roll dice."))
+    calls: list = []
+    real = runner.skills_root_key
+
+    def _counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(runner, "skills_root_key", _counting)
+    found = SimpleNamespace(metadata={KEY: "old"})
+
+    first = await _skills_reload_input(found, THREAD, root)
+    second = await _skills_reload_input(found, THREAD, root)
+
+    assert first == second
+    assert len(calls) == 1
+
+
+def test_an_unaddressed_root_is_scanned_again_after_the_ttl(
+    world, monkeypatch, tmp_path
+):
+    root = tmp_path / "packaged-live"
+    _write(root / "good", "---\nname: good\ndescription: Fine.\n---\n")
+    monkeypatch.setattr(skills_module, "_UNADDRESSED_KEY_TTL_S", 30.0)
+    clock = [1000.0]
+    monkeypatch.setattr(skills_module.time, "monotonic", lambda: clock[0])
+
+    key = skills_root_key(root)
+    assert skills_module.cached_skills_root_key(root) == key
+    clock[0] += 31
+    assert skills_module.cached_skills_root_key(root) is None
 
 
 # ─── the runner: one checkpoint read, reload and key on both paths ────────────
@@ -455,4 +546,19 @@ async def test_streamed_turn_reads_once_and_sends_the_reload(world, monkeypatch)
         pass
 
     assert graph.inputs, "the stream never reached the graph"
+    _assert_turn(graph, checkpointer, root)
+
+
+async def test_a_failed_checkpoint_read_reloads_the_list(world, monkeypatch):
+    # The thread is treated as there; its list may be stale, so list again
+    # instead of recording this turn's key over it.
+    root = world.root(_skill("roll-dice", "Roll dice."))
+    graph = _RecordingGraph(stream=False)
+    checkpointer = _patch_runner(monkeypatch, graph, root)
+    checkpointer.aget_tuple = AsyncMock(side_effect=RuntimeError("primary down"))
+
+    await runner.generate_answer_agentic(
+        GenerationRequest(query="hi", agent="deep"), user_id="u1", conversation_id="c1"
+    )
+
     _assert_turn(graph, checkpointer, root)
