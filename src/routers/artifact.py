@@ -375,10 +375,14 @@ async def delete_owned_artifact(
         Confirmation message.
 
     Raises:
-        HTTPException: 404 if missing; 403 if owned by another user; 503 with
+        HTTPException: 404 if missing or owned by another user; 503 with
         ``detail.code`` ``artifact_delete_failed`` if storage refused.
     """
-    artifact = await get_owned_artifact(artifact_id, requesting_user)
+    # Primary: a delete right after an upload or an attach must find the row.
+    # Another user's id answers 404 like a missing one.
+    artifact = await Artifact.find_by_id_on_primary(artifact_id)
+    if not artifact or artifact.user_id != requesting_user.id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
     try:
         await delete_artifact(artifact)
     except Exception as exc:  # noqa: BLE001 - mapped to a retryable 503

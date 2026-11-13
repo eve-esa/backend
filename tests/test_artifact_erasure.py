@@ -163,13 +163,39 @@ async def test_delete_of_a_foreign_artifact_is_refused_and_keeps_it(async_client
     try:
         resp = await async_client.delete(f"/artifacts/{artifact.id}", headers=_auth(intr_token))
 
-        # 403 today; 404 once foreign ids answer as missing.
-        assert resp.status_code in (403, 404)
+        # 404, like a missing id: the answer never confirms someone else's file.
+        assert resp.status_code == 404
         assert await Artifact.find_by_id(artifact.id) is not None
         assert artifact.key in fake.objects
     finally:
         await Artifact.delete_many({"user_id": owner.id})
         await cleanup_models([owner, intruder])
+
+
+async def test_owner_delete_reads_the_row_on_the_primary(async_client, monkeypatch):
+    """A delete right after an upload must not miss the row on a lagging secondary."""
+    fake = _use(monkeypatch, FakeStorage())
+    user, token = await create_test_user_and_token()
+    artifact = await _seed(fake, user.id)
+    primary = Artifact.get_primary_collection()
+
+    class _LaggingSecondary:
+        def find_one(self, *args, **kwargs):
+            return primary.find_one({"_id": None})
+
+        def __getattr__(self, name):
+            return getattr(primary, name)
+
+    monkeypatch.setattr(Artifact, "get_collection", classmethod(lambda cls: _LaggingSecondary()))
+    monkeypatch.setattr(Artifact, "get_primary_collection", classmethod(lambda cls: primary))
+    try:
+        resp = await async_client.delete(f"/artifacts/{artifact.id}", headers=_auth(token))
+        assert resp.status_code == 200, resp.text
+        assert artifact.key not in fake.objects
+    finally:
+        monkeypatch.undo()
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
 
 
 async def test_delete_of_a_missing_artifact_is_404(async_client, monkeypatch):
@@ -288,8 +314,9 @@ async def test_mcp_output_shown_in_another_conversation_survives(async_client, m
     fake = _use(monkeypatch, FakeStorage())
     user, token = await create_test_user_and_token()
     conversation, artifact, _ = await _conversation_with_files(fake, user.id)
+    second = await Conversation.create(user_id=user.id, name="Second")
     reuse = await Message.create(
-        conversation_id="second-conv", input="q", output="a", artifact_ids=[artifact.id]
+        conversation_id=second.id, input="q", output="a", artifact_ids=[artifact.id]
     )
     try:
         resp = await async_client.delete(f"/conversations/{conversation.id}", headers=_auth(token))
@@ -297,11 +324,32 @@ async def test_mcp_output_shown_in_another_conversation_survives(async_client, m
         assert resp.status_code == 200
         kept = await Artifact.find_by_id(artifact.id)
         assert kept is not None
-        assert kept.conversation_id == "second-conv"
+        assert kept.conversation_id == second.id
         assert artifact.key in fake.objects
     finally:
         await Artifact.delete_many({"user_id": user.id})
-        await cleanup_models([user, conversation, reuse])
+        await cleanup_models([user, conversation, second, reuse])
+
+
+async def test_a_foreign_users_message_does_not_keep_the_file(async_client, monkeypatch):
+    """Only the owner's conversations count as showing the file elsewhere."""
+    fake = _use(monkeypatch, FakeStorage())
+    user, token = await create_test_user_and_token()
+    stranger, _ = await create_test_user_and_token()
+    conversation, artifact, _ = await _conversation_with_files(fake, user.id)
+    foreign = await Conversation.create(user_id=stranger.id, name="Not yours")
+    copied = await Message.create(
+        conversation_id=foreign.id, input="q", output="a", artifact_ids=[artifact.id]
+    )
+    try:
+        resp = await async_client.delete(f"/conversations/{conversation.id}", headers=_auth(token))
+
+        assert resp.status_code == 200
+        assert await Artifact.find_by_id(artifact.id) is None
+        assert artifact.key not in fake.objects
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, stranger, conversation, foreign, copied])
 
 
 async def test_upload_attached_in_two_conversations_survives_the_delete_of_one(
@@ -344,8 +392,9 @@ async def test_shared_file_check_reads_the_primary(monkeypatch):
     fake = _use(monkeypatch, FakeStorage())
     user, _ = await create_test_user_and_token()
     conversation, artifact, _ = await _conversation_with_files(fake, user.id)
+    second = await Conversation.create(user_id=user.id, name="Second")
     reuse = await Message.create(
-        conversation_id="second-conv",
+        conversation_id=second.id,
         input="q",
         output="a",
         attachments=[{"image_id": artifact.id}],
@@ -365,33 +414,196 @@ async def test_shared_file_check_reads_the_primary(monkeypatch):
     monkeypatch.setattr(Message, "get_collection", classmethod(lambda cls: _LaggingSecondary()))
     monkeypatch.setattr(Message, "get_primary_collection", classmethod(lambda cls: primary))
     try:
-        found = await artifact_cleanup._other_conversations([artifact.id], conversation.id)
-        assert found == {artifact.id: "second-conv"}
+        found = await artifact_cleanup._other_conversations(
+            user.id, [artifact.id], conversation.id
+        )
+        assert found == {artifact.id: second.id}
     finally:
         monkeypatch.undo()
         await Artifact.delete_many({"user_id": user.id})
-        await cleanup_models([user, conversation, reuse])
+        await cleanup_models([user, conversation, second, reuse])
 
 
-async def test_storage_failure_warns_with_ids_and_still_deletes(async_client, monkeypatch, caplog):
-    fake = _use(monkeypatch, _FailingDeleteStorage())
+async def _messages(conversation_id):
+    return await Message.count_documents({"conversation_id": conversation_id})
+
+
+def _assert_incomplete(resp):
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"]["code"] == "conversation_delete_incomplete"
+
+
+async def test_s3_error_on_an_artifact_keeps_the_conversation_and_answers_503(
+    async_client, monkeypatch, caplog
+):
+    """The object delete fails; tool results are still removed; a retry can finish."""
+
+    class _ObjectDeleteDenied(FakeStorage):
+        async def delete_object(self, key):
+            raise _FailingDeleteStorage()._denied("DeleteObject")
+
+    fake = _use(monkeypatch, _ObjectDeleteDenied())
     user, token = await create_test_user_and_token()
-    conversation, artifact, _ = await _conversation_with_files(fake, user.id)
+    conversation, artifact, prefix = await _conversation_with_files(fake, user.id)
+    await Message.create(conversation_id=conversation.id, input="q", output="a")
     try:
-        with caplog.at_level(logging.WARNING, logger=LOGGER):
+        with caplog.at_level(logging.WARNING):
             resp = await async_client.delete(
                 f"/conversations/{conversation.id}", headers=_auth(token)
             )
 
-        assert resp.status_code == 200
-        assert await Conversation.find_by_id(conversation.id) is None
-        # The row stays with its object, so a later sweep can still find both.
+        _assert_incomplete(resp)
+        assert await Conversation.find_by_id(conversation.id) is not None
+        assert await _messages(conversation.id) == 1
+        # The row stays with its object, so the retry still finds both.
         assert await Artifact.find_by_id(artifact.id) is not None
+        assert artifact.key in fake.objects
+        assert not [k for k in fake.objects if k.startswith(prefix)]
         records = [r for r in caplog.records if r.name == LOGGER]
         assert records and all(r.levelno == logging.WARNING for r in records)
         assert conversation.id in caplog.text and artifact.id in caplog.text
         assert "secret-key-material" not in caplog.text
         assert "pic.png" not in caplog.text
+    finally:
+        await Message.delete_many({"conversation_id": conversation.id})
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_s3_error_on_tool_results_keeps_the_conversation_and_answers_503(
+    async_client, monkeypatch
+):
+    class _PrefixDeleteDenied(FakeStorage):
+        async def delete_prefix(self, prefix, max_keys=artifact_cleanup.PREFIX_DELETE_MAX_KEYS):
+            raise _FailingDeleteStorage()._denied("DeleteObjects")
+
+    fake = _use(monkeypatch, _PrefixDeleteDenied())
+    user, token = await create_test_user_and_token()
+    conversation, artifact, prefix = await _conversation_with_files(fake, user.id)
+    try:
+        resp = await async_client.delete(f"/conversations/{conversation.id}", headers=_auth(token))
+
+        _assert_incomplete(resp)
+        assert await Conversation.find_by_id(conversation.id) is not None
+        # Independent: the artifact went even though the tool results did not.
+        assert await Artifact.find_by_id(artifact.id) is None
+        assert [k for k in fake.objects if k.startswith(prefix)]
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_mongo_error_in_the_cascade_keeps_the_conversation_and_still_removes_tool_results(
+    async_client, monkeypatch, caplog
+):
+    fake = _use(monkeypatch, FakeStorage())
+    user, token = await create_test_user_and_token()
+    conversation, artifact, prefix = await _conversation_with_files(fake, user.id)
+    await Message.create(conversation_id=conversation.id, input="q", output="a")
+
+    async def _mongo_down(*args, **kwargs):
+        raise RuntimeError("connection reset with user text inside")
+
+    monkeypatch.setattr(artifact_cleanup, "_other_conversations", _mongo_down)
+    try:
+        with caplog.at_level(logging.WARNING):
+            resp = await async_client.delete(
+                f"/conversations/{conversation.id}", headers=_auth(token)
+            )
+
+        _assert_incomplete(resp)
+        assert await Conversation.find_by_id(conversation.id) is not None
+        assert await _messages(conversation.id) == 1
+        assert await Artifact.find_by_id(artifact.id) is not None
+        assert not [k for k in fake.objects if k.startswith(prefix)]
+        assert "user text inside" not in caplog.text
+        assert "user text inside" not in resp.text
+    finally:
+        await Message.delete_many({"conversation_id": conversation.id})
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_deadline_on_the_artifacts_still_removes_tool_results_and_answers_503(
+    async_client, monkeypatch, caplog
+):
+    fake = _use(monkeypatch, FakeStorage())
+    user, token = await create_test_user_and_token()
+    conversation, artifact, prefix = await _conversation_with_files(fake, user.id)
+
+    async def _hangs(*args, **kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(artifact_cleanup, "_other_conversations", _hangs)
+    monkeypatch.setattr(artifact_cleanup, "CASCADE_TIMEOUT_S", 0.2)
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            resp = await async_client.delete(
+                f"/conversations/{conversation.id}", headers=_auth(token)
+            )
+
+        assert time.monotonic() - started < 5
+        _assert_incomplete(resp)
+        assert "reason=timeout" in caplog.text
+        assert await Conversation.find_by_id(conversation.id) is not None
+        assert await Artifact.find_by_id(artifact.id) is not None
+        assert not [k for k in fake.objects if k.startswith(prefix)]
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_a_retry_after_a_failed_cascade_finishes_the_job(async_client, monkeypatch):
+    user, token = await create_test_user_and_token()
+    fake = FakeStorage()
+    conversation, artifact, prefix = await _conversation_with_files(fake, user.id)
+    _use(monkeypatch, _FailingDeleteStorage())
+    try:
+        first = await async_client.delete(f"/conversations/{conversation.id}", headers=_auth(token))
+        _assert_incomplete(first)
+
+        _use(monkeypatch, fake)
+        second = await async_client.delete(
+            f"/conversations/{conversation.id}", headers=_auth(token)
+        )
+
+        assert second.status_code == 200
+        assert await Conversation.find_by_id(conversation.id) is None
+        assert await Artifact.find_by_id(artifact.id) is None
+        assert not fake.objects
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_the_cascade_pages_past_one_batch(monkeypatch):
+    fake = _use(monkeypatch, FakeStorage())
+    monkeypatch.setattr(artifact_cleanup, "CASCADE_BATCH_SIZE", 2)
+    user, _ = await create_test_user_and_token()
+    conversation = await Conversation.create(user_id=user.id, name="Many")
+    for i in range(5):
+        await _seed(fake, user.id, conversation_id=conversation.id, filename=f"f{i}.png")
+    try:
+        await artifact_cleanup.delete_conversation_artifacts(user.id, conversation.id)
+
+        assert await Artifact.count_documents({"conversation_id": conversation.id}) == 0
+        assert not fake.objects
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user, conversation])
+
+
+async def test_a_capped_tool_result_delete_reports_itself_incomplete(monkeypatch):
+    """Tool results have no row: a run that hit the key cap must ask for a retry."""
+    fake = _use(monkeypatch, FakeStorage())
+    monkeypatch.setattr(artifact_cleanup, "PREFIX_DELETE_MAX_KEYS", 1)
+    user, _ = await create_test_user_and_token()
+    conversation, _, prefix = await _conversation_with_files(fake, user.id)
+    try:
+        with pytest.raises(artifact_cleanup.ArtifactCascadeIncomplete) as err:
+            await artifact_cleanup.delete_conversation_artifacts(user.id, conversation.id)
+        assert err.value.failed == ["tool_results"]
     finally:
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user, conversation])
@@ -427,7 +639,8 @@ async def test_a_hung_storage_thread_is_bounded(monkeypatch, caplog):
     try:
         started = time.monotonic()
         with caplog.at_level(logging.WARNING, logger=LOGGER):
-            await artifact_cleanup.delete_conversation_artifacts("u1", "c1")
+            with pytest.raises(artifact_cleanup.ArtifactCascadeIncomplete):
+                await artifact_cleanup.delete_conversation_artifacts("u1", "c1")
         assert time.monotonic() - started < 2
         assert "reason=timeout" in caplog.text
     finally:

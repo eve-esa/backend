@@ -18,19 +18,33 @@ import asyncio
 import logging
 
 from src.database.models.artifact import Artifact
+from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.services.agents.core.tool_results import tool_result_prefix
 from src.services.storage import storage_service
 
 logger = logging.getLogger(__name__)
 
-# The whole cascade, so a hung S3 call cannot hold a conversation delete.
-# The threadpool call keeps running (bounded by the S3 client timeouts), the
-# request does not wait for it.
+# Each half of the cascade (artifacts, tool results) has its own deadline,
+# so a hung S3 call cannot hold a conversation delete. The threadpool call
+# keeps running (bounded by the S3 client timeouts), the request does not
+# wait for it.
 CASCADE_TIMEOUT_S = 10
-# Rows read per conversation and objects removed from its tool-result prefix.
-CASCADE_MAX_ARTIFACTS = 1000
+# Rows read per round; the cascade reads rounds until none is left.
+CASCADE_BATCH_SIZE = 1000
 PREFIX_DELETE_MAX_KEYS = 10_000
+
+
+class ArtifactCascadeIncomplete(Exception):
+    """A conversation's files were not all erased; a retry finishes the job.
+
+    ``failed`` names the halves that did not finish: ``artifacts``,
+    ``tool_results`` or both.
+    """
+
+    def __init__(self, failed: list[str]):
+        super().__init__(",".join(failed))
+        self.failed = failed
 
 
 def _referencing(artifact_ids: list[str]) -> dict:
@@ -80,76 +94,118 @@ async def delete_artifact(artifact: Artifact) -> None:
 
 
 async def delete_conversation_artifacts(user_id: str, conversation_id: str) -> None:
-    """Remove a conversation's artifacts and offloaded tool results. Never raises.
+    """Remove a conversation's artifacts and offloaded tool results.
 
-    An artifact a message in another conversation still shows (as a tool
-    output or as an attached upload) is kept and moved to that conversation,
-    so a later delete of that one removes it. Every failure is a WARNING with
-    ids only; the conversation delete goes on. Safe to run twice: a second
-    run finds nothing to do.
+    The two halves run side by side, each with its own deadline, so one that
+    fails or hangs never skips the other. An artifact a message in another of
+    the owner's conversations still shows (as a tool output or as an attached
+    upload) is kept and moved to that conversation, so a later delete of that
+    one removes it. Every failure is a WARNING with ids only.
+
+    Safe to run twice: a second run finds nothing to do, so the caller keeps
+    the conversation and asks for a retry.
+
+    Raises:
+        ArtifactCascadeIncomplete: when either half failed or ran out of time.
     """
+    results = await asyncio.gather(
+        _bounded("artifacts", _delete_artifacts, user_id, conversation_id),
+        _bounded("tool_results", _delete_tool_results, user_id, conversation_id),
+    )
+    failed = [kind for kind, ok in results if not ok]
+    if failed:
+        raise ArtifactCascadeIncomplete(failed)
+
+
+async def _bounded(kind: str, step, user_id: str, conversation_id: str) -> tuple[str, bool]:
+    """Run one half of the cascade under its deadline; True when it finished."""
     try:
         async with asyncio.timeout(CASCADE_TIMEOUT_S):
-            await _delete_artifacts(user_id, conversation_id)
-            await _delete_tool_results(user_id, conversation_id)
+            return kind, await step(user_id, conversation_id)
     except TimeoutError:
         logger.warning(
-            "artifact.cascade_failed reason=timeout user=%s conversation=%s",
+            "artifact.cascade_failed reason=timeout kind=%s user=%s conversation=%s",
+            kind,
             user_id,
             conversation_id,
         )
-    except Exception as exc:  # noqa: BLE001 - best effort, logged
+    except Exception as exc:  # noqa: BLE001 - reported to the caller, logged
         logger.warning(
-            "artifact.cascade_failed user=%s conversation=%s error=%s",
+            "artifact.cascade_failed kind=%s user=%s conversation=%s error=%s",
+            kind,
             user_id,
             conversation_id,
             type(exc).__name__,
         )
+    return kind, False
 
 
-async def _delete_artifacts(user_id: str, conversation_id: str) -> None:
-    # Primary: an attach a moment ago may have moved a row here, and a
-    # secondary that has not caught up would miss it.
-    docs = (
-        await Artifact.get_primary_collection()
-        .find({"user_id": user_id, "conversation_id": conversation_id})
-        .limit(CASCADE_MAX_ARTIFACTS)
-        .to_list(length=CASCADE_MAX_ARTIFACTS)
-    )
-    artifacts = [Artifact.from_dict(doc) for doc in docs]
-    if not artifacts:
-        return
-    shown_elsewhere = await _other_conversations(
-        [a.id for a in artifacts], conversation_id
-    )
-    for artifact in artifacts:
-        other = shown_elsewhere.get(artifact.id)
-        try:
-            if other:
-                artifact.conversation_id = other
-                await artifact.save()
-            else:
-                await delete_artifact(artifact)
-        except Exception as exc:  # noqa: BLE001 - best effort, logged
-            logger.warning(
-                "artifact.cascade_failed user=%s conversation=%s artifact=%s error=%s",
-                user_id,
-                conversation_id,
-                artifact.id,
-                type(exc).__name__,
-            )
+async def _delete_artifacts(user_id: str, conversation_id: str) -> bool:
+    """Delete or move every artifact of the conversation; False if one failed.
+
+    Reads rounds of ``CASCADE_BATCH_SIZE`` until none is left. A row whose
+    delete failed stays (with its object), so the loop stops after a round
+    with a failure instead of reading the same rows again.
+    """
+    while True:
+        # Primary: an attach a moment ago may have moved a row here, and a
+        # secondary that has not caught up would miss it.
+        docs = (
+            await Artifact.get_primary_collection()
+            .find({"user_id": user_id, "conversation_id": conversation_id})
+            .limit(CASCADE_BATCH_SIZE)
+            .to_list(length=CASCADE_BATCH_SIZE)
+        )
+        artifacts = [Artifact.from_dict(doc) for doc in docs]
+        if not artifacts:
+            return True
+        shown_elsewhere = await _other_conversations(
+            user_id, [a.id for a in artifacts], conversation_id
+        )
+        complete = True
+        for artifact in artifacts:
+            other = shown_elsewhere.get(artifact.id)
+            try:
+                if other:
+                    artifact.conversation_id = other
+                    await artifact.save()
+                else:
+                    await delete_artifact(artifact)
+            except Exception as exc:  # noqa: BLE001 - reported, logged
+                complete = False
+                logger.warning(
+                    "artifact.cascade_failed user=%s conversation=%s artifact=%s error=%s",
+                    user_id,
+                    conversation_id,
+                    artifact.id,
+                    type(exc).__name__,
+                )
+        if not complete:
+            return False
+        if len(artifacts) < CASCADE_BATCH_SIZE:
+            return True
 
 
 async def _other_conversations(
-    artifact_ids: list[str], conversation_id: str
+    user_id: str, artifact_ids: list[str], conversation_id: str
 ) -> dict[str, str]:
-    """Artifact id to one other conversation whose messages still show it.
+    """Artifact id to another of the owner's conversations whose messages still show it.
 
-    Read on the primary: a secondary that missed a fresh attach would let
-    the cascade delete a file another conversation shows.
+    Only the owner's conversations count, so a message elsewhere that carries
+    the id can never keep the owner's file alive. Read on the primary: a
+    secondary that missed a fresh attach would let the cascade delete a file
+    another conversation shows.
     """
+    owned = (
+        await Conversation.get_primary_collection()
+        .find({"user_id": user_id}, {"_id": 1})
+        .to_list(length=None)
+    )
+    others = [str(doc["_id"]) for doc in owned if str(doc["_id"]) != conversation_id]
+    if not others:
+        return {}
     query = _referencing(artifact_ids)
-    query["conversation_id"] = {"$ne": conversation_id}
+    query["conversation_id"] = {"$in": others}
     cursor = Message.get_primary_collection().find(
         query, {"artifact_ids": 1, "attachments.image_id": 1, "conversation_id": 1}
     )
@@ -168,16 +224,14 @@ async def _other_conversations(
     return found
 
 
-async def _delete_tool_results(user_id: str, conversation_id: str) -> None:
-    try:
-        await storage_service.delete_prefix(
-            tool_result_prefix(user_id, conversation_id),
-            max_keys=PREFIX_DELETE_MAX_KEYS,
-        )
-    except Exception as exc:  # noqa: BLE001 - best effort, logged
-        logger.warning(
-            "artifact.cascade_failed kind=tool_results user=%s conversation=%s error=%s",
-            user_id,
-            conversation_id,
-            type(exc).__name__,
-        )
+async def _delete_tool_results(user_id: str, conversation_id: str) -> bool:
+    """Empty the conversation's tool-result prefix; False when the cap was hit.
+
+    Tool results have no Mongo row: once the conversation is gone nothing
+    lists them again, so a capped run reports itself incomplete.
+    """
+    deleted = await storage_service.delete_prefix(
+        tool_result_prefix(user_id, conversation_id),
+        max_keys=PREFIX_DELETE_MAX_KEYS,
+    )
+    return deleted < PREFIX_DELETE_MAX_KEYS
