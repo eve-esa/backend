@@ -2355,6 +2355,21 @@ class TestSandbox:
         backend.execute("python3 /opt/sandbox/skills/roll-dice/scripts/roll.py")
         assert calls[-1] == "python3 /opt/sandbox/skills/roll-dice/scripts/roll.py"
 
+    def test_tool_artifacts_shell_rewrites_the_absolute_path(self):
+        calls: list[str] = []
+
+        class _Inner:
+            def execute(self, command, *, timeout=None):
+                calls.append(command)
+                if command == "pwd":
+                    return SimpleNamespace(output="/opt/sandbox\n", exit_code=0)
+                return SimpleNamespace(output="ran", exit_code=0)
+
+        backend = _bind_skills_shell(_Inner())
+        command = "cat /tool_artifacts/abc/report.txt"
+        assert backend.execute(command).output == "ran"
+        assert calls == ["pwd", "cat /opt/sandbox/tool_artifacts/abc/report.txt"]
+
     def test_skills_shell_leaves_a_root_cwd_unchanged(self):
         calls: list[str] = []
 

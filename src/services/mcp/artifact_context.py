@@ -14,7 +14,7 @@ import contextlib
 import contextvars
 import logging
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,11 @@ class ArtifactRequestContext:
     conversation_id: Optional[str] = None
     message_id: Optional[str] = None
     collected_artifact_ids: List[str] = field(default_factory=list)
+    # The live sandbox, set by the runner once the turn has one. The
+    # interceptor uploads each new MCP file there. None when the turn has
+    # no sandbox. Not set in ``set_artifact_context``: the sandbox is
+    # acquired later.
+    sandbox_backend: Any = None
 
 
 _artifact_context: contextvars.ContextVar[Optional[ArtifactRequestContext]] = (

@@ -1049,9 +1049,11 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "answer references that file, reproduce the markdown line VERBATIM — "
     "do not rewrite, reformat, translate, or invent a different URL for it. "
     "`/artifacts/{id}` URLs are the ONLY valid way to reference a "
-    "tool-produced file; never emit a `resource://` URI or any other URL "
-    "(e.g. a `storage.googleapis.com` link) for it, even if one appears "
-    "elsewhere in the tool output."
+    "tool-produced file in your answer; never emit a `resource://` URI or "
+    "any other URL (e.g. a `storage.googleapis.com` link) for it, even if "
+    "one appears elsewhere in the tool output. When a tool result is a JSON "
+    "object whose `path` starts with `/tool_artifacts/`, that path is the file "
+    "in the sandbox. Read and run it there."
 )
 
 
@@ -1363,8 +1365,10 @@ def _on_fresh_tool_results(
         if lease is None or not user_id or not conversation_id:
             return
         from src.services.agents.core.tool_results import restore_tool_results
+        from src.services.mcp.tool_artifacts import restore_tool_artifacts
 
         await restore_tool_results(lease.backend, user_id, conversation_id)
+        await restore_tool_artifacts(lease.backend, user_id, conversation_id)
 
     return _restore
 
@@ -1836,6 +1840,7 @@ async def generate_answer_agentic(
         # Append, do not rebuild the list. It may be a _MCPToolsWithClient,
         # and a new list would drop the client strong reference.
         if held is not None:
+            artifact_ctx.sandbox_backend = held.backend
             tools.append(build_display_tool(held.backend))
         graph = _build_react_graph(
             request.llm_type,
@@ -2236,6 +2241,7 @@ async def generate_answer_agentic_stream_helper(
         # Append, do not rebuild the list. It may be a _MCPToolsWithClient,
         # and a new list would drop the client strong reference.
         if sandbox_lease is not None:
+            artifact_ctx.sandbox_backend = sandbox_lease.backend
             tools.append(build_display_tool(sandbox_lease.backend))
         step_start = time.perf_counter()
         graph = _build_react_graph(
