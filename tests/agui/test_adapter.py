@@ -793,3 +793,66 @@ def test_pre_stream_error_table(code, status, header):
     assert error.status_code == status
     assert error.headers == header
     assert error.body["detail"]["code"] == (code if status != 500 else "internal_error")
+
+
+def test_skipped_input_parts_are_one_notice_after_run_started():
+    adapter = AguiAdapter(
+        RunContext(thread_id=T, run_id=R, message_id=M, trace_id=TRACE, graph="react", skipped_parts=("p2", None))
+    )
+    out = list(adapter.start())
+    for frame in [f_status(), f_token("Hi."), f_final("Hi.", endpoint=ENDPOINT)]:
+        out.extend(adapter.adapt(frame))
+    events = [_as_dict(e) for e in out]
+
+    assert _types(events)[:2] == ["RUN_STARTED", "CUSTOM"]
+    notice = events[1]
+    assert notice["name"] == "eve.notice"
+    assert notice["value"]["code"] == "input_part_skipped"
+    assert notice["value"]["partIds"] == ["p2"]
+    assert notice["value"]["count"] == 2
+    _assert_valid(events)
+
+
+def test_sources_for_an_unknown_id_attach_to_the_last_started_call():
+    documents = [{"id": "d1"}]
+    events = _run(
+        [
+            f_status(),
+            f_tool_call("call_a1", "eve_retrieval_retrieve", {"query": "q"}, server="eve_retrieval", label="Searching"),
+            f_tool_result("call_a1", "eve_retrieval_retrieve", "1 document", server="eve_retrieval", duration_ms=5),
+            f_sources("call_nowhere", documents),
+            f_token("Done."),
+            f_final("Done.", endpoint=ENDPOINT),
+        ]
+    )
+
+    assert _one(events, "CUSTOM")["value"] == {"toolCallId": "call_a1", "documents": documents}
+    _assert_valid(events)
+
+
+def test_sources_before_any_call_are_dropped():
+    events = _run([f_status(), f_sources("call_nowhere", [{"id": "d1"}]), f_token("Done."), f_final("Done.", endpoint=ENDPOINT)])
+
+    assert _of(events, "CUSTOM") == []
+    _assert_valid(events)
+
+
+def test_runner_tool_call_id_wins_over_the_raw_id():
+    # The runner gives a retry its own tool_call_id while the model reuses the raw id.
+    first = {**f_tool_call("call_1_x", "ls", {"path": "/"}, server=None, label="ls"), "tool_call_id": "call_1_x"}
+    second = {**f_tool_call("call_1_x", "ls", {"path": "/"}, server=None, label="ls"), "tool_call_id": "call_1_x~2"}
+    events = _run(
+        [
+            f_status(),
+            first,
+            {**f_tool_result("call_1_x", "ls", "boom", server=None, duration_ms=1), "tool_call_id": "call_1_x", "status": "error"},
+            second,
+            {**f_tool_result("call_1_x", "ls", "ok", server=None, duration_ms=1), "tool_call_id": "call_1_x~2"},
+            f_token("Done."),
+            f_final("Done.", endpoint=ENDPOINT),
+        ]
+    )
+
+    assert [e["toolCallId"] for e in _of(events, "TOOL_CALL_START")] == ["call_1_x", "call_1_x~2"]
+    assert [e["toolCallId"] for e in _of(events, "TOOL_CALL_RESULT")] == ["call_1_x", "call_1_x~2"]
+    _assert_valid(events)

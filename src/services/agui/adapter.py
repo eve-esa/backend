@@ -27,7 +27,7 @@ import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ag_ui.core import (
     ActivitySnapshotEvent,
@@ -65,6 +65,11 @@ STEP_THINKING = "thinking"
 ACTIVITY_SUMMARIZING = "eve.summarizing"
 CUSTOM_SOURCES = "eve.sources"
 CUSTOM_ARTIFACTS = "eve.artifacts"
+CUSTOM_NOTICE = "eve.notice"
+NOTICE_INPUT_PART_SKIPPED = "input_part_skipped"
+_NOTICE_MESSAGES = {
+    NOTICE_INPUT_PART_SKIPPED: "Some attachments could not be used and were left out.",
+}
 
 # RUN_ERROR copy per code (contract 1.7). The message is fixed user copy, never
 # the exception text the legacy frame carries.
@@ -86,6 +91,9 @@ _PRE_STREAM_ERRORS: Dict[str, tuple] = {
     "agent_not_allowed": (400, "This agent is not available."),
     "collection_forbidden": (403, "One of the selected collections is not available to you."),
     "not_found": (404, "Conversation not found."),
+    "artifact_not_found": (404, "An attached file was not found."),
+    "custom_model_not_found": (404, "The selected custom model was not found."),
+    "custom_model_unusable": (400, "The selected custom model has no stored credentials."),
     "run_id_conflict": (409, "This run id was already used in this conversation."),
     "interrupt_uncovered": (409, "The resume does not answer every pending approval."),
     "interrupt_expired": (409, "The pending approval has expired."),
@@ -109,6 +117,9 @@ class RunContext:
     message_id: str
     trace_id: Optional[str] = None
     graph: Optional[str] = None
+    # Input parts the route skipped (contract 1.4): their ids, None for a part
+    # without one. Reported once, right after RUN_STARTED.
+    skipped_parts: Tuple[Optional[str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,6 +170,11 @@ def _str_or_none(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def _frame_call_id(frame: LegacyFrame) -> Optional[str]:
+    """The runner's run-unique ``tool_call_id`` (B-S2), else the raw model id."""
+    return _str_or_none(frame.get("tool_call_id")) or _str_or_none(frame.get("id"))
+
+
 def _usage(rows: Any) -> Optional[List[TokenUsage]]:
     """``RUN_FINISHED.usage`` from ``final.usage``.
 
@@ -207,6 +223,7 @@ class AguiAdapter:
         self._summary_count = 0
         self._summary_open: Optional[ActivitySnapshotEvent] = None
         self._emitted = 0
+        self._last_started: Optional[str] = None
 
     # ── public interface ────────────────────────────────────────────────────
 
@@ -228,16 +245,27 @@ class AguiAdapter:
         metadata["eve.messageId"] = ctx.message_id
         if ctx.graph:
             metadata["eve.graph"] = ctx.graph
-        return self._out(
-            [
-                RunStartedEvent(
-                    thread_id=ctx.thread_id,
-                    run_id=ctx.run_id,
-                    protocol_version=PROTOCOL_VERSION,
-                    metadata=metadata,
+        events: List[AguiEvent] = [
+            RunStartedEvent(
+                thread_id=ctx.thread_id,
+                run_id=ctx.run_id,
+                protocol_version=PROTOCOL_VERSION,
+                metadata=metadata,
+            )
+        ]
+        if ctx.skipped_parts:
+            events.append(
+                CustomEvent(
+                    name=CUSTOM_NOTICE,
+                    value={
+                        "code": NOTICE_INPUT_PART_SKIPPED,
+                        "message": _NOTICE_MESSAGES[NOTICE_INPUT_PART_SKIPPED],
+                        "partIds": [p for p in ctx.skipped_parts if p],
+                        "count": len(ctx.skipped_parts),
+                    },
                 )
-            ]
-        )
+            )
+        return self._out(events)
 
     def adapt(self, frame: LegacyFrame) -> List[AguiEvent]:
         """Events for one legacy frame; empty after the terminal event."""
@@ -279,8 +307,9 @@ class AguiAdapter:
         events = self._close_thinking()
         events.extend(self._close_text())
         name = _str_or_none(frame.get("tool")) or "tool"
-        raw_id = _str_or_none(frame.get("id"))
+        raw_id = _frame_call_id(frame)
         tool_call_id = self._mint_tool_call_id(raw_id, name)
+        self._last_started = tool_call_id
         metadata: Dict[str, Any] = {}
         server = _str_or_none(frame.get("server"))
         if server:
@@ -306,7 +335,7 @@ class AguiAdapter:
 
     def _on_tool_result(self, frame: LegacyFrame) -> List[AguiEvent]:
         events: List[AguiEvent] = []
-        raw_id = _str_or_none(frame.get("id"))
+        raw_id = _frame_call_id(frame)
         pending = self._pending_by_raw.get(raw_id)
         if pending:
             tool_call_id = pending.popleft()
@@ -363,11 +392,21 @@ class AguiAdapter:
         tool_call_id = self._last_by_raw.get(raw_id)
         if tool_call_id is None:
             pending = self._pending_by_raw.get(raw_id)
-            tool_call_id = pending[0] if pending else raw_id
-        value: Dict[str, Any] = {"documents": documents}
-        if tool_call_id:
-            value = {"toolCallId": tool_call_id, "documents": documents}
-        return [CustomEvent(name=CUSTOM_SOURCES, value=value)]
+            tool_call_id = pending[0] if pending else None
+        if tool_call_id is None:
+            # An id that names no started call: the last started call, since
+            # sources follow their call. None started: dropped (contract 2.3
+            # requires a toolCallId of a started call).
+            tool_call_id = self._last_started
+        if tool_call_id is None:
+            logger.debug("agui.sources_dropped documents=%d", len(documents))
+            return []
+        return [
+            CustomEvent(
+                name=CUSTOM_SOURCES,
+                value={"toolCallId": tool_call_id, "documents": documents},
+            )
+        ]
 
     def _on_summarizing(self, frame: LegacyFrame) -> List[AguiEvent]:
         phase = frame.get("phase")
