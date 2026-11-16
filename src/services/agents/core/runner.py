@@ -47,13 +47,16 @@ from src.services.custom_model_service import (
 )
 from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
+    EmptyAnswer,
     _get_conversation_history_from_db,
+    build_empty_answer_payload,
     build_endpoint_metadata,
     build_error_payload,
     deadline_error,
     deadline_overrides,
     endpoint_answered_by,
     get_shared_llm_manager,
+    is_empty_answer,
     maybe_rollup_and_trim_history,
     persist_message_state,
     is_terminal_event,
@@ -122,6 +125,7 @@ from src.observability.context import (
     agent_span,
     cancel_is_stop,
     current_trace_id,
+    mark_error,
     set_llm_attributes,
     span_trace_id,
 )
@@ -175,6 +179,58 @@ except Exception:
     might_be_incomplete_text_tool_call = None  # type: ignore
     parse_text_tool_calls = None  # type: ignore
     split_tool_calls_and_answer_text = None  # type: ignore
+
+
+def _strip_text_tool_calls(text: str) -> str:
+    """``text`` without a text-format tool call, the rule of the stream's turn buffer.
+
+    Recognised ``[TOOL_CALLS]`` calls go and the text after them stays; a marker
+    nothing parses leaves no answer. A call written as text is never run by the
+    sync path, so it is not an answer either.
+    """
+    if not (has_text_tool_call and has_text_tool_call(text)):
+        return text
+    calls, rest = (
+        split_tool_calls_and_answer_text(text)
+        if split_tool_calls_and_answer_text
+        else ([], "")
+    )
+    return rest if calls else ""
+
+
+def _final_answer_text(messages: List[Any]) -> str:
+    """What the non-streaming routes return: the last model message without tool calls.
+
+    The model may copy an [S<k>] handle an earlier streamed turn left in the
+    thread: this route hands out none, so it never reaches the user.
+    """
+    for msg in reversed(messages):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            text = msg.content if isinstance(msg.content, str) else str(msg.content)
+            return strip_handles(_strip_text_tool_calls(text))
+    return ""
+
+
+def _mark_empty_answer(span: Any) -> None:
+    """Record an empty answer on the turn's root span, as a raised failure would be."""
+    if span is None:
+        return
+    mark_error(span, EmptyAnswer(build_empty_answer_payload()["message"]))
+    with contextlib.suppress(Exception):
+        span.set_attribute("eve.error.code", "empty_answer")
+
+
+def _log_empty_answer(conversation_id: Optional[str], message_id: Optional[str]) -> None:
+    # Ids only: never the question or the model output.
+    logger.warning(
+        "generation.empty_answer conversation_id=%s message_id=%s",
+        conversation_id,
+        message_id,
+    )
 
 
 # ─── Trace serialisation ──────────────────────────────────────────────────────
@@ -2599,6 +2655,12 @@ async def generate_answer_agentic(
                                 latency_map[latency_key] = step_latency_s
                 except Exception as exc:
                     graph_exc = exc
+                # While the root is open: a turn that ends with nothing to show
+                # is a failed turn in the trace too.
+                if graph_exc is None and is_empty_answer(
+                    _final_answer_text(raw_msgs), artifact_ctx.collected_artifact_ids
+                ):
+                    _mark_empty_answer(root_span)
 
             if graph_exc is not None:
                 has_answer = any(
@@ -2643,23 +2705,13 @@ async def generate_answer_agentic(
             fallback,
         ) = await _run_graph(graph)
 
-        final_answer = ""
-        for msg in reversed(all_messages):
-            if (
-                isinstance(msg, AIMessage)
-                and msg.content
-                and not getattr(msg, "tool_calls", None)
-            ):
-                final_answer = (
-                    msg.content if isinstance(msg.content, str) else str(msg.content)
-                )
-                break
-        # This route hands out no handles, but the model may copy one an
-        # earlier streamed turn left in the thread: it never reaches the user.
-        final_answer = strip_handles(final_answer)
         final_answer = await append_missing_artifact_stubs(
-            final_answer, list(artifact_ctx.collected_artifact_ids)
+            _final_answer_text(all_messages), list(artifact_ctx.collected_artifact_ids)
         )
+        if is_empty_answer(final_answer, artifact_ctx.collected_artifact_ids):
+            # The router persists the empty_answer marker from the same check.
+            final_answer = ""
+            _log_empty_answer(conversation_id, message_id)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
@@ -2766,7 +2818,8 @@ async def generate_answer_agentic_stream_helper(
     the answer streamed, say) is still recorded in the persisted
     `metadata.error`, but the client is not handed an error banner on top of an
     answer it has already rendered. Only a turn with nothing streamed ends with
-    `error`.
+    `error`. A turn that ends without a failure but with no visible text and no
+    artifact ends with `error` too, code ``empty_answer``.
 
     Raises ``ValueError`` when ``conversation_id`` is empty: a streamed turn
     always persists its message in a conversation and runs on its thread.
@@ -3464,6 +3517,12 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
+                # While the root is open: the same check as the persistence
+                # below, the held text being what the flush there adds.
+                if is_empty_answer(
+                    _answer_text() + citation_rewriter.held, _collected_artifact_ids()
+                ):
+                    _mark_empty_answer(root_span)
         except Exception as exc:
             answer = _answer_text() or citation_rewriter.held
             if not _recoverable_after_agent_fallback(
@@ -3485,6 +3544,11 @@ async def generate_answer_agentic_stream_helper(
         answer = await append_missing_artifact_stubs(
             _answer_text(), _collected_artifact_ids()
         )
+        # Whitespace, or a text tool call the turn buffer dropped, and no
+        # artifact: the user got nothing, so the turn is a failed one.
+        empty_answer = is_empty_answer(answer, _collected_artifact_ids())
+        if empty_answer:
+            answer = ""
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -3558,13 +3622,24 @@ async def generate_answer_agentic_stream_helper(
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
             clear_error=bool(answer),
+            **({"error": build_empty_answer_payload()} if empty_answer else {}),
             **_citation_fields(),
         )
         _log_citations("answer")
+        if empty_answer:
+            _log_empty_answer(conversation_id, message_id)
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
+        # Set before the terminal frame either way: the turn is persisted, and a
+        # Stop that lands on the publish must not replace it.
         final_emitted = True
+        if empty_answer:
+            # Nothing visible went out, so the error frame, not a final: the
+            # client renders it with Retry, as for any failure before text.
+            error_info = build_empty_answer_payload()
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
+            return
         for event in _final_events(answer, latencies):
             yield event
 

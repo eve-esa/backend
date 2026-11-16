@@ -27,7 +27,7 @@ only, never from `message` or `type`.
 | code | Meaning | Suggested copy angle |
 |---|---|---|
 | `timeout` | No first token within that model's budget. If nothing was sent, the next endpoint and then the fallback model were already tried; this code remains when those also produced nothing. Text already streamed is kept, and no second answer is appended. | "warming up, retry in a moment" |
-| `empty_answer` | Generation completed but produced nothing | "empty answer, retry" |
+| `empty_answer` | Generation completed but produced nothing. On agentic turns: no visible text (whitespace, or a `[TOOL_CALLS]` text call that was never run, counts as none) and no artifact. The stream ends with the `error` frame, the row stores `output: ""`, the backend logs one WARNING `generation.empty_answer` with the ids and marks the root span as an error (`eve.error.code`) | "empty answer, retry" |
 | `upstream_error` | Anything else from the model endpoint or pipeline | generic failure, retry |
 
 The set is extensible and additive; codes are never renamed. Clients MUST

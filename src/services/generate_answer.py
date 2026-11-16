@@ -197,13 +197,32 @@ def build_error_payload(exc: BaseException) -> Dict[str, Any]:
     return {"code": code, "type": type(exc).__name__, "message": str(exc)[:500]}
 
 
+class EmptyAnswer(Exception):
+    """A generation that finished without an error and with nothing to show.
+
+    Never raised: recorded on the answer's root span, so the trace reads as the
+    failure the user sees.
+    """
+
+
 def build_empty_answer_payload() -> Dict[str, Any]:
     """Marker for a generation that completed without producing an answer."""
     return {
         "code": "empty_answer",
-        "type": "EmptyAnswer",
+        "type": EmptyAnswer.__name__,
         "message": "The model returned an empty answer",
     }
+
+
+def is_empty_answer(
+    answer: Optional[str], artifact_ids: Optional[List[str]] = None
+) -> bool:
+    """True when an agentic turn leaves the user nothing: no visible text, no artifact.
+
+    Whitespace is not an answer. An artifact is: a tool that saved a file or an
+    image answered even when the model wrote no text.
+    """
+    return not (answer or "").strip() and not artifact_ids
 
 
 def build_endpoint_metadata(

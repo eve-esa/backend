@@ -38,6 +38,7 @@ from src.services.generate_answer import (
     finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
+    is_empty_answer,
     is_terminal_event,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -822,6 +823,9 @@ async def retry(
                 conversation_id=conversation_id,
                 message_id=message.id,
             )
+            empty_answer = is_empty_answer(answer, artifact_ids)
+            if empty_answer:
+                answer = ""
 
             message.output = answer
             message.documents = documents
@@ -842,12 +846,12 @@ async def retry(
                 existing_metadata["generated_model_name"] = (
                     resolve_generated_model_name(endpoint)
                 )
-            if answer:
-                existing_metadata.pop("error", None)
-            else:
+            if empty_answer:
                 # An empty regeneration is not a success: without a marker the
                 # frontend would render a blank bubble with no explanation.
                 existing_metadata["error"] = build_empty_answer_payload()
+            else:
+                existing_metadata.pop("error", None)
             message.metadata = existing_metadata
             await message.save()
             generation_persisted = True
@@ -2217,6 +2221,9 @@ async def create_agentic_message(
             conversation_id=conversation_id,
             message_id=message.id,
         )
+        empty_answer = is_empty_answer(answer, artifact_ids)
+        if empty_answer:
+            answer = ""
 
         message.output = answer
         message.documents = documents
@@ -2235,6 +2242,9 @@ async def create_agentic_message(
             existing_metadata["generated_model_name"] = resolve_generated_model_name(
                 endpoint
             )
+        if empty_answer:
+            # Same marker as the stream: the turn ended with nothing to show.
+            existing_metadata["error"] = build_empty_answer_payload()
         message.metadata = existing_metadata
         await message.save()
         await consume_tokens_for_user(
