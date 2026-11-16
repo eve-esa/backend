@@ -378,6 +378,99 @@ async def test_provider_routing(
         await cleanup_models([user])
 
 
+class _WallClock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _jsc_window(monkeypatch, retry_after: str = "45"):
+    """A breaker with a JSC rate limit window opened at t=1000, wired into the proxy."""
+    from src.core.llm_health import EndpointHealth
+
+    clock = _WallClock(1000.0)
+    health = EndpointHealth(cooldown_s=120, clock=clock, wall_clock=clock, probe_s=15)
+    health.record_rate_limit("eve_jsc", retry_after)
+    monkeypatch.setattr("src.routers.openai_proxy._endpoint_health", lambda: health)
+    monkeypatch.setattr("src.routers.openai_proxy.EVE_JSC_MODEL_NAME", "eve-model")
+    return health, clock
+
+
+async def _post_jsc(async_client, token: str, model: str = "jsc/eve-model"):
+    with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": "Hi"}]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_jsc_inside_a_rate_limit_window_answers_429_without_calling_upstream(
+    async_client, monkeypatch
+):
+    """Same key and Blablador bucket as the chat: a request sent into the block
+    would double it, so the gateway refuses in the OpenAI envelope."""
+    user, token = await create_test_user_and_token()
+    try:
+        _jsc_window(monkeypatch)
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await _post_jsc(async_client, token)
+
+        assert resp.status_code == 429
+        assert resp.headers["retry-after"] == "45"
+        error = resp.json()["error"]
+        assert error["type"] == "rate_limit_error"
+        assert error["code"] == "endpoint_rate_limited"
+        stream_mock.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_jsc_429_opens_the_window(async_client, monkeypatch):
+    user, token = await create_test_user_and_token()
+    try:
+        health, clock = _jsc_window(monkeypatch)
+        clock.now = 1045.0  # window over: this request is the probe
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        client, stream_mock = _mock_client(status=429, body=b'{"error": {"message": "slow down"}}')
+        client.stream.return_value.__aenter__.return_value.headers["retry-after"] = "120"
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await _post_jsc(async_client, token)
+
+        assert resp.status_code == 429
+        assert stream_mock.call_count == 1
+        assert health.rate_limit_remaining_s("eve_jsc") == pytest.approx(120)
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_the_jsc_probe_through_the_gateway_closes_the_window(async_client, monkeypatch):
+    user, token = await create_test_user_and_token()
+    try:
+        health, clock = _jsc_window(monkeypatch)
+        clock.now = 1045.0
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await _post_jsc(async_client, token)
+
+        assert resp.status_code == 200
+        assert health.is_rate_limited("eve_jsc") is False
+        assert health.admit("eve_jsc").probe is False
+    finally:
+        await cleanup_models([user])
+
+
 @pytest.mark.asyncio
 async def test_unknown_provider_slug_forwards_unchanged(async_client, monkeypatch):
     """org/model ids that are not proxy providers are passed through to RunPod."""

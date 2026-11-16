@@ -169,7 +169,11 @@ def test_retry_after_is_parsed_and_capped():
     assert jsc_reranker._retry_after_seconds("3600") == jsc_reranker.RETRY_AFTER_CAP_S
     assert jsc_reranker._retry_after_seconds(None) == jsc_reranker.RETRY_AFTER_DEFAULT_S
     assert jsc_reranker._retry_after_seconds("soon") == jsc_reranker.RETRY_AFTER_DEFAULT_S
-    assert jsc_reranker._retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
+    # A date in the past (clock skew) says nothing usable: the default, not 0.
+    assert (
+        jsc_reranker._retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT")
+        == jsc_reranker.RETRY_AFTER_DEFAULT_S
+    )
 
 
 async def test_every_provider_failing_keeps_retrieval_order_with_todays_descriptions(

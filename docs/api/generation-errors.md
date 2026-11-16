@@ -87,23 +87,29 @@ payload with `answered: null` and the failed attempt listed:
   `generated_model_name` is its model.
 - `attempts[].outcome` reuses the codes above.
 - `circuit_open` lists candidates that were still cooling down when the turn
-  started, the requested endpoint included when a 429 window took it out of
-  `chain`.
+  started; an endpoint a 429 window took out of `chain` is listed too.
 - `substituted` is true only when the request named an endpoint and a different
   one answered; a request that named none is never a substitution.
 
 An explicit request is never promoted to another endpoint: asking for
 `eve_jsc` can only be answered by `eve_jsc` or the fallback model.
 
-A 429 keeps the endpoint out for the `Retry-After` window it sent (seconds or
-an HTTP date; 60 s when missing or unreadable; at most 3600 s), on every worker
-when `REDIS_URL` is set. The request that got the 429 is not retried: the turn
-moves to the fallback model at once, and a running agentic turn makes no
-further call to that endpoint. Until the window ends, new turns skip it even
-when they name it, so the fallback answers with `substituted: true`. After the
-window one request probes the endpoint, and its success closes the circuit.
-Other failures keep the fixed `EVE_ENDPOINT_COOLDOWN_S` and never shorten a
-429 window.
+A 429 opens a rate limit window on that endpoint for the `Retry-After` it
+sent (delay-seconds or an HTTP date; 60 s when missing, unreadable or a date
+already past; at most 3600 s), on every worker when `REDIS_URL` is set and per
+process otherwise. It applies to any endpoint that answers 429; the JSC
+clients also enforce it on each call. The request that got the 429 is not
+retried: the turn moves to the fallback model at once, and a running agentic
+turn makes no further call to that endpoint. Until the window ends, new turns
+skip it even when they name it, so the fallback answers with
+`substituted: true`. After the window exactly one request in the fleet probes
+the endpoint while every other call still refuses, and only that endpoint's
+own answer closes the window; an answer the fallback gave in its place never
+does. A later 429 can only lengthen a window. Timeouts and 5xx keep the fixed
+`EVE_ENDPOINT_COOLDOWN_S` circuit and never touch a window. The `/v1` gateway
+shares the window for `jsc/` requests to the model the chat calls: inside it
+answers 429 `endpoint_rate_limited` with `Retry-After` and sends nothing
+upstream, and an upstream 429 opens it.
 
 The wait is for the first token only. Later tokens are not under it. The budget is `MAIN_MODEL_TIMEOUT` (120s) for `main`, `EVE_JSC_TIMEOUT` (default 13s) for `eve_jsc`, `JSC_LARGE_TIMEOUT` (60s) for `jsc_large`, and `MODEL_TIMEOUT` (13s) for every other model.
 

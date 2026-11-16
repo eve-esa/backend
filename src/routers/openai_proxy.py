@@ -39,6 +39,7 @@ The proxy strips only the provider segment and forwards the model id unchanged:
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Optional
 
@@ -48,11 +49,13 @@ from src.config import (
     EVE_JSC_API_KEY,
     EVE_JSC_BASE_URL,
     EVE_JSC_MODEL_NAME,
+    JSC_LARGE_MODEL_NAME,
     MAIN_MODEL_API_KEY,
     MAIN_MODEL_NAME,
     OPENAI_PROXY_API_KEY,
     OPENAI_PROXY_UPSTREAM_URL,
 )
+from src.core.llm_health import EndpointHealth, EndpointRateLimited, RateLimitPermit
 from src.database.models.user import User
 from src.middlewares.auth import (
     extract_bearer_token,
@@ -175,6 +178,30 @@ def resolve_proxy_route(model: Optional[str]) -> tuple[str, str, Optional[str]]:
     else:
         raise ValueError(f"Unknown proxy provider: {provider}")
     return upstream_base, upstream_api_key, upstream_model
+
+
+def _endpoint_health() -> EndpointHealth:
+    """The chat's breaker: a ``jsc/`` request spends the same Blablador bucket."""
+    from src.services.generate_answer import get_shared_llm_manager
+
+    return get_shared_llm_manager().health
+
+
+def _rate_limited_endpoint(model: Optional[str]) -> Optional[str]:
+    """The chat endpoint whose rate limit window a request shares, or None.
+
+    Blablador limits per key and per model, so only a ``jsc/`` request for a
+    model the chat calls shares that endpoint's window; any other model is its
+    own bucket and passes as before.
+    """
+    provider, upstream_model = parse_proxy_model(model)
+    if provider != "jsc" or not upstream_model:
+        return None
+    if upstream_model == EVE_JSC_MODEL_NAME:
+        return "eve_jsc"
+    if JSC_LARGE_MODEL_NAME and upstream_model == JSC_LARGE_MODEL_NAME:
+        return "jsc_large"
+    return None
 
 
 def _build_forward_body(
@@ -549,6 +576,18 @@ class OpenAIProxyDispatcher:
         # reserving before this would leave those tokens held for good.
         upstream_base, upstream_api_key, upstream_model = resolve_proxy_route(model)
 
+        # Inside a rate limit window nothing is sent, and nothing reserved:
+        # every request Blablador receives during a block doubles it.
+        endpoint = _rate_limited_endpoint(model)
+        permit: Optional[RateLimitPermit] = None
+        if endpoint is not None:
+            try:
+                permit = _endpoint_health().admit(endpoint)
+            except EndpointRateLimited as limited:
+                await self._send_endpoint_rate_limited(send, limited)
+                response_started["value"] = True
+                return
+
         req_texts, token_array_len = _request_texts_for_estimate(req_body)
         estimated_tokens = count_tokens_for_texts(*req_texts) + token_array_len
         exceeded, reserved_tokens = await reserve_token_budget(user, estimated_tokens)
@@ -585,6 +624,8 @@ class OpenAIProxyDispatcher:
             client = self._get_client()
             async with client.stream(method, url, headers=fwd_headers, content=fwd_body) as resp:
                 status = resp.status_code
+                if permit is not None:
+                    self._account_rate_limit(endpoint, permit, status, resp.headers)
                 resp_headers = [
                     [k.lower().encode(), v.encode()]
                     for k, v in resp.headers.items()
@@ -701,6 +742,42 @@ class OpenAIProxyDispatcher:
             [b"content-type", b"application/json"],
             [b"x-should-retry", b"true"],
             [b"retry-after", str(limited.retry_after_s).encode()],
+        ]
+        body = json.dumps({
+            "detail": detail,
+            "error": {
+                "message": detail["message"],
+                "type": "rate_limit_error",
+                "code": detail["code"],
+                "param": None,
+            },
+        }).encode()
+        await send({"type": "http.response.start", "status": 429, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+    @staticmethod
+    def _account_rate_limit(
+        endpoint: str, permit: RateLimitPermit, status: int, headers
+    ) -> None:
+        """An upstream 429 opens the window; the probe's answer closes it."""
+        health = _endpoint_health()
+        if status == 429:
+            health.record_rate_limit(endpoint, headers.get("retry-after"))
+        elif status < 400 and permit.probe:
+            health.close_rate_limit_window(endpoint, permit.started_at)
+
+    @staticmethod
+    async def _send_endpoint_rate_limited(send, limited: EndpointRateLimited) -> None:
+        """429 in the OpenAI envelope with the window's Retry-After; no upstream call."""
+        retry_after = math.ceil(limited.retry_after_s)
+        detail = {
+            "code": "endpoint_rate_limited",
+            "message": f"The model endpoint is rate limited, retry after {retry_after}s",
+        }
+        headers = [
+            [b"content-type", b"application/json"],
+            [b"x-should-retry", b"true"],
+            [b"retry-after", str(retry_after).encode()],
         ]
         body = json.dumps({
             "detail": detail,

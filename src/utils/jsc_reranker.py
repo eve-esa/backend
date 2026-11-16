@@ -1,9 +1,10 @@
 import logging
 import time
-from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from src.core.llm_health import parse_retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +26,10 @@ def backoff_remaining() -> float:
 
 
 def _retry_after_seconds(value: Optional[str]) -> float:
-    if not value:
+    seconds = parse_retry_after(value, time.time())
+    if seconds is None:
         return RETRY_AFTER_DEFAULT_S
-    value = value.strip()
-    try:
-        seconds = float(value)
-    except ValueError:
-        try:
-            seconds = parsedate_to_datetime(value).timestamp() - time.time()
-        except (TypeError, ValueError, IndexError, OverflowError):
-            return RETRY_AFTER_DEFAULT_S
-    return min(max(seconds, 0.0), RETRY_AFTER_CAP_S)
+    return min(seconds, RETRY_AFTER_CAP_S)
 
 
 def note_rate_limited(retry_after: Optional[str]) -> float:

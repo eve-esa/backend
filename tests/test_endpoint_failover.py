@@ -281,6 +281,60 @@ async def test_a_429_keeps_the_next_explicit_request_off_the_endpoint(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_the_classic_graph_never_swaps_in_the_fallback_for_a_rate_limited_endpoint(
+    monkeypatch,
+):
+    """call_model asks for the candidate's own client. Inside a window the JSC
+    client refuses, and the chain walk moves to the fallback and says so; a
+    silent swap would report eve_jsc and could close the window for it."""
+    from langchain_openai import ChatOpenAI
+
+    from src.core.llm_health import EndpointHealth, EndpointRateLimited
+    from src.core.llm_manager import BreakerAwareChatOpenAI
+    from src.services import generate_answer as generate_answer_module
+
+    manager = LLMManager()
+    manager._health = EndpointHealth(cooldown_s=120)
+    monkeypatch.setattr(manager, "_is_configured", lambda name: name in ("eve_jsc", "fallback"))
+    sent: Dict[str, int] = {"eve_jsc": 0, "fallback": 0}
+
+    def upstream(name: str) -> httpx.AsyncClient:
+        def answer(request: httpx.Request) -> httpx.Response:
+            sent[name] += 1
+            return httpx.Response(500)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(answer))
+
+    jsc = BreakerAwareChatOpenAI(
+        api_key="k", base_url="https://jsc.example/v1", model="m", max_retries=0,
+        http_async_client=upstream("eve_jsc"),
+    ).guard(manager.health, "eve_jsc")
+    fallback = ChatOpenAI(
+        api_key="k", base_url="https://fallback.example/v1", model="m", max_retries=0,
+        http_async_client=upstream("fallback"),
+    )
+    monkeypatch.setattr(manager, "_get_eve_jsc_llm", lambda: jsc)
+    monkeypatch.setattr(manager, "_get_fallback_llm", lambda: fallback)
+    monkeypatch.setattr(f"{_MODULE}.get_shared_llm_manager", lambda: manager)
+    manager.health.record_rate_limit("eve_jsc", "30")
+
+    graph = await generate_answer_module._get_or_create_stateless_graph()
+    with pytest.raises(EndpointRateLimited):
+        await graph.ainvoke(
+            {
+                "messages": [("user", "hi")],
+                "temperature": 0.3,
+                "max_tokens": 10,
+                "conversation_summary": None,
+                "is_streaming": False,
+                "llm_type": "eve_jsc",
+            }
+        )
+    assert sent == {"eve_jsc": 0, "fallback": 0}
+    assert manager.health.is_rate_limited("eve_jsc") is True
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_endpoint_falls_back_and_says_it_was_substituted(
     monkeypatch,
 ):

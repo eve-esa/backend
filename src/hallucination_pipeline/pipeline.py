@@ -21,7 +21,9 @@ class Pipeline:
             per_span_reprompting (bool): If True, reprocess each hallucinated span individually;
                                          if False, reprocess all at once
         """
-        self.model = LLMManager().get_model()
+        from src.services.generate_answer import get_shared_llm_manager
+
+        self.model = LLMManager(health=get_shared_llm_manager().health).get_model()
         self.hallucination = hallucination
         self.per_span_reprompting = per_span_reprompting
 

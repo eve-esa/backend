@@ -197,6 +197,56 @@ class _FakeRedis:
         entry = self._live(key)
         return None if entry is None else entry[0]
 
+    def mget(self, keys):
+        self._check("mget")
+        return [self.peek(key) for key in keys]
+
+    # The rate limit window scripts, by the tag on their first line. The Lua
+    # itself runs against a real Redis in test_endpoint_rate_limit.py.
+    def eval(self, script: str, numkeys: int, *args):
+        self._check("eval")
+        keys, argv = args[:numkeys], [str(a) for a in args[numkeys:]]
+        tag = script.strip().splitlines()[0].removeprefix("-- ")
+        return getattr(self, "_" + tag.split(":")[-1])(keys, argv)
+
+    def _record(self, keys, argv):
+        opened, until, now, hold = (int(a) for a in argv)
+        grew = True
+        current = self.peek(keys[0])
+        if current is not None:
+            cur_opened, cur_until = (int(p) for p in current.split(":"))
+            opened = max(opened, cur_opened)
+            if cur_until >= until:
+                until, grew = cur_until, False
+        ttl = max(until - now + hold, 1000)
+        self._data[keys[0]] = (f"{opened}:{until}", self.clock() + ttl / 1000)
+        if grew:
+            self._data.pop(keys[1], None)
+        return str(until)
+
+    def _admit(self, keys, argv):
+        current = self.peek(keys[0])
+        if current is None:
+            return [0, 0]
+        until = int(current.split(":")[1])
+        now = int(argv[0])
+        if now < until:
+            return [1, until - now]
+        if self.peek(keys[1]) is None:
+            self._data[keys[1]] = (argv[1], self.clock() + int(argv[2]) / 1000)
+            return [2, 0]
+        return [3, int((self._data[keys[1]][1] - self.clock()) * 1000)]
+
+    def _close(self, keys, argv):
+        current = self.peek(keys[0])
+        if current is None:
+            return 0
+        if int(current.split(":")[0]) > int(argv[0]):
+            return 0
+        self._data.pop(keys[0], None)
+        self._data.pop(keys[1], None)
+        return 1
+
 
 @pytest.fixture(autouse=True)
 def _fresh_stores():

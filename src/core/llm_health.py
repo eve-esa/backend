@@ -7,10 +7,11 @@ from call sites that cannot import langgraph or the OpenAI SDK.
 With a Redis URL the open circuits live in Valkey, so every worker of every
 task sees the outage the first one found instead of paying its own probe.
 
-A 429 is the endpoint asking to be left alone: it opens the circuit for the
-Retry-After it sent instead of the fixed cooldown, and while that window runs
-the endpoint leaves the chain and its client refuses to send (Blablador doubles
-a block on every request it receives during it).
+A 429 is the endpoint asking to be left alone, and Blablador doubles a block
+for every request it receives during it. So a 429 is not a circuit failure but
+its own state, a rate limit window: nothing is sent to the endpoint until the
+Retry-After has passed, then exactly one probe, and only a success of the
+endpoint itself closes the window.
 """
 
 import asyncio
@@ -18,12 +19,14 @@ import email.utils
 import logging
 import math
 import os
+import re
 import threading
 import time
+import uuid
+import weakref
 from dataclasses import dataclass
 from datetime import timezone
-import weakref
-from typing import Any, Callable, Dict, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, NamedTuple, Optional, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +43,76 @@ _ENDPOINT_FAILURE_NAMES = {
     "TimeoutException",
 }
 
-
 # A 429 without a usable Retry-After keeps the endpoint out this long; Blablador
 # starts its blocks at 60 s and doubles them up to an hour, the cap.
 RATE_LIMIT_DEFAULT_S = 60.0
 RATE_LIMIT_MAX_S = 3600.0
+# How long a window that ended without a successful probe is remembered: until
+# then only the holder of the probe lease may call the endpoint.
+RATE_LIMIT_HOLD_S = 3600.0
+# The probe lease covers the endpoint's first-token budget plus this margin.
+PROBE_LEASE_MARGIN_S = 5.0
+
+# Retry-After as delay-seconds (RFC 9110 says digits; a decimal is read too).
+# re.ASCII: str.isdigit() and \d without it accept digits such as "²".
+_DELAY_SECONDS = re.compile(r"\d+(?:\.\d+)?", re.ASCII)
+
+
+def parse_retry_after(raw: Any, now: float) -> Optional[float]:
+    """Seconds a Retry-After value asks for, or None when it says nothing usable.
+
+    *raw* is the header value: delay-seconds or an HTTP-date. *now* is the wall
+    clock (epoch seconds) the HTTP-date is read against. A date that is not in
+    the future (clock skew) is unusable, not zero: the block is likely still
+    running. Callers apply their own default and cap.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if _DELAY_SECONDS.fullmatch(text):
+        return float(text)
+    try:
+        when = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    try:
+        seconds = when.timestamp() - now
+    except (OverflowError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def rate_limit_window_s(raw: Any, now: float) -> float:
+    """The window a 429 with Retry-After *raw* keeps the endpoint out.
+
+    Missing or unusable: :data:`RATE_LIMIT_DEFAULT_S`. Always between 1 s and
+    :data:`RATE_LIMIT_MAX_S`.
+    """
+    seconds = parse_retry_after(raw, now)
+    if seconds is None:
+        seconds = RATE_LIMIT_DEFAULT_S
+    return min(max(seconds, 1.0), RATE_LIMIT_MAX_S)
+
+
+def retry_after_header(exc: BaseException) -> Any:
+    """The Retry-After header of the response an error carries, or None."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        return headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - a foreign headers object is not a window
+        return None
 
 
 class EndpointRateLimited(RuntimeError):
-    """An endpoint answered 429, or is still inside the window a 429 set.
+    """An endpoint answered 429, or its rate limit window keeps it out.
 
     ``status_code`` keeps it an endpoint failure that reports as
     ``upstream_error``. It carries no ``response`` and a class name no retry
@@ -63,45 +127,22 @@ class EndpointRateLimited(RuntimeError):
 
     def __init__(self, llm_type: str, retry_after_s: float) -> None:
         self.llm_type = llm_type
-        self.retry_after_s = retry_after_s
+        self.retry_after_s = max(float(retry_after_s), 1.0)
         super().__init__(
-            f"Endpoint {llm_type} is rate limited (HTTP 429) for {math.ceil(retry_after_s)}s"
+            f"Endpoint {llm_type} is rate limited (HTTP 429), "
+            f"retry after {math.ceil(self.retry_after_s)}s"
         )
 
 
-def _retry_after_s(raw: Any, now: float) -> Optional[float]:
-    """Seconds from a Retry-After value (delta-seconds or HTTP-date), or None."""
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if text.isdigit():
-        return float(text)
-    try:
-        when = email.utils.parsedate_to_datetime(text)
-    except (TypeError, ValueError, IndexError):
-        return None
-    if when is None:
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return float(math.ceil(when.timestamp() - now))
+class RateLimitPermit(NamedTuple):
+    """Leave to send one request, from :meth:`EndpointHealth.admit`.
 
-
-def rate_limit_window_s(exc: BaseException, now: float) -> Optional[float]:
-    """How long a 429 asks the endpoint to be left alone; None for anything else.
-
-    *now* is the wall clock (epoch seconds), for an HTTP-date Retry-After.
-    Missing or unparsable: :data:`RATE_LIMIT_DEFAULT_S`. Always between 1 s and
-    :data:`RATE_LIMIT_MAX_S`.
+    *probe* is true when the request is the one probe after a rate limit
+    window: its success closes the window.
     """
-    if getattr(exc, "status_code", None) != 429:
-        return None
-    headers = getattr(getattr(exc, "response", None), "headers", None)
-    raw = headers.get("retry-after") if headers is not None else None
-    seconds = _retry_after_s(raw, now)
-    if seconds is None:
-        seconds = RATE_LIMIT_DEFAULT_S
-    return min(max(seconds, 1.0), RATE_LIMIT_MAX_S)
+
+    started_at: float
+    probe: bool
 
 
 def is_endpoint_failure(exc: BaseException) -> bool:
@@ -128,20 +169,6 @@ class _EndpointState:
     opened_wall_ms: int
     failures: int
     last_error: str
-    cooldown_s: float
-    # Opened by a 429: the window is the endpoint's own Retry-After.
-    rate_limited: bool = False
-
-    def remaining_s(self, now: float) -> float:
-        return self.cooldown_s - (now - self.opened_at)
-
-    def value(self) -> str:
-        """The shared key value for this state."""
-        return _encode(
-            self.opened_wall_ms,
-            self.cooldown_s if self.rate_limited else None,
-            self.last_error,
-        )
 
 
 class _Store:
@@ -262,6 +289,103 @@ def reset_shared_stores() -> None:
         _CLIENT_STORES.clear()
 
 
+
+
+@dataclass
+class _RateWindow:
+    """A rate limit window as this process knows it, on the wall clock."""
+
+    opened_wall_ms: int
+    until: float
+    count: int
+    # This process holds the probe lease until then (0: it does not).
+    lease_until: float = 0.0
+
+
+class _CachedCircuit(NamedTuple):
+    checked_at: float
+    open_until: float
+
+
+class _WindowView(NamedTuple):
+    """A rate limit window as read: its end (wall clock) and whether any
+    worker holds the probe lease."""
+
+    until: float
+    probe_out: bool
+
+
+class _CachedWindow(NamedTuple):
+    checked_at: float
+    view: Optional[_WindowView]
+
+
+# The store cannot answer: the per-process state decides.
+_UNKNOWN: Any = object()
+
+# Rate limit window scripts: each is one atomic step on Valkey, so two workers
+# never interleave a read and a write. The window value is
+# "<opened ms>:<until ms>"; the lease is a separate key with its own expiry.
+
+_RL_RECORD = """
+-- eve:rate-limit:record
+-- KEYS: window, lease. ARGV: opened ms, until ms, now ms, hold ms.
+-- The window only grows: a shorter Retry-After never replaces a longer one,
+-- and opened is the latest 429. The lease goes only when the window grows.
+local opened = tonumber(ARGV[1])
+local untl = tonumber(ARGV[2])
+local grew = true
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local sep = string.find(cur, ':', 1, true)
+  if sep then
+    local cur_opened = tonumber(string.sub(cur, 1, sep - 1))
+    local cur_until = tonumber(string.sub(cur, sep + 1))
+    if cur_opened and cur_opened > opened then opened = cur_opened end
+    if cur_until and cur_until >= untl then
+      untl = cur_until
+      grew = false
+    end
+  end
+end
+local ttl = untl - tonumber(ARGV[3]) + tonumber(ARGV[4])
+if ttl < 1000 then ttl = 1000 end
+redis.call('SET', KEYS[1], string.format('%.0f', opened) .. ':' .. string.format('%.0f', untl),
+  'PX', string.format('%.0f', ttl))
+if grew then redis.call('DEL', KEYS[2]) end
+return string.format('%.0f', untl)
+"""
+
+_RL_ADMIT = """
+-- eve:rate-limit:admit
+-- KEYS: window, lease. ARGV: now ms, lease token, lease ms.
+-- {0, 0} no window; {1, ms left} inside it; {2, 0} probe lease won;
+-- {3, ms left on the lease} another request is the probe.
+local cur = redis.call('GET', KEYS[1])
+if not cur then return {0, 0} end
+local sep = string.find(cur, ':', 1, true)
+local untl = sep and tonumber(string.sub(cur, sep + 1))
+if not untl then return {0, 0} end
+local now = tonumber(ARGV[1])
+if now < untl then return {1, untl - now} end
+if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3]) then return {2, 0} end
+return {3, redis.call('PTTL', KEYS[2])}
+"""
+
+_RL_CLOSE = """
+-- eve:rate-limit:close
+-- KEYS: window, lease. ARGV: started ms.
+-- Closes only a window opened before the successful request started.
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local sep = string.find(cur, ':', 1, true)
+local opened = sep and tonumber(string.sub(cur, 1, sep - 1))
+if opened and opened > tonumber(ARGV[1]) then return 0 end
+redis.call('DEL', KEYS[1], KEYS[2])
+return 1
+"""
+
+
 class EndpointHealth:
     """Circuit breaker over the endpoint chain, shared through Redis when it can be.
 
@@ -285,22 +409,31 @@ class EndpointHealth:
       and the key is not newer than the request that succeeded, so a slow
       success never erases a failure another worker recorded meanwhile.
 
-    A 429 writes ``<opened_at>:rl=<window ms>:<reason>`` instead: the window
-    replaces the cooldown for every reader, and :meth:`is_rate_limited` is true
-    while the circuit is open, the half-open wait of the other workers
-    included, so only the worker holding the probe lease calls the endpoint.
-    A later timeout or 5xx never shortens such a window.
+    A 429 is a rate limit window instead, in its own key
+    ``<prefix><llm_type>:rate-limit`` (``<opened ms>:<until ms>``) with its own
+    probe lease ``<prefix><llm_type>:rate-limit:probe``. Nothing else writes
+    it, so a timeout or a 5xx never touches it, and it only grows. Callers
+    that send to the endpoint ask :meth:`admit` first, a fresh atomic read:
+    inside the window it refuses; after it, one request in the fleet wins the
+    lease and is the probe, every other one refuses. Only
+    :meth:`close_rate_limit_window`, called when the endpoint itself answered
+    the probe, closes it; a window nobody probes is forgotten
+    :data:`RATE_LIMIT_HOLD_S` after it ended. :meth:`is_rate_limited` reads the
+    same state (cached *refresh_s*) without ever taking the lease.
 
     While Redis answers it is authoritative. The per-process state is always
     written too and takes over whenever Redis is unset or unreachable; failures
-    recorded during an outage are written back (``NX``, remaining cooldown)
-    before this breaker reads the store again. The breaker never raises.
+    and windows recorded during an outage are written back (circuits ``NX``
+    with the remaining cooldown, windows through the same only-grows script)
+    before this breaker reads the store again. The breaker never raises, except
+    :meth:`admit`, which raises :class:`EndpointRateLimited` to refuse.
 
     The public methods stay synchronous because ``resolve_chain`` and its
-    callers are. A read is one ``GET`` per endpoint at most every *refresh_s*,
-    bounded by *redis_timeout_s*; after a Redis error every breaker on that
-    store skips it for *redis_retry_s*, so an outage costs one bounded stall
-    per worker per retry window.
+    callers are. A read is one command per endpoint at most every *refresh_s*,
+    and :meth:`admit` one script per request, each bounded by
+    *redis_timeout_s*; after a Redis error every breaker on that store skips it
+    for *redis_retry_s*, so an outage costs one bounded stall per worker per
+    retry window.
     """
 
     def __init__(
@@ -322,6 +455,7 @@ class EndpointHealth:
         self._wall = wall_clock
         self._lock = threading.Lock()
         self._states: Dict[str, _EndpointState] = {}
+        self._windows: Dict[str, _RateWindow] = {}
 
         self._store = _store_for(
             url=(redis_url or "").strip(),
@@ -333,146 +467,226 @@ class EndpointHealth:
         self._key_prefix = key_prefix
         self._probe_s = probe_s
         self._refresh_s = refresh_s
-        # llm_type -> (checked_at, open_until, window_until, rate_limited), on
-        # self._clock; window_until is the end of a 429 window (0 outside one).
-        self._remote: Dict[str, Tuple[float, float, float, bool]] = {}
+        # Shared reads, on self._clock.
+        self._remote: Dict[str, _CachedCircuit] = {}
+        self._remote_windows: Dict[str, _CachedWindow] = {}
         # Half-open leases this breaker holds.
         self._probing: Set[str] = set()
-        # Failures recorded while the store was unreachable.
+        # Failures and windows recorded while the store was unreachable.
         self._unsynced: Set[str] = set()
+        self._unsynced_windows: Set[str] = set()
+        # Identifies this process's probe leases in the store.
+        self._lease_token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
 
     # ─── public API ──────────────────────────────────────────────────────────
 
     def is_open(self, llm_type: str) -> bool:
-        """True while *llm_type* is still cooling down after a failure."""
-        return self._status(llm_type)[0]
+        """True while *llm_type* cools down after a failure, or a rate limit
+        window keeps it out."""
+        if self.is_rate_limited(llm_type):
+            return True
+        local_open = self._local_is_open(llm_type)
+        shared_open = self._shared_is_open(llm_type)
+        return local_open if shared_open is None else shared_open
 
     def is_rate_limited(self, llm_type: str) -> bool:
-        """True while a 429 keeps *llm_type* out: it must not be called at all.
+        """True while a 429 keeps *llm_type* out of new turns.
 
-        Covers the Retry-After window and, after it, the half-open wait of the
-        workers that did not win the probe lease.
+        Inside the Retry-After window, and after it while a probe is out. A
+        window that ended with no probe out reads False, so the next turn may
+        try: :meth:`admit` then picks the one request that probes.
         """
-        is_open, rate_limited, _ = self._status(llm_type)
-        return is_open and rate_limited
+        view = self._window_view(llm_type)
+        return view is not None and (self._wall() < view.until or view.probe_out)
 
     def rate_limit_remaining_s(self, llm_type: str) -> float:
         """Seconds left in the Retry-After window of *llm_type*, 0 outside one."""
-        _, rate_limited, window_s = self._status(llm_type)
-        return window_s if rate_limited else 0.0
+        view = self._window_view(llm_type)
+        return max(view.until - self._wall(), 0.0) if view is not None else 0.0
+
+    def admit(self, llm_type: str) -> RateLimitPermit:
+        """Leave to send one request to *llm_type*, or :class:`EndpointRateLimited`.
+
+        Reads the store fresh, never the cache, so a 429 another worker just
+        recorded holds here at once. Inside a window it refuses; after it the
+        first caller in the fleet gets the probe lease and every other caller
+        refuses until the probe reports or its lease expires. With the store
+        unset or unreachable the per-process state decides.
+        """
+        started = self._wall()
+        started_ms = int(started * 1000)
+        lease_s = self._probe_budget(llm_type) + PROBE_LEASE_MARGIN_S
+        window_key, lease_key = self._window_keys(llm_type)
+
+        def admit(client: Any) -> Any:
+            return client.eval(
+                _RL_ADMIT, 2, window_key, lease_key,
+                started_ms, self._lease_token, int(lease_s * 1000),
+            )
+
+        result = self._run(admit)
+        if result is not None:
+            code, left_ms = int(result[0]), int(result[1])
+            if code == 0:
+                with self._lock:
+                    self._windows.pop(llm_type, None)
+                self._cache_window(llm_type, None)
+                return RateLimitPermit(started, False)
+            if code == 2:
+                self._cache_window(llm_type, _WindowView(started, True))
+                return RateLimitPermit(started, True)
+            if code == 1:
+                self._cache_window(llm_type, _WindowView(started + left_ms / 1000.0, False))
+            else:
+                self._cache_window(llm_type, _WindowView(started, True))
+            raise EndpointRateLimited(llm_type, left_ms / 1000.0)
+
+        with self._lock:
+            window = self._windows.get(llm_type)
+            if window is None or started >= window.until + RATE_LIMIT_HOLD_S:
+                self._windows.pop(llm_type, None)
+                return RateLimitPermit(started, False)
+            if started < window.until:
+                raise EndpointRateLimited(llm_type, window.until - started)
+            if window.lease_until > started:
+                raise EndpointRateLimited(llm_type, window.lease_until - started)
+            window.lease_until = started + lease_s
+            return RateLimitPermit(started, True)
+
+    def record_rate_limit(self, llm_type: str, retry_after: Any = None) -> float:
+        """Open (or lengthen) the rate limit window of *llm_type* after a 429.
+
+        *retry_after* is the response's Retry-After header. Returns the seconds
+        left in the window, which is never shorter than one already running.
+        """
+        now = self._wall()
+        window_s = rate_limit_window_s(retry_after, now)
+        opened_ms = int(now * 1000)
+        with self._lock:
+            previous = self._windows.get(llm_type)
+            until = max(now + window_s, previous.until if previous else 0.0)
+            self._windows[llm_type] = _RateWindow(
+                opened_wall_ms=opened_ms,
+                until=until,
+                count=previous.count + 1 if previous else 1,
+            )
+        window_key, lease_key = self._window_keys(llm_type)
+
+        def record(client: Any) -> Any:
+            return client.eval(
+                _RL_RECORD, 2, window_key, lease_key,
+                opened_ms, int(until * 1000), opened_ms, int(RATE_LIMIT_HOLD_S * 1000),
+            )
+
+        shared_until = self._run(record)
+        if shared_until is None:
+            with self._lock:
+                self._unsynced_windows.add(llm_type)
+        else:
+            until = max(until, int(shared_until) / 1000.0)
+            with self._lock:
+                window = self._windows.get(llm_type)
+                if window is not None:
+                    window.until = max(window.until, until)
+            self._cache_window(llm_type, _WindowView(until, False))
+        remaining_s = max(until - now, 1.0)
+        # No upstream text: a 429 body can echo the key or the prompt.
+        logger.warning(
+            "Endpoint %s circuit opened: rate limited (HTTP 429), retry after %ds",
+            llm_type,
+            math.ceil(remaining_s),
+        )
+        return remaining_s
+
+    def close_rate_limit_window(self, llm_type: str, started_at: float) -> bool:
+        """Close the rate limit window of *llm_type* after the endpoint answered.
+
+        Call it only with a success produced by *llm_type* itself, never with
+        an answer another endpoint gave in its place. *started_at* is the wall
+        clock the request started: a window opened after it (a newer 429)
+        stays. Returns True when a window was closed.
+        """
+        started_ms = int(started_at * 1000)
+        local_closed = False
+        with self._lock:
+            window = self._windows.get(llm_type)
+            if window is not None and window.opened_wall_ms <= started_ms:
+                del self._windows[llm_type]
+                self._unsynced_windows.discard(llm_type)
+                local_closed = True
+        window_key, lease_key = self._window_keys(llm_type)
+
+        def close(client: Any) -> Any:
+            return client.eval(_RL_CLOSE, 2, window_key, lease_key, started_ms)
+
+        result = self._run(close)
+        closed = local_closed if result is None else bool(int(result))
+        if result is not None and closed:
+            self._cache_window(llm_type, None)
+        if closed:
+            logger.info("Endpoint %s rate limit window closed: the probe answered", llm_type)
+        return closed
 
     def record_failure(self, llm_type: str, exc: BaseException) -> Optional[float]:
         """Open (or re-open) the circuit for *llm_type*.
 
-        A 429 opens it for the Retry-After it carries and returns that window
-        in seconds; anything else opens it for the cooldown and returns None.
-        An error that says it is already recorded changes nothing.
+        A 429 opens the rate limit window instead (:meth:`record_rate_limit`)
+        and returns its seconds left; anything else opens the circuit for the
+        cooldown, leaves any window alone and returns None. An error that says
+        it is already recorded changes nothing.
         """
         if getattr(exc, "breaker_recorded", False):
             return None
-        window_s = rate_limit_window_s(exc, self._wall())
-        rate_limited = window_s is not None
-        cooldown_s = window_s if window_s is not None else self._cooldown_s
-        reason = (
-            f"RateLimited: HTTP 429, retry after {window_s:.0f}s"
-            if rate_limited
-            else f"{type(exc).__name__}: {exc}"[:200]
-        )
+        if getattr(exc, "status_code", None) == 429:
+            return self.record_rate_limit(llm_type, retry_after_header(exc))
+        reason = f"{type(exc).__name__}: {exc}"[:200]
         wall_ms = int(self._wall() * 1000)
-        now = self._clock()
         with self._lock:
             previous = self._states.get(llm_type)
-            keeps_window = (
-                not rate_limited
-                and previous is not None
-                and previous.rate_limited
-                and previous.remaining_s(now) > cooldown_s
+            self._states[llm_type] = _EndpointState(
+                opened_at=self._clock(),
+                opened_wall_ms=wall_ms,
+                failures=previous.failures + 1 if previous else 1,
+                last_error=reason,
             )
-            if keeps_window:
-                previous.failures += 1
-            else:
-                self._states[llm_type] = _EndpointState(
-                    opened_at=now,
-                    opened_wall_ms=wall_ms,
-                    failures=previous.failures + 1 if previous else 1,
-                    last_error=reason,
-                    cooldown_s=cooldown_s,
-                    rate_limited=rate_limited,
-                )
             self._probing.discard(llm_type)
-        if cooldown_s > 0 and not keeps_window:
+        if self._cooldown_s > 0:
             key = self._key(llm_type)
-            probe_s = self._probe_budget(llm_type)
-            value = _encode(wall_ms, window_s, reason)
+            ttl_ms = int((self._cooldown_s + self._probe_budget(llm_type)) * 1000)
 
-            def reopen(client: Any) -> Tuple[float, float, bool]:
-                if not rate_limited:
-                    # A timeout or a 5xx never shortens a 429 window another
-                    # worker recorded.
-                    current = _decode(client.get(key))
-                    if current is not None and current[1] is not None:
-                        left_s = (current[0] + current[1] - wall_ms) / 1000.0
-                        if left_s > cooldown_s:
-                            return left_s, left_s, True
-                client.set(key, value, px=int((cooldown_s + probe_s) * 1000))
+            def reopen(client: Any) -> bool:
+                client.set(key, f"{wall_ms}:{reason}", px=ttl_ms)
                 client.delete(f"{key}:probe")
-                return cooldown_s, (cooldown_s if rate_limited else 0.0), rate_limited
+                return True
 
-            opened = self._run(reopen)
-            if opened is not None:
-                self._cache(llm_type, *opened)
+            if self._run(reopen):
+                self._cache(llm_type, self._cooldown_s)
             else:
                 with self._lock:
                     self._unsynced.add(llm_type)
-        if rate_limited:
-            # No upstream text: a 429 body can echo the key or the prompt.
-            logger.warning(
-                "Endpoint %s circuit opened: rate limited (HTTP 429), retry after %ds",
-                llm_type,
-                math.ceil(window_s),
-            )
-        else:
-            logger.warning("Endpoint %s circuit opened: %s", llm_type, exc)
-        return window_s
+        logger.warning("Endpoint %s circuit opened: %s", llm_type, exc)
+        return None
 
     def record_success(
-        self,
-        llm_type: str,
-        *,
-        started_at: Optional[float] = None,
-        rate_limit_only: bool = False,
+        self, llm_type: str, *, started_at: Optional[float] = None
     ) -> None:
         """Close the circuit for *llm_type*.
 
         *started_at* is the wall-clock time (``time.time()``) the successful
-        request started; a shared circuit opened after it stays open, and so
-        does a local 429 window. With *rate_limit_only* only a circuit a 429
-        opened is closed: the client that keeps an endpoint out of its 429
-        window closes it after its own probe, and leaves every other circuit to
-        the callers that manage it today.
+        request started; a shared circuit opened after it stays open. A rate
+        limit window is never closed here: callers report the turn, which a
+        substituted client may have answered (see
+        :meth:`close_rate_limit_window`).
         """
         now = self._clock()
         with self._lock:
-            state = self._states.get(llm_type)
-            cached = self._remote.get(llm_type)
-            if rate_limit_only and not (
-                (state is not None and state.rate_limited)
-                or (cached is not None and cached[3])
-            ):
-                return
-            local_open = state is not None
-            keeps_window = (
-                state is not None
-                and state.rate_limited
-                and started_at is not None
-                and started_at * 1000 < state.opened_wall_ms
-            )
-            if not keeps_window:
-                self._states.pop(llm_type, None)
-                self._unsynced.discard(llm_type)
+            local_open = llm_type in self._states
+            self._states.pop(llm_type, None)
+            self._unsynced.discard(llm_type)
             probing = llm_type in self._probing
             self._probing.discard(llm_type)
-        cached_open = cached is not None and now < cached[1]
+            cached = self._remote.get(llm_type)
+        cached_open = cached is not None and now < cached.open_until
         if self._store is None or not (local_open or probing or cached_open):
             return
         key = self._key(llm_type)
@@ -496,108 +710,151 @@ class EndpointHealth:
         worker opened shows up in :meth:`is_open`, not here.
         """
         now = self._clock()
+        wall = self._wall()
         with self._lock:
-            return {
+            rows = {
                 llm_type: {
-                    "open": state.remaining_s(now) > 0,
-                    "rate_limited": state.rate_limited,
+                    "open": now - state.opened_at < self._cooldown_s,
+                    "rate_limited": False,
                     "failures": state.failures,
                     "last_error": state.last_error,
                     "opened_since_s": round(now - state.opened_at, 3),
                 }
                 for llm_type, state in self._states.items()
             }
+            for llm_type, window in self._windows.items():
+                rows[llm_type] = {
+                    "open": wall < window.until or window.lease_until > wall,
+                    "rate_limited": True,
+                    "failures": window.count,
+                    "last_error": "RateLimited: HTTP 429",
+                    "opened_since_s": round(wall - window.opened_wall_ms / 1000.0, 3),
+                }
+            return rows
 
     # ─── per-process state ───────────────────────────────────────────────────
 
-    def _status(self, llm_type: str) -> Tuple[bool, bool, float]:
-        """(open, opened by a 429, seconds left in the 429 window)."""
-        local = self._local_status(llm_type)
-        shared = self._shared_status(llm_type)
-        return local if shared is None else shared
-
-    def _local_status(self, llm_type: str) -> Tuple[bool, bool, float]:
+    def _local_is_open(self, llm_type: str) -> bool:
         with self._lock:
             state = self._states.get(llm_type)
             if state is None:
-                return False, False, 0.0
-            remaining_s = state.remaining_s(self._clock())
-            if remaining_s <= 0:
+                return False
+            if self._clock() - state.opened_at >= self._cooldown_s:
                 del self._states[llm_type]
                 self._unsynced.discard(llm_type)
-                return False, False, 0.0
-            return True, state.rate_limited, remaining_s if state.rate_limited else 0.0
+                return False
+            return True
+
+    def _local_window(self, llm_type: str) -> Optional[_WindowView]:
+        wall = self._wall()
+        with self._lock:
+            window = self._windows.get(llm_type)
+            if window is None:
+                return None
+            if wall >= window.until + RATE_LIMIT_HOLD_S:
+                del self._windows[llm_type]
+                self._unsynced_windows.discard(llm_type)
+                return None
+            return _WindowView(window.until, window.lease_until > wall)
 
     # ─── shared state ────────────────────────────────────────────────────────
 
     def _key(self, llm_type: str) -> str:
         return f"{self._key_prefix}{llm_type}"
 
+    def _window_keys(self, llm_type: str) -> Tuple[str, str]:
+        window_key = f"{self._key(llm_type)}:rate-limit"
+        return window_key, f"{window_key}:probe"
+
     def _probe_budget(self, llm_type: str) -> float:
         budget = self._probe_s(llm_type) if callable(self._probe_s) else self._probe_s
         return max(float(budget), 1.0)
 
-    def _cache(
-        self,
-        llm_type: str,
-        open_for_s: float,
-        window_s: float = 0.0,
-        rate_limited: bool = False,
-    ) -> None:
+    def _cache(self, llm_type: str, open_for_s: float) -> None:
         now = self._clock()
         with self._lock:
-            self._remote[llm_type] = (now, now + open_for_s, now + window_s, rate_limited)
+            self._remote[llm_type] = _CachedCircuit(now, now + open_for_s)
 
-    def _shared_status(self, llm_type: str) -> Optional[Tuple[bool, bool, float]]:
+    def _cache_window(self, llm_type: str, view: Optional[_WindowView]) -> None:
+        if self._store is None:
+            return
+        now = self._clock()
+        with self._lock:
+            self._remote_windows[llm_type] = _CachedWindow(now, view)
+
+    def _window_view(self, llm_type: str) -> Optional[_WindowView]:
+        shared = self._shared_window(llm_type)
+        return self._local_window(llm_type) if shared is _UNKNOWN else shared
+
+    def _shared_window(self, llm_type: str) -> Any:
+        """The shared window, None for none, or _UNKNOWN when only the local
+        state can answer. Cached *refresh_s*; never takes the probe lease."""
+        if self._store is None:
+            return _UNKNOWN
+        now = self._clock()
+        with self._lock:
+            cached = self._remote_windows.get(llm_type)
+            if cached is not None and now - cached.checked_at < self._refresh_s:
+                return cached.view
+        window_key, lease_key = self._window_keys(llm_type)
+
+        def read(client: Any) -> Optional[_WindowView]:
+            window, lease = client.mget([window_key, lease_key])
+            decoded = _decode_window(window)
+            if decoded is None:
+                return None
+            return _WindowView(decoded[1] / 1000.0, lease is not None)
+
+        result = self._run(read, default=_UNKNOWN)
+        if result is _UNKNOWN:
+            return _UNKNOWN
+        self._cache_window(llm_type, result)
+        return result
+
+    def _shared_is_open(self, llm_type: str) -> Optional[bool]:
         """The shared verdict, or None when only the local state can answer."""
         if self._store is None:
             return None
         now = self._clock()
         with self._lock:
             cached = self._remote.get(llm_type)
-            if cached is not None and now - cached[0] < self._refresh_s:
-                return now < cached[1], cached[3], max(cached[2] - now, 0.0)
+            if cached is not None and now - cached.checked_at < self._refresh_s:
+                return now < cached.open_until
         key = self._key(llm_type)
         probe_ms = int(self._probe_budget(llm_type) * 1000)
 
-        def read(client: Any) -> Tuple[float, float, bool]:
-            """Seconds open for this worker (0 = closed), seconds left in a 429
-            window, and whether a 429 opened the circuit."""
-            current = _decode(client.get(key))
-            if current is None:
-                return 0.0, 0.0, False
-            opened_ms, window_ms = current
-            rate_limited = window_ms is not None
-            cooldown_ms = window_ms if window_ms is not None else self._cooldown_s * 1000
-            remaining_ms = opened_ms + cooldown_ms - self._wall() * 1000
+        def read(client: Any) -> float:
+            """Seconds the circuit stays open for this worker (0 = closed)."""
+            opened_ms = _opened_ms(client.get(key))
+            if opened_ms is None:
+                return 0.0
+            remaining_ms = opened_ms + self._cooldown_s * 1000 - self._wall() * 1000
             if remaining_ms > 0:
-                remaining_s = remaining_ms / 1000.0
-                return remaining_s, (remaining_s if rate_limited else 0.0), rate_limited
+                return remaining_ms / 1000.0
             # Half-open: one worker probes, the others wait for its verdict.
             if client.set(f"{key}:probe", str(os.getpid()), nx=True, px=probe_ms):
                 with self._lock:
                     self._probing.add(llm_type)
-                return 0.0, 0.0, rate_limited
-            return self._refresh_s, 0.0, rate_limited
+                return 0.0
+            return self._refresh_s
 
-        verdict = self._run(read)
-        if verdict is None:
+        open_for = self._run(read)
+        if open_for is None:
             return None
-        open_for, window_s, rate_limited = verdict
-        self._cache(llm_type, open_for, window_s, rate_limited)
-        return open_for > 0, rate_limited, window_s
+        self._cache(llm_type, open_for)
+        return open_for > 0
 
-    def _run(self, op: Callable[[Any], Any]) -> Any:
-        """Run *op* against the store; None when the store cannot answer.
+    def _run(self, op: Callable[[Any], Any], default: Any = None) -> Any:
+        """Run *op* against the store; *default* when the store cannot answer.
 
-        Failures recorded during an outage go back first (NX, remaining
-        cooldown), so the store never contradicts what this worker saw.
+        Failures and windows recorded during an outage go back first, so the
+        store never contradicts what this worker saw.
         """
         if self._store is None:
-            return None
+            return default
         client = self._store.get_client()
         if client is None:
-            return None
+            return default
         try:
             self._resync(client)
             result = op(client)
@@ -605,61 +862,81 @@ class EndpointHealth:
             self._store.failed(exc)
             with self._lock:
                 self._remote.clear()
-            return None
+                self._remote_windows.clear()
+            return default
         self._store.answered()
         return result
 
     def _resync(self, client: Any) -> None:
         with self._lock:
-            if not self._unsynced:
+            if not self._unsynced and not self._unsynced_windows:
                 return
             now = self._clock()
+            wall = self._wall()
             pending = [
                 (llm_type, self._states[llm_type])
                 for llm_type in self._unsynced
                 if llm_type in self._states
             ]
+            pending_windows = [
+                (llm_type, _RateWindow(**vars(self._windows[llm_type])))
+                for llm_type in self._unsynced_windows
+                if llm_type in self._windows
+            ]
         for llm_type, state in pending:
-            remaining_s = state.remaining_s(now)
+            remaining_s = self._cooldown_s - (now - state.opened_at)
             if remaining_s <= 0:
                 continue
             ttl_ms = int((remaining_s + self._probe_budget(llm_type)) * 1000)
-            client.set(self._key(llm_type), state.value(), nx=True, px=ttl_ms)
+            client.set(
+                self._key(llm_type),
+                f"{state.opened_wall_ms}:{state.last_error}",
+                nx=True,
+                px=ttl_ms,
+            )
+        for llm_type, window in pending_windows:
+            if wall >= window.until + RATE_LIMIT_HOLD_S:
+                continue
+            # The only-grows script: a window this worker saw while the store
+            # was down wins over a shorter one written meanwhile.
+            window_key, lease_key = self._window_keys(llm_type)
+            client.eval(
+                _RL_RECORD, 2, window_key, lease_key,
+                window.opened_wall_ms, int(window.until * 1000),
+                int(wall * 1000), int(RATE_LIMIT_HOLD_S * 1000),
+            )
         with self._lock:
             self._unsynced.clear()
+            self._unsynced_windows.clear()
 
 
-def _encode(opened_wall_ms: int, window_s: Optional[float], reason: str) -> str:
-    """A breaker key value; *window_s* set marks a 429 window."""
-    if window_s is None:
-        return f"{opened_wall_ms}:{reason}"
-    return f"{opened_wall_ms}:rl={int(window_s * 1000)}:{reason}"
-
-
-def _decode(value: Any) -> Optional[Tuple[int, Optional[int]]]:
-    """``(opened_at ms, 429 window ms or None)``, or None when absent or foreign.
-
-    A reason never starts with ``rl=``: it starts with an exception class name.
-    """
+def _text(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
-    head, _, rest = str(value).partition(":")
-    try:
-        opened_ms = int(head)
-    except ValueError:
-        return None
-    window_ms: Optional[int] = None
-    if rest.startswith("rl="):
-        try:
-            window_ms = int(rest[3:].split(":", 1)[0])
-        except ValueError:
-            window_ms = None
-    return opened_ms, window_ms
+        return value.decode("utf-8", "replace")
+    return str(value)
 
 
 def _opened_ms(value: Any) -> Optional[int]:
     """``opened_at`` from a breaker key value, or None when absent or foreign."""
-    decoded = _decode(value)
-    return None if decoded is None else decoded[0]
+    text = _text(value)
+    if text is None:
+        return None
+    head = text.split(":", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _decode_window(value: Any) -> Optional[Tuple[int, int]]:
+    """``(opened ms, until ms)`` from a rate limit window value, or None."""
+    text = _text(value)
+    if text is None:
+        return None
+    opened, _, until = text.partition(":")
+    try:
+        return int(opened), int(until)
+    except ValueError:
+        return None

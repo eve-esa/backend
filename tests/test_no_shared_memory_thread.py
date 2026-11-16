@@ -66,6 +66,9 @@ class _Manager:
     def get_client_for_model(self, _llm_type):
         return self.llm
 
+    def client_for_candidate(self, _llm_type):
+        return self.llm
+
 
 async def _no_rag(_manager, query, _context, _llm_type=None):
     return (

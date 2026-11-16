@@ -512,7 +512,12 @@ Please continue the conversation using this summary as context for understanding
 
             logger.info(f"bind_kwargs: {bind_kwargs}")
             llm_manager = get_shared_llm_manager()
-            llm = llm_manager.get_client_for_model(state.get("llm_type"))
+            # The candidate's own client, never a silent substitute: inside a
+            # rate limit window the JSC client refuses, and the caller's chain
+            # walk moves to the fallback and records it.
+            llm = llm_manager.client_for_candidate(
+                state.get("llm_type") or llm_manager.resolve_chain(None)[0]
+            )
             bound_llm = llm.bind(**bind_kwargs)
 
             final_messages = context_messages
