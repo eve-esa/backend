@@ -3,11 +3,13 @@ LLM Manager module that handles different language model interactions.
 """
 
 import logging
+import time
 from enum import Enum
 from typing import Any, AsyncGenerator, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from pydantic import PrivateAttr
 
 from src.config import (
     EVE_ENDPOINT_COOLDOWN_S,
@@ -35,7 +37,12 @@ from src.config import (
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src import config as _config
-from src.core.llm_health import EndpointHealth, is_endpoint_failure
+from src.core.llm_health import (
+    RATE_LIMIT_DEFAULT_S,
+    EndpointHealth,
+    EndpointRateLimited,
+    is_endpoint_failure,
+)
 from src.services.image_catalog import append_image_context
 from src.utils.helpers import (
     str_token_counter,
@@ -92,6 +99,101 @@ def endpoint_timeout(llm_type: Optional[str]) -> int:
     if canonical == LLMType.Jsc_Large.value:
         return JSC_LARGE_TIMEOUT
     return MODEL_TIMEOUT
+
+
+class BreakerAwareChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that keeps its endpoint out for the Retry-After of a 429.
+
+    A 429 opens the endpoint's circuit for the window it asked for and comes
+    back as :class:`EndpointRateLimited`, which no retry policy retries; inside
+    the window every call refuses before a request is sent. This is what keeps
+    a running agentic turn, whose graph holds this client for every step, off
+    the endpoint after its first 429. A call that succeeds on a circuit a 429
+    opened (the half-open probe) closes it. Every other error passes through
+    untouched. Without :meth:`guard` it is a plain ChatOpenAI.
+    """
+
+    _eve_health: Any = PrivateAttr(default=None)
+    _eve_llm_type: str = PrivateAttr(default="")
+
+    def guard(self, health: EndpointHealth, llm_type: str) -> "BreakerAwareChatOpenAI":
+        """Tie this client to *llm_type*'s circuit on *health*."""
+        self._eve_health = health
+        self._eve_llm_type = llm_type
+        return self
+
+    def _refuse_inside_window(self) -> None:
+        if self._eve_health is None:
+            return
+        remaining_s = self._eve_health.rate_limit_remaining_s(self._eve_llm_type)
+        if remaining_s > 0:
+            raise EndpointRateLimited(self._eve_llm_type, remaining_s)
+
+    def _as_rate_limited(self, exc: Exception) -> Optional[Exception]:
+        """The error to raise instead of *exc*, or None to re-raise it as is."""
+        if isinstance(exc, EndpointRateLimited) or self._eve_health is None:
+            return None
+        if getattr(exc, "status_code", None) != 429:
+            return None
+        window_s = self._eve_health.record_failure(self._eve_llm_type, exc)
+        return EndpointRateLimited(self._eve_llm_type, window_s or RATE_LIMIT_DEFAULT_S)
+
+    def _answered(self, started_at: float) -> None:
+        if self._eve_health is not None:
+            self._eve_health.record_success(
+                self._eve_llm_type, started_at=started_at, rate_limit_only=True
+            )
+
+    def _generate(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse_inside_window()
+        started_at = time.time()
+        try:
+            result = super()._generate(*args, **kwargs)
+        except Exception as exc:
+            limited = self._as_rate_limited(exc)
+            if limited is None:
+                raise
+            raise limited from exc
+        self._answered(started_at)
+        return result
+
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse_inside_window()
+        started_at = time.time()
+        try:
+            result = await super()._agenerate(*args, **kwargs)
+        except Exception as exc:
+            limited = self._as_rate_limited(exc)
+            if limited is None:
+                raise
+            raise limited from exc
+        self._answered(started_at)
+        return result
+
+    def _stream(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse_inside_window()
+        started_at = time.time()
+        try:
+            yield from super()._stream(*args, **kwargs)
+        except Exception as exc:
+            limited = self._as_rate_limited(exc)
+            if limited is None:
+                raise
+            raise limited from exc
+        self._answered(started_at)
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> Any:
+        self._refuse_inside_window()
+        started_at = time.time()
+        try:
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+        except Exception as exc:
+            limited = self._as_rate_limited(exc)
+            if limited is None:
+                raise
+            raise limited from exc
+        self._answered(started_at)
 
 
 class LLMManager:
@@ -302,13 +404,16 @@ class LLMManager:
                 raise RuntimeError("EVE_JSC_BASE_URL is not configured")
             if not EVE_JSC_API_KEY:
                 raise RuntimeError("EVE_JSC_API_KEY is not set")
-            self._eve_jsc_chat_openai = ChatOpenAI(
-                api_key=EVE_JSC_API_KEY,
-                base_url=self._eve_jsc_base_url,
-                model=self._eve_jsc_model_name,
-                temperature=0.3,
-                timeout=EVE_JSC_TIMEOUT,
-                max_retries=0,
+            self._eve_jsc_chat_openai = self._guarded(
+                BreakerAwareChatOpenAI(
+                    api_key=EVE_JSC_API_KEY,
+                    base_url=self._eve_jsc_base_url,
+                    model=self._eve_jsc_model_name,
+                    temperature=0.3,
+                    timeout=EVE_JSC_TIMEOUT,
+                    max_retries=0,
+                ),
+                LLMType.Eve_Jsc.value,
             )
         return self._eve_jsc_chat_openai
 
@@ -321,15 +426,26 @@ class LLMManager:
                 raise RuntimeError("EVE_JSC_API_KEY is not set")
             if not self._jsc_large_model_name:
                 raise RuntimeError("JSC_LARGE_MODEL_NAME is not configured")
-            self._jsc_large_chat_openai = ChatOpenAI(
-                api_key=EVE_JSC_API_KEY,
-                base_url=self._eve_jsc_base_url,
-                model=self._jsc_large_model_name,
-                temperature=0.3,
-                timeout=JSC_LARGE_TIMEOUT,
-                max_retries=0,
+            self._jsc_large_chat_openai = self._guarded(
+                BreakerAwareChatOpenAI(
+                    api_key=EVE_JSC_API_KEY,
+                    base_url=self._eve_jsc_base_url,
+                    model=self._jsc_large_model_name,
+                    temperature=0.3,
+                    timeout=JSC_LARGE_TIMEOUT,
+                    max_retries=0,
+                ),
+                LLMType.Jsc_Large.value,
             )
         return self._jsc_large_chat_openai
+
+    def _guarded(self, client: Any, llm_type: str) -> Any:
+        """Tie a Blablador client to its circuit: Blablador doubles a block on
+        every request sent during it, so a 429 window must hold mid-turn too."""
+        guard = getattr(client, "guard", None)
+        if callable(guard):
+            guard(self._health, llm_type)
+        return client
 
     def build_custom_client(
         self, *, base_url: str, model_name: str, api_key: str
@@ -377,7 +493,10 @@ class LLMManager:
         endpoint; only ``None`` expands to EVE_ENDPOINT_ORDER. Unconfigured
         entries drop out, the fallback model is always the last resort, and
         endpoints whose circuit is open sink to the back rather than out, so a
-        chain with nothing but open circuits still answers.
+        chain with nothing but open circuits still answers. An endpoint a 429
+        keeps out (``is_rate_limited``) drops out instead, explicit requests
+        included, whenever something else can answer: calling it inside its
+        window would lengthen the block.
         """
         requested = canonical_llm_type(llm_type)
         names = (
@@ -406,17 +525,38 @@ class LLMManager:
             candidates.append(name)
 
         chain = [name for name in candidates if name != LLMType.Fallback.value]
+        fallback_configured = self._is_configured(LLMType.Fallback.value)
+        allowed = [name for name in chain if not self._health.is_rate_limited(name)]
+        if allowed or fallback_configured:
+            chain = allowed
         # Stable sort: closed circuits keep their configured order and open ones
         # sink to the back. When every candidate is open they all compare equal
         # and come back untouched, so a chain entirely in cooldown still answers.
         chain.sort(key=self._health.is_open)
-        if self._is_configured(LLMType.Fallback.value):
+        if fallback_configured:
             # The last resort is last by definition, whatever its own circuit
             # says: callers treat the tail of the chain as the final attempt.
             chain.append(LLMType.Fallback.value)
         if not chain:
             raise RuntimeError(f"No endpoint is configured for llm_type={llm_type!r}")
         return chain
+
+    def open_circuits(self, llm_type: Optional[str], chain: list[str]) -> list[str]:
+        """Endpoints of this request whose circuit is open, for metadata.
+
+        The chain's own, then the requested ones a 429 took out of it.
+        """
+        requested = canonical_llm_type(llm_type)
+        names = list(chain)
+        wanted = (
+            [requested]
+            if requested is not None
+            else [canonical_llm_type(n.strip()) for n in EVE_ENDPOINT_ORDER.split(",")]
+        )
+        for name in wanted:
+            if name and name not in names and self._health.is_rate_limited(name):
+                names.append(name)
+        return [name for name in names if self._health.is_open(name)]
 
     def client_for_candidate(self, llm_type: str) -> ChatOpenAI:
         """Return the client for one chain candidate, without substituting.
@@ -454,6 +594,16 @@ class LLMManager:
         try:
             if llm_type is None:
                 llm_type = self.resolve_chain(None)[0]
+            canonical = canonical_llm_type(llm_type)
+            if (
+                canonical
+                and canonical != LLMType.Fallback.value
+                and self._is_configured(LLMType.Fallback.value)
+                and self._health.is_rate_limited(canonical)
+            ):
+                # Same rule as resolve_chain: a 429 window is not probed.
+                self._selected_llm_type = LLMType.Fallback.value
+                return self._get_fallback_llm()
             return self.client_for_candidate(llm_type)
         except Exception as e:
             logger.error(f"Failed to get client for model {llm_type!r}: {e}")

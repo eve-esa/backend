@@ -933,9 +933,10 @@ async def _resolve_agentic_llm_client(
     manager = get_shared_llm_manager()
     effective_type = _resolve_agentic_llm_type(request.llm_type)
     chain = manager.resolve_chain(effective_type)
-    circuit_open = [name for name in chain if manager.health.is_open(name)]
-    # resolve_chain has already sunk open circuits to the back, and kept the
-    # configured order when every one of them is open, so the head is the pick.
+    circuit_open = manager.open_circuits(effective_type, chain)
+    # resolve_chain has already sunk open circuits to the back, kept the
+    # configured order when every one of them is open, and dropped an endpoint
+    # a 429 keeps out, so the head is the pick.
     candidate = chain[0]
     # client_for_candidate raises instead of quietly substituting Mistral, so
     # agentic_llm_resolved reports the endpoint that will actually be called.

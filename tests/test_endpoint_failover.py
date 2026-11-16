@@ -228,6 +228,59 @@ async def test_an_open_circuit_keeps_the_next_request_off_the_dead_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_a_429_keeps_the_next_explicit_request_off_the_endpoint(monkeypatch):
+    """A classic 429 opens the circuit for its Retry-After, and the next turn
+    that names the endpoint goes to the fallback without calling it."""
+    from openai import APIStatusError
+
+    user, _token = await create_test_user_and_token()
+    conversation = message = second_message = None
+    try:
+        conversation, message = await _new_turn(user)
+        request = httpx.Request("POST", "https://jsc.example/v1/chat/completions")
+        rate_limited = APIStatusError(
+            "Error code: 429",
+            response=httpx.Response(429, headers={"retry-after": "30"}, request=request),
+            body=None,
+        )
+        graph = _FakeGraph(
+            {"eve_jsc": [rate_limited], "fallback": ["fallback ", "answer"]}
+        )
+        manager = _patch_pipeline(monkeypatch, graph)
+
+        await _stream(conversation, message, llm_type="eve_jsc")
+        assert manager.health.rate_limit_remaining_s("eve_jsc") == pytest.approx(30, abs=2)
+
+        second_message = await Message.create(
+            conversation_id=conversation.id,
+            input="And Milan?",
+            output="",
+            documents=[],
+            use_rag=False,
+            metadata={},
+        )
+        graph.seen.clear()
+        events = await _stream(conversation, second_message, llm_type="eve_jsc")
+
+        assert graph.seen == ["fallback"]
+        assert _tokens(events) == ["fallback ", "answer"]
+        saved = await Message.find_by_id(second_message.id)
+        endpoint = saved.metadata["endpoint"]
+        assert endpoint["chain"] == ["fallback"]
+        assert endpoint["answered"] == "fallback"
+        assert endpoint["substituted"] is True
+        assert endpoint["circuit_open"] == ["eve_jsc"]
+    finally:
+        await cleanup_models(
+            [
+                doc
+                for doc in (user, conversation, message, second_message)
+                if doc is not None
+            ]
+        )
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_endpoint_falls_back_and_says_it_was_substituted(
     monkeypatch,
 ):

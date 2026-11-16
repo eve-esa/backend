@@ -81,17 +81,29 @@ payload with `answered: null` and the failed attempt listed:
   and `mistral` read as `main` and `fallback`), or `null` when it asked for
   none.
 - `chain` is the resolved candidate order: unconfigured endpoints are already
-  dropped and open circuits already sunk to the back.
+  dropped, open circuits already sunk to the back, and an endpoint inside a
+  429 window already dropped (see below).
 - `answered` is the endpoint that produced the output, and
   `generated_model_name` is its model.
 - `attempts[].outcome` reuses the codes above.
 - `circuit_open` lists candidates that were still cooling down when the turn
-  started.
+  started, the requested endpoint included when a 429 window took it out of
+  `chain`.
 - `substituted` is true only when the request named an endpoint and a different
   one answered; a request that named none is never a substitution.
 
 An explicit request is never promoted to another endpoint: asking for
 `eve_jsc` can only be answered by `eve_jsc` or the fallback model.
+
+A 429 keeps the endpoint out for the `Retry-After` window it sent (seconds or
+an HTTP date; 60 s when missing or unreadable; at most 3600 s), on every worker
+when `REDIS_URL` is set. The request that got the 429 is not retried: the turn
+moves to the fallback model at once, and a running agentic turn makes no
+further call to that endpoint. Until the window ends, new turns skip it even
+when they name it, so the fallback answers with `substituted: true`. After the
+window one request probes the endpoint, and its success closes the circuit.
+Other failures keep the fixed `EVE_ENDPOINT_COOLDOWN_S` and never shorten a
+429 window.
 
 The wait is for the first token only. Later tokens are not under it. The budget is `MAIN_MODEL_TIMEOUT` (120s) for `main`, `EVE_JSC_TIMEOUT` (default 13s) for `eve_jsc`, `JSC_LARGE_TIMEOUT` (60s) for `jsc_large`, and `MODEL_TIMEOUT` (13s) for every other model.
 

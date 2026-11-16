@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 import httpx
 import openai
 import pytest
-from langchain_openai import ChatOpenAI
 from pymongo.errors import OperationFailure
 
 from src.commands.register_jsc_large_model import (
@@ -269,7 +268,9 @@ async def test_the_alias_is_the_model_in_the_request_body(monkeypatch):
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     monkeypatch.setattr(
-        llm_module, "ChatOpenAI", partial(ChatOpenAI, http_async_client=client)
+        llm_module,
+        "BreakerAwareChatOpenAI",
+        partial(llm_module.BreakerAwareChatOpenAI, http_async_client=client),
     )
     llm = _manager(monkeypatch).client_for_candidate("jsc_large")
 

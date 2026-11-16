@@ -1361,7 +1361,7 @@ async def generate_answer(
         # only second chance.
         chain = llm_manager.resolve_chain(request.llm_type)
         candidate = chain[0]
-        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+        circuit_open = llm_manager.open_circuits(request.llm_type, chain)
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
@@ -1865,7 +1865,7 @@ async def _classic_stream_events(
             if len(chain) > 1 and chain[-1] == LLMType.Fallback.value
             else chain
         )
-        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+        circuit_open = llm_manager.open_circuits(request.llm_type, chain)
         endpoint_attempts: List[Dict[str, str]] = []
         answered_by: Optional[str] = None
         stream_error: Optional[BaseException] = None
