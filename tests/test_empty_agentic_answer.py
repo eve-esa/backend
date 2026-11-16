@@ -8,6 +8,7 @@ the ``error`` frame the frontend renders with Retry, one WARNING line names the
 ids and the root span carries the error.
 """
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -33,6 +34,11 @@ SECRET_QUERY = "my-private-question-text"
 UNPARSED_CALL = '[TOOL_CALLS]eve_retrieval_retrieve{"query": "sea ice'
 PARSED_CALL = '[TOOL_CALLS]eve_retrieval_retrieve{"query": "sea ice"}'
 EMPTY_LINE = "generation.empty_answer conversation_id=c1 message_id=m1"
+RECOVERED = "Primary agent node failed after agent_fallback produced an answer"
+EMPTY_DETAIL = {
+    "code": "empty_answer",
+    "message": build_empty_answer_payload()["message"],
+}
 
 
 @pytest.fixture
@@ -116,6 +122,72 @@ class TestStreamEmptyAnswer:
         assert frames[-1]["type"] == "error"
         assert frames[-1]["code"] == "empty_answer"
         assert _persisted(applied)["error"]["code"] == "empty_answer"
+
+
+def _fallback_update():
+    return ("updates", {"agent_fallback": {"messages": [AIMessage(content="")]}})
+
+
+def _fallback_answer(text, message_id=None):
+    return (
+        "messages",
+        (AIMessage(content=text, id=message_id), {"langgraph_node": "agent_fallback"}),
+    )
+
+
+def _recovery_descriptions(applied):
+    return [
+        call.kwargs.get("description")
+        for call in applied["persist_policy_event"].await_args_list
+    ]
+
+
+@pytest.mark.no_db
+class TestStreamEdges:
+    async def test_a_stop_after_the_last_event_leaves_the_root_span_unmarked(self, telemetry):
+        # The Stop lands once the graph is done: the event is set, then the
+        # task is cancelled at the next await. The turn ends stopped, so the
+        # trace must not read empty_answer.
+        stop = asyncio.Event()
+
+        class _StopAtTheEnd(_Graph):
+            async def astream(self, *args, **kwargs):
+                async for event in super().astream(*args, **kwargs):
+                    yield event
+                stop.set()
+
+        frames, applied = await _run(
+            _StopAtTheEnd([_answer("   ")]),
+            cancel_event=stop,
+            append_missing_artifact_stubs=AsyncMock(side_effect=asyncio.CancelledError),
+        )
+
+        assert _of(frames, "error") == []
+        assert _persisted(applied)["stopped"] is True
+        root = _root(telemetry)
+        assert root.status.status_code != StatusCode.ERROR
+        assert "eve.error.code" not in root.attributes
+
+    async def test_whitespace_from_the_fallback_does_not_recover_a_failed_primary(self):
+        frames, applied = await _run(
+            _Graph(
+                # The second model call flushes the first one's whitespace
+                # onto the stream before the primary's failure lands.
+                [
+                    _fallback_update(),
+                    _fallback_answer("  \n", "fb-1"),
+                    _fallback_answer(" ", "fb-2"),
+                ],
+                raise_exc=TimeoutError("agent timeout"),
+            )
+        )
+
+        # The primary's timeout stands. The whitespace already went out, so
+        # the failure-after-text rule carries it on `final`.
+        assert "empty_answer" not in json.dumps(frames)
+        assert frames[-1]["error"]["code"] == "timeout"
+        assert _persisted(applied)["error"]["code"] == "timeout"
+        assert RECOVERED not in _recovery_descriptions(applied)
 
 
 @pytest.mark.no_db
@@ -218,6 +290,38 @@ class TestSyncRunner:
         assert result[0] == "Sea ice melts."
         assert not any("generation.empty_answer" in w for w in _warnings(caplog))
 
+    async def test_list_content_is_joined_as_text(self, caplog):
+        caplog.set_level(logging.INFO)
+        content = [{"type": "text", "text": "Sea ice "}, {"type": "text", "text": "melts."}]
+        result = await _sync([{"agent": {"messages": [AIMessage(content=content)]}}])
+
+        assert result[0] == "Sea ice melts."
+        assert not any("generation.empty_answer" in w for w in _warnings(caplog))
+
+    async def test_list_content_with_blank_text_is_an_empty_answer(self, caplog):
+        caplog.set_level(logging.INFO)
+        content = [{"type": "text", "text": "  "}]
+        result = await _sync([{"agent": {"messages": [AIMessage(content=content)]}}])
+
+        assert result[0] == ""
+        assert _warnings(caplog).count(EMPTY_LINE) == 1
+
+    async def test_whitespace_from_the_fallback_does_not_recover_a_failed_primary(self):
+        updates = [
+            {"agent_fallback": {"messages": [AIMessage(content="")]}},
+            {"agent_fallback": {"messages": [AIMessage(content="  ")]}},
+        ]
+        graph = _FakeUpdatesGraph(updates, raise_exc=TimeoutError("agent timeout"))
+        request = GenerationRequest(query=SECRET_QUERY, llm_type="main", agent="react")
+
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)) as patched:
+            with pytest.raises(TimeoutError):
+                await generate_answer_agentic(
+                    request, user_id="u1", conversation_id="c1", message_id="m1"
+                )
+
+        assert RECOVERED not in _recovery_descriptions(patched)
+
     async def test_an_answer_is_untouched(self, caplog, telemetry):
         caplog.set_level(logging.INFO)
         result = await _sync([{"agent": {"messages": [AIMessage(content="An answer.")]}}])
@@ -258,7 +362,10 @@ async def test_generate_agentic_persists_an_empty_answer_error(async_client, mon
         async_client, monkeypatch, _agentic_result(answer)
     )
     try:
-        assert response.status_code == 200, response.text
+        # An API client tells it from a success: same status and detail shape
+        # as any other failed generation, and the row keeps the marker.
+        assert response.status_code == 500, response.text
+        assert response.json()["detail"] == EMPTY_DETAIL
         assert saved.output == ""
         assert saved.metadata["error"] == build_empty_answer_payload()
         assert saved.metadata["pipeline"] == "agentic"
@@ -316,9 +423,11 @@ async def test_agentic_retry_with_whitespace_is_an_empty_answer(async_client, mo
         async_client, monkeypatch, _agentic_result(" \n")
     )
     try:
-        assert response.status_code == 200, response.text
+        assert response.status_code == 500, response.text
+        assert response.json()["detail"] == EMPTY_DETAIL
         assert saved.output == ""
         assert saved.metadata["error"] == build_empty_answer_payload()
+        assert saved.stopped is False
     finally:
         await cleanup_models([saved, conversation, user])
 

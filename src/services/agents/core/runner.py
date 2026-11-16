@@ -198,6 +198,16 @@ def _strip_text_tool_calls(text: str) -> str:
     return rest if calls else ""
 
 
+def _content_text(content: Any) -> str:
+    """Message content as text: a list of parts is joined by its text parts,
+    the stream's rule, never turned into a Python repr."""
+    if isinstance(content, list):
+        return "".join(
+            c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+        )
+    return content if isinstance(content, str) else str(content or "")
+
+
 def _final_answer_text(messages: List[Any]) -> str:
     """What the non-streaming routes return: the last model message without tool calls.
 
@@ -210,8 +220,7 @@ def _final_answer_text(messages: List[Any]) -> str:
             and msg.content
             and not getattr(msg, "tool_calls", None)
         ):
-            text = msg.content if isinstance(msg.content, str) else str(msg.content)
-            return strip_handles(_strip_text_tool_calls(text))
+            return strip_handles(_strip_text_tool_calls(_content_text(msg.content)))
     return ""
 
 
@@ -2663,11 +2672,10 @@ async def generate_answer_agentic(
                     _mark_empty_answer(root_span)
 
             if graph_exc is not None:
-                has_answer = any(
-                    isinstance(msg, AIMessage)
-                    and msg.content
-                    and not getattr(msg, "tool_calls", None)
-                    for msg in raw_msgs
+                # Whitespace or an unrun text call from the fallback is not an
+                # answer: the primary's failure stands.
+                has_answer = not is_empty_answer(
+                    _final_answer_text(raw_msgs), artifact_ctx.collected_artifact_ids
                 )
                 if not _recoverable_after_agent_fallback(
                     fallback_used=fallback.used, has_answer=has_answer
@@ -3490,12 +3498,7 @@ async def generate_answer_agentic_stream_helper(
                                         yield event
                                 continue
 
-                            content = chunk.content
-                            if isinstance(content, list):
-                                content = "".join(
-                                    c.get("text", "") if isinstance(c, dict) else str(c)
-                                    for c in content
-                                )
+                            content = _content_text(chunk.content)
                             if not content:
                                 continue
 
@@ -3517,16 +3520,25 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
-                # While the root is open: the same check as the persistence
-                # below, the held text being what the flush there adds.
-                if is_empty_answer(
-                    _answer_text() + citation_rewriter.held, _collected_artifact_ids()
+                # Still inside the root: the held text goes out first, so the
+                # check reads the answer the user saw and the row stores (the
+                # artifact stubs added below come only with an artifact). A
+                # Stop already set ends the turn stopped at the next await, so
+                # the trace is left to the Stop.
+                for event in _held_token_events():
+                    yield event
+                if not cancelled() and is_empty_answer(
+                    _answer_text(), _collected_artifact_ids()
                 ):
                     _mark_empty_answer(root_span)
         except Exception as exc:
-            answer = _answer_text() or citation_rewriter.held
+            # Whitespace or an unrun text call from the fallback is not an
+            # answer: the primary's failure stands.
+            has_answer = not is_empty_answer(
+                _answer_text() + citation_rewriter.held, _collected_artifact_ids()
+            )
             if not _recoverable_after_agent_fallback(
-                fallback_used=fallback.used, has_answer=bool(answer)
+                fallback_used=fallback.used, has_answer=has_answer
             ):
                 raise
             graph_exc = exc
@@ -3536,6 +3548,8 @@ async def generate_answer_agentic_stream_helper(
                 exc,
             )
 
+        # Empty unless the graph raised after a recovered fallback: the normal
+        # end flushed inside the root above.
         for event in _held_token_events():
             yield event
 

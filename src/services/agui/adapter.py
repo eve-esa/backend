@@ -553,7 +553,9 @@ class AguiAdapter:
         self._thinking_open = False
         self._text_open = False
         self._text_streamed = False
-        self._tool_result_seen = False
+        # Text with more than whitespace went out: the answer rule of
+        # ``is_empty_answer`` (generate_answer.py), with the artifact half on `final`.
+        self._visible_text = False
         # Calls started and not ended (calls end on their own frame, so this is
         # empty in practice), and calls ended with no result yet, by minted id.
         self._open_tools: List[str] = []
@@ -710,7 +712,6 @@ class AguiAdapter:
         if tool_call_id in self._pending_results:
             self._pending_results.remove(tool_call_id)
         self._last_by_raw[raw_id] = tool_call_id
-        self._tool_result_seen = True
         self._result_since_segment = True
 
         status = frame.get("status")
@@ -829,6 +830,7 @@ class AguiAdapter:
         events.extend(self._close_text(endpoint, text_meta))
 
         artifact_ids = frame.get("artifact_ids")
+        ids: List[str] = []
         if isinstance(artifact_ids, list):
             ids = [a for a in artifact_ids if isinstance(a, str) and a]
             if ids:
@@ -838,8 +840,9 @@ class AguiAdapter:
             # Decision 5: a failure after streamed text rides on `final`.
             events.extend(self._run_error(error_code, usage=usage))
             return events
-        if not self._text_streamed and not self._tool_result_seen:
-            # Decision 6: nothing to show is not a success.
+        if not self._visible_text and not ids:
+            # Decision 6: no visible text and no artifact is not a success,
+            # tool results or not (a result is a step, not an answer).
             events.extend(self._run_error("empty_answer", usage=usage))
             return events
 
@@ -972,6 +975,8 @@ class AguiAdapter:
             self._text_message_id = message_id
             events.append(TextMessageStartEvent(message_id=self._text_message_id, role="assistant"))
         self._text_streamed = True
+        if delta.strip():
+            self._visible_text = True
         events.append(
             TextMessageContentEvent(
                 message_id=self._text_message_id, delta=delta, metadata=metadata

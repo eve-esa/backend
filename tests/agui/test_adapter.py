@@ -484,8 +484,8 @@ def test_stop_before_the_first_token(frames):
 
 
 def test_empty_answer_is_a_run_error():
-    # Today the runner sends `final` with answer "" (runner.py:2649, clear_error
-    # false); the user got nothing, so the run ends with empty_answer.
+    # The runner ends an empty turn with the `error` frame empty_answer; a
+    # `final` with no text and no artifact from any producer ends the same way.
     events = _run([f_status(), f_final("", endpoint=ENDPOINT)])
 
     assert not [t for t in _types(events) if t.startswith("TEXT_MESSAGE")]
@@ -748,8 +748,30 @@ def test_result_for_an_unannounced_call_opens_the_call_first():
     _assert_valid(events)
 
 
-def test_empty_answer_after_a_shown_tool_result_is_success():
-    # Decision 6: empty_answer only when no tool result was shown.
+def test_empty_final_after_a_shown_tool_result_is_empty_answer():
+    # Decision 6: a tool result is a step, not an answer.
+    events = _run(
+        [
+            f_status(),
+            f_tool_call("call_s1", "eve_retrieval_retrieve", {"query": "x"}, server="eve_retrieval", label="Searching EVE sources"),
+            f_tool_result("call_s1", "eve_retrieval_retrieve", "3 documents", server="eve_retrieval", duration_ms=30),
+            f_final("", endpoint=ENDPOINT),
+        ]
+    )
+
+    _assert_run_error(events, "empty_answer", COPY_EMPTY)
+    _assert_valid(events)
+
+
+def test_whitespace_only_text_is_empty_answer():
+    events = _run([f_status(), f_token("  \n"), f_final("  \n", endpoint=ENDPOINT)])
+
+    _assert_run_error(events, "empty_answer", COPY_EMPTY)
+    _assert_valid(events)
+
+
+def test_artifact_without_text_after_a_tool_result_is_success():
+    # Decision 6: a file shown through `display` is an artifact, so an answer.
     events = _run(
         [
             f_status(),

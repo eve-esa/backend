@@ -101,6 +101,34 @@ async def test_empty_answer_from_the_runner_is_run_error():
     assert events[-1]["code"] == "empty_answer"
 
 
+@pytest.mark.parametrize("text", ["", "  \n"], ids=["no-text", "whitespace"])
+async def test_call_result_then_empty_text_from_the_runner_is_run_error(text):
+    _, events = await _transcript(
+        _Graph([_call(RETRIEVE, {"query": "q"}, "call-1"), _result(RETRIEVE, "call-1"), _answer(text)]),
+        tools=[_tool(RETRIEVE, "eve_retrieval")],
+    )
+
+    assert events[-1]["type"] == "RUN_ERROR"
+    assert events[-1]["code"] == "empty_answer"
+    assert _of(events, "RUN_FINISHED") == []
+    [result] = _of(events, "TOOL_CALL_RESULT")
+    assert result["toolCallId"] == "call-1"
+
+
+async def test_parsed_text_call_left_open_from_the_runner_is_run_error():
+    # The model wrote a tool call as text and the turn ended: the call is
+    # announced and never run, so nothing reached the user.
+    _, events = await _transcript(
+        _Graph([_answer('[TOOL_CALLS]eve_retrieval_retrieve{"query": "sea ice"}')]),
+        tools=[_tool(RETRIEVE, "eve_retrieval")],
+    )
+
+    assert events[-1]["type"] == "RUN_ERROR"
+    assert events[-1]["code"] == "empty_answer"
+    assert _of(events, "RUN_FINISHED") == []
+    assert "[TOOL_CALLS]" not in json.dumps(events)
+
+
 async def test_react_tool_failure_and_retry_keep_distinct_calls():
     _, events = await _transcript(
         _Graph(
