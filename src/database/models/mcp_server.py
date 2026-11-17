@@ -83,6 +83,16 @@ class MCPServer(MongoModel):
     # Connection configuration
     config: ToolConfig = Field(..., description="MCP connection configuration")
 
+    # Set by operators only (back office or Mongo), never by the user API:
+    # whether this server receives the caller's EVE token as ``X-EVE-Token``.
+    # ``None`` (field absent) falls back to the reserved retrieval names, see
+    # ``src/services/mcp/user_token_scope.py``. A change reaches each worker
+    # within ``MCP_TOOLS_CACHE_TTL`` (the proxy URL and tool caches).
+    forward_user_token: Optional[bool] = Field(
+        default=None,
+        description="Forward the caller's EVE token as X-EVE-Token (retrieval only)",
+    )
+
     metadata: Optional[MCPServerMetadata] = Field(
         default=None, description="Descriptive metadata such as author attribution"
     )
