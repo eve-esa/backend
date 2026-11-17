@@ -52,7 +52,7 @@ The map is in Redis when `REDIS_URL` is set, because the next message can land o
 
 | Key | Type | Contents |
 | --- | --- | --- |
-| `sandbox:conv:{conversation_id}` | hash | `provider`, `sandbox_id`, `skills_digest`, `inflight`. AgentCore also stores `region`, `identifier`, `created_at`, `max_lifetime_s` |
+| `sandbox:conv:{conversation_id}` | hash | `provider`, `sandbox_id`, `skills_digest`, `inflight`, `user_id`, `process_baseline`. AgentCore also stores `region`, `identifier`, `created_at`, `max_lifetime_s` |
 | `sandbox:idle` | zset | Member is the conversation id. Score is the kill deadline as epoch seconds |
 | `sandbox:lock:{conversation_id}` | string | `SET NX PX` for 180 seconds |
 
@@ -65,6 +65,23 @@ The reaper reads the deadline again under the lock. A turn that reattached betwe
 The skills digest is the sha256 of the uploaded `(path, bytes)` list, in upload order. The same digest skips the upload. A changed digest runs `rm -rf /skills` and uploads again. AgentCore stores `/skills/...` under the session working directory, because the process cannot create a real `/skills`. The shell rewrite points `/skills` at `{cwd}/skills`.
 
 The backend passed to `compile` is a `CompositeBackend` whose default is the sandbox. `/large_tool_results/` and `/conversation_history/` stay on `StateBackend`, so those paths survive after the sandbox is destroyed. `/skills/` is not routed: the file tools and the shell both read the tree that was uploaded into the sandbox.
+
+### Workspace
+
+The session root has four sibling directories: `workspace/`, `skills/`, `artifacts/`, and `large_tool_results/`. The shell starts in `workspace/`. A file the model creates belongs there. `skills/`, `artifacts/`, and `large_tool_results/` stay beside it.
+
+An MCP file is stored once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. `Artifact.key` is that object. The sandbox path is `/artifacts/{artifact_id}/{filename}`. The chat still loads `/artifacts/{artifact_id}`. A user upload stays at `users/{user_id}/artifacts/`. A record written by the old layout, with a key under `users/{user_id}/artifacts/` and an optional copy under `tool_artifacts/`, is moved by:
+
+```bash
+python -m src.commands.migrate_conversation_artifacts
+python -m src.commands.migrate_conversation_artifacts --apply
+```
+
+The first command prints the moves. `--apply` writes the new object, points the record at it, then deletes the old keys. A failed record update deletes the new object, so the old key keeps serving.
+
+After a turn, `workspace/` is copied to `users/{user_id}/conversations/{conversation_id}/workspace/`. A new sandbox loads that prefix back into `workspace/`. A reused sandbox is not reloaded. A markdown path in `workspace/` is rewritten to `/conversations/{id}/workspace/{path}`. That route serves the saved workspace object. It is not copied into the artifact store.
+
+The copy waits until no process is running beyond the set recorded at sandbox start, and two listings match on path, size, and mtime. The answer does not wait. The idle deadline moves forward while that save is still running, up to the AgentCore reuse margin. Before a sandbox is destroyed, one snapshot is saved without waiting. A sidecar object `workspace_state` stores size, mtime, and sha256 so an unchanged file is not downloaded again.
 
 ### Checking it
 

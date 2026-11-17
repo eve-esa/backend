@@ -208,7 +208,9 @@ async def test_artifact_capture_and_serving_e2e(mcp_client):
         assert image_artifact.source.tool_name == "get_sample_image"
         assert image_artifact.user_id == owner.id
         assert image_artifact.conversation_id == conversation_id
-        assert image_artifact.key.startswith(f"users/{owner.id}/artifacts/")
+        assert image_artifact.key.startswith(
+            f"users/{owner.id}/conversations/{conversation_id}/artifacts/"
+        )
 
         # (2) resource-link tool → CSV persisted via resources/read.
         assert csv_artifact.source.type == "mcp_tool"
@@ -222,7 +224,7 @@ async def test_artifact_capture_and_serving_e2e(mcp_client):
         csv_stub = _parse_stub(str(report_result[0]["text"]))
         assert csv_stub["artifact_id"] == csv_artifact.id
 
-        # Object really present in MinIO under users/{uid}/artifacts/ (independent
+        # Object really present in MinIO under the conversation prefix (independent
         # verification via boto3, not our own storage_service abstraction).
         import boto3
         from botocore.config import Config as BotoConfig
@@ -244,7 +246,8 @@ async def test_artifact_capture_and_serving_e2e(mcp_client):
             config=BotoConfig(signature_version="s3v4"),
         )
         listing = s3.list_objects_v2(
-            Bucket=S3_BUCKET_NAME, Prefix=f"users/{owner.id}/artifacts/"
+            Bucket=S3_BUCKET_NAME,
+            Prefix=f"users/{owner.id}/conversations/{conversation_id}/artifacts/",
         )
         s3_keys = {obj["Key"] for obj in listing.get("Contents", [])}
         assert image_artifact.key in s3_keys
@@ -335,7 +338,9 @@ async def test_compute_metrics_effis_pattern_e2e(mcp_client):
         assert metrics_artifact.source.tool_name == "compute_metrics"
         assert metrics_artifact.user_id == owner.id
         assert metrics_artifact.conversation_id == conversation_id
-        assert metrics_artifact.key.startswith(f"users/{owner.id}/artifacts/")
+        assert metrics_artifact.key.startswith(
+            f"users/{owner.id}/conversations/{conversation_id}/artifacts/"
+        )
 
         # Result content: the plain-text summary passes through untouched, and
         # the ResourceLink block was replaced by the provenance stub carrying

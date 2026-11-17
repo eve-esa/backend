@@ -789,6 +789,27 @@ async def test_a_redis_error_does_not_mark_the_lock_lost(monkeypatch):
     await guard.check()
 
 
+async def test_user_id_is_stored_and_release_waits_for_the_sync(
+    monkeypatch, clock, sandbox_store
+):
+    state = _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None, user_id="user-1")
+    record = await sandbox_store.get("c1")
+
+    assert record["user_id"] == "user-1"
+
+    async def _hold():
+        await asyncio.sleep(30)
+
+    lease.session._workspace_task = asyncio.create_task(_hold())
+    await release_sandbox(lease)
+
+    assert state["detached"] == []
+    lease.session._workspace_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await lease.session._workspace_task
+
+
 async def test_release_failure_does_not_raise(monkeypatch, clock):
     state = _install(monkeypatch, clock)
     state["fail_detach"] = True

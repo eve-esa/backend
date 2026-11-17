@@ -2270,6 +2270,17 @@ def _install_opensandbox(monkeypatch, sandbox=None):
     return sandbox, created
 
 
+async def _finish_workspace_sync() -> None:
+    """Wait for the post-turn workspace save. It detaches the sandbox."""
+    pending = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("workspace-sync")
+    ]
+    if pending:
+        await asyncio.gather(*pending)
+
+
 def _inline_threads(*module_paths: str):
     """Run ``asyncio.to_thread`` inline and record the callable names."""
     names: list = []
@@ -2355,7 +2366,7 @@ class TestSandbox:
         backend.execute("python3 /opt/sandbox/skills/roll-dice/scripts/roll.py")
         assert calls[-1] == "python3 /opt/sandbox/skills/roll-dice/scripts/roll.py"
 
-    def test_tool_artifacts_shell_rewrites_the_absolute_path(self):
+    def test_artifacts_shell_rewrites_the_absolute_path(self):
         calls: list[str] = []
 
         class _Inner:
@@ -2366,9 +2377,9 @@ class TestSandbox:
                 return SimpleNamespace(output="ran", exit_code=0)
 
         backend = _bind_skills_shell(_Inner())
-        command = "cat /tool_artifacts/abc/report.txt"
+        command = "cat /artifacts/abc/report.txt"
         assert backend.execute(command).output == "ran"
-        assert calls == ["pwd", "cat /opt/sandbox/tool_artifacts/abc/report.txt"]
+        assert calls == ["pwd", "cat /opt/sandbox/artifacts/abc/report.txt"]
 
     def test_skills_shell_leaves_a_root_cwd_unchanged(self):
         calls: list[str] = []
@@ -2561,7 +2572,10 @@ class TestSandboxInGeneration:
         # The conversation keeps the sandbox. Release drops local clients only,
         # and AgentCore's local close is a no-op so the session is not stopped.
         assert sandbox.closed == 0
-        assert names == ["_open_sync", "detach"]
+        # Release leaves the client up while the workspace save is running.
+        # That save detaches, and it is not a pool thread call.
+        assert names == ["_open_sync"]
+        await _finish_workspace_sync()
         assert latencies["setup_sandbox_s"] >= 0
 
     async def test_no_conversation_destroys_the_sandbox(self, tmp_path, monkeypatch):
@@ -2596,6 +2610,7 @@ class TestSandboxInGeneration:
                 )
 
         assert sandbox.closed == 0
+        await _finish_workspace_sync()
 
     async def test_upload_error_skips_compile(self, tmp_path, monkeypatch):
         _skills_tree(tmp_path, monkeypatch)
@@ -2661,6 +2676,7 @@ class TestSandboxInGeneration:
 
         assert _event_payload(events[-1])["type"] == "stopped"
         assert sandbox.closed == 0
+        await _finish_workspace_sync()
 
     async def test_opensandbox_backend_is_the_composite_default(
         self, tmp_path, monkeypatch
@@ -2690,6 +2706,7 @@ class TestSandboxInGeneration:
         assert created[0]["connection_config"].protocol == "http"
         assert created[0]["connection_config"].api_key is None
         assert remote.destroyed == 0
+        await _finish_workspace_sync()
         assert remote.closed == 1
 
 

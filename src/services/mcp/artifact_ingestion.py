@@ -4,8 +4,11 @@ Wraps ``execute_tool`` and sees the raw ``mcp.types.CallToolResult`` returned by
 the MCP server *before* ``langchain_mcp_adapters`` converts it into a
 ``ToolMessage`` for the LLM. Any content block rewritten here therefore never
 reaches the LLM, the LangGraph checkpointer, execution traces, or the SSE
-stream — only the persisted stub (a markdown link plus a one-line JSON blob)
-does.
+stream. A file the tool JSON already describes keeps that object: its ``path``
+becomes the sandbox path and the stub is dropped. A block that carries
+``_meta.eve.source_path`` replaces that exact string, in any field, with the
+sandbox path. A file with neither keeps the stub (a markdown link plus a
+one-line JSON blob).
 
 Fail-open by design: ingestion runs in a single try/except around the whole
 result, and any unexpected error returns the original, untouched result rather
@@ -22,6 +25,8 @@ import os
 import weakref
 from typing import Any, List, Optional, Tuple
 
+from bson import ObjectId
+
 from src.config import (
     ARTIFACT_MAX_BYTES,
     ARTIFACT_MAX_PER_TOOL_CALL,
@@ -32,11 +37,11 @@ from src.services.mcp.artifact_context import (
     ArtifactRequestContext,
     get_artifact_context,
 )
-from src.services.mcp.tool_artifacts import (
+from src.services.mcp.conversation_artifacts import (
     file_path_for,
     object_key,
     sandbox_path,
-    upload_tool_artifacts,
+    upload_artifact,
 )
 from src.services.storage import guess_extension_from_content_type, storage_service
 
@@ -130,8 +135,8 @@ def _stub_text(
     return TextContent(type="text", text=f"{link_line}\n{meta_line}")
 
 
-def _stub_output_path(block: Any) -> Optional[str]:
-    """The sandbox path carried by a markdown stub, if this block is one."""
+def _stub_record(block: Any) -> Optional[dict]:
+    """Sandbox path and size from a markdown stub, if this block is one."""
     if not isinstance(block, TextContent):
         return None
     lines = block.text.split("\n", 1)
@@ -141,32 +146,235 @@ def _stub_output_path(block: Any) -> Optional[str]:
         meta = json.loads(lines[1])
     except json.JSONDecodeError:
         return None
-    path = meta.get("path") if isinstance(meta, dict) else None
-    if isinstance(path, str) and path.startswith("/tool_artifacts/"):
-        return path
+    if not isinstance(meta, dict):
+        return None
+    path = meta.get("path")
+    if not isinstance(path, str) or not path.startswith("/artifacts/"):
+        return None
+    size = meta.get("size_bytes")
+    if isinstance(size, bool) or not isinstance(size, int):
+        size = None
+    return {"path": path, "size": size}
+
+
+def _stub_output_path(block: Any) -> Optional[str]:
+    """The sandbox path carried by a markdown stub, if this block is one."""
+    record = _stub_record(block)
+    if record is None:
+        return None
+    return record["path"]
+
+
+def _eve_source_paths(block: Any) -> list[str]:
+    """Exact path strings the MCP middleware loaded for this block."""
+    meta = getattr(block, "meta", None)
+    if not isinstance(meta, dict):
+        return []
+    eve = meta.get("eve")
+    if not isinstance(eve, dict):
+        return []
+    many = eve.get("source_paths")
+    if isinstance(many, list):
+        found = [item for item in many if isinstance(item, str) and item]
+        if found:
+            return found
+    one = eve.get("source_path")
+    if isinstance(one, str) and one:
+        return [one]
+    return []
+
+
+def _named_from_sources(sources: list[str], used_names: set) -> Optional[str]:
+    """File name from the path the middleware loaded, when it is still free."""
+    if not sources:
+        return None
+    name = os.path.basename(sources[0])
+    if not name or name in {".", ".."} or name in used_names:
+        return None
+    used_names.add(name)
+    return name
+
+
+def _rewrite_source_paths(
+    blocks: List[Any], structured: Any, pairs: List[Tuple[str, str]]
+) -> Tuple[List[Any], Any]:
+    """Replace each loaded path with the sandbox path, then drop that stub.
+
+    The replacement walks tool text and structured content. Stub text is left
+    alone, then removed when its sandbox path was written into the tool output.
+    """
+    if not pairs:
+        return blocks, structured
+    ordered = sorted(pairs, key=lambda item: len(item[0]), reverse=True)
+
+    def rewrite(value: Any) -> Any:
+        if isinstance(value, str):
+            for old, new in ordered:
+                if old and old != new:
+                    value = value.replace(old, new)
+            return value
+        if isinstance(value, dict):
+            return {key: rewrite(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        return value
+
+    rewritten: List[Any] = []
+    for block in blocks:
+        if isinstance(block, TextContent) and _stub_output_path(block) is None:
+            rewritten.append(TextContent(type="text", text=rewrite(block.text)))
+        else:
+            rewritten.append(block)
+    structured_out = rewrite(structured) if structured is not None else None
+    visible: List[str] = []
+    for block in rewritten:
+        if isinstance(block, TextContent) and _stub_output_path(block) is None:
+            visible.append(block.text)
+    if structured_out is not None:
+        visible.append(json.dumps(structured_out))
+    joined = "\n".join(visible)
+    used = {new for _, new in ordered if new and new in joined}
+    kept = [block for block in rewritten if _stub_output_path(block) not in used]
+    return kept, structured_out
+
+
+def _iter_path_nodes(payload: Any):
+    """Every object that already has a string ``path``, at any depth."""
+    if isinstance(payload, dict):
+        if isinstance(payload.get("path"), str):
+            yield payload
+        for value in payload.values():
+            yield from _iter_path_nodes(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_path_nodes(item)
+
+
+def _node_size(node: dict) -> Optional[int]:
+    """A size the tool already reported on this object."""
+    for key in ("bytes", "size_bytes"):
+        value = node.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
     return None
 
 
-def _rewrite_path_value(value: str, paths: list[str]) -> Optional[str]:
-    """The sandbox path that replaces *value*, when one was stored for that file."""
-    by_name = {os.path.basename(path): path for path in paths}
-    name = os.path.basename(value)
-    if name in by_name:
-        return by_name[name]
-    if len(paths) == 1:
-        return paths[0]
-    return None
+def _json_payloads(blocks: List[Any], structured: Any) -> List[Any]:
+    payloads: List[Any] = []
+    for block in blocks:
+        if not isinstance(block, TextContent) or _stub_output_path(block) is not None:
+            continue
+        try:
+            payloads.append(json.loads(block.text))
+        except json.JSONDecodeError:
+            continue
+    if structured is not None:
+        payloads.append(structured)
+    return payloads
 
 
-def _rewrite_path_object(payload: Any, paths: list[str]) -> bool:
-    """Set ``payload['path']`` to the sandbox path. True when it changed."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("path"), str):
-        return False
-    sandbox = _rewrite_path_value(payload["path"], paths)
-    if sandbox is None or sandbox == payload["path"]:
-        return False
-    payload["path"] = sandbox
-    return True
+def _unique_names_by_size(blocks: List[Any], structured: Any) -> dict:
+    """Tool filename for a byte size, when exactly one ``path`` has that size.
+
+    The extension must agree, so a PNG is not stored under a ``.csv`` name.
+    """
+    found: dict = {}
+    for payload in _json_payloads(blocks, structured):
+        for node in _iter_path_nodes(payload):
+            size = _node_size(node)
+            base = os.path.basename(node["path"])
+            if size is None or not base or base in {".", ".."}:
+                continue
+            names = found.setdefault(size, [])
+            if base not in names:
+                names.append(base)
+    return {size: names[0] for size, names in found.items() if len(names) == 1}
+
+
+def _name_for_size(
+    size: int, ext: str, names_by_size: dict, used: set
+) -> Optional[str]:
+    """The tool's own filename for these bytes, when the match is unique."""
+    name = names_by_size.get(size)
+    if not name or name in used:
+        return None
+    suffix = os.path.splitext(name)[1].lstrip(".").lower()
+    if suffix and suffix != ext.lower():
+        return None
+    return name
+
+
+def _pair_path_nodes(nodes: List[dict], stubs: List[dict]) -> List[Tuple[str, str]]:
+    """Point each existing ``path`` at one sandbox file. Return the paths used.
+
+    A name match wins. A byte size the tool already stored pairs a file when
+    that size belongs to one object and one sandbox file. One leftover object
+    and one leftover file pair too. Nothing else is written onto the object.
+    """
+    used_nodes: set = set()
+    used_paths: set = set()
+    assignments: List[Tuple[str, str]] = []
+
+    def take(node: dict, stub: dict) -> None:
+        original = node["path"]
+        node["path"] = stub["path"]
+        used_nodes.add(id(node))
+        used_paths.add(stub["path"])
+        assignments.append((original, stub["path"]))
+
+    by_name: dict = {}
+    for node in nodes:
+        by_name.setdefault(os.path.basename(node["path"]), []).append(node)
+    stubs_by_name: dict = {}
+    for stub in stubs:
+        stubs_by_name.setdefault(os.path.basename(stub["path"]), []).append(stub)
+    for name, group in by_name.items():
+        matches = stubs_by_name.get(name, [])
+        if matches and len(group) == len(matches):
+            for node, stub in zip(group, matches):
+                take(node, stub)
+
+    for node in nodes:
+        if id(node) in used_nodes:
+            continue
+        size = _node_size(node)
+        if size is None:
+            continue
+        node_mates = [
+            item
+            for item in nodes
+            if id(item) not in used_nodes and _node_size(item) == size
+        ]
+        stub_mates = [
+            item
+            for item in stubs
+            if item["path"] not in used_paths and item["size"] == size
+        ]
+        if len(node_mates) == 1 and len(stub_mates) == 1:
+            take(node, stub_mates[0])
+
+    left_nodes = [node for node in nodes if id(node) not in used_nodes]
+    left_stubs = [stub for stub in stubs if stub["path"] not in used_paths]
+    if len(left_nodes) == 1 and len(left_stubs) == 1:
+        take(left_nodes[0], left_stubs[0])
+    return assignments
+
+
+def _replay_assignments(nodes: List[dict], assignments: List[Tuple[str, str]]) -> None:
+    """Apply pairings from another copy of the same tool JSON."""
+    groups: dict = {}
+    for original, sandbox in assignments:
+        groups.setdefault(original, []).append(sandbox)
+    cursors = {key: 0 for key in groups}
+    for node in nodes:
+        slots = groups.get(node["path"])
+        if not slots:
+            continue
+        index = cursors[node["path"]]
+        if index >= len(slots):
+            continue
+        node["path"] = slots[index]
+        cursors[node["path"]] = index + 1
 
 
 def _fold_output_paths(
@@ -174,50 +382,73 @@ def _fold_output_paths(
 ) -> tuple[List[Any], Any]:
     """Put the sandbox path in the tool's own JSON and drop the stub.
 
-    A file tool returns ``{"path": "report.txt"}`` and the interceptor adds
-    a markdown stub beside it. The model should see one JSON object, with
-    ``path`` set to ``/tool_artifacts/{artifact_id}/{filename}``. A result with
-    no such JSON keeps the stub, which is how images and ``display`` render.
+    Any object that already has a ``path``, at any depth, can receive the
+    sandbox path of the file that belongs to it. No key is added. A file with
+    no such object keeps its stub, which is how a bare image renders.
     """
-    paths = [path for block in blocks if (path := _stub_output_path(block))]
-    if not paths:
+    stubs = [record for block in blocks if (record := _stub_record(block))]
+    if not stubs:
         return blocks, structured
 
-    used: set[str] = set()
-
-    def rewrite(payload: Any) -> bool:
-        if not _rewrite_path_object(payload, paths):
-            return False
-        used.add(payload["path"])
-        return True
-
-    rewritten: List[Any] = []
+    text_payloads: List[Any] = []
     for block in blocks:
         if isinstance(block, TextContent) and _stub_output_path(block) is None:
             try:
-                payload = json.loads(block.text)
+                text_payloads.append(json.loads(block.text))
             except json.JSONDecodeError:
-                payload = None
-            if rewrite(payload):
-                rewritten.append(
-                    TextContent(type="text", text=json.dumps(payload))
-                )
-                continue
-        rewritten.append(block)
-
-    folded_structured = structured
-    if isinstance(structured, dict):
+                text_payloads.append(None)
+        else:
+            text_payloads.append(None)
+    folded_structured = None
+    if structured is not None:
         folded_structured = json.loads(json.dumps(structured))
-        rewrite(folded_structured)
 
-    if not used:
-        return blocks, structured
-    kept = [
-        block
-        for block in rewritten
-        if _stub_output_path(block) not in used
+    text_nodes = [
+        node
+        for payload in text_payloads
+        if payload is not None
+        for node in _iter_path_nodes(payload)
     ]
-    return kept, folded_structured
+    structured_nodes = (
+        list(_iter_path_nodes(folded_structured))
+        if folded_structured is not None
+        else []
+    )
+    if text_nodes:
+        assignments = _pair_path_nodes(text_nodes, stubs)
+        _replay_assignments(structured_nodes, assignments)
+        used_paths = {sandbox for _, sandbox in assignments}
+        leftover = [stub for stub in stubs if stub["path"] not in used_paths]
+        pending = [
+            node
+            for node in structured_nodes
+            if not str(node.get("path", "")).startswith("/artifacts/")
+        ]
+        if leftover and pending:
+            assignments.extend(_pair_path_nodes(pending, leftover))
+    else:
+        assignments = _pair_path_nodes(structured_nodes, stubs)
+    if not assignments:
+        return blocks, structured
+    used = {sandbox for _, sandbox in assignments}
+
+    rewritten: List[Any] = []
+    for block, payload in zip(blocks, text_payloads):
+        if payload is not None and any(
+            isinstance(node.get("path"), str) and node["path"] in used
+            for node in _iter_path_nodes(payload)
+        ):
+            rewritten.append(TextContent(type="text", text=json.dumps(payload)))
+            continue
+        rewritten.append(block)
+    kept = [block for block in rewritten if _stub_output_path(block) not in used]
+    structured_out = structured
+    if folded_structured is not None and any(
+        isinstance(node.get("path"), str) and node["path"] in used
+        for node in _iter_path_nodes(folded_structured)
+    ):
+        structured_out = folded_structured
+    return kept, structured_out
 
 
 def _warning_text(message: str) -> "TextContent":
@@ -276,6 +507,18 @@ class ArtifactInterceptor:
         new_content: List[Any] = []
         persisted_count = 0
         counter = 0
+        names_by_size = _unique_names_by_size(
+            result.content, getattr(result, "structuredContent", None)
+        )
+        used_names: set = set()
+        replacements: List[Tuple[str, str]] = []
+
+        def filename_for(size: int, ext: str, fallback: str) -> str:
+            chosen = _name_for_size(size, ext, names_by_size, used_names)
+            if chosen is None:
+                return fallback
+            used_names.add(chosen)
+            return chosen
 
         for block in result.content:
             if isinstance(block, TextContent):
@@ -295,10 +538,22 @@ class ArtifactInterceptor:
 
                 content_type = block.mimeType or "application/octet-stream"
                 ext = guess_extension_from_content_type(content_type)
-                filename = f"{tool_name}-{counter}.{ext}"
-                artifact, output_path = await self._persist(
+                filename = _named_from_sources(_eve_source_paths(block), used_names)
+                if filename is None:
+                    filename = filename_for(
+                        len(data), ext, f"{tool_name}-{counter}.{ext}"
+                    )
+                stored = await self._persist(
                     data, content_type, filename, ctx, tool_name, server_name
                 )
+                if stored is None:
+                    new_content.append(_warning_text("not stored: no conversation"))
+                    continue
+                artifact, output_path = stored
+                if output_path:
+                    replacements.extend(
+                        (source, output_path) for source in _eve_source_paths(block)
+                    )
                 new_content.append(
                     _stub_text(
                         is_image=True,
@@ -340,12 +595,26 @@ class ArtifactInterceptor:
 
                 content_type = resource.mimeType or "application/octet-stream"
                 ext = guess_extension_from_content_type(content_type)
-                filename = _filename_from_uri(getattr(resource, "uri", None)) or (
-                    f"{tool_name}-{counter}.{ext}"
-                )
-                artifact, output_path = await self._persist(
+                filename = _named_from_sources(_eve_source_paths(block), used_names)
+                if filename is None:
+                    filename = _filename_from_uri(getattr(resource, "uri", None))
+                    if filename:
+                        used_names.add(filename)
+                    else:
+                        filename = filename_for(
+                            len(data), ext, f"{tool_name}-{counter}.{ext}"
+                        )
+                stored = await self._persist(
                     data, content_type, filename, ctx, tool_name, server_name
                 )
+                if stored is None:
+                    new_content.append(_warning_text("not stored: no conversation"))
+                    continue
+                artifact, output_path = stored
+                if output_path:
+                    replacements.extend(
+                        (source, output_path) for source in _eve_source_paths(block)
+                    )
                 new_content.append(
                     _stub_text(
                         is_image=content_type.startswith("image/"),
@@ -380,9 +649,10 @@ class ArtifactInterceptor:
             # Unknown/future block types passthrough untouched.
             new_content.append(block)
 
-        content, structured = _fold_output_paths(
-            new_content, getattr(result, "structuredContent", None)
+        content, structured = _rewrite_source_paths(
+            new_content, getattr(result, "structuredContent", None), replacements
         )
+        content, structured = _fold_output_paths(content, structured)
         update: dict[str, Any] = {"content": content}
         if structured is not None:
             update["structuredContent"] = structured
@@ -396,12 +666,21 @@ class ArtifactInterceptor:
         ctx: ArtifactRequestContext,
         tool_name: str,
         server_name: str,
-    ) -> tuple[Artifact, Optional[str]]:
-        ext = guess_extension_from_content_type(content_type)
-        key = storage_service.build_user_key(ctx.user_id, ext, prefix="artifacts")
-        await storage_service.put_object(key, data, content_type)
+    ) -> Optional[tuple[Artifact, str]]:
+        """Store one object under the conversation and insert its record.
 
-        artifact = await Artifact.create(
+        ``None`` when the turn has no conversation: nothing is written. The
+        object is written first, under a preallocated id, and deleted again
+        when the record insert fails. The sandbox upload is best-effort.
+        """
+        if not ctx.conversation_id:
+            return None
+        artifact_oid = ObjectId()
+        relative = file_path_for(str(artifact_oid), filename)
+        key = object_key(ctx.user_id, ctx.conversation_id, relative)
+        await storage_service.put_object(key, data, content_type)
+        artifact = Artifact(
+            id=str(artifact_oid),
             user_id=ctx.user_id,
             key=key,
             filename=filename,
@@ -413,44 +692,25 @@ class ArtifactInterceptor:
             conversation_id=ctx.conversation_id,
             message_id=ctx.message_id,
         )
-        ctx.collected_artifact_ids.append(artifact.id)
-        output_path = await self._copy_to_conversation(
-            artifact.id, filename, data, content_type, ctx
-        )
-        return artifact, output_path
-
-    async def _copy_to_conversation(
-        self,
-        artifact_id: str,
-        filename: str,
-        data: bytes,
-        content_type: str,
-        ctx: ArtifactRequestContext,
-    ) -> Optional[str]:
-        """Store the conversation copy and upload it to the live sandbox.
-
-        A failure here leaves the artifact in place. The model then gets the
-        artifact stub without a sandbox path.
-        """
-        if not ctx.conversation_id:
-            return None
+        document = artifact.to_dict()
+        document["_id"] = artifact_oid
         try:
-            relative = file_path_for(artifact_id, filename)
-            await storage_service.put_object(
-                object_key(ctx.user_id, ctx.conversation_id, relative),
-                data,
-                content_type,
-            )
-            path = sandbox_path(relative)
-            await upload_tool_artifacts(ctx.sandbox_backend, path, data)
-            return path
+            await Artifact.get_collection().insert_one(document)
         except Exception:
             logger.warning(
-                "tool_artifacts.copy_failed artifact_id=%s",
-                artifact_id,
-                exc_info=True,
+                "artifacts.record_failed key=%s", key, exc_info=True
             )
-            return None
+            try:
+                await storage_service.delete_object(key)
+            except Exception:
+                logger.warning(
+                    "artifacts.record_cleanup_failed key=%s", key, exc_info=True
+                )
+            raise
+        ctx.collected_artifact_ids.append(artifact.id)
+        path = sandbox_path(relative)
+        await upload_artifact(ctx.sandbox_backend, path, data)
+        return artifact, path
 
     async def _resolve_resource_link(
         self,
@@ -521,9 +781,13 @@ class ArtifactInterceptor:
 
             ext = guess_extension_from_content_type(content_type)
             filename = uri_filename or f"{tool_name}-{counter}-{idx}.{ext}"
-            artifact, output_path = await self._persist(
+            stored = await self._persist(
                 data, content_type, filename, ctx, tool_name, server_name
             )
+            if stored is None:
+                stubs.append(_warning_text("not stored: no conversation"))
+                continue
+            artifact, output_path = stored
             stubs.append(
                 _stub_text(
                     is_image=content_type.startswith("image/"),
