@@ -70,14 +70,7 @@ The backend passed to `compile` is a `CompositeBackend` whose default is the san
 
 The session root has four sibling directories: `workspace/`, `skills/`, `artifacts/`, and `large_tool_results/`. The shell starts in `workspace/`. A file the model creates belongs there. `skills/`, `artifacts/`, and `large_tool_results/` stay beside it.
 
-An MCP file is stored once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. `Artifact.key` is that object. The sandbox path is `/artifacts/{artifact_id}/{filename}`. The chat still loads `/artifacts/{artifact_id}`. A user upload stays at `users/{user_id}/artifacts/`. A record written by the old layout, with a key under `users/{user_id}/artifacts/` and an optional copy under `tool_artifacts/`, is moved by:
-
-```bash
-python -m src.commands.migrate_conversation_artifacts
-python -m src.commands.migrate_conversation_artifacts --apply
-```
-
-The first command prints the moves. `--apply` writes the new object, points the record at it, then deletes the old keys. A failed record update deletes the new object, so the old key keeps serving.
+An MCP file is stored once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. `Artifact.key` is that object. The sandbox path is `/artifacts/{artifact_id}/{filename}`. The chat still loads `/artifacts/{artifact_id}`. A user upload stays at `users/{user_id}/artifacts/`.
 
 After a turn, `workspace/` is copied to `users/{user_id}/conversations/{conversation_id}/workspace/`. A new sandbox loads that prefix back into `workspace/`. A reused sandbox is not reloaded. A markdown path in `workspace/` is rewritten to `/conversations/{id}/workspace/{path}`. That route serves the saved workspace object. It is not copied into the artifact store.
 
