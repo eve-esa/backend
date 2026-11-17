@@ -2572,9 +2572,11 @@ class TestSandboxInGeneration:
         # The conversation keeps the sandbox. Release drops local clients only,
         # and AgentCore's local close is a no-op so the session is not stopped.
         assert sandbox.closed == 0
+        # The spy sees every to_thread call: the skills reload check scans
+        # the local tree off the event loop between the open and the release.
         # Release leaves the client up while the workspace save is running.
         # That save detaches, and it is not a pool thread call.
-        assert names == ["_open_sync"]
+        assert names == ["_open_sync", "skills_root_key"]
         await _finish_workspace_sync()
         assert latencies["setup_sandbox_s"] >= 0
 

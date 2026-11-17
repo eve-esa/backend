@@ -132,9 +132,10 @@ async def test_a_deep_turn_with_a_checkpoint_drops_the_rollup(monkeypatch):
     checkpointer = MagicMock()
     checkpointer.aget_tuple = AsyncMock(return_value=object())
 
-    history, summary, prior, new_checkpoint, prepared = await _prepare_agent_context(
-        "deep", "conv-1", checkpointer, "msg-now"
+    history, summary, prior, new_checkpoint, prepared, checkpoint = (
+        await _prepare_agent_context("deep", "conv-1", checkpointer, "msg-now")
     )
+    assert checkpoint is checkpointer.aget_tuple.return_value
 
     assert history == []
     assert summary is None
@@ -181,9 +182,10 @@ async def test_a_deep_turn_without_a_checkpoint_is_seeded(monkeypatch):
         runner.Message, "get_collection", lambda: _collection(documents)
     )
 
-    history, summary, prior, new_checkpoint, _prepared = await _prepare_agent_context(
-        "deep", "conv-1", checkpointer, "msg-now"
+    history, summary, prior, new_checkpoint, _prepared, checkpoint = (
+        await _prepare_agent_context("deep", "conv-1", checkpointer, "msg-now")
     )
+    assert checkpoint is None
 
     assert history == []
     assert summary is None
@@ -205,9 +207,10 @@ async def test_a_react_turn_keeps_the_rollup(monkeypatch):
     )
     monkeypatch.setattr(runner, "get_agent_graph", lambda _name: agent)
 
-    history, summary, prior, new_checkpoint, prepared = await _prepare_agent_context(
-        "react", "conv-1", MagicMock(), "msg-now"
+    history, summary, prior, new_checkpoint, prepared, checkpoint = (
+        await _prepare_agent_context("react", "conv-1", MagicMock(), "msg-now")
     )
+    assert checkpoint is None
 
     assert [message.content for message in history] == ["old turn"]
     assert "rolled up" in summary

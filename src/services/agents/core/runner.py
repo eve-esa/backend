@@ -71,7 +71,11 @@ from src.services.agents.core.sandbox import (
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
-from src.services.agents.core.skills import resolve_skills_root
+from src.services.agents.core.skills import (
+    cached_skills_root_key,
+    resolve_skills_root,
+    skills_root_key,
+)
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
@@ -1616,14 +1620,21 @@ def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]
     ]
 
 
-async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
-    """True when this conversation already has a checkpoint.
+# Stands for a checkpoint that exists but could not be read. The thread may
+# hold a stale skill list, so the skills check lists again.
+_CHECKPOINT_UNREADABLE = object()
+
+
+async def _read_checkpoint(checkpointer: Any, conversation_id: str) -> tuple[bool, Any]:
+    """Whether this conversation already has a checkpoint, and the tuple read.
 
     A lookup error is treated as "the thread is there": seeding on top of a
-    thread that could not be read would duplicate it.
+    thread that could not be read would duplicate it. The tuple is then
+    ``_CHECKPOINT_UNREADABLE``; it is ``None`` when no checkpointer or no
+    checkpoint exists.
     """
     if checkpointer is None:
-        return False
+        return False, None
     try:
         found = await checkpointer.aget_tuple(
             {"configurable": {"thread_id": conversation_id}}
@@ -1632,8 +1643,118 @@ async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
         logger.warning(
             "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
         )
-        return True
-    return found is not None
+        return True, _CHECKPOINT_UNREADABLE
+    return found is not None, found
+
+
+# Checkpoint metadata key holding the skills key a turn ran with. LangGraph
+# copies string values of ``config["metadata"]`` onto every checkpoint the
+# turn writes, so the next turn reads it from the tuple it already has.
+_SKILLS_KEY_METADATA = "eve_skills_key"
+# Bound on the wait for the local tree scan, not on the scan: a thread cannot
+# be cancelled, so a late scan finishes in the background and fills the cache.
+_SKILLS_CHECK_TIMEOUT_S = 2.0
+# Checks that ran out of time in this process. Under load the wait mostly
+# measures the default executor queue, so each one is an INFO line with the
+# running count, not a WARNING per turn.
+_skills_check_timeouts = 0
+
+
+def _stored_skills_key(checkpoint: Any) -> Optional[str]:
+    metadata = getattr(checkpoint, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(_SKILLS_KEY_METADATA)
+    return value if isinstance(value, str) and value else None
+
+
+def _has_skills_load_errors(checkpoint: Any) -> bool:
+    """True when the last listing on this thread reported errors."""
+    state = getattr(checkpoint, "checkpoint", None)
+    if not isinstance(state, dict):
+        return False
+    values = state.get("channel_values")
+    if not isinstance(values, dict):
+        return False
+    errors = values.get("skills_load_errors")
+    return isinstance(errors, list) and bool(errors)
+
+
+async def _skills_reload_input(
+    checkpoint: Any, conversation_id: Optional[str], skills_root: Any
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    """Graph input and config metadata that keep a thread's skill list current.
+
+    SkillsMiddleware lists ``/skills/`` once per thread and keeps the list in
+    the checkpoint; ``{"skills_metadata": None}`` asks it to list again. The
+    decision compares the key of this turn's local tree with the key the last
+    turn recorded in its checkpoint metadata, never with the checkpointed list:
+    on the sandbox path that list comes from the sandbox listing, and duplicate
+    names resolve in listing order, so a list that differs from the local tree
+    would force a reload on every turn.
+
+    A stored key that is missing or differs from this turn's key reloads; only
+    equal keys keep the list. A key goes missing when the last turn ran with
+    no skills tree (no middleware, nothing recorded, the old list still in
+    state) or on a thread from before this check: one extra listing then.
+    Also reloaded: a checkpoint that could not be read, and a thread whose
+    last listing reported errors (a failed listing would otherwise stick to
+    the thread until the key changes). With no checkpoint there is nothing to
+    reload: the middleware lists anyway.
+
+    A scan failure or timeout keeps the list and re-records the previous key,
+    so a change is still caught on a later turn; with no previous key nothing
+    is recorded and the next turn reloads. Known gaps: a read from a lagging
+    secondary can return an older checkpoint whose key equals this turn's
+    key (a change made and reverted in between), and two turns on one thread
+    at once can write the old list back; both stay until the key changes
+    again.
+    """
+    if skills_root is None or not conversation_id:
+        return {}, {}
+    global _skills_check_timeouts
+    unreadable = checkpoint is _CHECKPOINT_UNREADABLE
+    stored = None if unreadable else _stored_skills_key(checkpoint)
+    wanted = cached_skills_root_key(skills_root)
+    if wanted is None:
+        try:
+            wanted = await asyncio.wait_for(
+                asyncio.to_thread(skills_root_key, skills_root),
+                timeout=_SKILLS_CHECK_TIMEOUT_S,
+            )
+        except TimeoutError:
+            _skills_check_timeouts += 1
+            logger.info(
+                "skills reload check: no key within %.1f s, kept the list "
+                "conversation=%s timeouts=%d",
+                _SKILLS_CHECK_TIMEOUT_S,
+                conversation_id,
+                _skills_check_timeouts,
+            )
+        except Exception as exc:
+            logger.warning(
+                "skills reload check failed, kept the list conversation=%s error=%s",
+                conversation_id,
+                type(exc).__name__,
+            )
+    recorded = wanted or stored
+    metadata_out = {_SKILLS_KEY_METADATA: recorded} if recorded else {}
+    if checkpoint is None or wanted is None:
+        return {}, metadata_out
+    if unreadable:
+        reason = "unreadable_checkpoint"
+    elif _has_skills_load_errors(checkpoint):
+        reason = "load_errors"
+    elif stored is None:
+        reason = "not_recorded"
+    elif wanted != stored:
+        reason = "changed"
+    else:
+        return {}, metadata_out
+    logger.info(
+        "skills reload conversation=%s reason=%s", conversation_id, reason
+    )
+    return {"skills_metadata": None}, metadata_out
 
 
 async def save_agent_summary(graph: Any, conversation_id: str) -> None:
@@ -1743,19 +1864,23 @@ async def _prepare_agent_context(
     conversation_id: Optional[str],
     checkpointer: Any,
     message_id: Optional[str],
-) -> tuple[List[Any], Optional[str], List[Any], bool, Any]:
-    """Return history, summary, seeded turns, new-checkpoint, and the agent.
+) -> tuple[List[Any], Optional[str], List[Any], bool, Any, Any]:
+    """Return history, summary, seeded turns, new-checkpoint, agent, checkpoint.
 
     A deep turn with a checkpoint uses that thread and no rolling summary.
     Without one, the stored turns are seeded into the new thread. ``simple``
-    and ``react`` keep the rolling summary and the one-turn window.
+    and ``react`` keep the rolling summary and the one-turn window. The
+    checkpoint tuple is the deep turn's one read of the thread, ``None``, or
+    ``_CHECKPOINT_UNREADABLE`` when the read failed.
     """
     history, summary = await _fetch_conversation_context(conversation_id)
     prior: List[Any] = []
+    checkpoint: Any = None
     new_checkpoint = not history
     agent = get_agent_graph(agent_graph_type)
     if agent_graph_type == "deep" and conversation_id:
-        if await _checkpoint_exists(checkpointer, conversation_id):
+        exists, checkpoint = await _read_checkpoint(checkpointer, conversation_id)
+        if exists:
             history, summary = [], None
             new_checkpoint = False
         else:
@@ -1765,7 +1890,7 @@ async def _prepare_agent_context(
         agent = _agent_with_pinned_context(agent)
     elif agent_graph_type != "simple":
         summary = note_searchable_history(summary)
-    return history, summary, prior, new_checkpoint, agent
+    return history, summary, prior, new_checkpoint, agent, checkpoint
 
 
 def _generation_unattributed_s(
@@ -1911,7 +2036,14 @@ async def generate_answer_agentic(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -1969,6 +2101,15 @@ async def generate_answer_agentic(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}} if conversation_id else {}
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
         async def _run_graph(
             g: Any,
@@ -2013,7 +2154,8 @@ async def generate_answer_agentic(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode="updates",
@@ -2318,7 +2460,14 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -2375,6 +2524,15 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}}
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
         gen_start = time.perf_counter()
         # First-answer budget. gen_start stays put: generation_latency uses it.
@@ -2517,7 +2675,8 @@ async def generate_answer_agentic_stream_helper(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode=["messages", "updates", "custom"],
