@@ -512,6 +512,67 @@ async def _drop_stale_inflight(
     return record
 
 
+async def _snapshot_workspace(conversation_id: str, record: dict[str, str]) -> None:
+    """Save the working directory once, then drop the client. A miss is logged.
+
+    The kill that follows does not wait for a quiet tree. A record with no
+    ``user_id`` has nothing to write under, so it is skipped.
+    """
+    user_id = record.get("user_id") or ""
+    if not user_id:
+        return
+    from src.services.agents.core.workspace import save_workspace
+
+    try:
+        session = await asyncio.to_thread(attach_session, record)
+    except Exception:
+        logger.warning(
+            "workspace.snapshot_attach_failed conversation_id=%s",
+            conversation_id,
+            exc_info=True,
+        )
+        return
+    try:
+        await save_workspace(session.backend, user_id, conversation_id)
+    except Exception:
+        logger.warning(
+            "workspace.snapshot_failed conversation_id=%s",
+            conversation_id,
+            exc_info=True,
+        )
+    try:
+        await asyncio.to_thread(session.detach)
+    except Exception:
+        logger.exception(
+            "workspace.snapshot_detach_failed conversation_id=%s", conversation_id
+        )
+
+
+def _remember_workspace(
+    session: SandboxSession, record: Optional[dict[str, str]], user_id: Optional[str]
+) -> bool:
+    """Copy the workspace fields onto *session*. True when *record* changed."""
+    changed = False
+    if user_id:
+        session.metadata["user_id"] = user_id
+        if record is not None and record.get("user_id") != user_id:
+            record["user_id"] = user_id
+            changed = True
+    elif record is not None and record.get("user_id"):
+        session.metadata["user_id"] = record["user_id"]
+    baseline = ""
+    if record is not None and record.get("process_baseline"):
+        baseline = record["process_baseline"]
+    elif session.metadata.get("process_baseline"):
+        baseline = str(session.metadata["process_baseline"])
+    if baseline:
+        session.metadata["process_baseline"] = baseline
+        if record is not None and record.get("process_baseline") != baseline:
+            record["process_baseline"] = baseline
+            changed = True
+    return changed
+
+
 async def _retire(
     store: SandboxStore,
     conversation_id: str,
@@ -520,6 +581,7 @@ async def _retire(
 ) -> bool:
     """Stop the sandbox and drop its record. False leaves the record for a retry."""
     await guard.check()
+    await _snapshot_workspace(conversation_id, record)
     try:
         await asyncio.to_thread(kill_record, record)
     except Exception:
@@ -553,6 +615,7 @@ async def acquire_sandbox(
     conversation_id: str,
     skills_root: Any = None,
     on_fresh: Any = None,
+    user_id: Optional[str] = None,
 ) -> Optional[SandboxLease]:
     """Return the conversation's sandbox, starting one when it has none.
 
@@ -575,7 +638,7 @@ async def acquire_sandbox(
         if guard is None:
             raise SandboxError("sandbox lock was not acquired")
         lease = await _acquire_locked(
-            store, conversation_id, provider, skills_root, guard
+            store, conversation_id, provider, skills_root, guard, user_id
         )
         if lease.fresh and on_fresh is not None:
             try:
@@ -595,6 +658,7 @@ async def _acquire_locked(
     provider: str,
     skills_root: Any,
     guard: LockGuard,
+    user_id: Optional[str] = None,
 ) -> SandboxLease:
     record = await store.get(conversation_id)
     now = time.time()
@@ -627,6 +691,7 @@ async def _acquire_locked(
             await _replace(store, conversation_id, record, guard)
         session = await asyncio.to_thread(_open_sync, skills_root)
         fresh = True
+        _remember_workspace(session, None, user_id)
         try:
             await guard.check()
             await store.put(conversation_id, _stored_record(session))
@@ -649,8 +714,11 @@ async def _acquire_locked(
     else:
         try:
             digest = await asyncio.to_thread(sync_skills, session, skills_root)
+            changed = _remember_workspace(session, record, user_id)
             if digest != record.get("skills_digest"):
                 record["skills_digest"] = digest
+                changed = True
+            if changed:
                 await guard.check()
                 await store.put(conversation_id, record)
             if session.can_renew:
@@ -716,6 +784,8 @@ async def _release(lease: SandboxLease) -> None:
         logger.exception(
             "sandbox.release_failed conversation_id=%s", lease.conversation_id
         )
+    if lease.session.workspace_sync_active():
+        return
     try:
         await asyncio.to_thread(lease.session.detach)
     except Exception:

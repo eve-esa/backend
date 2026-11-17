@@ -1,15 +1,14 @@
-"""Conversation copy of an MCP artifact, and the sandbox file that mirrors it.
+"""The one copy of an MCP artifact, and the sandbox file that mirrors it.
 
-The artifact itself stays at ``users/{user_id}/artifacts/``. This module also
-stores the same bytes at
-``users/{user_id}/conversations/{conversation_id}/tool_artifacts/{file_path}``.
-``file_path`` is ``{artifact_id}/{filename}``. The model hears only the sandbox
-path ``/tool_artifacts/{file_path}``, which is that key with the conversation
-prefix removed.
+The bytes live at
+``users/{user_id}/conversations/{conversation_id}/artifacts/{file_path}``.
+``file_path`` is ``{artifact_id}/{filename}``. ``Artifact.key`` is that object
+key. The model hears only the sandbox path ``/artifacts/{file_path}``, which
+is that key with the conversation prefix removed.
 
 A new sandbox copies the prefix in before the turn. A file persisted while a
 sandbox is already up is uploaded immediately. An upload failure is logged.
-The MinIO object remains the copy a later sandbox restores.
+The object remains the copy a later sandbox restores.
 """
 
 from __future__ import annotations
@@ -29,11 +28,11 @@ from src.services.storage import ObjectNotFoundError, storage_service
 logger = logging.getLogger(__name__)
 
 # No trailing slash. The shell rewrite matches this token, same as ``/skills``.
-SANDBOX_PREFIX = "/tool_artifacts"
+SANDBOX_PREFIX = "/artifacts"
 
 
 def file_path_for(artifact_id: str, filename: str) -> str:
-    """``{artifact_id}/{basename}`` under the conversation ``tool_artifacts`` folder."""
+    """``{artifact_id}/{basename}`` under the conversation ``artifacts`` folder."""
     raw = (filename or "").replace("\\", "/").strip()
     name = os.path.basename(raw) or "file"
     if name in {".", ".."}:
@@ -43,7 +42,7 @@ def file_path_for(artifact_id: str, filename: str) -> str:
 
 def object_key(user_id: str, conversation_id: str, file_path: str) -> str:
     return (
-        f"users/{user_id}/conversations/{conversation_id}/tool_artifacts/{file_path}"
+        f"users/{user_id}/conversations/{conversation_id}/artifacts/{file_path}"
     )
 
 
@@ -53,10 +52,10 @@ def sandbox_path(file_path: str) -> str:
 
 
 def conversation_prefix(user_id: str, conversation_id: str) -> str:
-    return f"users/{user_id}/conversations/{conversation_id}/tool_artifacts/"
+    return f"users/{user_id}/conversations/{conversation_id}/artifacts/"
 
 
-async def upload_tool_artifacts(
+async def upload_artifact(
     sandbox_backend: Any, path: str, data: bytes
 ) -> None:
     """Copy one file into the live sandbox. A missing uploader is a no-op."""
@@ -73,13 +72,13 @@ async def upload_tool_artifacts(
             return
         _log_upload_errors(await run_in_threadpool(sync_upload, payload))
     except Exception:
-        logger.warning("tool_artifacts.upload_failed path=%s", path, exc_info=True)
+        logger.warning("artifacts.upload_failed path=%s", path, exc_info=True)
 
 
-async def restore_tool_artifacts(
+async def restore_artifacts(
     sandbox_backend: Any, user_id: str, conversation_id: str
 ) -> None:
-    """Copy this conversation's ``tool_artifacts`` objects into a new sandbox.
+    """Copy this conversation's ``artifacts`` objects into a new sandbox.
 
     A failure is logged and swallowed. The turn still runs.
     """
@@ -87,7 +86,7 @@ async def restore_tool_artifacts(
         await _restore(sandbox_backend, user_id, conversation_id)
     except Exception:
         logger.warning(
-            "tool_artifacts.restore_failed conversation_id=%s",
+            "artifacts.restore_failed conversation_id=%s",
             conversation_id,
             exc_info=True,
         )
@@ -100,7 +99,7 @@ async def _restore(
         return
     upload = getattr(sandbox_backend, "upload_files", None)
     if upload is None:
-        logger.warning("tool_artifacts.restore_skipped reason=no_upload")
+        logger.warning("artifacts.restore_skipped reason=no_upload")
         return
     prefix = conversation_prefix(user_id, conversation_id)
     records, truncated = await run_in_threadpool(
@@ -108,7 +107,7 @@ async def _restore(
     )
     if truncated:
         logger.info(
-            "tool_artifacts.restore_truncated conversation_id=%s", conversation_id
+            "artifacts.restore_truncated conversation_id=%s", conversation_id
         )
     files: list[tuple[str, bytes]] = []
     total = 0
@@ -116,7 +115,7 @@ async def _restore(
         size = int(record.get("size") or 0)
         if size > RESTORE_MAX_BYTES or total + size > RESTORE_MAX_BYTES:
             logger.info(
-                "tool_artifacts.restore_skipped_size key=%s size=%s",
+                "artifacts.restore_skipped_size key=%s size=%s",
                 record.get("key"),
                 size,
             )
@@ -132,7 +131,7 @@ async def _restore(
             continue
         except Exception:
             logger.warning(
-                "tool_artifacts.restore_read_failed key=%s", key, exc_info=True
+                "artifacts.restore_read_failed key=%s", key, exc_info=True
             )
             continue
         total += len(body)
@@ -168,4 +167,4 @@ def _log_upload_errors(responses: Any) -> None:
     for response in responses or []:
         error = _upload_error(response)
         if error:
-            logger.warning("tool_artifacts.upload_failed error=%s", error)
+            logger.warning("artifacts.upload_failed error=%s", error)

@@ -11,6 +11,7 @@ import copy
 import inspect
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -57,7 +58,6 @@ from src.services.generate_answer import (
     raise_if_deadline_expired,
     resolve_generated_model_name,
 )
-from src.services.agents.core.display import build_display_tool
 from src.services.agents.core.history_search import (
     SEARCH_NOTE,
     build_history_tools,
@@ -1032,7 +1032,7 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
     return s or AGENT_GRAPH_TYPE
 
 
-# ─── Artifact-reproduction instruction ────────────────────────────────────────
+# ─── Artifact markdown instruction ────────────────────────────────────────────
 
 # The ReAct graph's own lead-in instruction lives in `prompts.yaml` bundled
 # with the `eve-esa-agents` package resolved by graphs_bundle.py (see its
@@ -1043,18 +1043,21 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
 # node invocation (ReactAgent._invoke prepends its instruction fresh each
 # call), so it stays visible for the whole tool-calling loop.
 _ARTIFACT_MARKDOWN_INSTRUCTION = (
-    "Tool results may contain a markdown stub for a file the tool produced: "
-    'an image embed (`![name](/artifacts/{id} "MCP: server/tool")`) or a '
-    'link (`[name](/artifacts/{id} "MCP: server/tool")`), each followed on '
-    "the next line by a one-line JSON blob with the same data. When your "
-    "answer references that file, reproduce the markdown line VERBATIM — "
-    "do not rewrite, reformat, translate, or invent a different URL for it. "
-    "`/artifacts/{id}` URLs are the ONLY valid way to reference a "
-    "tool-produced file in your answer; never emit a `resource://` URI or "
-    "any other URL (e.g. a `storage.googleapis.com` link) for it, even if "
-    "one appears elsewhere in the tool output. When a tool result is a JSON "
-    "object whose `path` starts with `/tool_artifacts/`, that path is the file "
-    "in the sandbox. Read and run it there."
+    "The sandbox root has four sibling directories. "
+    "workspace/ is your working directory. The shell starts there. "
+    "A file you create or download belongs in workspace/ and stays for this "
+    "conversation. "
+    "/skills/ holds installed skills. Read them. Do not write there. "
+    "/artifacts/ holds a file a tool returned. Its path is "
+    "/artifacts/{id}/{filename}. "
+    "/large_tool_results/ holds a tool result that was too large for the "
+    "thread. Read it. Do not write there. "
+    "To show a file from any of these directories, write normal markdown. "
+    "An image is `![filename](path)`. Any other file is `[filename](path)`. "
+    "A file in the working directory is `ndvi.png` or `/workspace/ndvi.png`. "
+    "Do not add a host or a scheme. `storage.googleapis.com` is never an "
+    "image URL. "
+    "There is no display tool. Do not call display."
 )
 
 
@@ -1099,47 +1102,53 @@ def _build_initial_messages(
     return messages
 
 
-async def append_missing_artifact_stubs(
-    answer: str, artifact_ids: Optional[List[str]]
-) -> str:
-    """Append markdown stubs for collected artifacts the answer never references.
+# A markdown link that names an artifact. The chat loads ``/artifacts/{id}``.
+# The sandbox path is ``/artifacts/{id}/file``. An older thread may still say
+# ``/tool_artifacts/{id}/file``. A model may keep the id and put a host in
+# front, such as ``storage.googleapis.com/.../artifacts/{id}/file``.
+_ARTIFACT_MARKDOWN = re.compile(
+    r"(!?\[[^\]]*])\([^)\s]*?/(?:tool_)?artifacts/([0-9a-fA-F]{24})(?:/[^)\s]*)?\)"
+)
 
-    The instruction above asks the model to reproduce `/artifacts/{id}` stubs
-    verbatim, but models routinely paraphrase them into invented URLs (seen
-    live with EVE-Instruct emitting `storage.googleapis.com` links). The
-    captured files are too valuable to lose to prompt non-compliance, so this
-    deterministic pass re-attaches every collected artifact whose serving URL
-    is absent from the final answer. Fail-open: any lookup error leaves the
-    answer untouched.
+
+def _markdown_paths_to_artifact_urls(answer: str) -> str:
+    """Rewrite a markdown artifact link to the URL the chat can load.
+
+    A link that is already ``/artifacts/{id}`` is left as it is. Any other
+    form is repaired, and a warning names the URL that was wrong.
     """
-    if not answer or not artifact_ids:
-        return answer
-    try:
-        from src.database.models.artifact import Artifact
 
-        lines: List[str] = []
-        for artifact_id in artifact_ids:
-            url = f"/artifacts/{artifact_id}"
-            if url in answer:
-                continue
-            artifact = await Artifact.find_by_id(artifact_id)
-            if not artifact:
-                continue
-            source = getattr(artifact, "source", None)
-            server = getattr(source, "mcp_server", None) or "unknown"
-            tool = getattr(source, "tool_name", None) or "tool"
-            title = f"MCP: {server}/{tool}"
-            if (artifact.content_type or "").startswith("image/"):
-                lines.append(f'![{artifact.filename}]({url} "{title}")')
-            else:
-                lines.append(f'[{artifact.filename}]({url} "{title}")')
-        if lines:
-            answer = answer.rstrip() + "\n\n" + "\n\n".join(lines) + "\n"
-    except Exception:
-        logger.warning(
-            "Failed to append missing artifact stubs to the answer", exc_info=True
-        )
-    return answer
+    def replace(match: re.Match) -> str:
+        artifact_id = match.group(2)
+        repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        original = match.group(0)
+        if original != repaired:
+            logger.warning(
+                "artifact.markdown_repaired url=%s to=/artifacts/%s",
+                original,
+                artifact_id,
+            )
+        return repaired
+
+    return _ARTIFACT_MARKDOWN.sub(replace, answer)
+
+
+async def rewrite_answer_file_links(answer: str) -> str:
+    """Point embedded file markdown at the URL the chat can load.
+
+    The instruction asks the model to embed ``/artifacts/{id}/{filename}``
+    as normal markdown. The chat loads ``/artifacts/{id}``, so that path is
+    rewritten before the answer is stored. A host wrapped around the same id,
+    such as ``storage.googleapis.com/.../artifacts/{id}/file``, is rewritten
+    in place. A workspace path is published the same way. An artifact the
+    answer never mentions stays out of the answer.
+    """
+    if not answer:
+        return answer
+    answer = _markdown_paths_to_artifact_urls(answer)
+    from src.services.agents.core.workspace import publish_markdown_files
+
+    return await publish_markdown_files(answer)
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
@@ -1201,6 +1210,10 @@ def _build_react_graph(
         except (TypeError, ValueError):
             pass
     policy_cb = on_policy if on_policy is not None else _graph_on_policy(graph_name)
+    from src.services.agents.core.tool_args import ensure_tool_args_are_json
+
+    llm = ensure_tool_args_are_json(llm)
+    fallback_llm = ensure_tool_args_are_json(fallback_llm)
     compile_kwargs: Dict[str, Any] = {
         "llm": llm,
         "tools": tools,
@@ -1366,10 +1379,13 @@ def _on_fresh_tool_results(
         if lease is None or not user_id or not conversation_id:
             return
         from src.services.agents.core.tool_results import restore_tool_results
-        from src.services.mcp.tool_artifacts import restore_tool_artifacts
+        from src.services.mcp.conversation_artifacts import restore_artifacts
+
+        from src.services.agents.core.workspace import restore_workspace
 
         await restore_tool_results(lease.backend, user_id, conversation_id)
-        await restore_tool_artifacts(lease.backend, user_id, conversation_id)
+        await restore_artifacts(lease.backend, user_id, conversation_id)
+        await restore_workspace(lease.backend, user_id, conversation_id)
 
     return _restore
 
@@ -1921,6 +1937,7 @@ async def generate_answer_agentic(
                     conversation_id,
                     skills_root,
                     on_fresh=_on_fresh_tool_results(user_id, conversation_id),
+                    user_id=user_id,
                 )
             else:
                 sandbox_session = await open_sandbox(skills_root)
@@ -1932,7 +1949,6 @@ async def generate_answer_agentic(
         # and a new list would drop the client strong reference.
         if held is not None:
             artifact_ctx.sandbox_backend = held.backend
-            tools.append(build_display_tool(held.backend))
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -2097,9 +2113,7 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
-        final_answer = await append_missing_artifact_stubs(
-            final_answer, list(artifact_ctx.collected_artifact_ids)
-        )
+        final_answer = await rewrite_answer_file_links(final_answer)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
@@ -2167,6 +2181,8 @@ async def generate_answer_agentic(
         )
         raise
     finally:
+        if sandbox_lease is not None:
+            sandbox_lease.session.start_workspace_sync(user_id, conversation_id or "")
         await release_sandbox(sandbox_lease)
         await close_sandbox(sandbox_session)
         reset_retrieval_context(retrieval_token)
@@ -2328,6 +2344,7 @@ async def generate_answer_agentic_stream_helper(
                 conversation_id,
                 skills_root,
                 on_fresh=_on_fresh_tool_results(user_id, conversation_id),
+                user_id=user_id,
             )
             if sandbox_lease is not None:
                 setup_latencies["setup_sandbox_s"] = time.perf_counter() - step_start
@@ -2335,7 +2352,6 @@ async def generate_answer_agentic_stream_helper(
         # and a new list would drop the client strong reference.
         if sandbox_lease is not None:
             artifact_ctx.sandbox_backend = sandbox_lease.backend
-            tools.append(build_display_tool(sandbox_lease.backend))
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
@@ -2665,9 +2681,7 @@ async def generate_answer_agentic_stream_helper(
 
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
-        answer = await append_missing_artifact_stubs(
-            "".join(accumulated), _collected_artifact_ids()
-        )
+        answer = await rewrite_answer_file_links("".join(accumulated))
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -2786,9 +2800,7 @@ async def generate_answer_agentic_stream_helper(
             error=exc,
             graph=agent_graph_type,
         )
-        answer = await append_missing_artifact_stubs(
-            "".join(accumulated), _collected_artifact_ids()
-        )
+        answer = await rewrite_answer_file_links("".join(accumulated))
         error_info = build_error_payload(exc)
         timeout_documents, timeout_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
@@ -2844,6 +2856,8 @@ async def generate_answer_agentic_stream_helper(
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
 
     finally:
+        if sandbox_lease is not None:
+            sandbox_lease.session.start_workspace_sync(user_id, conversation_id)
         await release_sandbox(sandbox_lease)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)

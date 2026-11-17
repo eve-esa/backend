@@ -45,9 +45,9 @@ _LARGE_TOOL_RESULTS = "/large_tool_results/"
 # writeFiles stores these under the session cwd. The shell rewrite points a
 # command at that directory. Longest prefix first, and none has a trailing
 # slash, so ``/skills`` itself is covered. A raw replace of ``/skills`` would
-# rewrite the suffix of ``/large_tool_results/skills_1``. ``/tool_artifacts`` is
-# the conversation copy of an MCP artifact.
-_SHELL_PREFIXES = ("/large_tool_results", "/tool_artifacts", "/skills")
+# rewrite the suffix of ``/large_tool_results/skills_1``. ``/artifacts`` is
+# an MCP file stored for this conversation.
+_SHELL_PREFIXES = ("/large_tool_results", "/artifacts", "/skills")
 
 
 class SandboxError(RuntimeError):
@@ -88,6 +88,7 @@ class SandboxSession:
         self._detach = detach
         self._renew = renew
         self._closed = False
+        self._workspace_task: Optional[asyncio.Task] = None
 
     @property
     def can_renew(self) -> bool:
@@ -116,6 +117,26 @@ class SandboxSession:
     def close(self) -> None:
         """Destroy the remote sandbox. A second call does nothing."""
         self.destroy()
+
+    def workspace_sync_active(self) -> bool:
+        """True while the post-turn workspace save has not finished."""
+        task = self._workspace_task
+        return task is not None and not task.done()
+
+    def start_workspace_sync(self, user_id: str, conversation_id: str) -> None:
+        """Save the working directory after this turn. A second call does nothing.
+
+        The task detaches the session when the save finishes. Release skips
+        detach while the task is running, so a background job can still be read.
+        """
+        if not user_id or not conversation_id or self.workspace_sync_active():
+            return
+        from src.services.agents.core.workspace import sync_workspace
+
+        self._workspace_task = asyncio.create_task(
+            sync_workspace(self, user_id, conversation_id),
+            name=f"workspace-sync-{conversation_id}",
+        )
 
 
 def _noop() -> None:
@@ -230,7 +251,7 @@ def _agentcore_handle(
     destroy: Callable[[], None],
 ) -> SandboxSession:
     return SandboxSession(
-        _bind_skills_shell(sandbox),
+        prepare_workspace_layout(_bind_skills_shell(sandbox)),
         provider="agentcore",
         sandbox_id=sandbox_id,
         destroy=destroy,
@@ -347,7 +368,7 @@ def _opensandbox_session(remote: Any, *, skills_digest: str = "") -> SandboxSess
 
     # close() frees the local HTTP client. destroy() also kills the remote.
     return SandboxSession(
-        OpenSandboxBackend(sandbox=remote),
+        prepare_workspace_layout(OpenSandboxBackend(sandbox=remote)),
         provider="opensandbox",
         sandbox_id=str(getattr(remote, "id", "") or ""),
         destroy=remote.destroy,
@@ -574,7 +595,7 @@ def _replace_path_token(command: str, prefix: str, root: str) -> str:
 
 
 def _bind_skills_shell(backend: Any) -> Any:
-    """Rewrite ``/skills`` and ``/large_tool_results`` in ``execute``.
+    """Rewrite ``/skills``, ``/artifacts``, and ``/large_tool_results`` in ``execute``.
 
     The object stays an ``AgentCoreSandbox``. ``CompositeBackend`` checks that
     type before it forwards a shell command, so a wrapper class would make
@@ -583,6 +604,7 @@ def _bind_skills_shell(backend: Any) -> Any:
     original = getattr(backend, "execute", None)
     if original is None:
         return backend
+    backend._eve_raw_execute = original
     cwd_box: dict[str, Optional[str]] = {"cwd": None}
 
     def execute(command: str, *args: Any, **kwargs: Any):
@@ -598,6 +620,129 @@ def _bind_skills_shell(backend: Any) -> Any:
     return backend
 
 
+# Sibling directories under the session root. The shell starts in workspace.
+# The others stay beside it, not inside it.
+_SIBLING_ROOTS = (
+    "/skills",
+    "/large_tool_results",
+    "/artifacts",
+    "/workspace",
+    "/conversation_history",
+)
+
+
+def place_in_workspace(path: str, session_cwd: str = "") -> str:
+    """Point a model path at ``workspace/`` unless it names a sibling directory.
+
+    A path the provider already resolved under the session root is unchanged.
+    ``..`` is unchanged so a caller can refuse it instead of escaping.
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return raw
+    root = session_cwd.rstrip("/")
+    if root and (raw == root or raw.startswith(root + "/")):
+        return raw
+    if ".." in raw.split("/"):
+        return raw
+    virtual = raw if raw.startswith("/") else f"/{raw.lstrip('./')}"
+    for prefix in _SIBLING_ROOTS:
+        if virtual == prefix or virtual.startswith(prefix + "/"):
+            return virtual
+    return "/workspace/" + raw.lstrip("./")
+
+
+def _wrap_leading_path(
+    method: Any, session_cwd: str, index: int, keyword: str
+) -> Any:
+    def wrapped(*args: Any, **kwargs: Any):
+        if isinstance(kwargs.get(keyword), str):
+            kwargs[keyword] = place_in_workspace(kwargs[keyword], session_cwd)
+        elif len(args) > index and isinstance(args[index], str):
+            args = list(args)
+            args[index] = place_in_workspace(args[index], session_cwd)
+            args = tuple(args)
+        return method(*args, **kwargs)
+
+    return wrapped
+
+
+def prepare_workspace_layout(backend: Any) -> Any:
+    """Create ``workspace`` and start shell commands inside it.
+
+    ``skills``, ``large_tool_results``, and ``artifacts`` stay siblings
+    of that directory. File paths that do not name one of them are stored
+    under ``workspace``. A second call does nothing.
+    """
+    if backend is None or getattr(backend, "_eve_workspace_ready", False):
+        return backend
+    session_cwd = ""
+    get_cwd = getattr(backend, "_get_cwd", None)
+    if get_cwd is not None:
+        try:
+            session_cwd = str(get_cwd() or "").rstrip("/")
+        except Exception:
+            logger.warning("workspace.cwd_probe_failed", exc_info=True)
+            session_cwd = ""
+    execute = getattr(backend, "execute", None)
+    if execute is not None:
+        try:
+            execute("mkdir -p workspace")
+        except Exception:
+            logger.warning("workspace.mkdir_failed", exc_info=True)
+
+        def execute_in_workspace(command: str, *args: Any, **kwargs: Any):
+            return execute(
+                f"mkdir -p workspace && cd workspace && {command}",
+                *args,
+                **kwargs,
+            )
+
+        backend.execute = execute_in_workspace
+    for name, index, keyword in (
+        ("write", 0, "file_path"),
+        ("read", 0, "file_path"),
+        ("edit", 0, "file_path"),
+        ("ls", 0, "path"),
+        ("grep", 1, "path"),
+        ("glob", 1, "path"),
+    ):
+        method = getattr(backend, name, None)
+        if method is not None:
+            setattr(
+                backend,
+                name,
+                _wrap_leading_path(method, session_cwd, index, keyword),
+            )
+    upload = getattr(backend, "upload_files", None)
+    if upload is not None:
+
+        def upload_files(files: list, *args: Any, **kwargs: Any):
+            mapped = []
+            for item in files:
+                path, data = item[0], item[1]
+                mapped.append(
+                    (place_in_workspace(path, session_cwd), data, *item[2:])
+                )
+            return upload(mapped, *args, **kwargs)
+
+        backend.upload_files = upload_files
+    download = getattr(backend, "download_files", None)
+    if download is not None:
+        backend._eve_download_files = download
+
+        def download_files(paths: list, *args: Any, **kwargs: Any):
+            return download(
+                [place_in_workspace(path, session_cwd) for path in paths],
+                *args,
+                **kwargs,
+            )
+
+        backend.download_files = download_files
+    backend._eve_workspace_ready = True
+    return backend
+
+
 def _open_sync(skills_root: Optional[Path] = None) -> SandboxSession:
     provider = sandbox_provider()
     start = _PROVIDERS.get(provider)
@@ -607,6 +752,11 @@ def _open_sync(skills_root: Optional[Path] = None) -> SandboxSession:
     session = start()
     try:
         session.skills_digest = _upload_skills(session.backend, skills_root)
+        from src.services.agents.core.workspace import capture_process_baseline
+
+        session.metadata["process_baseline"] = capture_process_baseline(
+            session.backend
+        )
     except Exception:
         try:
             session.destroy()

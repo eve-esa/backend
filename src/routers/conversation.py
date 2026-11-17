@@ -5,7 +5,11 @@ from src.schemas.conversation import (
 )
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
+import mimetypes
+import re
+
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.database.mongo_model import PaginatedResponse
@@ -13,6 +17,18 @@ from src.schemas.common import Pagination
 from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
 from src.services.agents.core.sandbox_pool import discard_conversation_sandbox
+from src.services.agents.core.workspace import workspace_prefix
+from src.services.storage import ObjectNotFoundError, storage_service
+
+_INLINE_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+    "text/plain",
+    "application/json",
+}
 
 router = APIRouter()
 
@@ -218,3 +234,62 @@ async def delete_conversation(
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+def _workspace_relative(file_path: str) -> str:
+    raw = file_path.replace("\\", "/").lstrip("/")
+    if (
+        not raw
+        or raw.endswith("/")
+        or any(part in {"", ".", ".."} for part in raw.split("/"))
+    ):
+        raise HTTPException(status_code=404, detail="File not found")
+    return raw
+
+
+@router.get("/conversations/{conversation_id}/workspace/{file_path:path}")
+async def get_workspace_file(
+    conversation_id: str,
+    file_path: str,
+    requesting_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """Stream one file from the conversation workspace prefix.
+
+    The bytes are the saved workspace object. This route does not copy them
+    into the artifact store.
+    """
+    conversation = await Conversation.find_by_id(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.user_id != requesting_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not allowed to get this conversation",
+        )
+    relative = _workspace_relative(file_path)
+    key = f"{workspace_prefix(requesting_user.id, conversation_id)}{relative}"
+    try:
+        response = await storage_service.get_object(key)
+    except ObjectNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    content_type = (
+        response.get("ContentType")
+        or mimetypes.guess_type(relative)[0]
+        or "application/octet-stream"
+    )
+    filename = re.sub(r'[\r\n"\\/]+', "_", relative.rsplit("/", 1)[-1])
+    disposition = "inline" if content_type in _INLINE_TYPES else "attachment"
+    headers = {
+        "Cache-Control": "private, no-cache",
+        "Vary": "Authorization",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
+    }
+    length = response.get("ContentLength")
+    if length is not None:
+        headers["Content-Length"] = str(length)
+    return StreamingResponse(
+        storage_service.stream_body(response["Body"]),
+        media_type=content_type,
+        headers=headers,
+    )

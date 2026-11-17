@@ -170,9 +170,13 @@ async def test_conversation_copy_is_uploaded_to_the_sandbox(interceptor, with_co
     try:
         payload = _parse_stub(out.content[0])
         relative = f"{payload['artifact_id']}/search-1.png"
-        key = f"users/{USER_ID}/conversations/conv-1/tool_artifacts/{relative}"
-        assert payload["path"] == f"/tool_artifacts/{relative}"
+        key = f"users/{USER_ID}/conversations/conv-1/artifacts/{relative}"
+        assert payload["path"] == f"/artifacts/{relative}"
+        assert list(fake.objects) == [key]
         assert fake.objects[key]["body"] == PNG_BYTES
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert artifact is not None
+        assert artifact.key == key
         assert sandbox.files == [(payload["path"], PNG_BYTES)]
     finally:
         await _cleanup()
@@ -207,16 +211,179 @@ async def test_a_json_path_becomes_the_sandbox_path_and_the_stub_is_dropped(
         assert len(out.content) == 1
         payload = json.loads(out.content[0].text)
         assert set(payload) == {"path"}
-        assert payload["path"].startswith("/tool_artifacts/")
+        assert payload["path"].startswith("/artifacts/")
         assert payload["path"].endswith("/report.txt")
-        assert "/artifacts/" not in out.content[0].text
+        assert "artifact_id" not in out.content[0].text
         assert out.structuredContent == payload
     finally:
         await _cleanup()
 
 
 @pytest.mark.asyncio
-async def test_no_conversation_skips_the_conversation_copy(interceptor):
+async def test_nested_file_paths_keep_their_fields_and_drop_the_stub(
+    interceptor, with_context
+):
+    """A files list keeps the keys the tool sent. Only path changes, and the stub goes."""
+    icept, _fake = interceptor
+    csv = b"a,b\n1,2\n"
+    body = {
+        "ok": True,
+        "files": [
+            {
+                "name": "severity_map.png",
+                "path": "severity_map.png",
+                "mime_type": "image/png",
+                "bytes": len(PNG_BYTES),
+            },
+            {
+                "name": "recovery.csv",
+                "path": "recovery.csv",
+                "mime_type": "text/csv",
+                "bytes": len(csv),
+            },
+            {
+                "name": "later.png",
+                "path": "later.png",
+                "mime_type": "image/png",
+                "bytes": 99999,
+            },
+        ],
+    }
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(body)),
+            ImageContent(type="image", data=PNG_B64, mimeType="image/png"),
+            EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri="file:///recovery.csv",
+                    mimeType="text/csv",
+                    blob=base64.b64encode(csv).decode("ascii"),
+                ),
+            ),
+            TextContent(type="text", text="Some files were not attached."),
+        ]
+    )
+
+    out = await icept(
+        _request(name="compute_metrics", server_name="effis"), _handler(result)
+    )
+
+    try:
+        assert [type(block) for block in out.content] == [TextContent, TextContent]
+        payload = json.loads(out.content[0].text)
+        image, table, pending = payload["files"]
+        assert set(image) == {"name", "path", "mime_type", "bytes"}
+        assert image["name"] == "severity_map.png"
+        assert image["bytes"] == len(PNG_BYTES)
+        assert image["path"].startswith("/artifacts/")
+        assert image["path"].endswith("/severity_map.png")
+        assert table["path"].startswith("/artifacts/")
+        assert table["path"].endswith("/recovery.csv")
+        assert pending["path"] == "later.png"
+        assert "artifact_id" not in out.content[0].text
+        assert out.content[1].text == "Some files were not attached."
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_source_path_meta_replaces_the_loaded_path(interceptor, with_context):
+    """_meta.eve.source_path replaces that exact string, including a non-path key."""
+    icept, _fake = interceptor
+    geojson = b'{"type":"FeatureCollection","features":[]}'
+    image_path = "/tmp/effis/severity_map.png"
+    geojson_path = "/tmp/effis/burnt_areas.geojson"
+    body = {
+        "ok": True,
+        "geojson_path": geojson_path,
+        "files": [
+            {
+                "name": "severity_map.png",
+                "path": image_path,
+                "mime_type": "image/png",
+                "bytes": len(PNG_BYTES),
+            }
+        ],
+    }
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(body)),
+            ImageContent(
+                type="image",
+                data=PNG_B64,
+                mimeType="image/png",
+                _meta={"eve": {"source_path": image_path}},
+            ),
+            EmbeddedResource(
+                type="resource",
+                resource=BlobResourceContents(
+                    uri="file:///burnt_areas.geojson",
+                    mimeType="application/geo+json",
+                    blob=base64.b64encode(geojson).decode("ascii"),
+                ),
+                _meta={"eve": {"source_path": geojson_path}},
+            ),
+        ],
+        structuredContent=body,
+    )
+
+    out = await icept(
+        _request(name="get_effis_burnt_areas", server_name="effis"), _handler(result)
+    )
+
+    try:
+        assert [type(block) for block in out.content] == [TextContent]
+        payload = json.loads(out.content[0].text)
+        assert set(payload) == {"ok", "geojson_path", "files"}
+        saved_image = payload["files"][0]["path"]
+        saved_geojson = payload["geojson_path"]
+        assert saved_image.startswith("/artifacts/")
+        assert saved_image.endswith("/severity_map.png")
+        assert saved_geojson.startswith("/artifacts/")
+        assert saved_geojson.endswith("/burnt_areas.geojson")
+        assert image_path not in out.content[0].text
+        assert geojson_path not in out.content[0].text
+        assert out.structuredContent["geojson_path"] == saved_geojson
+        assert out.structuredContent["files"][0]["path"] == saved_image
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_file_sizes_keep_the_stub(interceptor, with_context):
+    """Two files of the same size are not guessed. Their stubs stay."""
+    icept, _fake = interceptor
+    body = {
+        "files": [
+            {"name": "a.png", "path": "a.png", "bytes": len(PNG_BYTES)},
+            {"name": "b.png", "path": "b.png", "bytes": len(PNG_BYTES)},
+        ]
+    }
+    image = ImageContent(type="image", data=PNG_B64, mimeType="image/png")
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(body)),
+            image,
+            image,
+        ]
+    )
+
+    out = await icept(_request(), _handler(result))
+
+    try:
+        assert len(out.content) == 3
+        payload = json.loads(out.content[0].text)
+        assert payload["files"][0]["path"] == "a.png"
+        assert payload["files"][1]["path"] == "b.png"
+        assert _parse_stub(out.content[1])["size_bytes"] == len(PNG_BYTES)
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_no_conversation_stores_nothing(interceptor):
+    """A turn with no conversation id stores no object and returns a warning."""
     icept, fake = interceptor
     ctx, token = set_artifact_context(user_id=USER_ID)
     result = CallToolResult(
@@ -224,13 +391,12 @@ async def test_no_conversation_skips_the_conversation_copy(interceptor):
     )
     try:
         out = await icept(_request(), _handler(result))
-        payload = _parse_stub(out.content[0])
-        assert "path" not in payload
-        assert len(fake.objects) == 1
-        assert ctx.collected_artifact_ids == [payload["artifact_id"]]
+        assert out.content[0].text == "artifact skipped: not stored: no conversation"
+        assert PNG_B64 not in json.dumps(out.model_dump())
+        assert fake.objects == {}
+        assert ctx.collected_artifact_ids == []
     finally:
         reset_artifact_context(token)
-        await _cleanup()
 
 
 @pytest.mark.asyncio
@@ -499,7 +665,7 @@ async def test_max_per_tool_call_cap_respected(interceptor, with_context, monkey
         assert "artifact_id" in first_payload
         assert out.content[1].text == "artifact skipped: limit reached"
         assert len(with_context.collected_artifact_ids) == 1
-        assert len(fake.objects) == 2
+        assert len(fake.objects) == 1
     finally:
         await _cleanup()
 

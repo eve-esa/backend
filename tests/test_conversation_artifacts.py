@@ -1,8 +1,8 @@
-"""A new sandbox is filled from the conversation tool_artifacts prefix."""
+"""A new sandbox is filled from the conversation artifacts prefix."""
 
 import pytest
 
-from src.services.mcp.tool_artifacts import restore_tool_artifacts
+from src.services.mcp.conversation_artifacts import restore_artifacts
 
 
 class _Body:
@@ -44,11 +44,13 @@ class _Sandbox:
 @pytest.mark.no_db
 @pytest.mark.asyncio
 async def test_restore_uploads_the_conversation_prefix(monkeypatch):
-    key = "users/u1/conversations/c1/tool_artifacts/abc/report.txt"
+    key = "users/u1/conversations/c1/artifacts/abc/report.txt"
     store = _Store({key: b"report\n"})
-    monkeypatch.setattr("src.services.mcp.tool_artifacts.storage_service", store)
+    monkeypatch.setattr(
+        "src.services.mcp.conversation_artifacts.storage_service", store
+    )
     sandbox = _Sandbox()
 
-    await restore_tool_artifacts(sandbox, "u1", "c1")
+    await restore_artifacts(sandbox, "u1", "c1")
 
-    assert sandbox.files == [("/tool_artifacts/abc/report.txt", b"report\n")]
+    assert sandbox.files == [("/artifacts/abc/report.txt", b"report\n")]
