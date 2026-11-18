@@ -58,6 +58,9 @@ logger = logging.getLogger(__name__)
 # Collection holding the atomic per-user-per-day upload counters.
 QUOTA_COLLECTION = "image_upload_quota"
 
+# Rounds a move retries after another request moved the same row first.
+MOVE_ATTEMPTS = 3
+
 # Characters that never reach a filename in a header: controls (CR/LF split
 # the header, the rest make uvicorn refuse it), quotes, backslashes and path
 # separators.
@@ -124,36 +127,88 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
     and the row are written first and the old object is deleted last, so a
     failure leaves a stray object, never a row without bytes. A failed copy
     keeps the old key: the attachment still renders from it.
+
+    Two requests can attach the same file at once (an overlapping send, a
+    page that moved on mid-upload). The row is updated only while it still
+    holds the key this request copied from, never replaced whole: a request
+    that lost the race rereads the row and moves from where the winner left
+    it, so it can never write back a key whose object is already gone.
+
+    Raises:
+        HTTPException: 404 if the row was deleted meanwhile.
     """
-    key = object_key(
-        artifact.user_id, conversation_id, file_path_for(artifact.id, artifact.filename)
+    for _ in range(MOVE_ATTEMPTS):
+        key = object_key(
+            artifact.user_id, conversation_id, file_path_for(artifact.id, artifact.filename)
+        )
+        if artifact.conversation_id == conversation_id and artifact.key == key:
+            return
+        old_key = artifact.key
+        new_key = old_key
+        if old_key != key:
+            try:
+                await storage_service.copy_object(old_key, key)
+            except ObjectNotFoundError:
+                if await _reload_moved(artifact, old_key):
+                    continue
+                # The bytes are gone for good: bind the row, keep its key.
+            except Exception as exc:  # noqa: BLE001 - the old key still serves
+                logger.warning(
+                    "artifact.move_failed artifact=%s conversation=%s error=%s",
+                    artifact.id,
+                    conversation_id,
+                    type(exc).__name__,
+                )
+            else:
+                new_key = key
+        result = await Artifact.get_collection().update_one(
+            {"_id": ObjectId(artifact.id), "key": old_key},
+            {"$set": {"key": new_key, "conversation_id": conversation_id}},
+        )
+        if result.matched_count:
+            artifact.key = new_key
+            artifact.conversation_id = conversation_id
+            if new_key != old_key:
+                await _delete_stray(artifact.id, old_key)
+            return
+        # Another request moved the row first. Drop this copy unless the row
+        # now points at it (both requests chose the same conversation).
+        current = await Artifact.find_by_id_on_primary(artifact.id)
+        if new_key != old_key and (current is None or current.key != new_key):
+            await _delete_stray(artifact.id, new_key)
+        _adopt(artifact, current)
+    logger.warning(
+        "artifact.move_contended artifact=%s conversation=%s", artifact.id, conversation_id
     )
-    if artifact.conversation_id == conversation_id and artifact.key == key:
-        return
-    old_key = artifact.key
-    artifact.conversation_id = conversation_id
-    if old_key != key:
-        try:
-            await storage_service.copy_object(old_key, key)
-        except Exception as exc:  # noqa: BLE001 - the old key still serves
-            logger.warning(
-                "artifact.move_failed artifact=%s conversation=%s error=%s",
-                artifact.id,
-                conversation_id,
-                type(exc).__name__,
-            )
-        else:
-            artifact.key = key
-    await artifact.save()
-    if artifact.key != old_key:
-        try:
-            await storage_service.delete_object(old_key)
-        except Exception as exc:  # noqa: BLE001 - a stray object, reclaimed by GC
-            logger.warning(
-                "artifact.move_cleanup_failed artifact=%s error=%s",
-                artifact.id,
-                type(exc).__name__,
-            )
+
+
+async def _reload_moved(artifact: Artifact, old_key: str) -> bool:
+    """True when the row moved off ``old_key`` meanwhile; ``artifact`` then holds the new state."""
+    current = await Artifact.find_by_id_on_primary(artifact.id)
+    if current is not None and current.key == old_key:
+        return False
+    _adopt(artifact, current)
+    return True
+
+
+def _adopt(artifact: Artifact, current: Optional[Artifact]) -> None:
+    """Take the key and conversation of the row as stored now; 404 when it is gone."""
+    if current is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    artifact.key = current.key
+    artifact.conversation_id = current.conversation_id
+
+
+async def _delete_stray(artifact_id: str, key: str) -> None:
+    """Delete an object no row points to; a failure leaves it for GC."""
+    try:
+        await storage_service.delete_object(key)
+    except Exception as exc:  # noqa: BLE001 - a stray object, reclaimed by GC
+        logger.warning(
+            "artifact.move_cleanup_failed artifact=%s error=%s",
+            artifact_id,
+            type(exc).__name__,
+        )
 
 
 def require_uploads_enabled() -> None:
@@ -412,11 +467,10 @@ async def get_artifact(
     try:
         response = await storage_service.get_object(artifact.key)
     except ObjectNotFoundError:
-        # The record outlived its bytes. Report it as missing rather than as a
-        # server fault, and log the key so the orphan can be reclaimed.
-        logger.warning(
-            f"Artifact {artifact_id} has no object at key {artifact.key}"
-        )
+        # The record outlived its bytes (a row older than the guarded move, or
+        # an object removed outside the app): a missing file, not a server
+        # fault, so INFO. The id only: the key carries the user's filename.
+        logger.info("artifact.object_missing artifact=%s", artifact.id)
         raise HTTPException(
             status_code=404, detail="Artifact content is no longer available"
         )

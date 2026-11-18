@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from bson import ObjectId
+
 from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
@@ -169,8 +171,13 @@ async def _delete_artifacts(user_id: str, conversation_id: str) -> bool:
             other = shown_elsewhere.get(artifact.id)
             try:
                 if other:
-                    artifact.conversation_id = other
-                    await artifact.save()
+                    # Only the conversation, and only while the row is still
+                    # here: a full save would write back a key an attach just
+                    # moved, and the row would point at a deleted object.
+                    await Artifact.get_collection().update_one(
+                        {"_id": ObjectId(artifact.id), "conversation_id": conversation_id},
+                        {"$set": {"conversation_id": other}},
+                    )
                 else:
                     await delete_artifact(artifact)
             except Exception as exc:  # noqa: BLE001 - reported, logged
