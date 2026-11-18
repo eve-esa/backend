@@ -1495,7 +1495,11 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "In markdown a file in the working directory is `ndvi.png` or "
     "`/workspace/ndvi.png`. "
     "Never put a scheme or a host in front of a path. "
-    "There is no display tool. Do not call display."
+    "There is no display tool. Do not call display. "
+    "When a file is an image and reading it returns a notice that this model "
+    "cannot view images, tell the user you cannot see images with the current "
+    "model. Do not describe the image and do not guess its content from its "
+    "name or path."
 )
 
 
