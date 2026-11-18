@@ -108,7 +108,7 @@ A rejected manifest (YAML, schema, contract, manifest size, template, render) is
 python -m src.commands.render_mail_pack --pack ./pack --out ./out
 ```
 
-It runs the same validation as the backend, then renders every variant of `<pack>/fixtures.yaml` (or `--fixtures`) to `<out>/<variant>.html` and `.txt` and prints each subject. The variant name is the file stem, so `04-on-hold` writes `04-on-hold.html`. The command reads only the pack directory: it needs no database, no network and no real settings. There is no fallback here: a rejected pack, a fixture whose `context` keys differ from the mail's variables, a mail the pack does not carry or a render error exits 1. `fixtures.yaml` is never published.
+It runs the same validation as the backend, then renders every variant of `<pack>/fixtures.yaml` (or `--fixtures`) to `<out>/<variant>.html` and `.txt` and prints each subject. `--out` must be a new or empty directory. A symlink in the pack exits 1. The variant name is the file stem, so `04-on-hold` writes `04-on-hold.html`. The command reads only the pack directory: it needs no database, no network and no real settings. There is no fallback here: a rejected pack, a fixture whose `context` keys differ from the mail's variables, a mail the pack does not carry or a render error exits 1. `fixtures.yaml` is never published.
 
 ```yaml
 variants:
@@ -126,7 +126,7 @@ To fill in the hashes after editing templates:
 python -m src.commands.render_mail_pack --pack ./pack --write-hashes
 ```
 
-It sets the value of every entry under `files:` in `manifest.yaml` to the sha256 of that file and leaves every other line and comment as written. A listed file that is missing exits 1. Add `--out` to validate and render in the same run.
+It sets the value of every entry under `files:` in `manifest.yaml` to the sha256 of that file and leaves every other line, comment and line ending as written. A listed file that is missing, a line under `files:` it cannot read (a quoted key, an anchor, a value with a comment glued to it) or a result whose parsed `files` differ from the computed digests exits 1 and leaves the manifest untouched; otherwise the manifest is replaced in one step. Add `--out` to validate and render in the same run.
 
 ### Rollback
 

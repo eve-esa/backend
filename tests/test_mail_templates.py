@@ -1118,3 +1118,104 @@ def test_the_default_client_uses_a_session_of_its_own(monkeypatch):
     monkeypatch.setattr(mail_templates.boto3.session, "Session", _Session)
     assert mail_templates._s3_client() == ("client", "s3")
     assert len(sessions) == 1
+
+
+# ------------------------------------------------------------ 14. render command hardening
+
+
+def test_a_variant_name_with_a_trailing_newline_is_refused(tmp_path):
+    manifest, files = make_pack()
+    fixtures = {"variants": [dict(FIXTURES["variants"][0], name="pending\n")]}
+    _write_pack(tmp_path / "pack", manifest, files, fixtures)
+    code = render_mail_pack.main(["--pack", str(tmp_path / "pack"), "--out", str(tmp_path / "out")])
+    assert code == 1
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ['  "account_pending.txt": 0000', "  account_pending.txt: 0000#note", "  account_pending.txt: &a 0000"],
+    ids=["quoted_key", "glued_comment", "anchor"],
+)
+def test_write_hashes_fails_on_a_files_line_it_cannot_read(tmp_path, entry):
+    pack = tmp_path / "pack"
+    _bundled_pack_dir(pack)
+    path = pack / MANIFEST_KEY
+    lines = path.read_text().splitlines()
+    index = next(i for i, line in enumerate(lines) if line.strip().startswith("cohort_invite.txt:"))
+    lines.insert(index, entry)
+    original = "\n".join(lines) + "\n"
+    path.write_text(original)
+    assert render_mail_pack.main(["--pack", str(pack), "--write-hashes"]) == 1
+    assert path.read_text() == original
+
+
+def test_write_hashes_fails_when_the_parsed_files_disagree_with_the_edit(tmp_path):
+    # A second files key as a flow mapping: the line edit fixes the block it
+    # reads, YAML keeps the last key, so the parsed files stay stale.
+    pack = tmp_path / "pack"
+    _bundled_pack_dir(pack)
+    path = pack / MANIFEST_KEY
+    text = path.read_text() + "files: {base.html: " + "0" * 64 + "}\n"
+    path.write_text(text)
+    assert render_mail_pack.main(["--pack", str(pack), "--write-hashes"]) == 1
+    assert path.read_text() == text
+
+
+def test_write_hashes_keeps_crlf_line_endings(tmp_path):
+    pack = tmp_path / "pack"
+    _bundled_pack_dir(pack, stale_hashes=True)
+    path = pack / MANIFEST_KEY
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    assert render_mail_pack.main(["--pack", str(pack), "--write-hashes"]) == 0
+    data = path.read_bytes()
+    assert b"0" * 64 not in data
+    assert data.count(b"\r\n") == data.count(b"\n")
+    assert yaml.safe_load(data)["files"]["base.html"] == _sha((pack / "base.html").read_bytes())
+
+
+def test_write_hashes_replaces_the_manifest_atomically(tmp_path, monkeypatch):
+    pack = tmp_path / "pack"
+    _bundled_pack_dir(pack, stale_hashes=True)
+    path = pack / MANIFEST_KEY
+    original = path.read_bytes()
+    replaced = []
+    real_replace = render_mail_pack.os.replace
+
+    def _replace(src, dst):
+        replaced.append((Path(src).parent, Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(render_mail_pack.os, "replace", _replace)
+    monkeypatch.setattr(Path, "write_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("in place")))
+    monkeypatch.setattr(Path, "write_bytes", lambda *a, **k: (_ for _ in ()).throw(AssertionError("in place")))
+    assert render_mail_pack.main(["--pack", str(pack), "--write-hashes"]) == 0
+    assert replaced == [(pack, path)]
+    assert path.read_bytes() != original
+    assert sorted(p.name for p in pack.iterdir() if p.name.endswith(".tmp")) == []
+
+
+@pytest.mark.parametrize("target", ["listed_file", "manifest"])
+@pytest.mark.parametrize("mode", ["write_hashes", "render"])
+def test_a_symlink_in_the_pack_fails_the_command(tmp_path, target, mode):
+    pack = tmp_path / "pack"
+    _bundled_pack_dir(pack)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    name = "account_pending.txt" if target == "listed_file" else MANIFEST_KEY
+    (outside / name).write_bytes((pack / name).read_bytes())
+    (pack / name).unlink()
+    (pack / name).symlink_to(outside / name)
+    args = ["--write-hashes"] if mode == "write_hashes" else ["--out", str(tmp_path / "out")]
+    assert render_mail_pack.main(["--pack", str(pack), *args]) == 1
+    assert not (tmp_path / "out").exists()
+
+
+def test_render_command_refuses_an_out_directory_that_is_not_empty(tmp_path):
+    _bundled_pack_dir(tmp_path / "pack")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "03-old-variant.html").write_text("stale")
+    code = render_mail_pack.main(["--pack", str(tmp_path / "pack"), "--out", str(out)])
+    assert code == 1
+    assert sorted(p.name for p in out.iterdir()) == ["03-old-variant.html"]
