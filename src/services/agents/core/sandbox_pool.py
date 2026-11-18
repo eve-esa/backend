@@ -682,12 +682,20 @@ async def _acquire_locked(
     ):
         try:
             session = await asyncio.to_thread(attach_session, record)
-        except SandboxGone:
-            logger.warning(
-                "sandbox.attach_failed conversation_id=%s sandbox_id=%s",
+        except SandboxGone as exc:
+            # Expired or removed at the provider: expected, not a failure. The
+            # stop still runs before the entry goes: "gone" is read from a 404
+            # or an ended-session error, and if that verdict is wrong (a wrong
+            # interpreter identifier, a misrouted call) the stop is what keeps
+            # an orphan from billing. Both kill paths treat already gone as
+            # success. The reason names the provider error.
+            cause = exc.__cause__
+            logger.info(
+                "sandbox.gone conversation_id=%s provider=%s sandbox_id=%s reason=%s",
                 conversation_id,
+                record.get("provider"),
                 record.get("sandbox_id"),
-                exc_info=True,
+                type(cause).__name__ if cause is not None else "provider_status",
             )
             await guard.check()
             await _replace(store, conversation_id, record, guard)

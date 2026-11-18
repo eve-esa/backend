@@ -83,9 +83,15 @@ def _install(monkeypatch, clock):
         return _session(state, sandbox_id, provider, "digest-1", metadata)
 
     def attach(record):
-        if state["dead"]:
+        dead = state["dead"]
+        if isinstance(dead, BaseException):
+            raise SandboxGone("dead") from dead
+        if dead:
             raise SandboxGone("dead")
-        if state.get("transient"):
+        transient = state.get("transient")
+        if isinstance(transient, BaseException):
+            raise transient
+        if transient:
             raise RuntimeError("blip")
         metadata = {
             key: record[key]
@@ -289,18 +295,77 @@ async def test_reaper_skips_a_conversation_whose_lock_is_held(
     assert state["killed"] == [lease.session.sandbox_id]
 
 
-async def test_a_dead_sandbox_is_replaced(monkeypatch, clock):
+async def test_a_gone_sandbox_drops_its_entry_and_a_new_one_starts(
+    monkeypatch, clock, sandbox_store, caplog
+):
     state = _install(monkeypatch, clock)
     lease = await acquire_sandbox("c1", None)
     assert lease is not None
     await release_sandbox(lease)
     state["dead"] = True
+    caplog.clear()
 
-    again = await acquire_sandbox("c1", None)
+    with caplog.at_level("DEBUG"):
+        again = await acquire_sandbox("c1", None)
 
     assert again is not None
-    assert state["killed"] == [lease.session.sandbox_id]
+    assert again.fresh is True
     assert again.session.sandbox_id != lease.session.sandbox_id
+    # Gone is not a failure, but the stop still runs: a wrong "gone" verdict
+    # must not leave a running sandbox behind.
+    assert state["killed"] == [lease.session.sandbox_id]
+    record = await sandbox_store.get("c1")
+    assert record is not None
+    assert record["sandbox_id"] == again.session.sandbox_id
+    assert [r for r in caplog.records if r.levelno >= 30] == []
+    gone = [r for r in caplog.records if r.getMessage().startswith("sandbox.gone")]
+    assert len(gone) == 1
+    assert gone[0].levelname == "INFO"
+    assert gone[0].exc_info is None
+    assert gone[0].getMessage() == (
+        f"sandbox.gone conversation_id=c1 provider=agentcore "
+        f"sandbox_id={lease.session.sandbox_id} reason=provider_status"
+    )
+
+
+class ResourceNotFoundException(Exception):
+    """Stands for the boto3 error a wrong interpreter identifier also raises."""
+
+
+async def test_a_gone_line_names_the_provider_error(monkeypatch, clock, caplog):
+    state = _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+    state["dead"] = ResourceNotFoundException("no such session")
+
+    with caplog.at_level("DEBUG"):
+        await acquire_sandbox("c1", None)
+
+    (gone,) = [r for r in caplog.records if r.getMessage().startswith("sandbox.gone")]
+    assert gone.getMessage().endswith("reason=ResourceNotFoundException")
+    assert "no such session" not in gone.getMessage()
+    assert state["killed"] == [lease.session.sandbox_id]
+
+
+async def test_an_attach_timeout_keeps_the_entry_and_logs_no_gone(
+    monkeypatch, clock, sandbox_store, caplog
+):
+    state = _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+    state["transient"] = TimeoutError("timed out")
+
+    with caplog.at_level("DEBUG"), pytest.raises(TimeoutError):
+        await acquire_sandbox("c1", None)
+
+    record = await sandbox_store.get("c1")
+    assert record is not None
+    assert record["sandbox_id"] == lease.session.sandbox_id
+    assert state["killed"] == []
+    assert state["n"] == 1
+    assert not any(r.getMessage().startswith("sandbox.gone") for r in caplog.records)
 
 
 async def test_agentcore_near_its_hard_ttl_is_replaced(monkeypatch, clock):
