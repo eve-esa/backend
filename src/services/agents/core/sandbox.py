@@ -808,6 +808,17 @@ _SIBLING_ROOTS = (
 )
 
 
+# Session roots this process laid out, so a real absolute path written by the
+# model can be read back as a workspace path (run_hint). One value per provider
+# image in practice (AgentCore reports the same cwd for every session).
+_session_roots: set[str] = set()
+
+
+def known_session_roots() -> set[str]:
+    """Session roots seen by ``prepare_workspace_layout`` in this process."""
+    return set(_session_roots)
+
+
 def place_in_workspace(path: str, session_cwd: str = "") -> str:
     """Point a model path at ``workspace/`` unless it names a sibling directory.
 
@@ -921,6 +932,8 @@ def prepare_workspace_layout(backend: Any) -> Any:
         if root is not None:
             root = session_cwd or "/"
     workspace_dir = f"{root.rstrip('/')}/workspace" if root else None
+    if session_cwd:
+        _session_roots.add(session_cwd)
     if execute is not None:
         if getattr(backend, "_eve_raw_execute", None) is None:
             if root:

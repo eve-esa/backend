@@ -18,7 +18,7 @@ import json
 import shlex
 from typing import Any, Optional
 
-from src.services.agents.core.sandbox import place_in_workspace
+from src.services.agents.core.sandbox import known_session_roots, place_in_workspace
 
 # deepagents' success texts for these tools (deepagents.middleware.filesystem).
 # An error result carries the error text instead, so it gets no line.
@@ -28,7 +28,7 @@ _SUCCESS_PREFIX = {
 }
 _SHELL_TOOL = "execute"
 _WORKSPACE = "/workspace/"
-_RUNNERS = {".py": "python3", ".sh": "sh"}
+_RUNNERS = {".py": "python3"}
 _TAIL = "(the shell starts in the workspace)."
 
 
@@ -36,17 +36,21 @@ def workspace_relative_path(path: Any) -> Optional[str]:
     """The path of a written file relative to the workspace, or ``None``.
 
     ``x``, ``./x``, ``workspace/x``, ``/workspace/x`` and a real absolute
-    ``<root>/workspace/x`` are all ``x``; sub directories stay. A path in a
-    sibling directory (``/skills/``, ``/artifacts/``) or with ``..`` is not in
-    the workspace.
+    ``<root>/workspace/x`` are all ``x``; sub directories stay. The mapping is
+    the file tools' one (``place_in_workspace``): a real path under a session
+    root is kept as is, so only ``<root>/workspace/`` is the workspace there.
+    A path in a sibling directory (``/skills/``, ``/artifacts/``), elsewhere
+    under the root, or with ``..`` is not in the workspace.
     """
     raw = str(path or "").strip()
     if not raw or ".." in raw.split("/"):
         return None
-    if raw.startswith("/") and not raw.startswith(_WORKSPACE):
-        at = raw.find(_WORKSPACE)
-        if at > 0:
-            raw = raw[at:]
+    for root in sorted(known_session_roots(), key=len, reverse=True):
+        if raw == root or raw.startswith(root + "/"):
+            inside = root + _WORKSPACE
+            if not raw.startswith(inside):
+                return None
+            return raw[len(inside) :] or None
     placed = place_in_workspace(raw)
     if not placed.startswith(_WORKSPACE):
         return None
@@ -59,6 +63,8 @@ def run_hint(path: Any) -> Optional[str]:
     if relative is None:
         return None
     quoted = shlex.quote(relative)
+    if quoted.startswith("-"):
+        quoted = "./" + quoted
     for suffix, runner in _RUNNERS.items():
         if relative.endswith(suffix):
             return f"Run it in the shell as `{runner} {quoted}` {_TAIL}"
@@ -107,15 +113,28 @@ def _text(content: Any) -> str:
     return ""
 
 
+def _turn_start(messages: list) -> int:
+    """Index after the last user message, 0 when there is none."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "user":
+            return index + 1
+    return 0
+
+
 def add_run_hints(payload: dict) -> dict:
-    """Append the shell form to each successful file write in a chat payload."""
+    """Append the shell form to each successful file write of this turn.
+
+    Only tool messages after the last user message are touched: a write from
+    an earlier turn may sit in a sandbox that was replaced since.
+    """
     messages = payload.get("messages") or []
     if not _has_shell(payload):
         return payload
     calls = _file_calls(messages)
     if not calls:
         return payload
-    for message in messages:
+    for message in messages[_turn_start(messages) :]:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
         found = calls.get(message.get("tool_call_id"))

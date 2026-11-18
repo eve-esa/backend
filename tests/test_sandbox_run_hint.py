@@ -15,9 +15,18 @@ from src.services.agents.core.run_hint import (
     run_hint,
     workspace_relative_path,
 )
+from src.services.agents.core import sandbox
 from src.services.agents.core.tool_args import ensure_tool_args_are_json
 
 pytestmark = pytest.mark.no_db
+
+_ROOT = "/opt/amazon/genesis1p-tools/var"
+
+
+@pytest.fixture(autouse=True)
+def _agentcore_root(monkeypatch):
+    """The session root prepare_workspace_layout records on AgentCore."""
+    monkeypatch.setattr(sandbox, "_session_roots", {_ROOT})
 
 _EXECUTE = {"type": "function", "function": {"name": "execute", "parameters": {}}}
 _WRITE = {"type": "function", "function": {"name": "write_file", "parameters": {}}}
@@ -119,9 +128,15 @@ def test_a_data_file_gets_its_shell_path_without_a_command():
     )
 
 
-def test_a_shell_script_runs_with_sh():
+def test_a_shell_script_gets_its_path_without_a_runner():
     assert run_hint("/workspace/build.sh") == (
-        "Run it in the shell as `sh build.sh` (the shell starts in the workspace)."
+        "In the shell its path is `build.sh` (the shell starts in the workspace)."
+    )
+
+
+def test_a_name_starting_with_a_dash_is_not_read_as_an_option():
+    assert run_hint("/workspace/-x.py") == (
+        "Run it in the shell as `python3 ./-x.py` (the shell starts in the workspace)."
     )
 
 
@@ -204,3 +219,80 @@ def test_deepagents_success_texts_match_what_the_hint_reads():
     edit = inspect.getsource(FilesystemMiddleware._create_edit_file_tool)
     assert 'content=f"Updated file {res.path}"' in write
     assert 'content=f"Successfully replaced {res.occurrences}' in edit
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"{_ROOT}/count.py",
+        f"{_ROOT}/skills/workspace/x.py",
+        f"{_ROOT}/workspace",
+    ],
+)
+def test_a_real_path_outside_the_workspace_gets_no_hint(path):
+    assert workspace_relative_path(path) is None
+
+
+def test_a_real_path_under_the_workspace_keeps_its_sub_path():
+    assert workspace_relative_path(f"{_ROOT}/workspace/a/workspace/x.py") == (
+        "a/workspace/x.py"
+    )
+
+
+def test_without_a_known_root_a_real_path_is_placed_like_the_file_tool_does(
+    monkeypatch,
+):
+    monkeypatch.setattr(sandbox, "_session_roots", set())
+    assert workspace_relative_path("/tmp/x.py") == "tmp/x.py"
+
+
+def test_the_layout_records_the_session_root(monkeypatch):
+    monkeypatch.setattr(sandbox, "_session_roots", set())
+
+    class _Backend:
+        def _get_cwd(self):
+            return _ROOT + "/"
+
+        def execute(self, command):
+            return None
+
+    sandbox.prepare_workspace_layout(_Backend())
+    assert sandbox.known_session_roots() == {_ROOT}
+
+
+def test_writes_of_earlier_turns_get_no_hint():
+    payload = _payload("count.py", "Updated file count.py")
+    payload["messages"].append({"role": "assistant", "content": "done"})
+    payload["messages"].append({"role": "user", "content": "now something else"})
+    add_run_hints(payload)
+    assert _tool_content(payload) == "Updated file count.py"
+
+
+def test_list_content_through_the_real_converter_leaves_the_stored_message():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langchain_openai import ChatOpenAI
+
+    llm = ensure_tool_args_are_json(
+        ChatOpenAI(model="x", api_key="test-only", base_url="http://127.0.0.1:1/v1")
+    )
+    parts = [{"type": "text", "text": "Updated file /workspace/count.py"}]
+    messages = [
+        HumanMessage("save it"),
+        AIMessage(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "name": "write_file",
+                    "args": {"file_path": "/workspace/count.py", "content": "x"},
+                }
+            ],
+        ),
+        ToolMessage(content=parts, tool_call_id="call_1"),
+    ]
+    payload = llm._get_request_payload(messages, tools=[_EXECUTE, _WRITE])
+    tool = [m for m in payload["messages"] if m.get("role") == "tool"][0]
+    assert _HINT in json.dumps(tool["content"])
+    assert messages[2].content == [
+        {"type": "text", "text": "Updated file /workspace/count.py"}
+    ]
