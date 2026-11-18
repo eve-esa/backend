@@ -37,7 +37,12 @@ next run retries it. A claim left by a killed process is reported as in_doubt
 and never resent automatically; to resend, delete it:
 ``db.cohort_invites.deleteMany({cohort: "<name>", sent_at: null})``.
 
-Logs carry counts and the cohort, never an address.
+Templates. When ``MAIL_TEMPLATES_BUCKET`` is set the command fetches the
+published pack once before it plans (a one-off task has no lifespan to refresh
+it) and prints which copy the mails will use; each sent mail logs
+``template_source`` and ``pack_version``. ``--subject`` still wins over the pack.
+
+Logs carry counts, the cohort and the user id, never an address.
 """
 
 from __future__ import annotations
@@ -57,7 +62,7 @@ from pymongo.errors import DuplicateKeyError
 from src.config import configure_logging
 from src.database.mongo import async_mongo_manager, get_collection
 from src.services import mailer
-from src.services.account_notifications import render_cohort_invite
+from src.services.account_notifications import build_cohort_invite, mail_template_store
 from src.services.mailer import send_mail
 
 configure_logging()
@@ -230,11 +235,11 @@ async def _send_one(
     """Claim, send, stamp. Returns "sent", "failed" or "claimed_elsewhere"."""
     if not await _claim(collection, recipient.user_id, cohort):
         return "claimed_elsewhere"
-    mail_subject, html, text = render_cohort_invite(
+    mail = build_cohort_invite(
         recipient.email, sign_in_url=sign_in_url, text_block=text_block, subject=subject
     )
     try:
-        await send_mail(to=recipient.email, subject=mail_subject, html=html, text=text)
+        await send_mail(to=recipient.email, subject=mail.subject, html=mail.html, text=mail.text)
     except Exception:
         # Release the claim so the next run retries this person.
         await collection.delete_one(
@@ -250,6 +255,13 @@ async def _send_one(
     await collection.update_one(
         {"user_id": recipient.user_id, "cohort": cohort},
         {"$set": {"sent_at": datetime.now(timezone.utc)}},
+    )
+    logger.info(
+        "cohort_invite_sent cohort=%s user_id=%s template_source=%s pack_version=%s",
+        cohort,
+        recipient.user_id,
+        mail.source,
+        mail.version,
     )
     return "sent"
 
@@ -311,6 +323,11 @@ async def send_cohort_invite(
         include_migrated=include_migrated,
     )
     _print_plan(plan, batch_size=batch_size, sleep_seconds=sleep_seconds)
+    # Before the first send: the pack this run renders with, or the bundled copy.
+    if await mail_template_store.refresh() and mail_template_store.carries("cohort_invite"):
+        print(f"Mail templates: pack {mail_template_store.pack_version}")
+    else:
+        print("Mail templates: bundled")
 
     summary = {
         "selected": plan.selected,
