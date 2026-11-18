@@ -37,6 +37,39 @@ def _policy_log():
         yield mocked
 
 
+class TestServerStamp:
+    @pytest.mark.asyncio
+    async def test_each_tool_names_its_server_row(self):
+        from types import SimpleNamespace
+
+        from src.services.mcp.tool_loader import MCP_SERVER_METADATA_KEY
+
+        retrieve = SimpleNamespace(name="eve_retrieval_retrieve", metadata={"readOnlyHint": True})
+        search = SimpleNamespace(name="effis_search", metadata=None)
+
+        async def get_tools(*, server_name=None):
+            return [retrieve] if server_name == "eve_retrieval" else [search]
+
+        mock_client = MagicMock()
+        mock_client.get_tools = AsyncMock(side_effect=get_tools)
+
+        with patch(f"{_LOADER}._mcp_adapters_available", True), patch(
+            f"{_LOADER}.MultiServerMCPClient",
+            return_value=mock_client,
+        ), patch(f"{_LOADER}.get_cognito_token_provider", return_value=None), patch(
+            f"{_LOADER}.LatencyInterceptor", return_value=MagicMock()
+        ), patch(f"{_LOADER}.logger"):
+            await _load_mcp_tools_for_servers(
+                [
+                    _mcp_server("eve_retrieval", "https://retrieval.example/mcp"),
+                    _mcp_server("effis", "https://effis.example/mcp"),
+                ]
+            )
+
+        assert retrieve.metadata == {"readOnlyHint": True, MCP_SERVER_METADATA_KEY: "eve_retrieval"}
+        assert search.metadata == {MCP_SERVER_METADATA_KEY: "effis"}
+
+
 class TestLoadMcpToolsForServers:
     @pytest.mark.asyncio
     async def test_partial_failure_still_returns_other_server_tools(self):
