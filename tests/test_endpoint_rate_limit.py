@@ -357,8 +357,9 @@ def test_the_log_line_names_the_window_and_nothing_else(caplog):
     assert SECRET_KEY not in lines[0] and USER_TEXT not in lines[0]
 
 
-# The Lua scripts against a real Redis (CI and the gate run one). The breaker
-# passes the clock in, so the test clock drives them; only key expiry is real.
+# The window commands against a real Redis (CI and the gate run one). The
+# breaker passes the clock in, so the test clock drives them; only key expiry
+# is real.
 
 
 def _real_redis():
@@ -375,7 +376,7 @@ def _real_redis():
     return client
 
 
-def test_the_window_scripts_on_a_real_redis():
+def test_the_window_commands_on_a_real_redis():
     client = _real_redis()
     prefix = f"eve:test:{uuid.uuid4().hex}:"
     clock = _clock(1_800_000_000.0)

@@ -50,8 +50,10 @@ RATE_LIMIT_MAX_S = 3600.0
 # How long a window that ended without a successful probe is remembered: until
 # then only the holder of the probe lease may call the endpoint.
 RATE_LIMIT_HOLD_S = 3600.0
-# The probe lease covers the endpoint's first-token budget plus this margin.
-PROBE_LEASE_MARGIN_S = 5.0
+# How long the one probe after a window holds the endpoint for itself. A 429
+# comes back at once, so a probe still running after this was accepted; one
+# that never reports (a Stop, a crash) frees the endpoint after it.
+PROBE_LEASE_S = 30.0
 
 # Retry-After as delay-seconds (RFC 9110 says digits; a decimal is read too).
 # re.ASCII: str.isdigit() and \d without it accept digits such as "²".
@@ -289,8 +291,6 @@ def reset_shared_stores() -> None:
         _CLIENT_STORES.clear()
 
 
-
-
 @dataclass
 class _RateWindow:
     """A rate limit window as this process knows it, on the wall clock."""
@@ -323,67 +323,30 @@ class _CachedWindow(NamedTuple):
 # The store cannot answer: the per-process state decides.
 _UNKNOWN: Any = object()
 
-# Rate limit window scripts: each is one atomic step on Valkey, so two workers
-# never interleave a read and a write. The window value is
-# "<opened ms>:<until ms>"; the lease is a separate key with its own expiry.
+# Rate limit window values are "<opened ms>:<until ms>"; the probe lease is a
+# separate key with its own expiry. Plain commands, no script. The race that
+# matters, two requests taking the lease, is settled by SET NX. The window is
+# read, then written: two 429s recorded within one round trip of each other can
+# leave the shorter window, and the probe after it then meets the block once
+# and reopens the window. A close reads, then deletes: while the probe is out
+# nothing else is sent, so no new 429 can land in between.
 
-_RL_RECORD = """
--- eve:rate-limit:record
--- KEYS: window, lease. ARGV: opened ms, until ms, now ms, hold ms.
--- The window only grows: a shorter Retry-After never replaces a longer one,
--- and opened is the latest 429. The lease goes only when the window grows.
-local opened = tonumber(ARGV[1])
-local untl = tonumber(ARGV[2])
-local grew = true
-local cur = redis.call('GET', KEYS[1])
-if cur then
-  local sep = string.find(cur, ':', 1, true)
-  if sep then
-    local cur_opened = tonumber(string.sub(cur, 1, sep - 1))
-    local cur_until = tonumber(string.sub(cur, sep + 1))
-    if cur_opened and cur_opened > opened then opened = cur_opened end
-    if cur_until and cur_until >= untl then
-      untl = cur_until
-      grew = false
-    end
-  end
-end
-local ttl = untl - tonumber(ARGV[3]) + tonumber(ARGV[4])
-if ttl < 1000 then ttl = 1000 end
-redis.call('SET', KEYS[1], string.format('%.0f', opened) .. ':' .. string.format('%.0f', untl),
-  'PX', string.format('%.0f', ttl))
-if grew then redis.call('DEL', KEYS[2]) end
-return string.format('%.0f', untl)
-"""
 
-_RL_ADMIT = """
--- eve:rate-limit:admit
--- KEYS: window, lease. ARGV: now ms, lease token, lease ms.
--- {0, 0} no window; {1, ms left} inside it; {2, 0} probe lease won;
--- {3, ms left on the lease} another request is the probe.
-local cur = redis.call('GET', KEYS[1])
-if not cur then return {0, 0} end
-local sep = string.find(cur, ':', 1, true)
-local untl = sep and tonumber(string.sub(cur, sep + 1))
-if not untl then return {0, 0} end
-local now = tonumber(ARGV[1])
-if now < untl then return {1, untl - now} end
-if redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3]) then return {2, 0} end
-return {3, redis.call('PTTL', KEYS[2])}
-"""
+def _write_window(
+    client: Any, window_key: str, lease_key: str, opened_ms: int, until_ms: int, now_ms: int
+) -> int:
+    """Store a window that only grows; returns its end in ms.
 
-_RL_CLOSE = """
--- eve:rate-limit:close
--- KEYS: window, lease. ARGV: started ms.
--- Closes only a window opened before the successful request started.
-local cur = redis.call('GET', KEYS[1])
-if not cur then return 0 end
-local sep = string.find(cur, ':', 1, true)
-local opened = sep and tonumber(string.sub(cur, 1, sep - 1))
-if opened and opened > tonumber(ARGV[1]) then return 0 end
-redis.call('DEL', KEYS[1], KEYS[2])
-return 1
-"""
+    A shorter window than the one stored changes nothing. A longer one also
+    drops the probe lease, so the probe that got the new 429 frees its place.
+    """
+    current = _decode_window(client.get(window_key))
+    if current is not None and current[1] >= until_ms:
+        return current[1]
+    ttl_ms = max(until_ms - now_ms + int(RATE_LIMIT_HOLD_S * 1000), 1000)
+    client.set(window_key, f"{opened_ms}:{until_ms}", px=ttl_ms)
+    client.delete(lease_key)
+    return until_ms
 
 
 class EndpointHealth:
@@ -413,9 +376,10 @@ class EndpointHealth:
     ``<prefix><llm_type>:rate-limit`` (``<opened ms>:<until ms>``) with its own
     probe lease ``<prefix><llm_type>:rate-limit:probe``. Nothing else writes
     it, so a timeout or a 5xx never touches it, and it only grows. Callers
-    that send to the endpoint ask :meth:`admit` first, a fresh atomic read:
-    inside the window it refuses; after it, one request in the fleet wins the
-    lease and is the probe, every other one refuses. Only
+    that send to the endpoint ask :meth:`admit` first, a fresh read: inside
+    the window it refuses; after it, one request in the fleet wins the lease
+    (``SET NX``, :data:`PROBE_LEASE_S`) and is the probe, every other one
+    refuses. Only
     :meth:`close_rate_limit_window`, called when the endpoint itself answered
     the probe, closes it; a window nobody probes is forgotten
     :data:`RATE_LIMIT_HOLD_S` after it ended. :meth:`is_rate_limited` reads the
@@ -424,13 +388,14 @@ class EndpointHealth:
     While Redis answers it is authoritative. The per-process state is always
     written too and takes over whenever Redis is unset or unreachable; failures
     and windows recorded during an outage are written back (circuits ``NX``
-    with the remaining cooldown, windows through the same only-grows script)
+    with the remaining cooldown, windows only when they are longer)
     before this breaker reads the store again. The breaker never raises, except
     :meth:`admit`, which raises :class:`EndpointRateLimited` to refuse.
 
     The public methods stay synchronous because ``resolve_chain`` and its
     callers are. A read is one command per endpoint at most every *refresh_s*,
-    and :meth:`admit` one script per request, each bounded by
+    and :meth:`admit` one command per request (two or three right after a
+    window), each bounded by
     *redis_timeout_s*; after a Redis error every breaker on that store skips it
     for *redis_retry_s*, so an outage costs one bounded stall per worker per
     retry window.
@@ -515,31 +480,32 @@ class EndpointHealth:
         """
         started = self._wall()
         started_ms = int(started * 1000)
-        lease_s = self._probe_budget(llm_type) + PROBE_LEASE_MARGIN_S
+        lease_ms = int(PROBE_LEASE_S * 1000)
         window_key, lease_key = self._window_keys(llm_type)
 
-        def admit(client: Any) -> Any:
-            return client.eval(
-                _RL_ADMIT, 2, window_key, lease_key,
-                started_ms, self._lease_token, int(lease_s * 1000),
-            )
+        def admit(client: Any) -> Tuple[Optional[_WindowView], float]:
+            """The window as read, and the seconds to refuse (0: send)."""
+            window = _decode_window(client.get(window_key))
+            if window is None:
+                return None, 0.0
+            until = window[1] / 1000.0
+            if started_ms < window[1]:
+                return _WindowView(until, False), (window[1] - started_ms) / 1000.0
+            if client.set(lease_key, self._lease_token, nx=True, px=lease_ms):
+                return _WindowView(until, True), 0.0
+            return _WindowView(until, True), max(client.pttl(lease_key), 1) / 1000.0
 
         result = self._run(admit)
         if result is not None:
-            code, left_ms = int(result[0]), int(result[1])
-            if code == 0:
+            view, wait_s = result
+            self._cache_window(llm_type, view)
+            if view is None:
                 with self._lock:
                     self._windows.pop(llm_type, None)
-                self._cache_window(llm_type, None)
                 return RateLimitPermit(started, False)
-            if code == 2:
-                self._cache_window(llm_type, _WindowView(started, True))
-                return RateLimitPermit(started, True)
-            if code == 1:
-                self._cache_window(llm_type, _WindowView(started + left_ms / 1000.0, False))
-            else:
-                self._cache_window(llm_type, _WindowView(started, True))
-            raise EndpointRateLimited(llm_type, left_ms / 1000.0)
+            if wait_s > 0:
+                raise EndpointRateLimited(llm_type, wait_s)
+            return RateLimitPermit(started, True)
 
         with self._lock:
             window = self._windows.get(llm_type)
@@ -550,7 +516,7 @@ class EndpointHealth:
                 raise EndpointRateLimited(llm_type, window.until - started)
             if window.lease_until > started:
                 raise EndpointRateLimited(llm_type, window.lease_until - started)
-            window.lease_until = started + lease_s
+            window.lease_until = started + PROBE_LEASE_S
             return RateLimitPermit(started, True)
 
     def record_rate_limit(self, llm_type: str, retry_after: Any = None) -> float:
@@ -572,10 +538,9 @@ class EndpointHealth:
             )
         window_key, lease_key = self._window_keys(llm_type)
 
-        def record(client: Any) -> Any:
-            return client.eval(
-                _RL_RECORD, 2, window_key, lease_key,
-                opened_ms, int(until * 1000), opened_ms, int(RATE_LIMIT_HOLD_S * 1000),
+        def record(client: Any) -> int:
+            return _write_window(
+                client, window_key, lease_key, opened_ms, int(until * 1000), opened_ms
             )
 
         shared_until = self._run(record)
@@ -583,7 +548,7 @@ class EndpointHealth:
             with self._lock:
                 self._unsynced_windows.add(llm_type)
         else:
-            until = max(until, int(shared_until) / 1000.0)
+            until = max(until, shared_until / 1000.0)
             with self._lock:
                 window = self._windows.get(llm_type)
                 if window is not None:
@@ -616,11 +581,15 @@ class EndpointHealth:
                 local_closed = True
         window_key, lease_key = self._window_keys(llm_type)
 
-        def close(client: Any) -> Any:
-            return client.eval(_RL_CLOSE, 2, window_key, lease_key, started_ms)
+        def close(client: Any) -> bool:
+            window = _decode_window(client.get(window_key))
+            if window is None or window[0] > started_ms:
+                return False
+            client.delete(window_key, lease_key)
+            return True
 
         result = self._run(close)
-        closed = local_closed if result is None else bool(int(result))
+        closed = local_closed if result is None else result
         if result is not None and closed:
             self._cache_window(llm_type, None)
         if closed:
@@ -897,13 +866,12 @@ class EndpointHealth:
         for llm_type, window in pending_windows:
             if wall >= window.until + RATE_LIMIT_HOLD_S:
                 continue
-            # The only-grows script: a window this worker saw while the store
-            # was down wins over a shorter one written meanwhile.
+            # Only grows: a window this worker saw while the store was down
+            # wins over a shorter one written meanwhile.
             window_key, lease_key = self._window_keys(llm_type)
-            client.eval(
-                _RL_RECORD, 2, window_key, lease_key,
-                window.opened_wall_ms, int(window.until * 1000),
-                int(wall * 1000), int(RATE_LIMIT_HOLD_S * 1000),
+            _write_window(
+                client, window_key, lease_key,
+                window.opened_wall_ms, int(window.until * 1000), int(wall * 1000),
             )
         with self._lock:
             self._unsynced.clear()
