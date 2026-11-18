@@ -314,11 +314,23 @@ async def get_workspace_file(
         )
     relative = _workspace_relative(file_path)
     key = f"{workspace_prefix(requesting_user.id, conversation_id)}{relative}"
+    return await stream_sandbox_output(key)
+
+
+async def stream_sandbox_output(key: str) -> StreamingResponse:
+    """Stream one stored object written by a tool or the sandbox.
+
+    Only ``TOOL_INLINE_CONTENT_TYPES`` keep their type and render inline.
+    Anything else is ``application/octet-stream`` with ``attachment``.
+
+    Raises:
+        HTTPException: 404 when the object is missing.
+    """
     try:
         response = await storage_service.get_object(key)
     except ObjectNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
-    filename = relative.rsplit("/", 1)[-1]
+    filename = key.rsplit("/", 1)[-1]
     content_type = response.get("ContentType")
     if content_type in TOOL_INLINE_CONTENT_TYPES:
         disposition = content_disposition("inline", filename)

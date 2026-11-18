@@ -28,6 +28,7 @@ from src.routers import (
     skill_router,
     migration_router,
     message_router,
+    sandbox_router,
     user_router,
 )
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
@@ -66,6 +67,7 @@ def register_routers(app: FastAPI):
     app.include_router(conversation_router, tags=["Conversations"])
     app.include_router(message_router, tags=["Messages"])
     app.include_router(agui_router, tags=["Messages"])
+    app.include_router(sandbox_router, tags=["Conversations"])
 
     # Collections
     app.include_router(collection_router, tags=["Collections"])
