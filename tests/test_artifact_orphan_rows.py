@@ -11,6 +11,7 @@ import io
 import logging
 
 import pytest
+from bson import ObjectId
 
 from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
@@ -240,5 +241,203 @@ async def test_missing_object_is_a_quiet_404_without_the_key(async_client, monke
         assert all(row.key not in r.getMessage() for r in records)
         assert all("pic.png" not in r.getMessage() for r in records)
         assert any(image_id in r.getMessage() for r in records)
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_read_after_move_retries_on_the_primary(async_client, monkeypatch):
+    """A secondary that still holds the upload key (already deleted by the move)
+    must not answer 404: the read retries once with the primary's row."""
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        stale = await Artifact.find_by_id_on_primary(image_id)
+        moved = await Artifact.find_by_id_on_primary(image_id)
+        await move_to_conversation(moved, await _conversation(user.id, "Lag"))
+        assert stale.key not in fake.objects
+
+        async def lagging_secondary(cls, artifact_id):
+            return stale
+
+        monkeypatch.setattr(Artifact, "find_by_id", classmethod(lagging_secondary))
+        served = await _served(async_client, token, image_id)
+        assert served.status_code == 200 and served.content == PNG_BYTES
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_cascade_delete_spares_a_row_an_attach_just_moved(async_client, monkeypatch):
+    """The cascade decided to delete; an attach elsewhere moved the row first.
+    The row and its new object survive."""
+    fake = _use_fake_storage(monkeypatch)
+    from src.services import artifact_cleanup
+
+    user, token = await create_test_user_and_token()
+    try:
+        doomed = await _conversation(user.id, "Doomed")
+        kept = await _conversation(user.id, "Kept")
+        image_id = (await _upload(async_client, token, doomed)).json()["id"]
+
+        async def lookup_then_attach(user_id, artifact_ids, conversation_id):
+            fresh = await Artifact.find_by_id_on_primary(image_id)
+            await move_to_conversation(fresh, kept)
+            return {}
+
+        monkeypatch.setattr(artifact_cleanup, "_other_conversations", lookup_then_attach)
+        await artifact_cleanup.delete_conversation_artifacts(user.id, doomed)
+
+        row = await Artifact.find_by_id_on_primary(image_id)
+        assert row is not None
+        assert row.conversation_id == kept
+        assert row.key in fake.objects
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_cascade_keeps_the_row_when_the_object_delete_fails(async_client, monkeypatch):
+    """Storage refuses the delete: the row stays, so a retry still finds the file."""
+    fake = _use_fake_storage(monkeypatch)
+    from src.services import artifact_cleanup
+
+    user, token = await create_test_user_and_token()
+    try:
+        doomed = await _conversation(user.id, "Doomed")
+        image_id = (await _upload(async_client, token, doomed)).json()["id"]
+
+        async def refuse(key):
+            raise RuntimeError("delete refused")
+
+        monkeypatch.setattr(fake, "delete_object", refuse)
+        with pytest.raises(artifact_cleanup.ArtifactCascadeIncomplete):
+            await artifact_cleanup.delete_conversation_artifacts(user.id, doomed)
+
+        row = await Artifact.find_by_id_on_primary(image_id)
+        assert row is not None and row.key in fake.objects
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_row_deleted_mid_move_answers_404_and_drops_the_copy(async_client, monkeypatch):
+    """The owner deletes the file while it is moved: 404, no copy left behind."""
+    from fastapi import HTTPException
+
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        row = await Artifact.find_by_id_on_primary(image_id)
+        real_copy = fake.copy_object
+
+        async def copy_then_row_deleted(source_key, dest_key):
+            await real_copy(source_key, dest_key)
+            await Artifact.get_collection().delete_one({"_id": ObjectId(image_id)})
+
+        monkeypatch.setattr(fake, "copy_object", copy_then_row_deleted)
+        with pytest.raises(HTTPException) as raised:
+            await move_to_conversation(row, await _conversation(user.id, "Gone"))
+        assert raised.value.status_code == 404
+        assert [k for k in fake.objects if "/conversations/" in k] == []
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_missing_bytes_still_bind_the_row(async_client, monkeypatch):
+    """The object is gone and nobody moved the row: bind it, keep its key."""
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        row = await Artifact.find_by_id_on_primary(image_id)
+        upload_key = row.key
+        fake.objects.clear()
+        conv = await _conversation(user.id, "Bind")
+
+        await move_to_conversation(row, conv)
+
+        stored = await Artifact.find_by_id_on_primary(image_id)
+        assert stored.conversation_id == conv
+        assert stored.key == upload_key
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_move_gives_up_with_409_after_its_attempts(async_client, monkeypatch, caplog):
+    """Another request wins every round: the move stops after its attempts with
+    a WARNING and a 409 the client can retry, and the row stays on a live object."""
+    from fastapi import HTTPException
+
+    from src.routers import artifact as artifact_router
+
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        row = await Artifact.find_by_id_on_primary(image_id)
+        real_copy = fake.copy_object
+        rounds = []
+
+        async def copy_while_another_request_wins(source_key, dest_key):
+            await real_copy(source_key, dest_key)
+            rounds.append(dest_key)
+            winner_key = f"users/{user.id}/winner-{len(rounds)}.png"
+            await fake.put_object(winner_key, PNG_BYTES, "image/png")
+            await fake.delete_object(source_key)
+            await Artifact.get_collection().update_one(
+                {"_id": ObjectId(image_id)}, {"$set": {"key": winner_key}}
+            )
+
+        monkeypatch.setattr(fake, "copy_object", copy_while_another_request_wins)
+        with caplog.at_level(logging.WARNING, logger="src.routers.artifact"):
+            with pytest.raises(HTTPException) as raised:
+                await move_to_conversation(row, await _conversation(user.id, "Busy"))
+        assert raised.value.status_code == 409
+        assert raised.value.detail["code"] == "artifact_busy"
+
+        assert len(rounds) == artifact_router.MOVE_ATTEMPTS
+        assert any(
+            "artifact.move_contended" in r.getMessage() and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+        stored = await Artifact.find_by_id_on_primary(image_id)
+        assert stored.key in fake.objects
+        assert [k for k in fake.objects if "/conversations/" in k] == []
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_winner_restores_a_copy_a_loser_deleted(async_client, monkeypatch):
+    """Attaches to the same conversation share the destination key. A loser
+    that deletes it after the winner copied, before the winner binds the row,
+    must not leave the row on a missing object: the winner copies again."""
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        row = await Artifact.find_by_id_on_primary(image_id)
+        upload_key = row.key
+        real_copy = fake.copy_object
+        calls = []
+
+        async def copy_then_loser_deletes(source_key, dest_key):
+            await real_copy(source_key, dest_key)
+            calls.append(dest_key)
+            if len(calls) == 1:
+                await fake.delete_object(dest_key)
+
+        monkeypatch.setattr(fake, "copy_object", copy_then_loser_deletes)
+        await move_to_conversation(row, await _conversation(user.id, "Shared"))
+
+        stored = await Artifact.find_by_id_on_primary(image_id)
+        assert stored.key in fake.objects
+        assert upload_key not in fake.objects
+        assert (await _served(async_client, token, image_id)).status_code == 200
     finally:
         await _cleanup(user)

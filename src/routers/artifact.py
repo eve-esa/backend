@@ -135,7 +135,9 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
     it, so it can never write back a key whose object is already gone.
 
     Raises:
-        HTTPException: 404 if the row was deleted meanwhile.
+        HTTPException: 404 if the row was deleted meanwhile; 409 with
+        ``detail.code`` ``artifact_busy`` when other requests kept moving it
+        for ``MOVE_ATTEMPTS`` rounds (the client can retry).
     """
     for _ in range(MOVE_ATTEMPTS):
         key = object_key(
@@ -168,7 +170,7 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
         if result.matched_count:
             artifact.key = new_key
             artifact.conversation_id = conversation_id
-            if new_key != old_key:
+            if new_key != old_key and await _confirm_copy(artifact, old_key, new_key):
                 await _delete_stray(artifact.id, old_key)
             return
         # Another request moved the row first. Drop this copy unless the row
@@ -180,6 +182,38 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
     logger.warning(
         "artifact.move_contended artifact=%s conversation=%s", artifact.id, conversation_id
     )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "artifact_busy",
+            "message": "The file is being attached elsewhere. Try again.",
+        },
+    )
+
+
+async def _confirm_copy(artifact: Artifact, old_key: str, new_key: str) -> bool:
+    """Make sure the object the row was just bound to exists; False keeps ``old_key``.
+
+    Attaches to the same conversation share the destination key, so a request
+    that lost the race can delete it after this one copied and before this one
+    bound the row. The old object is still there: copy again. When that fails
+    too, the row goes back to ``old_key``, which still serves.
+    """
+    try:
+        if await storage_service.exists(new_key):
+            return True
+        await storage_service.copy_object(old_key, new_key)
+        return True
+    except Exception as exc:  # noqa: BLE001 - the old key still serves
+        logger.warning(
+            "artifact.move_failed artifact=%s error=%s", artifact.id, type(exc).__name__
+        )
+    result = await Artifact.get_collection().update_one(
+        {"_id": ObjectId(artifact.id), "key": new_key}, {"$set": {"key": old_key}}
+    )
+    if result.matched_count:
+        artifact.key = old_key
+    return False
 
 
 async def _reload_moved(artifact: Artifact, old_key: str) -> bool:
@@ -200,10 +234,10 @@ def _adopt(artifact: Artifact, current: Optional[Artifact]) -> None:
 
 
 async def _delete_stray(artifact_id: str, key: str) -> None:
-    """Delete an object no row points to; a failure leaves it for GC."""
+    """Delete an object no row points to; a failure leaks it, logged with the artifact id."""
     try:
         await storage_service.delete_object(key)
-    except Exception as exc:  # noqa: BLE001 - a stray object, reclaimed by GC
+    except Exception as exc:  # noqa: BLE001 - leaked, no job reclaims it
         logger.warning(
             "artifact.move_cleanup_failed artifact=%s error=%s",
             artifact_id,
@@ -467,6 +501,18 @@ async def get_artifact(
     try:
         response = await storage_service.get_object(artifact.key)
     except ObjectNotFoundError:
+        response = None
+    if response is None:
+        # A secondary may still hold the key a move just deleted: retry once
+        # with the row as the primary has it.
+        current = await Artifact.find_by_id_on_primary(artifact_id)
+        if current is not None and current.user_id == requesting_user.id and current.key != artifact.key:
+            artifact = current
+            try:
+                response = await storage_service.get_object(artifact.key)
+            except ObjectNotFoundError:
+                response = None
+    if response is None:
         # The record outlived its bytes (a row older than the guarded move, or
         # an object removed outside the app): a missing file, not a server
         # fault, so INFO. The id only: the key carries the user's filename.
