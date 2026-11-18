@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1578,6 +1579,62 @@ def _markdown_paths_to_artifact_urls(
     return _ARTIFACT_MARKDOWN.sub(replace, answer)
 
 
+# A markdown link whose target is a path, not a URL with a scheme.
+_MARKDOWN_PATH_LINK = re.compile(r"(!?\[[^\]]*])\(([^)\s:]+)\)")
+
+
+def _turn_artifact_filename(target: str) -> Optional[str]:
+    """The filename a link names when it can only mean a tool file.
+
+    A bare ``name.png``, ``./name.png`` or ``/artifacts/name.png`` (the id
+    left out). A path into another directory, ``/workspace/name.png``
+    included, is not a tool file.
+    """
+    raw = urllib.parse.unquote(target.split("?", 1)[0].split("#", 1)[0]).strip()
+    for prefix in ("./", "/artifacts/", "artifacts/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+            break
+    if not raw or "/" in raw or raw in {".", ".."}:
+        return None
+    return raw
+
+
+def _filenames_to_turn_artifact_urls(
+    answer: str, edits: Optional[List[Edit]] = None
+) -> str:
+    """Point a link to a file a tool returned in this turn at its artifact.
+
+    The stub tells the model ``/artifacts/{id}/{filename}``, yet a model may
+    write only the filename. That name is matched against the files the MCP
+    interceptor stored in this turn. Any other link is left to the workspace
+    pass. Each rewrite is appended to ``edits``.
+    """
+    from src.services.mcp.artifact_context import get_artifact_context
+
+    ctx = get_artifact_context()
+    files = getattr(ctx, "collected_artifact_files", None) if ctx else None
+    if not files:
+        return answer
+
+    def replace(match: re.Match) -> str:
+        name = _turn_artifact_filename(match.group(2))
+        artifact_id = files.get(name) if name else None
+        if artifact_id is None:
+            return match.group(0)
+        repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        # The id only: the original link is model text.
+        logger.warning(
+            "artifact.markdown_repaired reason=turn_filename to=/artifacts/%s",
+            artifact_id,
+        )
+        if edits is not None:
+            edits.append((match.start(), match.end(), len(repaired)))
+        return repaired
+
+    return _MARKDOWN_PATH_LINK.sub(replace, answer)
+
+
 async def rewrite_answer_file_links(
     answer: str, passes: Optional[List[List[Edit]]] = None
 ) -> str:
@@ -1598,11 +1655,13 @@ async def rewrite_answer_file_links(
     from src.services.agents.core.workspace import publish_markdown_files
 
     artifact_edits: List[Edit] = []
+    filename_edits: List[Edit] = []
     workspace_edits: List[Edit] = []
     answer = _markdown_paths_to_artifact_urls(answer, artifact_edits)
+    answer = _filenames_to_turn_artifact_urls(answer, filename_edits)
     answer = await publish_markdown_files(answer, workspace_edits)
     if passes is not None:
-        passes.extend([artifact_edits, workspace_edits])
+        passes.extend([artifact_edits, filename_edits, workspace_edits])
     return answer
 
 

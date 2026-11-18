@@ -97,3 +97,160 @@ async def test_a_google_host_around_the_artifact_id_is_rewritten(caplog):
     assert "artifact.markdown_repaired" in caplog.text
     assert "storage.googleapis.com" in caplog.text
     assert f"to=/artifacts/{artifact_id}" in caplog.text
+
+
+# A tool image returned in this turn, then linked by its bare filename.
+# Found live on dev (dummy_image, 2026-11-18): the model wrote
+# ``![get_sample_image-1.png](get_sample_image-1.png)`` and the browser asked
+# ``/api/get_sample_image-1.png``.
+
+_TURN_ARTIFACT_ID = "6afdf46fa8ffdf3d917139e5"
+
+
+class _Body:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def read(self):
+        return self.data
+
+    def close(self):
+        return None
+
+
+class _File:
+    def __init__(self, content=None, error=None):
+        self.content = content
+        self.error = error
+
+
+class _WorkspaceSandbox:
+    """Answers downloads from ``workspace/``; anything else is file_not_found."""
+
+    def __init__(self, files):
+        self.files = dict(files)
+
+    def download_files(self, paths):
+        found = []
+        for path in paths:
+            key = path[len("workspace/") :] if path.startswith("workspace/") else None
+            if key in self.files:
+                found.append(_File(self.files[key]))
+            else:
+                found.append(_File(error="file_not_found"))
+        return found
+
+
+class _Store:
+    def __init__(self):
+        self.objects: dict = {}
+
+    async def put_object(self, key, body, content_type, tagging=None):
+        self.objects[key] = body
+
+    async def get_object(self, key):
+        from src.services.storage import ObjectNotFoundError
+
+        if key not in self.objects:
+            raise ObjectNotFoundError(key)
+        return {"Body": _Body(self.objects[key])}
+
+
+@pytest.fixture
+def turn_context(monkeypatch):
+    from src.services.agents.core import workspace
+    from src.services.mcp.artifact_context import (
+        reset_artifact_context,
+        set_artifact_context,
+    )
+
+    store = _Store()
+    monkeypatch.setattr(workspace, "storage_service", store)
+    ctx, token = set_artifact_context("u1", "c1")
+    try:
+        ctx.collected_artifact_ids.append(_TURN_ARTIFACT_ID)
+        ctx.collected_artifact_files["get_sample_image-1.png"] = _TURN_ARTIFACT_ID
+        ctx.sandbox_backend = _WorkspaceSandbox(
+            {"ndvi.png": b"\x89PNG\r\n\x1a\nndvi"}
+        )
+        yield ctx, store
+    finally:
+        reset_artifact_context(token)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_filename_of_a_tool_image_becomes_its_artifact_url(
+    turn_context, caplog
+):
+    answer = await rewrite_answer_file_links(
+        "Here is the sample blue image:\n"
+        "![get_sample_image-1.png](get_sample_image-1.png)\n"
+    )
+
+    assert answer == (
+        "Here is the sample blue image:\n"
+        f"![get_sample_image-1.png](/artifacts/{_TURN_ARTIFACT_ID})\n"
+    )
+    assert f"to=/artifacts/{_TURN_ARTIFACT_ID}" in caplog.text
+    assert "workspace.markdown_unreadable" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_artifacts_path_without_the_id_becomes_its_artifact_url(
+    turn_context,
+):
+    answer = await rewrite_answer_file_links(
+        "![img](/artifacts/get_sample_image-1.png) [img](./get_sample_image-1.png)"
+    )
+
+    assert answer == (
+        f"![img](/artifacts/{_TURN_ARTIFACT_ID}) [img](/artifacts/{_TURN_ARTIFACT_ID})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_file_link_still_points_at_the_workspace(turn_context):
+    answer = await rewrite_answer_file_links("![ndvi](ndvi.png)")
+
+    assert answer == "![ndvi](/conversations/c1/workspace/ndvi.png)"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_workspace_path_is_not_taken_for_the_tool_image(
+    turn_context,
+):
+    _, store = turn_context
+    store.objects["users/u1/conversations/c1/workspace/get_sample_image-1.png"] = (
+        b"\x89PNG\r\n\x1a\nmine"
+    )
+
+    answer = await rewrite_answer_file_links(
+        "![mine](/workspace/get_sample_image-1.png)"
+    )
+
+    assert answer == (
+        "![mine](/conversations/c1/workspace/get_sample_image-1.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_bare_filename_stays_and_warns(turn_context, caplog):
+    original = "![other](other.png)"
+
+    answer = await rewrite_answer_file_links(original)
+
+    assert answer == original
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and "workspace.markdown_unreadable" in record.getMessage()
+    ]
+    assert warnings
+
+
+@pytest.mark.asyncio
+async def test_an_external_url_with_the_same_filename_is_left_alone(turn_context):
+    original = "![x](https://example.org/img/get_sample_image-1.png)"
+
+    assert await rewrite_answer_file_links(original) == original

@@ -1036,3 +1036,41 @@ async def test_filename_is_escaped_in_the_markdown_stub(
         assert "\n" not in payload["filename"]
     finally:
         await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_image_linked_by_its_bare_filename_renders(
+    interceptor, with_context
+):
+    """dummy_image on dev, 2026-11-18: the answer linked the bare filename.
+
+    The image is stored at the key its row serves, the turn remembers its
+    filename, and the answer link becomes ``/artifacts/{id}``.
+    """
+    from src.services.agents.core.runner import rewrite_answer_file_links
+
+    icept, fake = interceptor
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+
+    out = await icept(
+        _request(name="get_sample_image", server_name="dummy_image"), _handler(result)
+    )
+
+    try:
+        payload = _parse_stub(out.content[0])
+        assert payload["filename"] == "get_sample_image-1.png"
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert fake.objects[artifact.key]["body"] == PNG_BYTES
+        assert with_context.collected_artifact_files == {
+            "get_sample_image-1.png": artifact.id
+        }
+
+        answer = await rewrite_answer_file_links(
+            "![get_sample_image-1.png](get_sample_image-1.png)"
+        )
+
+        assert answer == f"![get_sample_image-1.png](/artifacts/{artifact.id})"
+    finally:
+        await _cleanup()

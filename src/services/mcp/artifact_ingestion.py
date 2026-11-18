@@ -797,6 +797,7 @@ class ArtifactInterceptor:
                 )
             raise
         ctx.collected_artifact_ids.append(artifact.id)
+        ctx.collected_artifact_files[os.path.basename(relative)] = artifact.id
         path = sandbox_path(relative)
         await upload_artifact(ctx.sandbox_backend, path, data)
         return artifact, path
