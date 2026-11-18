@@ -241,6 +241,19 @@ async def ensure_indexes() -> None:
         [("conversation_id", 1), ("timestamp", 1)],
         name="messages_conversation_timestamp",
     )
+    # Artifact erasure (src/services/artifact_cleanup.py) finds the messages
+    # that show a file, as a tool output or as an attached upload, and pulls
+    # the reference. Multikey; without them every lookup scans messages.
+    await _create_index(
+        messages,
+        [("artifact_ids", 1)],
+        name="messages_artifact_ids",
+    )
+    await _create_index(
+        messages,
+        [("attachments.image_id", 1)],
+        name="messages_attachments_image_id",
+    )
 
     logger.info(
         "MongoDB indexes ensured for MCP proxy features, API keys, artifacts, "

@@ -1,3 +1,5 @@
+import logging
+
 from src.schemas.conversation import (
     ConversationDetail,
     ConversationCreate,
@@ -14,6 +16,11 @@ from src.database.models.user import User
 from src.middlewares.auth import get_current_user
 from src.database.mongo_model import PaginatedResponse
 from src.schemas.common import Pagination
+from src.routers.message import stop_active_generation
+from src.services.artifact_cleanup import (
+    ArtifactCascadeIncomplete,
+    delete_conversation_artifacts,
+)
 from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
 from src.services.agents.core.sandbox_pool import discard_conversation_sandbox
@@ -31,6 +38,12 @@ _INLINE_TYPES = {
 }
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# How long a conversation delete waits for a running turn it stopped to
+# unwind. The turn persists its partial answer as it ends, so the delete
+# waits for that write before it removes the messages and the files.
+DELETE_PREEMPT_TIMEOUT_S = 10.0
 
 
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
@@ -193,12 +206,19 @@ async def delete_conversation(
 ) -> dict:
     """
     Delete a conversation, its messages, its attached documents (collection, rows,
-    vectors and slots) and its agent memory (LangGraph checkpoints).
+    vectors and slots), its files and its agent memory (LangGraph checkpoints).
 
-    A failure deleting the attached documents answers 500
+    A running turn is stopped first, through the same path as ``/stop``, and
+    awaited up to ``DELETE_PREEMPT_TIMEOUT_S``, so it cannot write after the
+    delete. A failure deleting the attached documents answers 500
     ``conversation_document_cleanup_failed`` before anything is deleted from the
-    conversation, so a retry can finish. A failure deleting the checkpoints is
-    logged as ``checkpoint.delete_failed`` and does not fail the request.
+    conversation, so a retry can finish. Files are the conversation's artifacts
+    (except one another of the owner's conversations still shows) and its
+    offloaded tool results; they go before the messages and the conversation
+    row. When they are not all erased the answer is a retryable 503 and the
+    conversation stays, so a retry finishes the job. A failure deleting the
+    checkpoints is logged as ``checkpoint.delete_failed`` and does not fail the
+    request.
 
     Args:
         conversation_id (str): Conversation identifier.
@@ -208,10 +228,13 @@ async def delete_conversation(
         Confirmation message.
 
     Raises:
-        HTTPException: 404 if not found; 403 if deletion is forbidden; 500 for server errors.
+        HTTPException: 404 if not found; 403 if deletion is forbidden; 503 with
+        ``detail.code`` ``conversation_delete_incomplete`` if its files were
+        not all erased; 500 for server errors.
     """
     try:
-        conversation = await Conversation.find_by_id(conversation_id)
+        # Primary: a delete right after the create must find the row.
+        conversation = await Conversation.find_by_id_on_primary(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
         if conversation.user_id != requesting_user.id:
@@ -220,8 +243,32 @@ async def delete_conversation(
                 detail="You are not allowed to delete this conversation",
             )
 
+        if not await stop_active_generation(
+            conversation_id, DELETE_PREEMPT_TIMEOUT_S
+        ):
+            logger.warning(
+                "conversation.delete.preempt_timeout conversation_id=%s",
+                conversation_id,
+            )
         # First: it raises when Qdrant refuses, and nothing is deleted yet then.
         await delete_conversation_documents(requesting_user.id, conversation_id)
+        # Before the messages and the row: tool results have no Mongo row, so
+        # once the conversation is gone nothing would find them again.
+        try:
+            await delete_conversation_artifacts(requesting_user.id, conversation_id)
+        except ArtifactCascadeIncomplete as exc:
+            logger.warning(
+                "conversation.delete_incomplete conversation_id=%s failed=%s",
+                conversation_id,
+                ",".join(exc.failed),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "conversation_delete_incomplete",
+                    "message": "The conversation files could not all be deleted. Try again later.",
+                },
+            )
         await Message.delete_many({"conversation_id": conversation_id})
         await delete_thread_checkpoints(conversation_id)
         # Best effort, like the checkpoints: a failed kill does not fail the

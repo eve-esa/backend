@@ -19,8 +19,11 @@ from fastapi.concurrency import run_in_threadpool
 from src.config import (
     S3_ACCESS_KEY_ID,
     S3_BUCKET_NAME,
+    S3_CONNECT_TIMEOUT_S,
     S3_ENDPOINT_URL,
+    S3_MAX_ATTEMPTS,
     S3_PRESIGN_TTL_SECONDS,
+    S3_READ_TIMEOUT_S,
     S3_REGION,
     S3_SECRET_ACCESS_KEY,
 )
@@ -81,6 +84,29 @@ ARTIFACT_TYPE_CONTENT_TYPES = {
     "json": "application/json",
     "geojson": "application/geo+json",
 }
+
+# Raster types the chat embeds as images. SVG is never one of them: it can
+# carry script, and a blob URL opened in a new tab runs in the app origin.
+INLINE_IMAGE_CONTENT_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Types served with their own media type and ``Content-Disposition: inline``.
+# Anything else (html, svg, csv, unknown) is served as
+# ``application/octet-stream`` with ``attachment``, so a stored file is never
+# rendered or executed by the browser (stored-XSS defense).
+INLINE_CONTENT_TYPES = INLINE_IMAGE_CONTENT_TYPES | {
+    "application/pdf",
+    "text/plain",
+    "application/json",
+}
+
+# Tool and sandbox output gets the same allowlist minus PDF: a PDF opened in a
+# tab runs the browser's PDF viewer on bytes the user never chose, so it is
+# served as an opaque attachment. The user's own uploaded PDF stays inline.
+TOOL_INLINE_CONTENT_TYPES = INLINE_CONTENT_TYPES - {"application/pdf"}
+
+OPAQUE_CONTENT_TYPE = "application/octet-stream"
 
 # Text-like artifact types that have no magic bytes to sniff. Detecting them
 # safely requires BOTH a matching file extension AND a decodable, NUL-free
@@ -189,7 +215,16 @@ class StorageService:
                 endpoint_url=S3_ENDPOINT_URL or None,
                 aws_access_key_id=S3_ACCESS_KEY_ID or None,
                 aws_secret_access_key=S3_SECRET_ACCESS_KEY or None,
-                config=BotoConfig(signature_version="s3v4"),
+                # Bounded: every call runs in the shared threadpool, which an
+                # ``asyncio.timeout`` around it cannot cancel. The botocore
+                # defaults (60 s read, legacy retries) would hold threads for
+                # minutes during an S3 brownout.
+                config=BotoConfig(
+                    signature_version="s3v4",
+                    connect_timeout=S3_CONNECT_TIMEOUT_S,
+                    read_timeout=S3_READ_TIMEOUT_S,
+                    retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
+                ),
             )
         return self._s3
 
@@ -389,15 +424,79 @@ class StorageService:
             lambda: self._client().delete_object(Bucket=S3_BUCKET_NAME, Key=key)
         )
 
+    def delete_prefix_sync(self, prefix: str, max_keys: int = 10_000) -> int:
+        """Delete every object under one user's ``prefix``; returns the count.
+
+        Refuses a prefix that is not ``users/<id>/<something>/``, so a bug in
+        the caller can never empty the bucket or another tree. Lists a page,
+        deletes it in one ``DeleteObjects`` call (at most 1000 keys each) and
+        stops after ``max_keys``. A per-key error raises ``RuntimeError``
+        after the batch, so the caller can log and retry later.
+        """
+        parts = prefix.split("/")
+        if (
+            len(parts) < 4
+            or parts[0] != "users"
+            or not all(parts[1:-1])
+            or parts[-1] != ""
+        ):
+            raise ValueError("refusing to delete outside one user's sub-prefix")
+        client = self._client()
+        deleted = 0
+        while deleted < max_keys:
+            page = client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix=prefix,
+                MaxKeys=min(1000, max_keys - deleted),
+            )
+            keys = [
+                {"Key": item["Key"]}
+                for item in page.get("Contents") or []
+                if item.get("Key")
+            ]
+            if not keys:
+                break
+            result = client.delete_objects(
+                Bucket=S3_BUCKET_NAME, Delete={"Objects": keys, "Quiet": True}
+            )
+            errors = result.get("Errors") or []
+            if errors:
+                raise RuntimeError(
+                    f"{len(errors)} of {len(keys)} objects not deleted "
+                    f"({errors[0].get('Code', 'unknown')})"
+                )
+            deleted += len(keys)
+            if not page.get("IsTruncated"):
+                break
+        return deleted
+
+    async def delete_prefix(self, prefix: str, max_keys: int = 10_000) -> int:
+        """Async ``delete_prefix_sync``: the boto calls run in the threadpool."""
+        return await run_in_threadpool(self.delete_prefix_sync, prefix, max_keys)
+
     async def generate_presigned_get(
-        self, key: str, expires_in: Optional[int] = None
+        self,
+        key: str,
+        expires_in: Optional[int] = None,
+        *,
+        response_content_type: Optional[str] = None,
+        response_content_disposition: Optional[str] = None,
     ) -> str:
-        """Generate a short-TTL presigned GET URL (never persist it)."""
+        """Generate a short-TTL presigned GET URL (never persist it).
+
+        The ``response_*`` overrides are signed into the URL, so storage
+        answers with them instead of the type stored on the object.
+        """
         ttl = expires_in or S3_PRESIGN_TTL_SECONDS
+        params = {"Bucket": S3_BUCKET_NAME, "Key": key}
+        if response_content_type:
+            params["ResponseContentType"] = response_content_type
+        if response_content_disposition:
+            params["ResponseContentDisposition"] = response_content_disposition
         return await run_in_threadpool(
             lambda: self._client().generate_presigned_url(
                 "get_object",
-                Params={"Bucket": S3_BUCKET_NAME, "Key": key},
+                Params=params,
                 ExpiresIn=ttl,
             )
         )

@@ -386,8 +386,8 @@ async def test_get_artifact_owner(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
-    """A different user cannot fetch someone else's artifact (403)."""
+async def test_get_artifact_other_user_not_found(async_client, monkeypatch):
+    """A different user gets 404 for someone else's artifact, not 403."""
 
     _use_fake_storage(monkeypatch)
     owner, owner_token = await create_test_user_and_token()
@@ -400,7 +400,7 @@ async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
         resp = await async_client.get(
             f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {intr_token}"}
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
     finally:
         await Artifact.delete_many({"user_id": owner.id})
         await cleanup_models([owner, intruder])
@@ -644,7 +644,7 @@ async def test_disposition_inline_for_pdf(async_client, monkeypatch):
         await cleanup_models([user])
 
 
-# ---------------- List / delete -----------------
+# ---------------- List -----------------
 
 
 @pytest.mark.asyncio
@@ -701,47 +701,6 @@ async def test_list_artifacts_filtered_by_conversation(async_client, monkeypatch
         assert listing.status_code == 200
         ids = [item["id"] for item in listing.json()["data"]]
         assert ids == [in_conv_id]
-    finally:
-        await Artifact.delete_many({"user_id": user.id})
-        await cleanup_models([user])
-
-
-@pytest.mark.asyncio
-async def test_artifacts_cannot_be_deleted(async_client, monkeypatch):
-    """An uploaded artifact is permanent: there is no endpoint to remove it.
-
-    This replaces three tests that exercised DELETE /artifacts/{id} — the happy
-    path, the storage-failure path that kept the record, and the 403 that spared
-    MCP artifacts. None of that has to be right any more, because the method is
-    not served: once a file is uploaded it stays, which is how the products this
-    one is measured against behave.
-
-    405 rather than 404 is the point. The path still exists for GET, so FastAPI
-    answers "method not allowed" — that is what tells a client the resource is
-    real and the operation is gone, instead of leaving it to guess.
-    """
-
-    fake = _use_fake_storage(monkeypatch)
-    user, token = await create_test_user_and_token()
-    try:
-        artifact_id = (
-            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
-        ).json()["id"]
-        key = (await Artifact.find_by_id(artifact_id)).key
-
-        del_resp = await async_client.delete(
-            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert del_resp.status_code == 405
-
-        # Not merely refused: still there, in the database and in the object store,
-        # and still readable. A 405 with the bytes gone would be worse than a 200.
-        assert await Artifact.find_by_id(artifact_id) is not None
-        assert key in fake.objects
-        get_resp = await async_client.get(
-            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert get_resp.status_code == 200
     finally:
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user])
@@ -849,8 +808,8 @@ async def test_message_with_legacy_image_ids_alias_accepted(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_message_with_other_users_image_forbidden(async_client, monkeypatch):
-    """Attaching another user's artifact to a message is forbidden (403)."""
+async def test_message_with_other_users_image_not_found(async_client, monkeypatch):
+    """Attaching another user's artifact to a message answers 404, not 403."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -875,7 +834,7 @@ async def test_message_with_other_users_image_forbidden(async_client, monkeypatc
             json={"query": "look", "artifact_ids": [image_id]},
             headers={"Authorization": f"Bearer {intr_token}"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
         await async_client.delete(
             f"/conversations/{conv_id}",
