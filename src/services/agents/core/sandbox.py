@@ -844,31 +844,70 @@ def _wrap_leading_path(
     return wrapped
 
 
-# A path token the model writes for the workspace: ``workspace/x``,
-# ``./workspace/x``, or the virtual absolute ``/workspace`` the file tools
-# report. Text inside a longer path (``var/workspace``) is not a token.
-_RELATIVE_WORKSPACE = re.compile(r"(?<![\w./\-])(?:\./)?workspace(?=/)")
-_ABSOLUTE_WORKSPACE = re.compile(r"(?<![\w./\-])/workspace(?=/|(?![\w./\-]))")
+# The model names the workspace three ways: ``x`` (relative to the shell,
+# which starts there), ``workspace/x`` (as the file tools accept it), and
+# ``/workspace/x`` (the virtual path the file tools report). The command text
+# is never edited: the other spellings resolve on disk instead. A relative
+# self-link ``workspace -> .`` inside the workspace makes ``workspace/x``,
+# ``./workspace/x`` and ``cd workspace`` land in the workspace, also inside a
+# script. Where the session root is not ``/`` (AgentCore), a link
+# ``/workspace`` to the real directory is tried; a sandbox that does not let
+# the process write ``/`` keeps ``/workspace`` unresolved in the shell.
+SELF_LINK = "workspace"
+_VIRTUAL_WORKSPACE = "/workspace"
+
+
+def _self_link_shell(target: str) -> str:
+    """Shell that creates the self-link once. A failure never stops the caller."""
+    link = f"{target}/{SELF_LINK}"
+    return f"{{ [ -e {link} ] || ln -s . {link}; }} 2>/dev/null"
 
 
 def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
     """Run a model command in its own shell from the workspace directory.
 
     ``workspace_dir`` is the real directory where the file tools store a
-    relative path. ``count.py``, ``workspace/count.py`` and
-    ``/workspace/count.py`` all reach the file ``write_file`` wrote there.
-    The command is one quoted argument to ``sh -c``, so its quotes and ``$``
-    reach that shell unchanged. Without a known directory the shell enters
-    ``workspace`` relative to where it starts, as before.
+    relative path; without it the shell enters ``workspace`` relative to
+    where it starts. The command is one quoted argument to ``sh -c`` and is
+    passed byte for byte, so its quotes, ``$``, comments and heredocs reach
+    that shell unchanged.
     """
-    if not workspace_dir:
-        target = "workspace"
-    else:
-        target = shlex.quote(workspace_dir)
-        command = _RELATIVE_WORKSPACE.sub(lambda _match: workspace_dir, command)
-        if workspace_dir != "/workspace":
-            command = _ABSOLUTE_WORKSPACE.sub(lambda _match: workspace_dir, command)
-    return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
+    target = shlex.quote(workspace_dir) if workspace_dir else SELF_LINK
+    return (
+        f"mkdir -p {target} && {_self_link_shell(target)}; "
+        f"cd {target} && exec sh -c {shlex.quote(command)}"
+    )
+
+
+def _layout_shell(workspace_dir: Optional[str]) -> str:
+    """Create the workspace, its self-link and, if allowed, ``/workspace``."""
+    target = shlex.quote(workspace_dir) if workspace_dir else SELF_LINK
+    shell = f"mkdir -p {target} && {_self_link_shell(target)}"
+    if workspace_dir and workspace_dir != _VIRTUAL_WORKSPACE:
+        alias = shlex.quote(_VIRTUAL_WORKSPACE)
+        shell += f"; {{ [ -e {alias} ] || ln -s {target} {alias}; }} 2>/dev/null"
+    return f"{shell}; true"
+
+
+def _probe_cwd(backend: Any, raw_execute: Any) -> str:
+    """Session cwd, read once more through the raw shell after a failed probe.
+
+    Caches the value on the provider (``_cwd``), so its lazy ``pwd`` never
+    runs through the workspace shell and caches ``<cwd>/workspace``.
+    Returns ``""`` when the shell cannot tell.
+    """
+    try:
+        result = raw_execute("pwd")
+    except Exception:
+        logger.warning("workspace.cwd_retry_failed", exc_info=True)
+        return ""
+    text = (getattr(result, "output", "") or "").strip()
+    if getattr(result, "exit_code", 0) not in (0, None) or not text:
+        return ""
+    cwd = text.splitlines()[-1].rstrip("/") or "/"
+    if hasattr(backend, "_cwd"):
+        backend._cwd = cwd.rstrip("/")
+    return cwd
 
 
 def prepare_workspace_layout(backend: Any) -> Any:
@@ -881,12 +920,13 @@ def prepare_workspace_layout(backend: Any) -> Any:
     The session root is the provider cwd when it reports one (AgentCore) and
     ``/`` otherwise (OpenSandbox stores ``/workspace/x`` as an absolute path).
     Internal commands (workspace listing, process baseline) keep running from
-    that root through ``_eve_raw_execute``, without the model path rewrite.
+    that root through ``_eve_raw_execute``.
     """
     if backend is None or getattr(backend, "_eve_workspace_ready", False):
         return backend
     session_cwd = ""
     root: Optional[str] = "/"
+    execute = getattr(backend, "execute", None)
     get_cwd = getattr(backend, "_get_cwd", None)
     if get_cwd is not None:
         try:
@@ -894,10 +934,11 @@ def prepare_workspace_layout(backend: Any) -> Any:
             root = session_cwd or "/"
         except Exception:
             logger.warning("workspace.cwd_probe_failed", exc_info=True)
-            session_cwd = ""
-            root = None
+            raw = getattr(backend, "_eve_raw_execute", None) or execute
+            probed = _probe_cwd(backend, raw) if raw is not None else ""
+            session_cwd = probed.rstrip("/")
+            root = probed or None
     workspace_dir = f"{root.rstrip('/')}/workspace" if root else None
-    execute = getattr(backend, "execute", None)
     if execute is not None:
         if getattr(backend, "_eve_raw_execute", None) is None:
             if root:
@@ -909,9 +950,8 @@ def prepare_workspace_layout(backend: Any) -> Any:
                 backend._eve_raw_execute = execute_from_root
             else:
                 backend._eve_raw_execute = execute
-        target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
         try:
-            execute(f"mkdir -p {target}")
+            execute(_layout_shell(workspace_dir))
         except Exception:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
