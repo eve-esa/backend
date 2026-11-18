@@ -133,8 +133,7 @@ def render_pack(pack_dir: Path, out_dir: Path, fixtures_path: Path) -> list[tupl
         if mail is None:
             raise FixtureError(f"{variant['name']}: the pack does not carry {variant['mail']}")
         try:
-            html = pack.env.get_template(mail.html).render(**variant["context"])
-            text = pack.env.get_template(mail.text).render(**variant["context"])
+            html, text = pack.render_parts(variant["mail"], variant["context"])
         except Exception as exc:
             raise FixtureError(f"{variant['name']}: render failed, {type(exc).__name__}") from None
         rendered.append((variant["name"], mail.subject, html, text))

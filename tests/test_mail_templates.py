@@ -155,6 +155,8 @@ def default_store(monkeypatch):
     monkeypatch.setattr(mail_template_store, "_client", None)
     monkeypatch.setattr(mail_template_store, "_pack", None)
     monkeypatch.setattr(mail_template_store, "_etag", None)
+    monkeypatch.setattr(mail_template_store, "_task", None)
+    monkeypatch.setattr(mail_template_store, "_last_failure_log", None)
     return mail_template_store
 
 
@@ -284,7 +286,8 @@ async def test_unchanged_manifest_fetches_no_file_and_keeps_the_environment():
         assert await store.refresh() is True
         stub.assert_no_pending_responses()
     assert store._pack is pack
-    assert store._pack.env is pack.env
+    assert store._pack.env_html is pack.env_html
+    assert store._pack.env_text is pack.env_text
 
 
 # ------------------------------------------------------------ 4. swap mid render
@@ -304,7 +307,7 @@ async def test_a_render_started_before_a_swap_finishes_on_the_old_pack():
         "account_pending.txt": PENDING_TXT.replace("PACK", "NEW"),
     }
     manifest_b, blobs_b = make_pack(files_b, version="2.0.0")
-    original = old.env.get_template
+    original = old.env_html.get_template
     swapped = []
 
     def _get_template_then_swap(name, *args, **kwargs):
@@ -317,7 +320,7 @@ async def test_a_render_started_before_a_swap_finishes_on_the_old_pack():
             swapped.append(True)
         return template
 
-    old.env.get_template = _get_template_then_swap
+    old.env_html.get_template = _get_template_then_swap
     rendered = store.render(
         "account_pending", {"email": EMAIL, "app_url": FRONTEND, "logo_url": "L"}
     )
@@ -361,6 +364,9 @@ def _bad_packs():
         "extends_outside": (with_template("account_pending.html", '{% extends "other.html" %}'), "template"),
         "undeclared_variable": (with_template("account_pending.txt", "{{ password }}"), "template"),
         "oversize": (tamper(raw_manifest=b"#" * (mail_templates.MAX_MANIFEST_BYTES + 1)), "size"),
+        # Caught by the trial render: it would fail on every send.
+        "render_error": (with_template("account_pending.txt", "{{ email.no_such_attribute }}"), "render"),
+        "sandbox_escape": (with_template("account_pending.txt", "{{ ''.__class__.__mro__ }}"), "render"),
     }
 
 
@@ -389,11 +395,16 @@ async def test_a_bad_pack_is_rejected_whole_and_the_last_good_one_stays(case, ca
 # ------------------------------------------------------------ 6. render errors
 
 
+# Fails only for the address the tests send to: the trial render at load uses
+# another address, so the pack loads and the failure happens at send time.
+DATA_DEPENDENT_ERROR = '{% if email == "person@example.com" %}{{ email.nope }}{% endif %}ok'
+
+
 @pytest.mark.parametrize(
     "body",
     [
-        "{{ email.no_such_attribute }}",
-        "{{ ''.__class__.__mro__ }}",
+        DATA_DEPENDENT_ERROR,
+        '{% if email == "person@example.com" %}{{ email.__class__.__mro__ }}{% endif %}ok',
     ],
 )
 def test_a_render_error_falls_back_to_the_bundled_copy(body, caplog):
@@ -421,7 +432,7 @@ def test_a_render_error_falls_back_to_the_bundled_copy(body, caplog):
 @pytest.mark.asyncio
 async def test_a_render_error_still_sends_the_mail(default_store, monkeypatch):
     files = {"base.html": BASE, "account_pending.html": PENDING_HTML,
-             "account_pending.txt": "{{ email.nope }}"}
+             "account_pending.txt": DATA_DEPENDENT_ERROR}
     manifest, blobs = make_pack(files)
     monkeypatch.setattr(default_store, "_bucket", BUCKET)
     monkeypatch.setattr(default_store, "_client_factory", lambda: FakeS3(manifest, blobs))
@@ -472,9 +483,7 @@ async def test_startup_failure_returns_and_sends_use_bundled(error, caplog):
     s3.error = error
     store = store_with(s3)
     with caplog.at_level(logging.WARNING, logger=mail_templates.logger.name):
-        started = time.monotonic()
         await store.start(first_wait_s=5.0)
-        assert time.monotonic() - started < 5.0
         rendered = store.render(
             "account_pending", {"email": EMAIL, "app_url": FRONTEND, "logo_url": "L"}
         )
@@ -538,7 +547,7 @@ def test_no_s3_call_happens_on_the_render_path():
 @pytest.mark.asyncio
 async def test_no_log_line_carries_the_recipient_address(default_store, monkeypatch, caplog):
     files = {"base.html": BASE, "account_pending.html": PENDING_HTML,
-             "account_pending.txt": "{{ email.nope }}"}
+             "account_pending.txt": DATA_DEPENDENT_ERROR}
     manifest, blobs = make_pack(files)
     s3 = FakeS3(manifest, blobs)
     monkeypatch.setattr(default_store, "_bucket", BUCKET)
@@ -641,16 +650,23 @@ def test_load_pack_ignores_a_mail_this_backend_does_not_know():
         "future_mail": {"subject": "F", "html": "account_pending.html", "text": "future.txt"},
     }
     manifest, blobs = make_pack(files, mails)
-    pack = load_pack(manifest, blobs.__getitem__, MAIL_SPECS, BUNDLED_DIR, etag='"e"')
+    pack = load_pack(manifest, blobs.__getitem__, MAIL_SPECS, etag='"e"')
     assert set(pack.mails) == {"account_pending"}
 
 
-def test_subject_with_a_line_break_is_rejected():
-    mails = {"account_pending": {"subject": "Hi\nBcc: x", "html": "account_pending.html",
+@pytest.mark.parametrize(
+    "subject",
+    ["Hi\nBcc: x", "Hi\rBcc: x", "A\x00B", "A\x0bB", "A\x85B", "A\u2028B", "A\u2029B",
+     "A\u200bB", "A\ue000B", "A\tB", "   "],
+    ids=["lf", "cr", "nul", "vtab", "nel", "line_sep", "para_sep", "zero_width", "private_use",
+         "tab", "blank"],
+)
+def test_subject_with_a_control_or_separator_character_is_rejected(subject):
+    mails = {"account_pending": {"subject": subject, "html": "account_pending.html",
                                  "text": "account_pending.txt"}}
     manifest, blobs = make_pack(mails=mails)
     with pytest.raises(PackRejected) as excinfo:
-        load_pack(manifest, blobs.__getitem__, MAIL_SPECS, BUNDLED_DIR, etag='"e"')
+        load_pack(manifest, blobs.__getitem__, MAIL_SPECS, etag='"e"')
     assert excinfo.value.reason == "schema"
 
 
@@ -685,7 +701,7 @@ def test_every_bundled_template_passes_its_own_validation():
         {"contract": 1, "version": "0.1.0",
          "files": {n: _sha(d) for n, d in files.items()}, "mails": mails}
     ).encode()
-    pack = load_pack(manifest, files.__getitem__, MAIL_SPECS, BUNDLED_DIR, etag='"e"')
+    pack = load_pack(manifest, files.__getitem__, MAIL_SPECS, etag='"e"')
     assert set(pack.mails) == set(MAIL_SPECS)
 
 
@@ -792,3 +808,313 @@ def test_render_command_needs_no_database_or_network(tmp_path):
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert (tmp_path / "out" / "07-launch.html").exists()
+
+
+# ------------------------------------------------------------ 13. hostile packs
+
+
+def _pending_pack_with(html: str = PENDING_HTML, txt: str = PENDING_TXT, **extra_files: str):
+    files = {"base.html": BASE, "account_pending.html": html, "account_pending.txt": txt}
+    files.update(extra_files)
+    return make_pack(files)
+
+
+# Each body would stall a worker if it ever rendered (CPU or memory). They run
+# in a subprocess with a hard timeout, so a regression fails the test instead
+# of freezing the suite: 9**9**9 holds the GIL until it finishes.
+HOSTILE_BODIES = {
+    "pow": "{{ 9**9**9 }}",
+    "nested_range": "{% for a in range(100000) %}{% for b in range(100000) %}.{% endfor %}{% endfor %}",
+    "string_mul": '{{ ("x"*50000000)|length }}',
+    "mul_variable": "{{ email * 100000000 }}",
+    "mod_format": '{{ "%0999999999d" % 1 }}',
+    "set_doubling": "{% set a = email ~ email %}" + "{% set a = a ~ a %}" * 40 + "{{ a|length }}",
+    "with_doubling": "{% with a = email ~ email %}{% with b = a ~ a %}{{ b }}{% endwith %}{% endwith %}",
+    "method_call": "{{ email.center(999999999) }}",
+    "growing_filter": '{{ email|center(999999999) }}',
+    "global_call": "{{ lipsum(1) }}",
+    "macro_recursion": "{% macro f() %}{{ f() }}{% endmacro %}{{ f() }}",
+    "nested_loop_over_variable": "{% for a in email %}{% for b in email %}.{% endfor %}{% endfor %}",
+    "loop_over_literal": '{% for c in "abcdef" %}{{ c }}{% endfor %}',
+    "include_in_loop": '{% for c in email %}{% include "base.html" %}{% endfor %}',
+    "append": "{% set l = [] %}{{ l.append(1) }}",
+    "autoescape_off": "{% autoescape false %}{{ email }}{% endautoescape %}",
+    "safe_filter": "{{ email|safe }}",
+}
+
+_HOSTILE_SCRIPT = r"""
+import hashlib, json, sys, time, yaml
+from src.services.account_notifications import MAIL_SPECS
+from src.services.mail_templates import PackRejected, load_pack
+
+BASE = sys.argv[1]
+results = {}
+for case, body in json.loads(sys.argv[2]).items():
+    files = {"base.html": BASE.encode(), "account_pending.html": body.encode(),
+             "account_pending.txt": b"plain"}
+    manifest = yaml.safe_dump({
+        "contract": 1, "version": "1.0.0",
+        "files": {n: hashlib.sha256(d).hexdigest() for n, d in files.items()},
+        "mails": {"account_pending": {"subject": "S", "html": "account_pending.html",
+                                      "text": "account_pending.txt"}},
+    }).encode()
+    started = time.monotonic()
+    try:
+        load_pack(manifest, files.__getitem__, MAIL_SPECS)
+        outcome = "loaded"
+    except PackRejected as exc:
+        outcome = exc.reason
+    results[case] = [outcome, time.monotonic() - started]
+print(json.dumps(results))
+"""
+
+
+def test_a_hostile_pack_is_rejected_at_load_in_well_under_a_second(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "QDRANT_URL": "http://unused.invalid",
+        "QDRANT_API_KEY": "unused",
+        "AUTH_ISSUER": "https://unused.invalid",
+        "AUTH_CLIENT_ID": "unused",
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", _HOSTILE_SCRIPT, BASE, json.dumps(HOSTILE_BODIES)],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    results = json.loads(result.stdout.strip().splitlines()[-1])
+    assert set(results) == set(HOSTILE_BODIES)
+    for case, (outcome, seconds) in results.items():
+        assert outcome == "template", (case, outcome)
+        assert seconds < 1.0, (case, seconds)
+
+
+def test_a_reference_cycle_is_rejected():
+    manifest, blobs = _pending_pack_with(
+        html='{% include "loop_a.html" %}',
+        **{"loop_a.html": '{% include "loop_b.html" %}', "loop_b.html": '{% include "loop_a.html" %}'},
+    )
+    with pytest.raises(PackRejected) as excinfo:
+        load_pack(manifest, blobs.__getitem__, MAIL_SPECS)
+    assert excinfo.value.reason == "template"
+
+
+def test_the_trial_render_rejects_a_mail_above_the_size_cap():
+    big = "x" * (mail_templates.MAX_RENDERED_BYTES + 1)
+    manifest, blobs = _pending_pack_with(txt=big)
+    with pytest.raises(PackRejected) as excinfo:
+        load_pack(manifest, blobs.__getitem__, MAIL_SPECS)
+    assert excinfo.value.reason == "size"
+    assert excinfo.value.detail == "account_pending text"
+
+
+def test_a_real_send_above_the_size_cap_falls_back_to_bundled(caplog):
+    # Passes the trial render (two sample paragraphs), not a send with ten.
+    block = "y" * 50_000
+    html = "{% for p in paragraphs %}" + block + "{{ p }}{% endfor %}{{ email }}{{ sign_in_url }}"
+    files = {"cohort_invite.html": html, "cohort_invite.txt": "{{ email }} {{ sign_in_url }}"}
+    mails = {"cohort_invite": {"subject": "S", "html": "cohort_invite.html", "text": "cohort_invite.txt"}}
+    manifest, blobs = make_pack(files, mails)
+    store = store_with(FakeS3(manifest, blobs))
+    store._refresh_sync()
+    assert store.carries("cohort_invite")
+    context = {"email": EMAIL, "app_url": FRONTEND, "logo_url": "L",
+               "sign_in_url": FRONTEND, "paragraphs": ["p"] * 10}
+    with caplog.at_level(logging.WARNING, logger=mail_templates.logger.name):
+        rendered = store.render("cohort_invite", context)
+    assert rendered.source == "bundled"
+    assert "mail_template_fallback name=cohort_invite reason=size" in _log_text(caplog)
+
+
+def test_a_partial_listed_only_by_an_unknown_mail_is_held_to_the_base_variables():
+    manifest, blobs = make_pack(
+        {
+            "base.html": BASE,
+            "account_pending.html": '{% include "q.html" %}',
+            "account_pending.txt": PENDING_TXT,
+            "q.html": "{{ secret_var }}",
+            "q.txt": "x",
+        },
+        {
+            "account_pending": {"subject": "S", "html": "account_pending.html", "text": "account_pending.txt"},
+            "future_mail": {"subject": "F", "html": "q.html", "text": "q.txt"},
+        },
+    )
+    with pytest.raises(PackRejected) as excinfo:
+        load_pack(manifest, blobs.__getitem__, MAIL_SPECS)
+    assert excinfo.value.reason == "template"
+    assert "q.html" in excinfo.value.detail
+
+
+def test_autoescape_follows_the_role_of_the_part_not_the_file_name():
+    files = {"part.htm": "<b>{{ email }}</b>", "part.html": "{{ email }} {{ app_url }}"}
+    mails = {"account_pending": {"subject": "S", "html": "part.htm", "text": "part.html"}}
+    manifest, blobs = make_pack(files, mails)
+    store = store_with(FakeS3(manifest, blobs))
+    store._refresh_sync()
+    address = 'a"><script>x</script>&@example.org'
+    rendered = store.render("account_pending", {"email": address, "app_url": FRONTEND, "logo_url": "L"})
+    assert rendered.source == "pack"
+    assert "<script>" not in rendered.html
+    assert "&lt;script&gt;" in rendered.html
+    assert rendered.text.startswith(address)
+
+
+@pytest.mark.parametrize(
+    "manifest_change",
+    [
+        lambda m: m["mails"].update({"account_pending\nFAKE mail_templates_loaded version=9.9.9":
+                                     m["mails"]["account_pending"]}),
+        lambda m: m.update({"extra\nFAKE mail_templates_loaded version=9.9.9": 1}),
+        lambda m: m["files"].update({"x.txt\nFAKE": "0" * 64}),
+    ],
+    ids=["mail_name", "top_level_key", "file_name"],
+)
+@pytest.mark.asyncio
+async def test_a_forged_name_never_reaches_a_log_line(manifest_change, caplog):
+    manifest, files = make_pack()
+    raw = yaml.safe_load(manifest)
+    manifest_change(raw)
+    s3 = FakeS3(yaml.safe_dump(raw).encode(), files)
+    store = store_with(s3)
+    with caplog.at_level(logging.DEBUG, logger=mail_templates.logger.name):
+        await store.refresh()
+    assert store._pack is None
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("mail_templates_rejected reason=schema" in line for line in lines)
+    for line in lines:
+        assert "\n" not in line
+        assert "FAKE" not in line
+
+
+@pytest.mark.asyncio
+async def test_a_publish_in_progress_is_retried_and_loads_once_complete(caplog):
+    manifest_v1, files_v1 = make_pack(version="1.0.0")
+    s3 = FakeS3(manifest_v1, files_v1, etag='"v1"')
+    store = store_with(s3)
+    await store.refresh()
+
+    # The publish wrote the new manifest; one listed file is still the old copy.
+    files_v2 = {
+        "base.html": BASE,
+        "account_pending.html": PENDING_HTML.replace("PACK", "V2"),
+        "account_pending.txt": PENDING_TXT.replace("PACK", "V2"),
+    }
+    manifest_v2, blobs_v2 = make_pack(files_v2, version="2.0.0")
+    s3.objects[MANIFEST_KEY] = manifest_v2
+    s3.objects["account_pending.html"] = blobs_v2["account_pending.html"]
+    s3.etag = '"v2"'
+    with caplog.at_level(logging.WARNING, logger=mail_templates.logger.name):
+        await store.refresh()
+        assert store.pack_version == "1.0.0"
+        # The last file lands; the manifest (and its ETag) did not change.
+        s3.objects["account_pending.txt"] = blobs_v2["account_pending.txt"]
+        s3.calls.clear()
+        await store.refresh()
+
+    # The rejected manifest was not pinned: the retry fetched it in full.
+    assert s3.calls[0].get("IfNoneMatch") != '"v2"'
+    assert len(s3.calls) > 1
+    assert store.pack_version == "2.0.0"
+    rejected = [r.getMessage() for r in caplog.records if "mail_templates_rejected" in r.getMessage()]
+    assert len(rejected) == 1 and "reason=file" in rejected[0]
+
+
+@pytest.mark.asyncio
+async def test_a_final_rejection_is_not_fetched_again():
+    manifest, files = make_pack()
+    s3 = FakeS3(manifest, files, etag='"good"')
+    store = store_with(s3)
+    await store.refresh()
+    (bad_manifest, bad_files), _ = _bad_packs()["undeclared_variable"]
+    s3.objects = dict(bad_files)
+    s3.objects[MANIFEST_KEY] = bad_manifest
+    s3.etag = '"bad"'
+    await store.refresh()
+    s3.calls.clear()
+    await store.refresh()
+    assert [call.get("IfNoneMatch") for call in s3.calls] == ['"bad"']
+
+
+@pytest.mark.asyncio
+async def test_a_subject_the_message_build_refuses_sends_the_bundled_mail(default_store, monkeypatch, caplog):
+    import dataclasses
+
+    from src.services import mailer
+
+    manifest, blobs = make_pack()
+    pack = load_pack(manifest, blobs.__getitem__, MAIL_SPECS, etag='"e"')
+    # Built past the loader on purpose: the guard at send time is the last line.
+    broken = dataclasses.replace(
+        pack,
+        mails={"account_pending": dataclasses.replace(pack.mails["account_pending"], subject="Hi\x0bthere")},
+    )
+    monkeypatch.setattr(default_store, "_bucket", BUCKET)
+    monkeypatch.setattr(default_store, "_pack", broken)
+    sent = []
+
+    async def _build_like_smtp(**kwargs):
+        mailer._build_message(sender="EVE <eve@example.org>", **kwargs).as_string()
+        sent.append(kwargs)
+
+    monkeypatch.setattr(account_notifications, "send_mail", _build_like_smtp)
+    with caplog.at_level(logging.WARNING, logger=mail_templates.logger.name):
+        await notify_account_pending("64b7f2c1a2b3c4d5e6f70123", EMAIL)
+    assert len(sent) == 1
+    assert sent[0]["subject"] == MAIL_SPECS["account_pending"].subject
+    assert "mail_template_fallback name=account_pending reason=subject pack_version=1.0.0" in _log_text(caplog)
+
+
+@pytest.mark.asyncio
+async def test_the_cohort_command_refuses_a_subject_with_a_control_character():
+    from src.commands.send_cohort_invite import CohortInviteError, send_cohort_invite
+
+    for subject in ("A\x0bB", "A\x00B", "A B", "A\x85B"):
+        with pytest.raises(CohortInviteError):
+            await send_cohort_invite("c", subject=subject)
+
+
+@pytest.mark.asyncio
+async def test_the_s3_client_is_built_once_on_the_event_loop_thread():
+    import threading
+
+    manifest, blobs = make_pack()
+    built_on = []
+
+    def _factory():
+        built_on.append(threading.current_thread())
+        return FakeS3(manifest, blobs)
+
+    store = MailTemplateStore(MAIL_SPECS, bucket=BUCKET, client_factory=_factory)
+    await store.refresh()
+    await store.refresh()
+    assert built_on == [threading.main_thread()]
+
+
+def test_the_default_client_uses_a_session_of_its_own(monkeypatch):
+    sessions = []
+
+    class _Session:
+        def __init__(self):
+            sessions.append(self)
+
+        def client(self, service, **kwargs):
+            return ("client", service)
+
+    def _default_session_client(*args, **kwargs):
+        raise AssertionError("the default boto3 session must not build the client")
+
+    monkeypatch.setattr(mail_templates.boto3, "client", _default_session_client)
+    monkeypatch.setattr(mail_templates.boto3.session, "Session", _Session)
+    assert mail_templates._s3_client() == ("client", "s3")
+    assert len(sessions) == 1

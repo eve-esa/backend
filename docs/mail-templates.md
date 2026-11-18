@@ -15,7 +15,9 @@ The task role needs `s3:GetObject` on the objects and `s3:ListBucket` on the buc
 
 ### Pack layout
 
-A pack is a flat set of objects at the bucket root: `manifest.yaml` and the files it lists. File names match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`, so there are no folders. Publish every file first and `manifest.yaml` last: a reader that sees the new manifest then sees the new files, and the hashes catch anything else.
+A pack is a flat set of objects at the bucket root: `manifest.yaml` and the files it lists. File names match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`, so there are no folders. Publish every file first and `manifest.yaml` last: a reader that sees the new manifest then sees the new files. A reader that catches a publish in the middle sees a missing file or a hash mismatch and tries the same manifest again on its next refresh.
+
+The hashes give integrity against a partial or out-of-order upload, not authenticity: whoever can write the bucket writes the manifest and its hashes too. The control is write access to the bucket, with object versioning as the audit trail and the rollback.
 
 ```yaml
 contract: 1          # integer, must equal the backend's MAIL_PACK_CONTRACT
@@ -31,10 +33,11 @@ mails:               # one entry per mail the pack carries
     text: account_pending.txt
 ```
 
-- `subject` is plain text on one line, at most 200 characters. It is not a template.
+- `subject` is plain text on one line, at most 200 characters. It is not a template. Control, format, private use and unassigned characters and the Unicode line and paragraph separators are refused (a tab, NUL, a vertical tab, U+2028, NEL). `send_cohort_invite --subject` follows the same rule.
 - `html` and `text` must be listed in `files`.
 - A pack may carry a subset of the mails. A mail it does not carry renders from the bundled copy.
-- A mail the backend does not know is checked for syntax and otherwise ignored, so a pack can be published ahead of a backend that supplies it.
+- Mail names match `[a-z][a-z0-9_]{0,63}`.
+- A mail the backend does not know is checked for syntax and otherwise ignored, so a pack can be published ahead of a backend that supplies it. A file that only such a mail lists but another file includes or extends is held to `email`, `app_url` and `logo_url`.
 - Limits: `manifest.yaml` at most 1 MB, each file at most 512 KB.
 
 ### Mails and variables
@@ -48,11 +51,27 @@ Every mail receives `email` (the recipient address), `app_url` (the app for that
 | `cohort_invite` | EVE is now open, come try it | `sign_in_url` (button target), `paragraphs` (list of strings, empty unless the command got `--text-file`) |
 | `cohort_invite_signup` | Create your EVE account | `sign_up_url` (button target) |
 
-A template may use only the variables of the mails that list it. A file no mail lists, such as the shared frame `base.html` or a partial, may use only `email`, `app_url` and `logo_url`. Every `extends` and `include` must name a file in the same pack.
+A template may use only the variables of the mails that list it. A file no mail lists, such as the shared frame `base.html` or a partial, may use only `email`, `app_url` and `logo_url`. Every `extends` and `include` must name a file in the same pack, and no file may reach itself through them.
+
+### What a template may contain
+
+A pack is code that runs inside every backend worker, so the loader accepts only what a mail needs and refuses the rest before compiling anything:
+
+- variables, text, `{% extends %}`, `{% block %}`, `{% include %}`, `{% if %}` and `{% elif %}`, comparisons, `and`, `or`, `not`, `~`, attribute and item access;
+- `{% for %}` over a variable the mail receives (`paragraphs`, for example), one level deep, with no `for`, `include`, `extends` or `block` inside it;
+- the filters `capitalize`, `count`, `d`, `default`, `e`, `escape`, `first`, `last`, `length`, `lower`, `string`, `striptags`, `title`, `trim`, `upper`, `urlencode`.
+
+Arithmetic, function and method calls, `{% set %}`, `{% with %}`, macros, imports, `{% autoescape %}`, `|safe` and every other filter reject the pack with `reason=template`. The environment has no globals (`range`, `lipsum`, `cycler`, `joiner`, `namespace`, `dict` are gone).
+
+Then the loader renders every mail the pack carries with sample values (each branch: with and without `after_hold`, with and without `paragraphs`). A render error rejects the pack with `reason=render`, a part above 256 KB with `reason=size`. All of this runs in the refresh thread, never on a send.
 
 ### Rendering
 
-Templates run in Jinja's `SandboxedEnvironment` with `StrictUndefined`. Files ending in `.html` or `.xml` are autoescaped, so an address is escaped in the HTML part and literal in the text part. `trim_blocks` and `lstrip_blocks` are on.
+Templates run in Jinja's `ImmutableSandboxedEnvironment` with `StrictUndefined`. The html part always renders with autoescape on and the text part with it off, whatever the file names: an address is escaped in the HTML part and literal in the text part. `trim_blocks` and `lstrip_blocks` are on. A rendered part above 256 KB falls back to the bundled copy.
+
+Links are not restricted: a pack can point a button or an image at any host, and the mail still leaves signed by our domain. Every link is reviewed in the pull request that changes the pack. A check of the rendered hosts against an allowlist is a follow-up.
+
+The Jinja sandbox is the only barrier between a bucket writer and code in the task, so `jinja2` stays current: its security updates are never held.
 
 `send_cohort_invite --subject` wins over the pack subject.
 
@@ -62,9 +81,9 @@ The contract number changes only when a pack written for the old one would break
 
 ### Refresh
 
-Each worker refreshes in the background. It sends `GetObject manifest.yaml` with `If-None-Match` set to the last ETag it read; a 304 ends the refresh. A changed manifest is parsed, each listed file is fetched by key and checked against its hash, the templates are validated, and the new pack replaces the old one in one step. A render that started before the swap finishes on the pack it started with. Startup waits for the first refresh for at most 5 seconds. `send_cohort_invite` refreshes once before it plans, because a one-off task has no background refresh.
+Each worker refreshes in the background. It sends `GetObject manifest.yaml` with `If-None-Match` set to the last ETag it read; a 304 ends the refresh. A changed manifest is parsed, each listed file is fetched by key and checked against its hash, the templates are validated, and the new pack replaces the old one in one step. A render that started before the swap finishes on the pack it started with. Startup waits for the first refresh for at most 5 seconds. `send_cohort_invite --apply` refreshes once before the first send, because a one-off task has no background refresh; a dry run makes no S3 call.
 
-The S3 client uses a 2 second connect timeout, a 3 second read timeout and at most 2 attempts. A send never calls S3.
+The S3 client is built once per process, on the event loop thread, from a boto3 session of its own. It uses a 2 second connect timeout, a 3 second read timeout and at most 2 attempts. A send never calls S3.
 
 ### Failures
 
@@ -74,12 +93,14 @@ The S3 client uses a 2 second connect timeout, a 3 second read timeout and at mo
 | Bucket missing, access denied, timeout | last good pack, else bundled | `mail_templates_refresh_failed reason=`, then at most once an hour; `mail_template_fallback reason=no_pack` per mail while no pack is loaded |
 | Manifest unchanged | current pack | none |
 | Malformed YAML, schema error, wrong `contract`, size limit | last good pack | `mail_templates_rejected reason=yaml\|schema\|contract\|size` |
-| Listed file missing or hash mismatch | last good pack | `mail_templates_rejected reason=file` |
-| Syntax error, reference outside the pack, unknown variable | last good pack | `mail_templates_rejected reason=template` |
+| Listed file missing, above 512 KB or hash mismatch (a publish in progress) | last good pack, retried on every refresh | `mail_templates_rejected reason=file\|size`, then at most once an hour |
+| Syntax error, construct outside the allowlist, reference outside the pack or a cycle, unknown variable | last good pack | `mail_templates_rejected reason=template` |
+| A mail fails or exceeds 256 KB in the trial render | last good pack | `mail_templates_rejected reason=render\|size` |
 | Mail not in the pack | bundled for that mail | `mail_template_fallback reason=absent` |
-| Error while rendering (for example an undefined attribute, a sandbox violation) | bundled for that mail, the mail is still sent | `mail_template_fallback reason=<error class>` |
+| Error while rendering a real send (for example an undefined attribute for one address) | bundled for that mail, the mail is still sent | `mail_template_fallback reason=<error class>` |
+| A rendered part above 256 KB, or a subject the message build refuses | bundled for that mail, the mail is still sent | `mail_template_fallback reason=size\|subject` |
 
-A rejected manifest is reported once: the next refresh sends its ETag and gets a 304. Publish a fixed manifest to retry. A successful load logs `mail_templates_loaded version= etag=`. `account_mail_sent` and `cohort_invite_sent` carry `template_source=pack|bundled` and `pack_version=`. No line carries an address.
+A rejected manifest (YAML, schema, contract, manifest size, template, render) is reported once: the next refresh sends its ETag and gets a 304. Publish a fixed manifest to retry. A missing file or a hash mismatch is not pinned: the next refresh reads the same manifest again, so uploading the missing file heals it. A successful load logs `mail_templates_loaded version= etag=`. `account_mail_sent` and `cohort_invite_sent` carry `template_source=pack|bundled` and `pack_version=`. No line carries an address.
 
 ### Checking a pack before publishing
 

@@ -345,6 +345,27 @@ async def test_apply_refreshes_the_templates_once_and_logs_their_source(
 
 
 @pytest.mark.asyncio
+async def test_dry_run_makes_no_s3_call_and_prints_no_template_line(
+    world, fake_mailer, pauses, monkeypatch, capsys
+):
+    """The dry run output is the same as before the pack existed."""
+    emails = [(await _user(world, f"dry{i}"))[1] for i in range(2)]
+    refreshes = []
+
+    async def _refresh():
+        refreshes.append(True)
+        return False
+
+    monkeypatch.setattr(mail_template_store, "refresh", _refresh)
+    summary = await send_cohort_invite(world["cohort"], emails=emails, sleep_seconds=0)
+
+    assert summary["recipients"] == 2
+    assert refreshes == []
+    assert "Mail templates" not in capsys.readouterr().out
+    assert fake_mailer.sent == []
+
+
+@pytest.mark.asyncio
 async def test_failed_send_releases_the_claim(world, fake_mailer, pauses):
     _, good = await _user(world, "good")
     _, bad = await _user(world, "bad")

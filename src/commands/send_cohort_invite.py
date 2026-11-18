@@ -37,9 +37,10 @@ next run retries it. A claim left by a killed process is reported as in_doubt
 and never resent automatically; to resend, delete it:
 ``db.cohort_invites.deleteMany({cohort: "<name>", sent_at: null})``.
 
-Templates. When ``MAIL_TEMPLATES_BUCKET`` is set the command fetches the
-published pack once before it plans (a one-off task has no lifespan to refresh
-it) and prints which copy the mails will use; each sent mail logs
+Templates. With ``--apply`` and ``MAIL_TEMPLATES_BUCKET`` set, the command
+fetches the published pack once before the first send (a one-off task has no
+lifespan to refresh it) and prints which copy the mails will use; a dry run
+makes no S3 call; each sent mail logs
 ``template_source`` and ``pack_version``. ``--subject`` still wins over the pack.
 
 Logs carry counts, the cohort and the user id, never an address.
@@ -63,6 +64,7 @@ from src.config import configure_logging
 from src.database.mongo import async_mongo_manager, get_collection
 from src.services import mailer
 from src.services.account_notifications import build_cohort_invite, mail_template_store
+from src.services.mail_templates import subject_problem
 from src.services.mailer import send_mail
 
 configure_logging()
@@ -302,6 +304,12 @@ async def send_cohort_invite(
         raise CohortInviteError("--batch-size must be at least 1")
     if sleep_seconds < 0 or offset < 0 or (limit is not None and limit < 0):
         raise CohortInviteError("--sleep, --offset and --limit must not be negative")
+    if subject is not None:
+        problem = subject_problem(subject)
+        if problem is not None:
+            # The same rule as a pack subject: a control character or a line
+            # separator breaks the header, and every mail of the run with it.
+            raise CohortInviteError(f"--subject is not a valid mail subject: {problem}")
     if apply:
         transport = (mailer.MAIL_TRANSPORT or mailer.TRANSPORT_OFF).strip().lower()
         if transport == mailer.TRANSPORT_OFF:
@@ -323,11 +331,6 @@ async def send_cohort_invite(
         include_migrated=include_migrated,
     )
     _print_plan(plan, batch_size=batch_size, sleep_seconds=sleep_seconds)
-    # Before the first send: the pack this run renders with, or the bundled copy.
-    if await mail_template_store.refresh() and mail_template_store.carries("cohort_invite"):
-        print(f"Mail templates: pack {mail_template_store.pack_version}")
-    else:
-        print("Mail templates: bundled")
 
     summary = {
         "selected": plan.selected,
@@ -340,6 +343,13 @@ async def send_cohort_invite(
     if not apply:
         print("Dry run: nothing sent, nothing written. Add --apply to send.")
         return summary
+
+    # Before the first send, never in a dry run: the pack this run renders
+    # with, or the bundled copy.
+    if await mail_template_store.refresh() and mail_template_store.carries("cohort_invite"):
+        print(f"Mail templates: pack {mail_template_store.pack_version}")
+    else:
+        print("Mail templates: bundled")
 
     collection = get_collection(COLLECTION)
     await collection.create_index(

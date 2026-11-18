@@ -41,13 +41,30 @@ MAIL_COHORT_INVITE = "cohort_invite"
 MAIL_COHORT_INVITE_SIGNUP = "cohort_invite_signup"
 
 
-def _spec(name: str, subject: str, *extra: str) -> MailSpec:
+# The sample values a pack is trial rendered with when it loads: every branch
+# a real send can take (with and without the optional parts).
+_SAMPLE_BASE = {
+    "email": "trial.recipient@example.org",
+    "app_url": "https://eve.example.org",
+    "logo_url": "https://eve.example.org/branding/eve-logo.png",
+}
+_SAMPLE_PARAGRAPHS = ["A first sample paragraph.", "A second sample paragraph."]
+
+
+def _spec(name: str, subject: str, *variants: dict) -> MailSpec:
+    """One mail: its name, default subject, and its extra variables by sample.
+
+    Each variant is the extra part of one trial context; the first one also
+    names the extra variables the mail receives.
+    """
+    variants = variants or ({},)
     return MailSpec(
         name=name,
         subject=subject,
         html=f"{name}.html",
         text=f"{name}.txt",
-        variables=BASE_VARIABLES | frozenset(extra),
+        variables=BASE_VARIABLES | frozenset(variants[0]),
+        samples=tuple({**_SAMPLE_BASE, **variant} for variant in variants),
     )
 
 
@@ -55,12 +72,26 @@ MAIL_SPECS: dict[str, MailSpec] = {
     spec.name: spec
     for spec in (
         _spec(MAIL_ACCOUNT_PENDING, "Your EVE account is on hold for now"),
-        _spec(MAIL_ACCOUNT_APPROVED, "Your EVE account is ready", "after_hold"),
+        _spec(
+            MAIL_ACCOUNT_APPROVED,
+            "Your EVE account is ready",
+            {"after_hold": False},
+            {"after_hold": True},
+        ),
         # The launch mail to legacy accounts (decision D16). ``paragraphs`` is
         # the optional text block from the command line, split on blank lines.
-        _spec(MAIL_COHORT_INVITE, "EVE is now open, come try it", "sign_in_url", "paragraphs"),
+        _spec(
+            MAIL_COHORT_INVITE,
+            "EVE is now open, come try it",
+            {"sign_in_url": "https://eve.example.org", "paragraphs": []},
+            {"sign_in_url": "https://eve.example.org", "paragraphs": _SAMPLE_PARAGRAPHS},
+        ),
         # The launch mail to a pre-registered person with no account yet.
-        _spec(MAIL_COHORT_INVITE_SIGNUP, "Create your EVE account", "sign_up_url"),
+        _spec(
+            MAIL_COHORT_INVITE_SIGNUP,
+            "Create your EVE account",
+            {"sign_up_url": "https://eve.example.org/signup"},
+        ),
     )
 }
 
