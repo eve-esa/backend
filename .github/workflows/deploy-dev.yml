@@ -86,7 +86,7 @@ jobs:
             REF="${AGENTS_REF}"
           else
             # Same commit CI installs. See .github/workflows/ci.yml.
-            REF=ce1a4b758f3d5587bd3864bddd8445873164d77f
+            REF=e50e253ad2523e294b8c4dc4a1ad1709b40ea628
           fi
           if [ -z "${REF}" ]; then
             echo "ERROR: could not resolve an agents ref"
