@@ -278,11 +278,18 @@ async def closest_with_direction(usage_kg: float) -> Optional[CO2EquivalenceComp
         return None
 
 
+class NoComparisonItemsError(RuntimeError):
+    """No enabled row in `co2eq_comparisons`: an empty collection, not a failure."""
+
+
+_no_comparison_items_logged = False
+
+
 async def build_equivalence_sentence(usage_kg: float) -> CO2EquivalenceResult:
     """Build an equivalence sentence for CO2 usage."""
     doc = await closest_with_direction(usage_kg)
     if not doc:
-        raise RuntimeError("No comparison items in DB")
+        raise NoComparisonItemsError("No comparison items in DB")
     base = doc.co2eq_kg
     title = doc.title
 
@@ -552,6 +559,15 @@ async def get_my_message_stats(
         try:
             equivalence_data = await build_equivalence_sentence(usage_kg)
             text = equivalence_data.text
+        except NoComparisonItemsError:
+            # An empty comparison set is an expected state (the rows are seeded by hand):
+            # say so once per process and answer the totals without the comparison text.
+            global _no_comparison_items_logged
+            if not _no_comparison_items_logged:
+                _no_comparison_items_logged = True
+                logger.warning(
+                    "No enabled rows in co2eq_comparisons: stats answer without the CO2 comparison text"
+                )
         except Exception as e:
             logger.error(f"Failed to get CO2 equivalence data: {str(e)}", exc_info=True)
 
