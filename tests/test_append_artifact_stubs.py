@@ -424,3 +424,17 @@ async def test_a_link_without_a_captured_id_is_left_alone(u7_turn, original):
 @pytest.mark.asyncio
 async def test_the_invented_host_stays_when_the_turn_captured_nothing():
     assert await rewrite_answer_file_links(_U7_ANSWER) == _U7_ANSWER
+
+
+@pytest.mark.no_db
+def test_the_instruction_forbids_guessing_an_image_the_model_cannot_view():
+    # U8 on dev, 2026-11-18: the read notice said the image was not attached and
+    # the model still described it from the file name.
+    assert (
+        "tell the user you cannot see images with the current model."
+        in _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
+    assert (
+        "Do not describe the image and do not guess its content from its name "
+        "or path." in _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
