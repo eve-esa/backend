@@ -233,6 +233,11 @@ the model's to pick.
   call came back as an error, returns `false`.
 - `public_mcp_servers` selects which MCP servers are attached as tools for the
   request; only enabled servers present in the MCP server store are resolved.
+- `artifact_ids` (legacy alias `image_ids`) attaches files from `POST /artifacts`.
+  Each one moves into the conversation's `artifacts/` folder, and a turn with a
+  sandbox lists their `/artifacts/{artifact_id}/{filename}` paths in an
+  `## Attached files` block after the query. See
+  [Attached files](../sandbox.md#attached-files).
 
 ## Busy service (429 `overloaded`)
 

@@ -47,6 +47,7 @@ from src.services.generate_answer import (
     should_use_rag,
 )
 from src.database.models.artifact import Artifact
+from src.routers.artifact import move_to_conversation
 from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
@@ -179,9 +180,9 @@ async def resolve_artifact_attachments(
 
     The request field is named ``artifact_ids`` (the legacy alias ``image_ids``
     is still accepted for backward compatibility). Validates that each artifact
-    exists and belongs to the requesting user, backfills the owning
-    conversation, and returns the attachment payloads to be persisted on the
-    message.
+    exists and belongs to the requesting user, binds it to the conversation
+    (moving its object into the conversation's ``artifacts/`` folder), and
+    returns the attachment payloads to be persisted on the message.
 
     Args:
         artifact_ids (list | None): IDs of previously uploaded artifacts to attach.
@@ -210,9 +211,7 @@ async def resolve_artifact_attachments(
             raise HTTPException(
                 status_code=404, detail=f"Image {artifact_id} not found"
             )
-        if artifact.conversation_id != conversation_id:
-            artifact.conversation_id = conversation_id
-            await artifact.save()
+        await move_to_conversation(artifact, conversation_id)
         attachments.append(
             {
                 "image_id": artifact.id,

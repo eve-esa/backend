@@ -48,6 +48,11 @@ class FakeStorage:
     async def stream_body(self, body, chunk_size=65536):
         yield body.data
 
+    async def copy_object(self, source_key, dest_key):
+        if source_key not in self.objects:
+            raise ObjectNotFoundError(source_key)
+        self.objects[dest_key] = dict(self.objects[source_key])
+
     async def delete_object(self, key):
         self.objects.pop(key, None)
 

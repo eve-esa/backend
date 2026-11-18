@@ -115,6 +115,10 @@ Here is a preview showing the head and tail of the result (lines of the form `..
 
 [human]  eve_message_id={message_id}
 {new user message}
+
+## Attached files                                only when the message has attachments
+The user attached the following files:
+/artifacts/{artifact_id}/{filename}
 ```
 
 | Part | Source | Changes when |
@@ -124,6 +128,7 @@ Here is a preview showing the head and tail of the result (lines of the form `..
 | EVE prompt | `system` in `agents/graphs/react/prompts.yaml` | Never |
 | Deep addendum (files, sandbox, long conversations) | `addendum` in `agents/graphs/deep/prompts.yaml` | Never |
 | Artifact rule | `_ARTIFACT_MARKDOWN_INSTRUCTION` in `runner.py` | Never |
+| Attached files block | `attached_files_block` in `runner.py`, on the human message ([Attached files](sandbox.md#attached-files)) | Each message with attachments |
 | Summary message | Mechanism 1 | Each new summary |
 | Offload stub | Mechanism 2 | Once, when the tool returns |
 | `search_history` / `read_history` results | Mechanism 3 | When the model calls them |
@@ -212,7 +217,7 @@ No model sits between the store and the agent; the tools return stored text. The
 | `messages` | Every turn: input, output, tool trace | Until the conversation is deleted |
 | `checkpointing_db` | The thread: messages, `_summarization_event`, files | `CHECKPOINT_RETENTION_DAYS` (30) |
 | S3 `/large_tool_results/` | Offloaded tool results | Per user and conversation prefix |
-| S3 `conversations/{id}/artifacts/` | One copy of each MCP file. `Artifact.key` points here. The sandbox path is `/artifacts/{id}/{filename}` | Per user and conversation. A new sandbox loads the prefix |
+| S3 `conversations/{id}/artifacts/` | One copy of each MCP file and each attached upload. `Artifact.key` points here. The sandbox path is `/artifacts/{id}/{filename}` | Per user and conversation. A new sandbox loads the prefix |
 | S3 `workspace/` | Files in the sandbox working directory, except `skills/`, `large_tool_results/`, and `artifacts/` | Kept for the conversation. A new sandbox loads the prefix |
 | `conversations.summary` | Copy of the latest summary and its id range | Overwritten by the next summary |
 

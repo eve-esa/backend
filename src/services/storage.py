@@ -418,6 +418,28 @@ class StorageService:
         finally:
             await run_in_threadpool(body.close)
 
+    def copy_object_sync(self, source_key: str, dest_key: str) -> None:
+        """Copy an object inside the bucket. The stored type and metadata come along.
+
+        Raises:
+            ObjectNotFoundError: if ``source_key`` is absent from the bucket.
+        """
+        try:
+            self._client().copy_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=dest_key,
+                CopySource={"Bucket": S3_BUCKET_NAME, "Key": source_key},
+            )
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _MISSING_OBJECT_ERROR_CODES:
+                raise ObjectNotFoundError(source_key) from exc
+            raise
+
+    async def copy_object(self, source_key: str, dest_key: str) -> None:
+        """Async ``copy_object_sync``."""
+        await run_in_threadpool(self.copy_object_sync, source_key, dest_key)
+
     async def delete_object(self, key: str) -> None:
         """Delete an object from the bucket."""
         await run_in_threadpool(

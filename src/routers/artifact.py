@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
+from bson import ObjectId
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -27,6 +28,7 @@ from src.config import (
     S3_PRESIGN_TTL_SECONDS,
 )
 from src.database.models.artifact import Artifact, ArtifactSource
+from src.database.models.conversation import Conversation
 from src.database.models.user import User
 from src.database.mongo import get_collection
 from src.database.mongo_model import PaginatedResponse
@@ -38,6 +40,7 @@ from src.services.mcp.artifact_ingestion import (
     clean_filename,
     strip_format_chars,
 )
+from src.services.mcp.conversation_artifacts import file_path_for, object_key
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
     INLINE_CONTENT_TYPES,
@@ -111,6 +114,48 @@ async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifac
     return artifact
 
 
+async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None:
+    """Bind an artifact to a conversation and keep its object in that conversation's folder.
+
+    The object goes to
+    ``users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}``,
+    the layout MCP outputs use, so a new sandbox restores it under
+    ``/artifacts/`` and the conversation's delete cascade finds it. The copy
+    and the row are written first and the old object is deleted last, so a
+    failure leaves a stray object, never a row without bytes. A failed copy
+    keeps the old key: the attachment still renders from it.
+    """
+    key = object_key(
+        artifact.user_id, conversation_id, file_path_for(artifact.id, artifact.filename)
+    )
+    if artifact.conversation_id == conversation_id and artifact.key == key:
+        return
+    old_key = artifact.key
+    artifact.conversation_id = conversation_id
+    if old_key != key:
+        try:
+            await storage_service.copy_object(old_key, key)
+        except Exception as exc:  # noqa: BLE001 - the old key still serves
+            logger.warning(
+                "artifact.move_failed artifact=%s conversation=%s error=%s",
+                artifact.id,
+                conversation_id,
+                type(exc).__name__,
+            )
+        else:
+            artifact.key = key
+    await artifact.save()
+    if artifact.key != old_key:
+        try:
+            await storage_service.delete_object(old_key)
+        except Exception as exc:  # noqa: BLE001 - a stray object, reclaimed by GC
+            logger.warning(
+                "artifact.move_cleanup_failed artifact=%s error=%s",
+                artifact.id,
+                type(exc).__name__,
+            )
+
+
 def require_uploads_enabled() -> None:
     """404 while ``FEATURE_ARTIFACT_UPLOADS`` is off, as if the route did not exist.
 
@@ -177,6 +222,9 @@ def content_disposition(disposition: str, filename: Optional[str]) -> str:
 )
 async def upload_artifact(
     file: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(
+        None, description="Conversation the file is for, when it already exists"
+    ),
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
@@ -185,12 +233,15 @@ async def upload_artifact(
     The Content-Type declared by the client is never trusted: images are
     sniffed from magic bytes, pdf from its magic prefix, and text-like types
     (csv, txt, json, geojson) require both a matching file extension and a
-    decodable UTF-8 payload. The stored object lives under the per-user
-    prefix ``users/{user_id}/artifacts/`` and is served through the stable
-    ``/artifacts/{id}`` route.
+    decodable UTF-8 payload. With ``conversation_id`` the object is written
+    straight into that conversation's folder. A new chat has no conversation
+    yet, so its object waits under ``users/{user_id}/artifacts/`` until a
+    message attaches it and ``move_to_conversation`` moves it. It is served
+    through the stable ``/artifacts/{id}`` route either way.
 
     Args:
         file (UploadFile): The file to upload.
+        conversation_id (str | None): An existing conversation of the user.
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
@@ -198,7 +249,8 @@ async def upload_artifact(
 
     Raises:
         HTTPException: 429 if the daily quota is exceeded; 413 if the file is too
-        large; 415 if the file is not an allowed/recognized type.
+        large; 415 if the file is not an allowed/recognized type; 404 if the
+        conversation is missing or another user's.
     """
     # Read with a hard cap so oversize payloads never reach storage.
     data = await file.read(ARTIFACT_UPLOAD_MAX_BYTES + 1)
@@ -211,26 +263,47 @@ async def upload_artifact(
             status_code=415, detail="Unsupported or unrecognized file type"
         )
 
+    if conversation_id:
+        # Another user's conversation answers like a missing one: a 403 would
+        # confirm that the id exists.
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation or conversation.user_id != requesting_user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
     # Reserve a quota slot atomically once the payload is known-valid, so malformed
     # uploads don't burn quota and concurrent valid uploads can't exceed the cap.
     await reserve_daily_quota_slot(requesting_user.id)
 
     content_type = ARTIFACT_TYPE_CONTENT_TYPES[type_key]
-    key = storage_service.build_user_key(
-        requesting_user.id, type_key, prefix="artifacts"
-    )
+    # Cleaned and capped once here, so the list, the header, the markdown and
+    # the object key all carry the same safe name.
+    filename = clean_filename(file.filename) if file.filename else f"artifact.{type_key}"
+    artifact_oid = ObjectId()
+    if conversation_id:
+        key = object_key(
+            requesting_user.id,
+            conversation_id,
+            file_path_for(str(artifact_oid), filename),
+        )
+    else:
+        key = storage_service.build_user_key(
+            requesting_user.id, type_key, prefix="artifacts"
+        )
     await storage_service.put_object(key, data, content_type)
 
-    artifact = await Artifact.create(
+    artifact = Artifact(
+        id=str(artifact_oid),
         user_id=requesting_user.id,
         key=key,
-        # Cleaned and capped once here, so the list, the header and the
-        # markdown all carry the same safe name.
-        filename=clean_filename(file.filename) if file.filename else f"artifact.{type_key}",
+        filename=filename,
         content_type=content_type,
         size_bytes=len(data),
         source=ArtifactSource(type="upload"),
+        conversation_id=conversation_id or None,
     )
+    document = artifact.to_dict()
+    document["_id"] = artifact_oid
+    await Artifact.get_collection().insert_one(document)
 
     url = f"/artifacts/{artifact.id}"
     return {

@@ -141,6 +141,41 @@ async def _restore(
     _log_upload_errors(await run_in_threadpool(upload, files))
 
 
+def attached_file_paths(
+    user_id: str, conversation_id: str, keys: list[str]
+) -> list[tuple[str, str]]:
+    """``(sandbox path, object key)`` for each key in the conversation's folder.
+
+    A key elsewhere (an upload whose move failed) has no sandbox copy, so it
+    is left out.
+    """
+    prefix = conversation_prefix(user_id, conversation_id)
+    paths = []
+    for key in keys:
+        relative = key[len(prefix) :] if key.startswith(prefix) else ""
+        if not _rejected(relative):
+            paths.append((sandbox_path(relative), key))
+    return paths
+
+
+async def copy_into_sandbox(
+    sandbox_backend: Any, files: list[tuple[str, str]]
+) -> None:
+    """Copy ``(sandbox path, object key)`` files into a sandbox that is already up.
+
+    A new sandbox gets them from ``restore_artifacts``. A file that cannot be
+    read is logged and skipped. The turn still runs.
+    """
+    for path, key in files:
+        try:
+            response = await storage_service.get_object(key)
+            body = await run_in_threadpool(_read_body, response)
+        except Exception:
+            logger.warning("artifacts.attach_read_failed key=%s", key, exc_info=True)
+            continue
+        await upload_artifact(sandbox_backend, path, body)
+
+
 def _rejected(relative: str) -> bool:
     if not relative or relative.startswith("/"):
         return True

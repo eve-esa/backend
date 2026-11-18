@@ -70,14 +70,45 @@ The backend passed to `compile` is a `CompositeBackend` whose default is the san
 
 The session root has four sibling directories: `workspace/`, `skills/`, `artifacts/`, and `large_tool_results/`. The shell starts in `workspace/`. A file the model creates belongs there. `skills/`, `artifacts/`, and `large_tool_results/` stay beside it.
 
-An MCP file is stored once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. `Artifact.key` is that object. The sandbox path is `/artifacts/{artifact_id}/{filename}`. The chat still loads `/artifacts/{artifact_id}`. A user upload stays at `users/{user_id}/artifacts/`.
+An MCP file is stored once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. `Artifact.key` is that object. The sandbox path is `/artifacts/{artifact_id}/{filename}`. The chat still loads `/artifacts/{artifact_id}`. A file the user attaches ends up in the same folder; see [Attached files](#attached-files).
 
 After a turn, `workspace/` is copied to `users/{user_id}/conversations/{conversation_id}/workspace/`. A new sandbox loads that prefix back into `workspace/`. A reused sandbox is not reloaded. A markdown path in `workspace/` is rewritten to `/conversations/{id}/workspace/{path}`. That route serves the saved workspace object. It is not copied into the artifact store.
 
 The copy waits until no process is running beyond the set recorded at sandbox start, and two listings match on path, size, and mtime. The answer does not wait. The idle deadline moves forward while that save is still running, up to the AgentCore reuse margin. Before a sandbox is destroyed, one snapshot is saved without waiting. A sidecar object `workspace_state` stores size, mtime, and sha256 so an unchanged file is not downloaded again.
 
+### Attached files
+
+A file the user attaches in the chat lives in the conversation's `artifacts/` folder, like an MCP file, so the agent can open it.
+
+`POST /artifacts` takes an optional `conversation_id` form field. With it, the backend checks that the user owns the conversation and writes the object once, at `users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}`. Another user's conversation, or a missing one, answers 404, stores nothing, and spends no upload quota. The composer sends the field whenever the chat already has an id.
+
+A new chat has no conversation when the file is picked. Its upload waits at `users/{user_id}/artifacts/{uuid}.{ext}`. When the message that carries it in `artifact_ids` arrives, `resolve_artifact_attachments` binds the artifact to the conversation and `move_to_conversation` moves the object: copy inside the bucket, update `Artifact.key`, delete the old object. A failed copy keeps the old key and logs `artifact.move_failed`. The attachment still renders, but the sandbox does not get the file. A failed delete leaves a stray object and logs `artifact.move_cleanup_failed`.
+
+Before the graph runs, `_attached_files` in `runner.py` reads the message's attachments that are in the conversation folder:
+
+| Sandbox | What happens |
+| --- | --- |
+| Started by this turn (`SandboxLease.fresh`) | `restore_artifacts` already copied the folder in. Nothing more is copied |
+| Reused from an earlier turn | `copy_into_sandbox` copies this message's files in. A file that cannot be read logs `artifacts.attach_read_failed` and is skipped |
+| None (graph without a sandbox, or no conversation) | No paths |
+
+The paths follow the query in the human message of that turn:
+
+```text
+{user message}
+
+## Attached files
+The user attached the following files:
+/artifacts/{artifact_id}/{filename}
+/artifacts/{artifact_id}/{filename}
+```
+
+The block is in the thread, next to the turn it came with. `Message.input` and the chat keep the text the user typed. A file outside the conversation folder is left out of the block, because its path would name nothing. A lookup that fails logs `Could not attach files` and runs the turn without the block. Filenames are cleaned at upload (one line, no control or format characters, capped), so a name cannot add lines to the block.
+
 ### Checking it
 
 Use `"agent": "deep"`. Ask the model to write a file, then in a later message of the same conversation ask it to read that file. The backend log shows `sandbox.created` and then `sandbox.reused` with the same `sandbox_id`. Reading the file from the sandbox itself confirms the text. The model can also repeat a marker that was already in the first message. Discard the sandbox when the check is done.
+
+For attached files, attach an image in a new chat and ask the model which files it got. It names `/artifacts/{artifact_id}/{filename}` and can open it. In the same chat, attach a second file and ask again: the log shows `sandbox.reused`, and the model opens the new file too. The object is under `users/{user_id}/conversations/{conversation_id}/artifacts/` in the bucket.
 
 Values already in the process environment are kept when `LOAD_DOTENV_OVERRIDE=false`. Otherwise a value in `.env` replaces them, including AWS credentials the provider SDK would otherwise take from the SSO chain.

@@ -32,6 +32,9 @@ from src.config import (
 )
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
+from bson import ObjectId
+
+from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.user import User
@@ -1073,6 +1076,7 @@ def _build_initial_messages(
     message_id: Optional[str] = None,
     new_checkpoint: Optional[bool] = None,
     agent_graph_type: Optional[str] = None,
+    attached_files: Optional[List[str]] = None,
 ) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
@@ -1090,7 +1094,9 @@ def _build_initial_messages(
 
     ``prior`` is the stored turns seeded into a deep thread that has no
     checkpoint. ``message_id`` is written on the new human message so a later
-    summary can name the range it covers.
+    summary can name the range it covers. ``attached_files`` (sandbox paths)
+    follow the query in that message, so the thread keeps them with the turn
+    they came with.
     """
     if new_checkpoint is None:
         new_checkpoint = not history
@@ -1102,7 +1108,11 @@ def _build_initial_messages(
     human_kwargs: Dict[str, Any] = {}
     if message_id:
         human_kwargs["additional_kwargs"] = {"eve_message_id": str(message_id)}
-    messages.append(HumanMessage(content=request.query, **human_kwargs))
+    content = request.query
+    block = attached_files_block(attached_files or [])
+    if block:
+        content = f"{content}\n\n{block}" if content else block
+    messages.append(HumanMessage(content=content, **human_kwargs))
     return messages
 
 
@@ -1603,6 +1613,62 @@ async def _with_attached_documents(agent: Any, tools: Any, request: Any) -> Any:
     return _agent_with_system_line(agent, attached_documents_line(names))
 
 
+def attached_files_block(paths: List[str]) -> Optional[str]:
+    """The block naming this message's attached files by sandbox path, or None."""
+    if not paths:
+        return None
+    return "## Attached files\nThe user attached the following files:\n" + "\n".join(
+        paths
+    )
+
+
+async def _attached_files(
+    request: Any, user_id: Optional[str], conversation_id: Optional[str], lease: Any
+) -> List[str]:
+    """Sandbox paths of the files attached to this message, present in ``lease``.
+
+    The router has already moved each attachment into the conversation's
+    ``artifacts/`` folder. A new sandbox restored that folder before the
+    turn; a reused one gets this message's files copied in here. Without a
+    sandbox the paths would name nothing, so there are none. A lookup that
+    fails leaves the turn without the block.
+    """
+    ids = list(dict.fromkeys(getattr(request, "artifact_ids", None) or []))
+    if not ids or not user_id or not conversation_id or lease is None:
+        return []
+    from src.services.mcp.conversation_artifacts import (
+        attached_file_paths,
+        copy_into_sandbox,
+    )
+
+    try:
+        oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+        docs = (
+            await Artifact.get_primary_collection()
+            .find(
+                {
+                    "_id": {"$in": oids},
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                },
+                {"key": 1},
+            )
+            .to_list(length=len(oids))
+        )
+        keys = {str(doc["_id"]): doc.get("key") or "" for doc in docs}
+        files = attached_file_paths(
+            user_id, conversation_id, [keys[i] for i in ids if i in keys]
+        )
+        if not getattr(lease, "fresh", False):
+            await copy_into_sandbox(lease.backend, files)
+    except Exception:
+        logger.warning(
+            "Could not attach files conversation=%s", conversation_id, exc_info=True
+        )
+        return []
+    return [path for path, _key in files]
+
+
 def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]]:
     """The collections each retrieval call of this run searched, in call order.
 
@@ -2081,6 +2147,9 @@ async def generate_answer_agentic(
         # and a new list would drop the client strong reference.
         if held is not None:
             artifact_ctx.sandbox_backend = held.backend
+        attached_files = await _attached_files(
+            request, user_id, conversation_id, sandbox_lease
+        )
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -2154,6 +2223,7 @@ async def generate_answer_agentic(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
+                                attached_files=attached_files,
                             ),
                             **skills_reload,
                         },
@@ -2501,6 +2571,9 @@ async def generate_answer_agentic_stream_helper(
         # and a new list would drop the client strong reference.
         if sandbox_lease is not None:
             artifact_ctx.sandbox_backend = sandbox_lease.backend
+        attached_files = await _attached_files(
+            request, user_id, conversation_id, sandbox_lease
+        )
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
@@ -2675,6 +2748,7 @@ async def generate_answer_agentic_stream_helper(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
+                                attached_files=attached_files,
                             ),
                             **skills_reload,
                         },
