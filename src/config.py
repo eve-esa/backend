@@ -91,6 +91,11 @@ EVE_JSC_API_KEY = getenv_or("EVE_JSC_API_KEY")
 # no default, because llm_type is not checked against the catalog, so a set alias
 # is callable by any client whether or not the picker lists it.
 JSC_LARGE_MODEL_NAME = getenv_or("JSC_LARGE_MODEL_NAME")
+# Platform model names (comma separated) that accept an image, also inside a tool
+# result. Every other platform model is marked text-only, so the deep agent's
+# read_file gives it a notice naming the image instead of the image itself
+# (EVE-Instruct answers 400 to an image). Custom models are not affected.
+IMAGE_INPUT_MODEL_NAMES = getenv_or("IMAGE_INPUT_MODEL_NAMES")
 
 JSC_EMBEDDING_API_KEY = getenv_or("JSC_EMBEDDING_API_KEY") or EVE_JSC_API_KEY
 JSC_EMBEDDING_MODEL_NAME = getenv_or(
