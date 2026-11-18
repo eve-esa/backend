@@ -29,7 +29,9 @@ hallucination_binary_with_retrieval: |
   - Only the most recent prior turns, the same short window the answering model was given, written as User and Assistant lines.
   Use that block to resolve follow-ups, pronouns, and references such as "its resolution". If the markers are absent, judge the question on its own.
 
-  {conversation}Question: {question}
+  {clock}Do not flag a date as invented only because it is later than your training data: compare it with the Clock.
+
+  {tool_evidence}{conversation}Question: {question}
   Answer: {answer}
   supporting documents: {docs}
 
@@ -65,5 +67,6 @@ rewriting_template: |
 
 llm_answer_template: |
   You are a helpful assistant.
+  {clock}
   Answer the following question:
   {query}
