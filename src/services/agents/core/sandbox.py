@@ -142,8 +142,11 @@ class _StoppedCommandFilter(logging.Filter):
 
 # The AgentCore integration logs ERROR "AgentCore session expired while ..."
 # and returns exit code 1 when the session is gone. After a turn the save of
-# the workspace can meet a session that a conversation delete just stopped;
-# there it is an expected outcome. During a turn the ERROR stays.
+# the workspace can meet a session that a conversation delete just stopped,
+# so there the line drops to INFO and the save logs the outcome itself: INFO
+# when the sandbox was stopped on purpose, WARNING workspace.save_failed
+# reason=session_expired when its record still names it. During a turn, and
+# in the reaper snapshot, the ERROR stays.
 _AGENTCORE_SDK_LOGGER = "langchain_agentcore_codeinterpreter.sandbox"
 _AGENTCORE_EXPIRED = "AgentCore session expired while"
 _after_turn: ContextVar[bool] = ContextVar("sandbox_after_turn", default=False)
