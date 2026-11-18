@@ -398,7 +398,7 @@ async def test_move_gives_up_with_409_after_its_attempts(async_client, monkeypat
             with pytest.raises(HTTPException) as raised:
                 await move_to_conversation(row, await _conversation(user.id, "Busy"))
         assert raised.value.status_code == 409
-        assert raised.value.detail["code"] == "artifact_busy"
+        assert raised.value.detail["code"] == "artifact_move_contended"
 
         assert len(rounds) == artifact_router.MOVE_ATTEMPTS
         assert any(
@@ -438,6 +438,85 @@ async def test_winner_restores_a_copy_a_loser_deleted(async_client, monkeypatch)
         stored = await Artifact.find_by_id_on_primary(image_id)
         assert stored.key in fake.objects
         assert upload_key not in fake.objects
+        assert (await _served(async_client, token, image_id)).status_code == 200
+    finally:
+        await _cleanup(user)
+
+
+def _contend_every_round(fake, user_id, image_id):
+    """Each copy is followed by another request moving the row to a new live key."""
+    real_copy = fake.copy_object
+    rounds = []
+
+    async def copy_while_another_request_wins(source_key, dest_key):
+        await real_copy(source_key, dest_key)
+        rounds.append(dest_key)
+        winner_key = f"users/{user_id}/winner-{len(rounds)}.png"
+        await fake.put_object(winner_key, PNG_BYTES, "image/png")
+        await fake.delete_object(source_key)
+        await Artifact.get_collection().update_one(
+            {"_id": ObjectId(image_id)}, {"$set": {"key": winner_key}}
+        )
+
+    return copy_while_another_request_wins
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route", ["stream_messages", "stream-generate-agentic"]
+)
+async def test_stream_routes_answer_409_before_the_stream_opens(async_client, monkeypatch, route):
+    """A contended move on a stream route is a JSON 409 with the code, no stream
+    and no message row."""
+    from src.database.models.message import Message
+
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        conv = await _conversation(user.id, "Stream")
+        monkeypatch.setattr(fake, "copy_object", _contend_every_round(fake, user.id, image_id))
+
+        resp = await async_client.post(
+            f"/conversations/{conv}/{route}",
+            json={"query": "look", "artifact_ids": [image_id]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 409
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.json()["detail"]["code"] == "artifact_move_contended"
+        assert await Message.count_documents({"conversation_id": conv}) == 0
+    finally:
+        await _cleanup(user)
+
+
+@pytest.mark.asyncio
+async def test_loser_keeps_a_shared_destination_the_row_now_uses(async_client, monkeypatch):
+    """B copies to the conversation key, then A moves to the same key and binds
+    the row before B binds it. B rereads the row, sees its own destination in
+    use and must not delete it."""
+    fake = _use_fake_storage(monkeypatch)
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (await _upload(async_client, token)).json()["id"]
+        conv = await _conversation(user.id, "Shared")
+        stale_b = await Artifact.find_by_id_on_primary(image_id)
+        real_copy = fake.copy_object
+        state = {"a_done": False}
+
+        async def copy_then_a_wins(source_key, dest_key):
+            await real_copy(source_key, dest_key)
+            if not state["a_done"]:
+                state["a_done"] = True
+                monkeypatch.setattr(fake, "copy_object", real_copy)
+                await move_to_conversation(await Artifact.find_by_id_on_primary(image_id), conv)
+
+        monkeypatch.setattr(fake, "copy_object", copy_then_a_wins)
+        await move_to_conversation(stale_b, conv)
+
+        row = await Artifact.find_by_id_on_primary(image_id)
+        assert row.conversation_id == conv
+        assert list(fake.objects) == [row.key]
         assert (await _served(async_client, token, image_id)).status_code == 200
     finally:
         await _cleanup(user)

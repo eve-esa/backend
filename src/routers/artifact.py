@@ -136,7 +136,7 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
 
     Raises:
         HTTPException: 404 if the row was deleted meanwhile; 409 with
-        ``detail.code`` ``artifact_busy`` when other requests kept moving it
+        ``detail.code`` ``artifact_move_contended`` when other requests kept moving it
         for ``MOVE_ATTEMPTS`` rounds (the client can retry).
     """
     for _ in range(MOVE_ATTEMPTS):
@@ -185,7 +185,7 @@ async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None
     raise HTTPException(
         status_code=409,
         detail={
-            "code": "artifact_busy",
+            "code": "artifact_move_contended",
             "message": "The file is being attached elsewhere. Try again.",
         },
     )
