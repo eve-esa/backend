@@ -1,8 +1,11 @@
 """Erase a user's stored files: one artifact, or everything a conversation left.
 
-Order for an artifact, the same as ``gc_mcp_artifacts``: the object first,
-then the row, then the references in messages. A failed object delete keeps
-the row, so nothing is orphaned and a later run can still find the bytes.
+Order for one artifact (``delete_artifact``, as ``gc_mcp_artifacts``): the
+object first, then the row, then the references in messages. A failed object
+delete keeps the row, so nothing is orphaned and a later run can still find
+the bytes. The conversation cascade deletes the row first, conditionally, so
+an attach that moved it meanwhile keeps it, and puts it back when the object
+delete fails.
 
 A message references an artifact in two places: ``artifact_ids`` (MCP tool
 outputs) and ``attachments[].image_id`` (user uploads). Both are matched and
@@ -16,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+from bson import ObjectId
 
 from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
@@ -169,10 +174,15 @@ async def _delete_artifacts(user_id: str, conversation_id: str) -> bool:
             other = shown_elsewhere.get(artifact.id)
             try:
                 if other:
-                    artifact.conversation_id = other
-                    await artifact.save()
+                    # Only the conversation, and only while the row is still
+                    # here: a full save would write back a key an attach just
+                    # moved, and the row would point at a deleted object.
+                    await Artifact.get_collection().update_one(
+                        {"_id": ObjectId(artifact.id), "conversation_id": conversation_id},
+                        {"$set": {"conversation_id": other}},
+                    )
                 else:
-                    await delete_artifact(artifact)
+                    await _delete_unless_moved(artifact, conversation_id)
             except Exception as exc:  # noqa: BLE001 - reported, logged
                 complete = False
                 logger.warning(
@@ -186,6 +196,39 @@ async def _delete_artifacts(user_id: str, conversation_id: str) -> bool:
             return False
         if len(artifacts) < CASCADE_BATCH_SIZE:
             return True
+
+
+async def _delete_unless_moved(artifact: Artifact, conversation_id: str) -> None:
+    """Delete an artifact of the conversation unless an attach moved it meanwhile.
+
+    The row goes first and only while it still has the key and conversation
+    the cascade read, so an attach that moved it elsewhere keeps its row and
+    its new object. Then the object; when storage refuses, the row is put
+    back so a retry still finds the file. Then the message references.
+    """
+    collection = Artifact.get_collection()
+    row = await collection.find_one_and_delete(
+        {
+            "_id": ObjectId(artifact.id),
+            "key": artifact.key,
+            "conversation_id": conversation_id,
+        }
+    )
+    if row is None:
+        return
+    try:
+        await storage_service.delete_object(artifact.key)
+    except Exception:
+        await collection.insert_one(row)
+        raise
+    try:
+        await pull_message_references(artifact.id)
+    except Exception as exc:  # noqa: BLE001 - the erasure itself succeeded
+        logger.warning(
+            "artifact.pull_failed artifact=%s error=%s",
+            artifact.id,
+            type(exc).__name__,
+        )
 
 
 async def _other_conversations(

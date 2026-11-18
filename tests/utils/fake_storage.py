@@ -33,6 +33,9 @@ class FakeStorage:
     async def put_object(self, key, body, content_type):
         self.objects[key] = {"body": body, "content_type": content_type}
 
+    async def exists(self, key):
+        return key in self.objects
+
     async def get_object(self, key):
         # Mirror StorageService, which turns a botocore NoSuchKey into this.
         if key not in self.objects:
