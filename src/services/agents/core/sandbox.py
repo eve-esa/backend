@@ -27,6 +27,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -843,33 +844,103 @@ def _wrap_leading_path(
     return wrapped
 
 
+def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
+    """Run a model command in its own shell from the workspace directory.
+
+    ``workspace_dir`` is the real directory where the file tools store a
+    relative path; without it the shell enters ``workspace`` relative to
+    where it starts. The command is one quoted argument to ``sh -c`` and is
+    passed byte for byte, so its quotes, ``$``, comments and heredocs reach
+    that shell unchanged. A file written as ``x`` or ``workspace/x`` runs as
+    ``x`` from there; the agent instruction says so.
+    """
+    target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
+    return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
+
+
+def _raw_cwd(backend: Any, raw_execute: Any) -> str:
+    """Session cwd read through the raw shell, cached on the provider.
+
+    Raises ``SandboxError`` when the shell cannot tell. The provider's lazy
+    probe runs ``self.execute("pwd")``, which after the layout is the
+    workspace shell and would cache ``<cwd>/workspace``, so every file would
+    land in ``workspace/workspace``. A loud error is better than that.
+    """
+    cached = getattr(backend, "_cwd", None)
+    if cached:
+        return cached
+    try:
+        result = raw_execute("pwd")
+    except Exception as exc:
+        raise SandboxError("sandbox working directory unknown") from exc
+    text = (getattr(result, "output", "") or "").strip()
+    if getattr(result, "exit_code", 0) not in (0, None) or not text:
+        raise SandboxError("sandbox working directory unknown")
+    cwd = text.splitlines()[-1].rstrip("/")
+    if hasattr(backend, "_cwd"):
+        backend._cwd = cwd
+    return cwd or "/"
+
+
 def prepare_workspace_layout(backend: Any) -> Any:
     """Create ``workspace`` and start shell commands inside it.
 
     ``skills``, ``large_tool_results``, and ``artifacts`` stay siblings
     of that directory. File paths that do not name one of them are stored
     under ``workspace``. A second call does nothing.
+
+    The session root is the provider cwd when it reports one (AgentCore) and
+    ``/`` otherwise (OpenSandbox stores ``/workspace/x`` as an absolute path).
+    Internal commands (workspace listing, process baseline) keep running from
+    that root through ``_eve_raw_execute``.
     """
     if backend is None or getattr(backend, "_eve_workspace_ready", False):
         return backend
     session_cwd = ""
+    root: Optional[str] = "/"
+    execute = getattr(backend, "execute", None)
+    raw = getattr(backend, "_eve_raw_execute", None) or execute
     get_cwd = getattr(backend, "_get_cwd", None)
     if get_cwd is not None:
         try:
             session_cwd = str(get_cwd() or "").rstrip("/")
         except Exception:
             logger.warning("workspace.cwd_probe_failed", exc_info=True)
-            session_cwd = ""
-    execute = getattr(backend, "execute", None)
+            try:
+                probed = _raw_cwd(backend, raw) if raw is not None else ""
+            except SandboxError:
+                probed = ""
+            if probed:
+                session_cwd = probed.rstrip("/")
+            elif raw is not None:
+                # Every later probe reads pwd through the raw shell, so a
+                # write either finds the real root or fails with an error.
+                logger.error("workspace.cwd_unknown")
+                backend._get_cwd = lambda: _raw_cwd(backend, raw)
+                root = None
+        if root is not None:
+            root = session_cwd or "/"
+    workspace_dir = f"{root.rstrip('/')}/workspace" if root else None
     if execute is not None:
+        if getattr(backend, "_eve_raw_execute", None) is None:
+            if root:
+                root_q = shlex.quote(root)
+
+                def execute_from_root(command: str, *args: Any, **kwargs: Any):
+                    return execute(f"cd {root_q} && {command}", *args, **kwargs)
+
+                backend._eve_raw_execute = execute_from_root
+            else:
+                backend._eve_raw_execute = execute
+        target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
         try:
-            execute("mkdir -p workspace")
+            execute(f"mkdir -p {target}")
         except Exception:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
         def execute_in_workspace(command: str, *args: Any, **kwargs: Any):
             return execute(
-                f"mkdir -p workspace && cd workspace && {command}",
+                workspace_shell_command(command, workspace_dir),
                 *args,
                 **kwargs,
             )

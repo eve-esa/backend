@@ -1480,6 +1480,8 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
 _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "The sandbox root has four sibling directories. "
     "workspace/ is your working directory. The shell starts there. "
+    "Run a file you wrote as `x` or `workspace/x` as `x`, for example "
+    "`python3 x`: inside workspace/ the path `workspace/x` does not exist. "
     "A file you create or download belongs in workspace/ and stays for this "
     "conversation. "
     "/skills/ holds installed skills. Read them. Do not write there. "
