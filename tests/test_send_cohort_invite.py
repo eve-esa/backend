@@ -34,9 +34,13 @@ class FakeMailer:
 
     def __init__(self, fail_for: set[str] | None = None):
         self.sent: list[dict] = []
+        self.fallback_on_uncertain: list[bool] = []
         self.fail_for = fail_for or set()
 
-    async def __call__(self, to: str, subject: str, html: str, text: str) -> None:
+    async def __call__(
+        self, to: str, subject: str, html: str, text: str, *, fallback_on_uncertain: bool = True
+    ) -> None:
+        self.fallback_on_uncertain.append(fallback_on_uncertain)
         if to in self.fail_for:
             raise RuntimeError("fake transport failure")
         self.sent.append({"to": to, "subject": subject, "html": html, "text": text})
@@ -717,7 +721,7 @@ async def test_rerun_after_a_crash_sends_nothing_twice(world, fake_mailer, pause
     signup = f"crash-signup-{world['tag']}@example.org"
     sent: list[str] = []
 
-    async def send_then_die(to, subject, html, text):
+    async def send_then_die(to, subject, html, text, **_):
         sent.append(to)
         if to == signup:
             raise Killed()  # the mail left, the stamp never happened
@@ -748,7 +752,7 @@ async def test_failed_smtp_send_logs_reason_and_code_never_the_address(
     _, account = await _user(world, "refused")
     signup = f"refused-signup-{world['tag']}@example.org"
 
-    async def refuse(to, subject, html, text):
+    async def refuse(to, subject, html, text, **_):
         if to == account:
             raise MailDeliveryFailed(
                 f"SMTP send failed for {to}", reason="SMTPDataError", code=550
@@ -870,6 +874,18 @@ async def test_twin_row_of_an_account_with_an_old_claim_gets_no_mail(world, fake
 
 
 @pytest.mark.asyncio
+async def test_every_send_forbids_a_second_copy_through_the_fallback(world, fake_mailer, pauses):
+    """An unclear SMTP send must stay in doubt, never be resent through SES."""
+    _, account = await _user(world, "nofallback")
+    signup = f"nofallback-signup-{world['tag']}@example.org"
+
+    await send_cohort_invite(world["cohort"], apply=True, emails=[account, signup], sleep_seconds=0)
+
+    assert [m["to"] for m in fake_mailer.sent] == [account, signup]
+    assert fake_mailer.fallback_on_uncertain == [False, False]
+
+
+@pytest.mark.asyncio
 async def test_unclear_send_keeps_the_claim_and_a_rerun_sends_nothing(
     world, fake_mailer, pauses, monkeypatch, caplog
 ):
@@ -878,7 +894,7 @@ async def test_unclear_send_keeps_the_claim_and_a_rerun_sends_nothing(
     signup = f"unclear-signup-{world['tag']}@example.org"
     attempts: list[str] = []
 
-    async def drop_the_line(to, subject, html, text):
+    async def drop_the_line(to, subject, html, text, **_):
         attempts.append(to)
         raise _unclear(to)
 
@@ -917,7 +933,7 @@ async def test_definite_refusal_releases_the_claim_and_a_rerun_retries(
     _, account = await _user(world, "refused-once")
     calls: list[str] = []
 
-    async def refuse_once(to, subject, html, text):
+    async def refuse_once(to, subject, html, text, **_):
         calls.append(to)
         if len(calls) == 1:
             raise MailDeliveryFailed(
@@ -940,7 +956,7 @@ async def test_failure_line_carries_the_enhanced_status(world, fake_mailer, paus
 
     _, account = await _user(world, "quota")
 
-    async def daily_limit(to, subject, html, text):
+    async def daily_limit(to, subject, html, text, **_):
         raise MailDeliveryFailed("SMTP send failed", reason="SMTPDataError", code=550, status="5.4.5")
 
     monkeypatch.setattr(command, "send_mail", daily_limit)

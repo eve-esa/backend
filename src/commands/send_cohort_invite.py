@@ -501,7 +501,15 @@ async def _send_one(
         return "claimed_elsewhere", recipient.mail
 
     try:
-        await send_mail(to=recipient.email, subject=mail.subject, html=mail.html, text=mail.text)
+        # At most once: an unclear SMTP send stays in doubt instead of going
+        # out a second time through the SES fallback.
+        await send_mail(
+            to=recipient.email,
+            subject=mail.subject,
+            html=mail.html,
+            text=mail.text,
+            fallback_on_uncertain=False,
+        )
     except Exception as exc:
         if delivery_uncertain(exc):
             # The relay may have the message: keep the claim, so no rerun
