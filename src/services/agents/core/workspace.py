@@ -916,7 +916,7 @@ async def _link_workspace_file(
         logger.warning("workspace.markdown_unreadable url=%s", original)
         return original
     url = workspace_file_url(ctx.conversation_id, relative)
-    logger.warning("workspace.markdown_repaired url=%s to=%s", original, url)
+    logger.info("workspace.markdown_repaired url=%s to=%s", original, url)
     return f"{label}({url})"
 
 

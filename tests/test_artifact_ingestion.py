@@ -697,7 +697,7 @@ async def test_limit_warning_stubs_do_not_consume_the_cap(
     async def _persist(
         self, data, content_type, filename, ctx, tool_name, server_name
     ):
-        artifact = SimpleNamespace(id="art-1")
+        artifact = SimpleNamespace(id="art-1", filename=filename)
         ctx.collected_artifact_ids.append(artifact.id)
         return artifact, None
 
@@ -735,7 +735,9 @@ async def test_resource_link_count_excludes_limit_warnings(
     async def _persist(
         self, data, content_type, filename, ctx, tool_name, server_name
     ):
-        artifact = SimpleNamespace(id=f"art-{len(ctx.collected_artifact_ids) + 1}")
+        artifact = SimpleNamespace(
+            id=f"art-{len(ctx.collected_artifact_ids) + 1}", filename=filename
+        )
         ctx.collected_artifact_ids.append(artifact.id)
         return artifact, None
 
@@ -1034,5 +1036,94 @@ async def test_filename_is_escaped_in_the_markdown_stub(
         assert "\\]" in link_line and "\\(" in link_line
         payload = json.loads(meta_line)
         assert "\n" not in payload["filename"]
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_image_linked_by_its_bare_filename_renders(
+    interceptor, with_context
+):
+    """dummy_image on dev, 2026-11-18: the answer linked the bare filename.
+
+    The image is stored at the key its row serves, the turn remembers its
+    filename, and the answer link becomes ``/artifacts/{id}``.
+    """
+    from src.services.agents.core.runner import rewrite_answer_file_links
+
+    icept, fake = interceptor
+    result = CallToolResult(
+        content=[ImageContent(type="image", data=PNG_B64, mimeType="image/png")]
+    )
+
+    out = await icept(
+        _request(name="get_sample_image", server_name="dummy_image"), _handler(result)
+    )
+
+    try:
+        payload = _parse_stub(out.content[0])
+        assert payload["filename"] == "get_sample_image-1.png"
+        artifact = await Artifact.find_by_id(payload["artifact_id"])
+        assert fake.objects[artifact.key]["body"] == PNG_BYTES
+        assert with_context.collected_artifact_files == {
+            "get_sample_image-1.png": artifact.id
+        }
+
+        answer = await rewrite_answer_file_links(
+            "![get_sample_image-1.png](get_sample_image-1.png)"
+        )
+
+        assert answer == f"![get_sample_image-1.png](/artifacts/{artifact.id})"
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_two_calls_of_one_tool_in_a_turn_keep_both_images(
+    interceptor, with_context
+):
+    """The default name restarts at 1 on every call. Inside one turn the
+    second file gets its own name, so a bare link to each renders its image."""
+    from src.services.agents.core.runner import rewrite_answer_file_links
+
+    icept, _fake = interceptor
+    request = _request(name="get_sample_image", server_name="dummy_image")
+    first_png = PNG_BYTES + b"first"
+    second_png = PNG_BYTES + b"second"
+
+    def _image(data):
+        return CallToolResult(
+            content=[
+                ImageContent(
+                    type="image",
+                    data=base64.b64encode(data).decode("ascii"),
+                    mimeType="image/png",
+                )
+            ]
+        )
+
+    first = await icept(request, _handler(_image(first_png)))
+    second = await icept(request, _handler(_image(second_png)))
+
+    try:
+        first_stub = _parse_stub(first.content[0])
+        second_stub = _parse_stub(second.content[0])
+        assert first_stub["filename"] == "get_sample_image-1.png"
+        assert second_stub["filename"] == "get_sample_image-1-2.png"
+        second_artifact = await Artifact.find_by_id(second_stub["artifact_id"])
+        assert second_artifact.filename == "get_sample_image-1-2.png"
+        assert with_context.collected_artifact_files == {
+            "get_sample_image-1.png": first_stub["artifact_id"],
+            "get_sample_image-1-2.png": second_stub["artifact_id"],
+        }
+
+        answer = await rewrite_answer_file_links(
+            "![a](get_sample_image-1.png)\n![b](get_sample_image-1-2.png)"
+        )
+
+        assert answer == (
+            f"![a](/artifacts/{first_stub['artifact_id']})\n"
+            f"![b](/artifacts/{second_stub['artifact_id']})"
+        )
     finally:
         await _cleanup()

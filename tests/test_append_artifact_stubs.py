@@ -5,6 +5,8 @@ The runner rewrites that markdown in place. It does not append artifacts
 the answer never mentions.
 """
 
+import logging
+
 import pytest
 
 from src.services.agents.core.runner import (
@@ -82,6 +84,7 @@ async def test_a_sandbox_file_link_is_rewritten():
 
 @pytest.mark.asyncio
 async def test_a_google_host_around_the_artifact_id_is_rewritten(caplog):
+    caplog.set_level(logging.INFO)
     artifact_id = "6afb1ab73daca14aba4f887f"
 
     answer = await rewrite_answer_file_links(
@@ -97,3 +100,253 @@ async def test_a_google_host_around_the_artifact_id_is_rewritten(caplog):
     assert "artifact.markdown_repaired" in caplog.text
     assert "storage.googleapis.com" in caplog.text
     assert f"to=/artifacts/{artifact_id}" in caplog.text
+    assert not _warnings(caplog, "markdown_repaired")
+
+
+def _warnings(caplog, needle):
+    return [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and needle in record.getMessage()
+    ]
+
+
+# A tool image returned in this turn, then linked by its bare filename.
+# Found live on dev (dummy_image, 2026-11-18): the model wrote
+# ``![get_sample_image-1.png](get_sample_image-1.png)`` and the browser asked
+# ``/api/get_sample_image-1.png``.
+
+_TURN_ARTIFACT_ID = "6afdf46fa8ffdf3d917139e5"
+
+
+class _Body:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    def read(self):
+        return self.data
+
+    def close(self):
+        return None
+
+
+class _File:
+    def __init__(self, content=None, error=None):
+        self.content = content
+        self.error = error
+
+
+class _WorkspaceSandbox:
+    """Answers downloads from ``workspace/``; anything else is file_not_found."""
+
+    def __init__(self, files):
+        self.files = dict(files)
+
+    def download_files(self, paths):
+        found = []
+        for path in paths:
+            key = path[len("workspace/") :] if path.startswith("workspace/") else None
+            if key in self.files:
+                found.append(_File(self.files[key]))
+            else:
+                found.append(_File(error="file_not_found"))
+        return found
+
+
+class _Store:
+    def __init__(self):
+        self.objects: dict = {}
+
+    async def put_object(self, key, body, content_type, tagging=None):
+        self.objects[key] = body
+
+    async def get_object(self, key):
+        from src.services.storage import ObjectNotFoundError
+
+        if key not in self.objects:
+            raise ObjectNotFoundError(key)
+        return {"Body": _Body(self.objects[key])}
+
+
+@pytest.fixture
+def turn_context(monkeypatch):
+    from src.services.agents.core import workspace
+    from src.services.mcp.artifact_context import (
+        reset_artifact_context,
+        set_artifact_context,
+    )
+
+    store = _Store()
+    monkeypatch.setattr(workspace, "storage_service", store)
+    ctx, token = set_artifact_context("u1", "c1")
+    try:
+        ctx.collected_artifact_ids.append(_TURN_ARTIFACT_ID)
+        ctx.collected_artifact_files["get_sample_image-1.png"] = _TURN_ARTIFACT_ID
+        ctx.sandbox_backend = _WorkspaceSandbox(
+            {"ndvi.png": b"\x89PNG\r\n\x1a\nndvi"}
+        )
+        yield ctx, store
+    finally:
+        reset_artifact_context(token)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_filename_of_a_tool_image_becomes_its_artifact_url(
+    turn_context, caplog
+):
+    caplog.set_level(logging.INFO)
+    answer = await rewrite_answer_file_links(
+        "Here is the sample blue image:\n"
+        "![get_sample_image-1.png](get_sample_image-1.png)\n"
+    )
+
+    assert answer == (
+        "Here is the sample blue image:\n"
+        f"![get_sample_image-1.png](/artifacts/{_TURN_ARTIFACT_ID})\n"
+    )
+    assert f"to=/artifacts/{_TURN_ARTIFACT_ID}" in caplog.text
+    assert "workspace.markdown_unreadable" not in caplog.text
+    assert not _warnings(caplog, "markdown_repaired")
+
+
+@pytest.mark.asyncio
+async def test_an_artifacts_path_without_the_id_becomes_its_artifact_url(
+    turn_context,
+):
+    answer = await rewrite_answer_file_links(
+        "![img](/artifacts/get_sample_image-1.png) [img](./get_sample_image-1.png)"
+    )
+
+    assert answer == (
+        f"![img](/artifacts/{_TURN_ARTIFACT_ID}) [img](/artifacts/{_TURN_ARTIFACT_ID})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_file_link_still_points_at_the_workspace(
+    turn_context, caplog
+):
+    caplog.set_level(logging.INFO)
+    answer = await rewrite_answer_file_links("![ndvi](ndvi.png)")
+
+    assert answer == "![ndvi](/conversations/c1/workspace/ndvi.png)"
+    # A repair is expected work: INFO, never a warning in the release gate.
+    assert "workspace.markdown_repaired" in caplog.text
+    assert not _warnings(caplog, "markdown_repaired")
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_workspace_path_is_not_taken_for_the_tool_image(
+    turn_context,
+):
+    _, store = turn_context
+    store.objects["users/u1/conversations/c1/workspace/get_sample_image-1.png"] = (
+        b"\x89PNG\r\n\x1a\nmine"
+    )
+
+    answer = await rewrite_answer_file_links(
+        "![mine](/workspace/get_sample_image-1.png)"
+    )
+
+    assert answer == (
+        "![mine](/conversations/c1/workspace/get_sample_image-1.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_bare_filename_stays_and_warns(turn_context, caplog):
+    original = "![other](other.png)"
+
+    answer = await rewrite_answer_file_links(original)
+
+    assert answer == original
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and "workspace.markdown_unreadable" in record.getMessage()
+    ]
+    assert warnings
+
+
+@pytest.mark.asyncio
+async def test_an_external_url_with_the_same_filename_is_left_alone(turn_context):
+    original = "![x](https://example.org/img/get_sample_image-1.png)"
+
+    assert await rewrite_answer_file_links(original) == original
+
+
+@pytest.mark.asyncio
+async def test_a_tool_file_of_this_turn_wins_over_a_workspace_file_of_the_same_name(
+    turn_context,
+):
+    """Pinned: the bare name a tool returned in this turn is the exact match
+    and costs no sandbox read; the workspace file stays reachable through
+    ``/workspace/{name}``."""
+    ctx, store = turn_context
+    ctx.sandbox_backend.files["get_sample_image-1.png"] = b"\x89PNG\r\n\x1a\nmine"
+    store.objects["users/u1/conversations/c1/workspace/get_sample_image-1.png"] = (
+        b"\x89PNG\r\n\x1a\nmine"
+    )
+
+    answer = await rewrite_answer_file_links(
+        "![tool](get_sample_image-1.png) ![mine](/workspace/get_sample_image-1.png)"
+    )
+
+    assert answer == (
+        f"![tool](/artifacts/{_TURN_ARTIFACT_ID}) "
+        "![mine](/conversations/c1/workspace/get_sample_image-1.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_links_inside_code_are_left_as_written(turn_context):
+    host_link = (
+        "![m](https://storage.googleapis.com/b/artifacts/"
+        f"{_TURN_ARTIFACT_ID}/m.png)"
+    )
+    original = (
+        "Write `![a](get_sample_image-1.png)` like this:\n"
+        "```markdown\n"
+        f"![b](ndvi.png) {host_link}\n"
+        "```\n"
+        "~~~\n![c](get_sample_image-1.png)\n~~~\n"
+        "``![d](ndvi.png)`` and here it is: ![e](get_sample_image-1.png) "
+        "and ![f](ndvi.png)"
+    )
+
+    answer = await rewrite_answer_file_links(original)
+
+    assert answer == original.replace(
+        "![e](get_sample_image-1.png)", f"![e](/artifacts/{_TURN_ARTIFACT_ID})"
+    ).replace("and ![f](ndvi.png)", "and ![f](/conversations/c1/workspace/ndvi.png)")
+
+
+@pytest.mark.asyncio
+async def test_citation_offsets_survive_the_three_rewrite_passes(turn_context):
+    from src.services.sources.citations import (
+        CitationRewriter,
+        SourceRegistry,
+        marker_spans,
+    )
+
+    registry = SourceRegistry()
+    registry.register({"id": "src_a", "document_key": "doi:a", "title": "A"})
+    rewriter = CitationRewriter(registry)
+    streamed = (
+        "Map [S1]. "
+        "![m](https://storage.googleapis.com/b/artifacts/"
+        f"{_TURN_ARTIFACT_ID}/m.png) fact [S1]. "
+        "`![x](ndvi.png)` [S1] "
+        "![s](get_sample_image-1.png) again [S1]. "
+        "![n](ndvi.png) last [S1]."
+    )
+    text = rewriter.feed(streamed) + rewriter.flush()
+    assert text.count("[1]") == 5
+
+    passes: list = []
+    answer = await rewrite_answer_file_links(text, passes)
+
+    assert len(passes) == 3 and all(passes)
+    assert rewriter.remap(answer, passes) == 0
+    assert marker_spans(answer, rewriter.citations()) == ["[1]"] * 5

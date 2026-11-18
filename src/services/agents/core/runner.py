@@ -14,10 +14,11 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from fastapi import BackgroundTasks
 
@@ -103,6 +104,7 @@ from src.services.sources.citations import (
     SourceRegistry,
     citation_payload,
     prior_sources_from_rows,
+    shift_offset,
     strip_handles,
 )
 from src.services.mcp.tool_loader import (
@@ -1557,8 +1559,8 @@ def _markdown_paths_to_artifact_urls(
     """Rewrite a markdown artifact link to the URL the chat can load.
 
     A link that is already ``/artifacts/{id}`` is left as it is. Any other
-    form is repaired, and a warning names the URL that was wrong. Each repair
-    is appended to ``edits``.
+    form is repaired, and an INFO line names the URL that was wrong. Each
+    repair is appended to ``edits``.
     """
 
     def replace(match: re.Match) -> str:
@@ -1566,7 +1568,7 @@ def _markdown_paths_to_artifact_urls(
         repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
         original = match.group(0)
         if original != repaired:
-            logger.warning(
+            logger.info(
                 "artifact.markdown_repaired url=%s to=/artifacts/%s",
                 original,
                 artifact_id,
@@ -1576,6 +1578,85 @@ def _markdown_paths_to_artifact_urls(
         return repaired
 
     return _ARTIFACT_MARKDOWN.sub(replace, answer)
+
+
+# A markdown link whose target is a path, not a URL with a scheme.
+_MARKDOWN_PATH_LINK = re.compile(r"(!?\[[^\]]*])\(([^)\s:]+)\)")
+
+
+def _turn_artifact_filename(target: str) -> Optional[str]:
+    """The filename a link names when it can only mean a tool file.
+
+    A bare ``name.png``, ``./name.png`` or ``/artifacts/name.png`` (the id
+    left out). A path into another directory, ``/workspace/name.png``
+    included, is not a tool file.
+    """
+    raw = urllib.parse.unquote(target.split("?", 1)[0].split("#", 1)[0]).strip()
+    for prefix in ("./", "/artifacts/", "artifacts/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+            break
+    if not raw or "/" in raw or raw in {".", ".."}:
+        return None
+    return raw
+
+
+def _filenames_to_turn_artifact_urls(
+    answer: str, edits: Optional[List[Edit]] = None
+) -> str:
+    """Point a link to a file a tool returned in this turn at its artifact.
+
+    The stub tells the model ``/artifacts/{id}/{filename}``, yet a model may
+    write only the filename. That name is matched against the files the MCP
+    interceptor stored in this turn. Any other link is left to the workspace
+    pass. Each rewrite is appended to ``edits``.
+    """
+    from src.services.mcp.artifact_context import get_artifact_context
+
+    ctx = get_artifact_context()
+    files = getattr(ctx, "collected_artifact_files", None) if ctx else None
+    if not files:
+        return answer
+
+    def replace(match: re.Match) -> str:
+        name = _turn_artifact_filename(match.group(2))
+        artifact_id = files.get(name) if name else None
+        if artifact_id is None:
+            return match.group(0)
+        repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        # The id only: the original link is model text.
+        logger.info(
+            "artifact.markdown_repaired reason=turn_filename to=/artifacts/%s",
+            artifact_id,
+        )
+        if edits is not None:
+            edits.append((match.start(), match.end(), len(repaired)))
+        return repaired
+
+    return _MARKDOWN_PATH_LINK.sub(replace, answer)
+
+
+# Code the model quotes: a fenced block (to its closing fence or the end of
+# the answer), then an inline span closed by a run of the same length.
+_FENCED_CODE = re.compile(
+    r"^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n.*?(?:^ {0,3}\1[`~]*[ \t]*$|\Z)|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)", re.DOTALL)
+
+
+def _blank(text: str, regions: List[Tuple[int, int]]) -> str:
+    """``text`` with each region turned into spaces, same length."""
+    out = list(text)
+    for start, end in regions:
+        out[start:end] = " " * (end - start)
+    return "".join(out)
+
+
+def _code_regions(text: str) -> List[Tuple[int, int]]:
+    fenced = [m.span() for m in _FENCED_CODE.finditer(text)]
+    inline = [m.span() for m in _INLINE_CODE.finditer(_blank(text, fenced))]
+    return sorted(fenced + inline)
 
 
 async def rewrite_answer_file_links(
@@ -1590,6 +1671,10 @@ async def rewrite_answer_file_links(
     in place. A workspace path is published the same way. An artifact the
     answer never mentions stays out of the answer.
 
+    A link inside inline code or a fenced block is an example the model
+    quotes and stays as written: the passes run on a copy where code is
+    blanked to spaces of the same length, then the code goes back in place.
+
     ``passes`` receives the edits of each rewrite pass, in order, for
     ``CitationRewriter.remap``.
     """
@@ -1597,13 +1682,23 @@ async def rewrite_answer_file_links(
         return answer
     from src.services.agents.core.workspace import publish_markdown_files
 
+    regions = _code_regions(answer)
+    text = _blank(answer, regions)
     artifact_edits: List[Edit] = []
+    filename_edits: List[Edit] = []
     workspace_edits: List[Edit] = []
-    answer = _markdown_paths_to_artifact_urls(answer, artifact_edits)
-    answer = await publish_markdown_files(answer, workspace_edits)
+    text = _markdown_paths_to_artifact_urls(text, artifact_edits)
+    text = _filenames_to_turn_artifact_urls(text, filename_edits)
+    text = await publish_markdown_files(text, workspace_edits)
+    rewrite_passes = [artifact_edits, filename_edits, workspace_edits]
+    for start, end in regions:
+        at = start
+        for edits in rewrite_passes:
+            at = shift_offset(at, edits)
+        text = text[:at] + answer[start:end] + text[at + end - start :]
     if passes is not None:
-        passes.extend([artifact_edits, workspace_edits])
-    return answer
+        passes.extend(rewrite_passes)
+    return text
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
