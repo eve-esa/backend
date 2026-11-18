@@ -545,7 +545,12 @@ Please continue the conversation using this summary as context for understanding
 
             logger.info(f"bind_kwargs: {bind_kwargs}")
             llm_manager = get_shared_llm_manager()
-            llm = llm_manager.get_client_for_model(state.get("llm_type"))
+            # The candidate's own client, never a silent substitute: inside a
+            # rate limit window the JSC client refuses, and the caller's chain
+            # walk moves to the fallback and records it.
+            llm = llm_manager.client_for_candidate(
+                state.get("llm_type") or llm_manager.resolve_chain(None)[0]
+            )
             bound_llm = llm.bind(**bind_kwargs)
 
             final_messages = context_messages
@@ -1394,7 +1399,7 @@ async def generate_answer(
         # only second chance.
         chain = llm_manager.resolve_chain(request.llm_type)
         candidate = chain[0]
-        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+        circuit_open = llm_manager.open_circuits(request.llm_type, chain)
 
         # Build messages for LangGraph memory + generation
         messages_for_turn: List[Any] = []
@@ -1898,7 +1903,7 @@ async def _classic_stream_events(
             if len(chain) > 1 and chain[-1] == LLMType.Fallback.value
             else chain
         )
-        circuit_open = [name for name in chain if llm_manager.health.is_open(name)]
+        circuit_open = llm_manager.open_circuits(request.llm_type, chain)
         endpoint_attempts: List[Dict[str, str]] = []
         answered_by: Optional[str] = None
         stream_error: Optional[BaseException] = None

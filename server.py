@@ -32,6 +32,7 @@ from src.routers import (
 )
 from src.routers.mcp_proxy import MCPProxyDispatcher, shutdown_mcp_proxy_lifespans
 from src.services.rerank import aclose_rerank_clients
+from src.services.account_notifications import mail_template_store
 from src.core.vector_store_manager import aclose_qdrant_read_clients
 from src.services.request_rate_limiter import (
     aclose_request_rate_limiter,
@@ -127,8 +128,17 @@ def create_app(debug=False, **kwargs):
         except Exception:
             logging.exception("Sandbox reaper failed to start")
         try:
+            # Waits for the first pack at most 5 s; mail uses the bundled copy until then.
+            await mail_template_store.start()
+        except Exception:
+            logging.exception("Mail template refresh failed to start")
+        try:
             yield
         finally:
+            try:
+                await mail_template_store.stop()
+            except Exception:
+                logging.exception("Mail template refresh shutdown failed")
             try:
                 await stop_sandbox_reaper()
             except Exception:

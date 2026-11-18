@@ -1,0 +1,13 @@
+EVE is open to everyone
+
+First line wrapped.
+
+Second <b>para</b> & more.
+
+Sign in to EVE: https://eve-chat.example.org
+
+Kind regards,
+The EVE Team
+
+You are receiving this message because person@example.com has an EVE account. If you wish to unregister from the system, please use the contact form:
+https://eve.philab.esa.int/contact

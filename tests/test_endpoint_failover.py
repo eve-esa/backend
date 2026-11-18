@@ -228,6 +228,115 @@ async def test_an_open_circuit_keeps_the_next_request_off_the_dead_endpoint(
 
 
 @pytest.mark.asyncio
+async def test_a_429_keeps_the_next_explicit_request_off_the_endpoint(monkeypatch):
+    """A classic 429 opens the circuit for its Retry-After, and the next turn
+    that names the endpoint goes to the fallback without calling it."""
+    from openai import APIStatusError
+
+    user, _token = await create_test_user_and_token()
+    conversation = message = second_message = None
+    try:
+        conversation, message = await _new_turn(user)
+        request = httpx.Request("POST", "https://jsc.example/v1/chat/completions")
+        rate_limited = APIStatusError(
+            "Error code: 429",
+            response=httpx.Response(429, headers={"retry-after": "30"}, request=request),
+            body=None,
+        )
+        graph = _FakeGraph(
+            {"eve_jsc": [rate_limited], "fallback": ["fallback ", "answer"]}
+        )
+        manager = _patch_pipeline(monkeypatch, graph)
+
+        await _stream(conversation, message, llm_type="eve_jsc")
+        view = manager.health._window_view("eve_jsc")
+        # Below the 60 s base, a first 429 keeps the endpoint out 60 s.
+        assert view.until - manager.health._wall() == pytest.approx(60, abs=2)
+
+        second_message = await Message.create(
+            conversation_id=conversation.id,
+            input="And Milan?",
+            output="",
+            documents=[],
+            use_rag=False,
+            metadata={},
+        )
+        graph.seen.clear()
+        events = await _stream(conversation, second_message, llm_type="eve_jsc")
+
+        assert graph.seen == ["fallback"]
+        assert _tokens(events) == ["fallback ", "answer"]
+        saved = await Message.find_by_id(second_message.id)
+        endpoint = saved.metadata["endpoint"]
+        assert endpoint["chain"] == ["fallback"]
+        assert endpoint["answered"] == "fallback"
+        assert endpoint["substituted"] is True
+        assert endpoint["circuit_open"] == ["eve_jsc"]
+    finally:
+        await cleanup_models(
+            [
+                doc
+                for doc in (user, conversation, message, second_message)
+                if doc is not None
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_classic_graph_never_swaps_in_the_fallback_for_a_rate_limited_endpoint(
+    monkeypatch,
+):
+    """call_model asks for the candidate's own client. Inside a window the JSC
+    client refuses, and the chain walk moves to the fallback and says so; a
+    silent swap would report eve_jsc and could close the window for it."""
+    from langchain_openai import ChatOpenAI
+
+    from src.core.llm_health import EndpointHealth, EndpointRateLimited
+    from src.core.llm_manager import BreakerAwareChatOpenAI
+    from src.services import generate_answer as generate_answer_module
+
+    manager = LLMManager()
+    manager._health = EndpointHealth(cooldown_s=120)
+    monkeypatch.setattr(manager, "_is_configured", lambda name: name in ("eve_jsc", "fallback"))
+    sent: Dict[str, int] = {"eve_jsc": 0, "fallback": 0}
+
+    def upstream(name: str) -> httpx.AsyncClient:
+        def answer(request: httpx.Request) -> httpx.Response:
+            sent[name] += 1
+            return httpx.Response(500)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(answer))
+
+    jsc = BreakerAwareChatOpenAI(
+        api_key="k", base_url="https://jsc.example/v1", model="m", max_retries=0,
+        http_async_client=upstream("eve_jsc"),
+    ).guard(manager.health, "eve_jsc")
+    fallback = ChatOpenAI(
+        api_key="k", base_url="https://fallback.example/v1", model="m", max_retries=0,
+        http_async_client=upstream("fallback"),
+    )
+    monkeypatch.setattr(manager, "_get_eve_jsc_llm", lambda: jsc)
+    monkeypatch.setattr(manager, "_get_fallback_llm", lambda: fallback)
+    monkeypatch.setattr(f"{_MODULE}.get_shared_llm_manager", lambda: manager)
+    manager.health.record_rate_limit("eve_jsc", "30")
+
+    graph = await generate_answer_module._get_or_create_stateless_graph()
+    with pytest.raises(EndpointRateLimited):
+        await graph.ainvoke(
+            {
+                "messages": [("user", "hi")],
+                "temperature": 0.3,
+                "max_tokens": 10,
+                "conversation_summary": None,
+                "is_streaming": False,
+                "llm_type": "eve_jsc",
+            }
+        )
+    assert sent == {"eve_jsc": 0, "fallback": 0}
+    assert manager.health.is_rate_limited("eve_jsc") is True
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_endpoint_falls_back_and_says_it_was_substituted(
     monkeypatch,
 ):

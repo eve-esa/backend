@@ -91,6 +91,31 @@ costs an upstream request:
 Headers: `Retry-After` (seconds to the period reset) and `x-should-retry: false`, so an
 OpenAI SDK's own retry logic backs off instead of hammering the gateway.
 
+## 429: endpoint rate limited
+
+When a model endpoint answers 429, the chat and the gateway keep it out for a window (the
+longer of its `Retry-After` and 60 s doubled for every 429 in a row, at most 3600 s). A
+`jsc/` request for the same model the chat calls shares that window: inside it, or while
+another request is the one probe after it, the gateway answers 429 without calling
+upstream:
+
+```json
+{
+  "detail": {"code": "endpoint_rate_limited", "message": "The model endpoint is rate limited, retry after 60s"},
+  "error": {
+    "message": "The model endpoint is rate limited, retry after 60s",
+    "type": "rate_limit_error",
+    "code": "endpoint_rate_limited",
+    "param": null
+  }
+}
+```
+
+Headers: `Retry-After` (1 to 3600 seconds) and `x-should-retry: true`. The per-user request
+limit answers the same envelope with `code` `rate_limited` (`generation-errors.md`). Other
+`jsc/` models are separate Blablador buckets and do not share the window; `jsc/alias-eve`
+shares it only where the chat itself calls `alias-eve` (`EVE_JSC_MODEL_NAME`).
+
 ## OpenAI SDK example
 
 ```python
