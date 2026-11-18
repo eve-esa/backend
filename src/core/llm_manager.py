@@ -6,7 +6,7 @@ import contextlib
 import contextvars
 import logging
 from enum import Enum
-from typing import Any, AsyncGenerator, Iterator, Optional
+from typing import Any, AsyncGenerator, Dict, Iterator, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -35,6 +35,7 @@ from src.config import (
     EVE_JSC_BASE_URL,
     EVE_JSC_MODEL_NAME,
     EVE_JSC_API_KEY,
+    IMAGE_INPUT_MODEL_NAMES,
 )
 from src.constants import DEFAULT_MAX_NEW_TOKENS, MODEL_CONTEXT_SIZE
 from src import config as _config
@@ -53,6 +54,22 @@ from src.utils.helpers import (
 from src.utils.template_loader import format_template, get_template
 
 logger = logging.getLogger(__name__)
+
+
+def platform_model_profile(model_name: Optional[str]) -> Dict[str, bool]:
+    """The image fields of a platform client's LangChain ``profile``.
+
+    deepagents' ``UnsupportedContentMiddleware`` reads them: when they are
+    False, an image that ``read_file`` returns reaches the model as a text
+    notice naming the file and its type. Without a profile the image goes to
+    the model as an ``image_url`` part, which EVE-Instruct refuses with a 400,
+    and the retry after it says only "Unsupported content", which the model
+    answered with an invented description. A model listed in
+    ``IMAGE_INPUT_MODEL_NAMES`` keeps the image.
+    """
+    listed = {name.strip() for name in IMAGE_INPUT_MODEL_NAMES.split(",") if name.strip()}
+    accepts = bool(model_name) and model_name in listed
+    return {"image_inputs": accepts, "image_tool_message": accepts}
 
 
 class LLMType(Enum):
@@ -384,6 +401,7 @@ class LLMManager:
                 api_key=MAIN_MODEL_API_KEY,
                 base_url=self._main_base_url,
                 model=self._main_model_name,
+                profile=platform_model_profile(self._main_model_name),
                 temperature=0.3,
                 timeout=MAIN_MODEL_TIMEOUT,
                 # SDK-level retries would burn the caller's first-token budget
@@ -405,6 +423,7 @@ class LLMManager:
                 api_key=FALLBACK_MODEL_API_KEY,
                 base_url=self._fallback_base_url,
                 model=self._fallback_model_name,
+                profile=platform_model_profile(self._fallback_model_name),
                 temperature=0.3,
                 timeout=MODEL_TIMEOUT,
                 max_retries=0,
@@ -422,6 +441,7 @@ class LLMManager:
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_small_base_url,
                 model=self._satcom_small_model_name,
+                profile=platform_model_profile(self._satcom_small_model_name),
                 temperature=0.3,
                 timeout=MODEL_TIMEOUT,
                 max_retries=0,
@@ -439,6 +459,7 @@ class LLMManager:
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_large_base_url,
                 model=self._satcom_large_model_name,
+                profile=platform_model_profile(self._satcom_large_model_name),
                 temperature=0.3,
                 timeout=MODEL_TIMEOUT,
                 max_retries=0,
@@ -458,6 +479,7 @@ class LLMManager:
                 api_key=EVE_JSC_API_KEY,
                 base_url=self._eve_jsc_base_url,
                 model=self._eve_jsc_model_name,
+                profile=platform_model_profile(self._eve_jsc_model_name),
                 temperature=0.3,
                 timeout=EVE_JSC_TIMEOUT,
                 max_retries=0,
@@ -477,6 +499,7 @@ class LLMManager:
                 api_key=EVE_JSC_API_KEY,
                 base_url=self._eve_jsc_base_url,
                 model=self._jsc_large_model_name,
+                profile=platform_model_profile(self._jsc_large_model_name),
                 temperature=0.3,
                 timeout=JSC_LARGE_TIMEOUT,
                 max_retries=0,
