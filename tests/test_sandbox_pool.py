@@ -1003,3 +1003,52 @@ def test_turn_windows_follow_the_turn_deadline(monkeypatch):
     )
     assert sandbox_busy_ttl_s() == 1080
     assert sandbox_reuse_limit_s() == 540
+
+
+async def test_a_delete_marks_the_record_before_the_kill(
+    monkeypatch, clock, sandbox_store
+):
+    from src.services.agents.core.sandbox_pool import RETIRING_FIELD
+
+    _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+    seen: list = []
+
+    def kill(record):
+        seen.append(sandbox_store._records.get("c1", {}).get(RETIRING_FIELD))
+
+    monkeypatch.setattr(f"{_POOL}.kill_record", kill)
+    await discard_conversation_sandbox("c1")
+
+    assert seen == ["1"]
+    assert await sandbox_store.get("c1") is None
+
+
+async def test_a_marked_record_is_replaced_not_reused(
+    monkeypatch, clock, sandbox_store
+):
+    from src.services.agents.core.sandbox_pool import RETIRING_FIELD
+
+    state = _install(monkeypatch, clock)
+    snapshots: list = []
+
+    async def _snapshot(conversation_id, _record):
+        snapshots.append(conversation_id)
+
+    monkeypatch.setattr(f"{_POOL}._snapshot_workspace", _snapshot)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+    record = await sandbox_store.get("c1")
+    record[RETIRING_FIELD] = "1"
+    await sandbox_store.put("c1", record)
+
+    again = await acquire_sandbox("c1", None)
+
+    assert again is not None
+    assert again.session.sandbox_id != lease.session.sandbox_id
+    assert state["killed"] == [lease.session.sandbox_id]
+    assert snapshots == []
+    assert RETIRING_FIELD not in (await sandbox_store.get("c1"))

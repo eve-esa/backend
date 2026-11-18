@@ -31,7 +31,11 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
-from src.services.agents.core.sandbox import sandbox_idle_ttl_s, sandbox_reuse_limit_s
+from src.services.agents.core.sandbox import (
+    after_turn,
+    sandbox_idle_ttl_s,
+    sandbox_reuse_limit_s,
+)
 from src.services.agents.core.tool_results import (
     RESTORE_MAX_BYTES,
     RESTORE_MAX_OBJECTS,
@@ -54,6 +58,90 @@ _FIND = (
 )
 _PS_LINE = re.compile(r"^(\d+)\s*(.*)$")
 _STATE_NAME = "workspace_state"
+# What the AgentCore integration returns, with exit code 1, for a command
+# sent to a session that has ended.
+_SESSION_EXPIRED = "AgentCore session has expired"
+# Deadline on the record lookup behind *alive*. The Redis client has no
+# socket timeout, so a store that does not answer would hold the save.
+_ALIVE_TIMEOUT_S = 2.0
+
+Alive = Callable[[], Awaitable[bool]]
+
+
+class _SandboxClosed(Exception):
+    """The save stops here. Nothing more is written.
+
+    *lost* is true when nobody stopped the sandbox on purpose, or when that
+    cannot be told: the tree is not saved and the log is a WARNING.
+    """
+
+    def __init__(self, reason: str, *, lost: bool = False) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.lost = lost
+
+
+async def _check_alive(alive: Optional[Alive]) -> None:
+    if alive is None:
+        return
+    try:
+        current = await alive()
+    except _SandboxClosed:
+        raise
+    except Exception as exc:
+        raise _SandboxClosed("store_unavailable", lost=True) from exc
+    if not current:
+        raise _SandboxClosed("sandbox_discarded")
+
+
+async def _classify(closed: _SandboxClosed, alive: Optional[Alive]) -> _SandboxClosed:
+    """An ended session is expected only when the sandbox was stopped on purpose."""
+    if closed.reason != "session_expired" or closed.lost:
+        return closed
+    try:
+        await _check_alive(alive)
+    except _SandboxClosed as gone:
+        if not gone.lost:
+            return closed
+    return _SandboxClosed(closed.reason, lost=True)
+
+
+def _log_closed(event: str, conversation_id: str, closed: _SandboxClosed) -> None:
+    if closed.lost:
+        logger.warning(
+            "workspace.save_failed conversation_id=%s reason=%s",
+            conversation_id,
+            closed.reason,
+        )
+    else:
+        logger.info(
+            "%s conversation_id=%s reason=%s", event, conversation_id, closed.reason
+        )
+
+
+def _raise_if_closed(output: str, ok: bool) -> None:
+    if not ok and _SESSION_EXPIRED in output:
+        raise _SandboxClosed("session_expired")
+
+
+async def _put_checked(
+    key: str, data: bytes, content_type: str, alive: Optional[Alive]
+) -> None:
+    """Write *key*, then ask *alive* again; a sandbox gone meanwhile undoes it.
+
+    A conversation delete drops the record before it erases the prefix, so a
+    write that lands after the erase is caught by the check that follows it.
+    """
+    await _check_alive(alive)
+    await storage_service.put_object(key, data, content_type)
+    try:
+        await _check_alive(alive)
+    except _SandboxClosed:
+        try:
+            await storage_service.delete_object(key)
+        except Exception:
+            logger.warning("workspace.undo_failed key=%s", key, exc_info=True)
+        raise
 
 
 def workspace_prefix(user_id: str, conversation_id: str) -> str:
@@ -113,11 +201,28 @@ async def restore_workspace(
 
 
 async def save_workspace(
-    sandbox_backend: Any, user_id: str, conversation_id: str
+    sandbox_backend: Any,
+    user_id: str,
+    conversation_id: str,
+    *,
+    alive: Optional[Alive] = None,
 ) -> None:
-    """Write the working directory to S3 once. A failure is logged."""
+    """Write the working directory to S3 once. A failure is logged.
+
+    *alive* is asked before and after every write. False stops the save and
+    undoes the write just made: the sandbox was discarded, and a conversation
+    delete erases the prefix next. A store error stops it too (WARNING): with
+    the store down the delete may still erase the prefix. An ended session
+    whose sandbox was not discarded is a lost save (WARNING).
+    """
     try:
-        await _save(sandbox_backend, user_id, conversation_id)
+        await _save(sandbox_backend, user_id, conversation_id, alive=alive)
+    except _SandboxClosed as closed:
+        _log_closed(
+            "workspace.save_skipped",
+            conversation_id,
+            await _classify(closed, alive),
+        )
     except Exception:
         logger.warning(
             "workspace.save_failed conversation_id=%s",
@@ -134,24 +239,62 @@ async def settle_workspace(
     baseline: str = "",
     extend: Optional[Callable[[], Awaitable[bool]]] = None,
     max_wait_s: Optional[float] = None,
+    alive: Optional[Alive] = None,
 ) -> None:
     """Save once the tree is quiet, or when *max_wait_s* runs out.
 
     Quiet means no pid outside *baseline* (probe commands do not count) and
     two listings with the same path, size, and mtime. The default wait is
-    the sandbox idle TTL.
+    the sandbox idle TTL. A sandbox that is gone (*alive* false, or the
+    session expired after a discard) ends the wait without a save, logged at
+    INFO. A store error, or a session that ended with its record still live,
+    ends it with a WARNING.
     """
+    try:
+        await _settle(
+            sandbox_backend,
+            user_id,
+            conversation_id,
+            baseline=baseline,
+            extend=extend,
+            max_wait_s=max_wait_s,
+            alive=alive,
+        )
+    except _SandboxClosed as closed:
+        _log_closed(
+            "workspace.sync_skipped",
+            conversation_id,
+            await _classify(closed, alive),
+        )
+
+
+async def _settle(
+    sandbox_backend: Any,
+    user_id: str,
+    conversation_id: str,
+    *,
+    baseline: str,
+    extend: Optional[Callable[[], Awaitable[bool]]],
+    max_wait_s: Optional[float],
+    alive: Optional[Alive],
+) -> None:
+    async def save() -> None:
+        await save_workspace(
+            sandbox_backend, user_id, conversation_id, alive=alive
+        )
+
     started = time.monotonic()
     limit = float(sandbox_idle_ttl_s() if max_wait_s is None else max_wait_s)
     previous: Optional[tuple] = None
     step = 0
     while True:
+        await _check_alive(alive)
         running = await _jobs_running(sandbox_backend, baseline)
         signature = await _listing_signature(sandbox_backend)
         # A sandbox that cannot list will not start listing later. Save once
         # (that save also sees the failure and does not delete) and stop.
         if not running and signature is None:
-            await save_workspace(sandbox_backend, user_id, conversation_id)
+            await save()
             return
         if (
             not running
@@ -159,14 +302,14 @@ async def settle_workspace(
             and signature is not None
             and previous == signature
         ):
-            await save_workspace(sandbox_backend, user_id, conversation_id)
+            await save()
             return
         previous = None if running or signature is None else signature
         if time.monotonic() - started >= limit:
-            await save_workspace(sandbox_backend, user_id, conversation_id)
+            await save()
             return
         if extend is not None and not await extend():
-            await save_workspace(sandbox_backend, user_id, conversation_id)
+            await save()
             return
         delay = _BACKOFF_S[min(step, len(_BACKOFF_S) - 1)]
         step += 1
@@ -176,15 +319,21 @@ async def settle_workspace(
 async def sync_workspace(
     session: Any, user_id: str, conversation_id: str
 ) -> None:
-    """Settle, save, then detach. The answer does not wait for this."""
+    """Settle, save, then detach. The answer does not wait for this.
+
+    A conversation delete can discard the sandbox while this runs. The save
+    then stops at the next step and logs at INFO, not ERROR.
+    """
     try:
-        await settle_workspace(
-            session.backend,
-            user_id,
-            conversation_id,
-            baseline=str(session.metadata.get("process_baseline") or ""),
-            extend=lambda: _extend_deadline(session, conversation_id),
-        )
+        with after_turn():
+            await settle_workspace(
+                session.backend,
+                user_id,
+                conversation_id,
+                baseline=str(session.metadata.get("process_baseline") or ""),
+                extend=lambda: _extend_deadline(session, conversation_id),
+                alive=lambda: _sandbox_current(session, conversation_id),
+            )
     except Exception:
         logger.warning(
             "workspace.sync_failed conversation_id=%s",
@@ -250,10 +399,15 @@ async def _restore(
 
 
 async def _save(
-    sandbox_backend: Any, user_id: str, conversation_id: str
+    sandbox_backend: Any,
+    user_id: str,
+    conversation_id: str,
+    *,
+    alive: Optional[Alive] = None,
 ) -> None:
     if sandbox_backend is None or not user_id or not conversation_id:
         return
+    await _check_alive(alive)
     listed, truncated = await _list_files(sandbox_backend)
     if listed is None:
         return
@@ -285,11 +439,12 @@ async def _save(
             continue
         digest = hashlib.sha256(data).hexdigest()
         if prior is None or prior.get("sha256") != digest:
-            await storage_service.put_object(
-                f"{prefix}{relative}", data, _content_type(data, relative)
+            await _put_checked(
+                f"{prefix}{relative}", data, _content_type(data, relative), alive
             )
         kept[relative] = {"size": size, "mtime": mtime, "sha256": digest}
         total += size
+    await _check_alive(alive)
     if not truncated:
         await _delete_missing(prefix, set(kept))
         state = kept
@@ -299,10 +454,11 @@ async def _save(
         )
         state = dict(previous)
         state.update(kept)
-    await storage_service.put_object(
+    await _put_checked(
         workspace_state_key(user_id, conversation_id),
         json.dumps({"files": state}).encode("utf-8"),
         "application/json",
+        alive,
     )
 
 
@@ -335,6 +491,7 @@ async def _jobs_running(backend: Any, baseline: str) -> bool:
     except Exception:
         logger.warning("workspace.ps_failed", exc_info=True)
         return False
+    _raise_if_closed(output, ok)
     if not ok:
         return False
     return bool(_pids(output, drop_probes=True) - known)
@@ -360,6 +517,7 @@ async def _list_files(
     except Exception:
         logger.warning("workspace.list_failed", exc_info=True)
         return None, True
+    _raise_if_closed(output, ok)
     if not ok:
         logger.warning("workspace.list_failed")
         return None, True
@@ -594,6 +752,32 @@ async def _extend_deadline(session: Any, conversation_id: str) -> bool:
                 exc_info=True,
             )
     return True
+
+
+async def _sandbox_current(session: Any, conversation_id: str) -> bool:
+    """False once the record is gone, marked retiring, or names another sandbox.
+
+    A stop marks the record, kills the sandbox, then drops the record. A store
+    error or a lookup past ``_ALIVE_TIMEOUT_S`` raises: the caller treats it
+    as unknown and writes nothing. Without ``REDIS_URL`` the store is per
+    process, so a delete served by another worker is not seen here.
+    """
+    from src.services.agents.core.sandbox_pool import RETIRING_FIELD, get_store
+
+    try:
+        record = await asyncio.wait_for(
+            get_store().get(conversation_id), timeout=_ALIVE_TIMEOUT_S
+        )
+    except Exception as exc:
+        logger.info(
+            "workspace.alive_check_failed conversation_id=%s error=%s",
+            conversation_id,
+            type(exc).__name__,
+        )
+        raise _SandboxClosed("store_unavailable", lost=True) from exc
+    if record is None or record.get(RETIRING_FIELD):
+        return False
+    return record.get("sandbox_id") == getattr(session, "sandbox_id", None)
 
 
 def _read_body(response: dict) -> bytes:

@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 _IDLE_KEY = "sandbox:idle"
 _LOCK_TTL_MS = 180_000
+# Set on a record right before its sandbox is stopped. A post-turn save that
+# reads it, or finds no record, knows the stop was deliberate.
+RETIRING_FIELD = "retiring"
 _LOCK_POLL_S = 0.2
 _UNLOCK_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -590,11 +593,25 @@ async def _retire(
     """Stop the sandbox and drop its record. False leaves the record for a retry.
 
     ``snapshot`` saves the workspace before the kill; a conversation delete
-    turns it off, since it erases the workspace right after.
+    turns it off, since it erases the workspace right after. The record is
+    marked with ``RETIRING_FIELD`` before the kill, so a post-turn save that
+    meets the ended session reads a deliberate stop, not a lost save. A record
+    already marked is not snapshotted again: its stop was decided earlier.
     """
     await guard.check()
-    if snapshot:
+    if snapshot and not record.get(RETIRING_FIELD):
         await _snapshot_workspace(conversation_id, record)
+    try:
+        await guard.check()
+        await store.put(conversation_id, {**record, RETIRING_FIELD: "1"})
+    except SandboxLockLost:
+        raise
+    except Exception:
+        logger.warning(
+            "sandbox.mark_retiring_failed conversation_id=%s",
+            conversation_id,
+            exc_info=True,
+        )
     try:
         await asyncio.to_thread(kill_record, record)
     except Exception:
@@ -683,7 +700,8 @@ async def _acquire_locked(
     fresh = False
     inflight = int(record.get("inflight", "0")) if record else 0
     same_provider = record is not None and record.get("provider") == provider
-    if same_provider and record is not None and (
+    retiring = record is not None and bool(record.get(RETIRING_FIELD))
+    if same_provider and record is not None and not retiring and (
         _within_lifetime(record, now) or inflight > 0
     ):
         try:

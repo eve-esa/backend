@@ -22,6 +22,7 @@ idle timer and the in-turn window are the same call.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -29,7 +30,7 @@ import re
 import time
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from src.config import AGENTIC_TURN_DEADLINE
 
@@ -139,6 +140,48 @@ class _StoppedCommandFilter(logging.Filter):
         return True
 
 
+# The AgentCore integration logs ERROR "AgentCore session expired while ..."
+# and returns exit code 1 when the session is gone. After a turn the save of
+# the workspace can meet a session that a conversation delete just stopped,
+# so there the line drops to INFO and the save logs the outcome itself: INFO
+# when the sandbox was stopped on purpose, WARNING workspace.save_failed
+# reason=session_expired when its record still names it. During a turn, and
+# in the reaper snapshot, the ERROR stays.
+_AGENTCORE_SDK_LOGGER = "langchain_agentcore_codeinterpreter.sandbox"
+_AGENTCORE_EXPIRED = "AgentCore session expired while"
+_after_turn: ContextVar[bool] = ContextVar("sandbox_after_turn", default=False)
+
+
+class _ClosedAfterTurnFilter(logging.Filter):
+    """Log an expired session at INFO, with the reason, inside the post-turn save."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            not _after_turn.get()
+            or record.levelno < logging.WARNING
+            or not str(record.msg).startswith(_AGENTCORE_EXPIRED)
+        ):
+            return True
+        record.msg = f"{record.msg} reason=session_closed_after_turn"
+        record.levelno = logging.INFO
+        record.levelname = logging.getLevelName(logging.INFO)
+        return True
+
+
+@contextlib.contextmanager
+def after_turn() -> Iterator[None]:
+    """Mark sandbox calls made here as post-turn work.
+
+    ``asyncio.to_thread`` copies the context, so a command run in a thread
+    inside this block is marked too.
+    """
+    token = _after_turn.set(True)
+    try:
+        yield
+    finally:
+        _after_turn.reset(token)
+
+
 # Marks our filters on the SDK loggers. A module reload (local development)
 # builds new ContextVars, so an older instance is replaced, not kept.
 _FILTER_MARK = "_eve_sandbox_filter"
@@ -159,6 +202,7 @@ for _name in _OPENSANDBOX_RETRY_LOGGERS:
     _add_filter_once(_name, _RetryAsInfoFilter())
 for _name in _OPENSANDBOX_COMMAND_LOGGERS:
     _add_filter_once(_name, _StoppedCommandFilter())
+_add_filter_once(_AGENTCORE_SDK_LOGGER, _ClosedAfterTurnFilter())
 
 
 class SandboxError(RuntimeError):
