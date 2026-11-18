@@ -113,11 +113,12 @@ def test_a_written_file_runs_by_its_real_absolute_path(agentcore):
     assert result.output.strip() == "42"
 
 
-def test_workspace_prefixed_paths_fail_loudly_in_the_shell(agentcore):
+@pytest.mark.parametrize("path", ["workspace/count.py", "/workspace/count.py"])
+def test_workspace_prefixed_paths_fail_loudly_in_the_shell(agentcore, path):
     _, backend = agentcore
     backend.write("count.py", "print(6 * 7)\n")
 
-    result = backend.execute("python3 workspace/count.py")
+    result = backend.execute(f"python3 {path}")
 
     assert result.exit_code != 0
     assert "workspace/count.py" in result.output
@@ -126,7 +127,9 @@ def test_workspace_prefixed_paths_fail_loudly_in_the_shell(agentcore):
 def test_the_instruction_says_how_to_run_a_written_file():
     assert "The shell starts there." in _ARTIFACT_MARKDOWN_INSTRUCTION
     assert "`python3 x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
-    assert "`workspace/x` does not exist" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "`workspace/x` or `/workspace/x` as `x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "never run a file through" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "Those paths do not exist there." in _ARTIFACT_MARKDOWN_INSTRUCTION
 
 
 @pytest.mark.parametrize(

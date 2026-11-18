@@ -1480,8 +1480,9 @@ def _resolve_agent_graph_type(request: GenerationRequest) -> str:
 _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "The sandbox root has four sibling directories. "
     "workspace/ is your working directory. The shell starts there. "
-    "Run a file you wrote as `x` or `workspace/x` as `x`, for example "
-    "`python3 x`: inside workspace/ the path `workspace/x` does not exist. "
+    "Run a file you wrote as `x`, `workspace/x` or `/workspace/x` as `x`, "
+    "for example `python3 x`: in the shell, never run a file through "
+    "`workspace/x` or `/workspace/x`. Those paths do not exist there. "
     "A file you create or download belongs in workspace/ and stays for this "
     "conversation. "
     "/skills/ holds installed skills. Read them. Do not write there. "
@@ -1491,7 +1492,8 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "thread. Read it. Do not write there. "
     "To show a file from any of these directories, write normal markdown. "
     "An image is `![filename](path)`. Any other file is `[filename](path)`. "
-    "A file in the working directory is `ndvi.png` or `/workspace/ndvi.png`. "
+    "In markdown a file in the working directory is `ndvi.png` or "
+    "`/workspace/ndvi.png`. "
     "Never put a scheme or a host in front of a path. "
     "There is no display tool. Do not call display."
 )
