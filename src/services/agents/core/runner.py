@@ -8,6 +8,7 @@ cancellation, error logging, token consumption, and stream bus publishing.
 import asyncio
 import contextlib
 import copy
+import functools
 import inspect
 import json
 import logging
@@ -20,6 +21,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
+from src import config as src_config
 from src.config import (
     AGENT_CONTEXT_WINDOW_TOKENS,
     AGENTIC_LLM_TYPE,
@@ -91,6 +93,13 @@ from src.services.mcp.retrieval_context import (
     get_retrieval_context,
     reset_retrieval_context,
     set_retrieval_context,
+)
+from src.services.sources.citations import (
+    CitationRewriter,
+    SourceRegistry,
+    citation_payload,
+    prior_sources_from_rows,
+    strip_handles,
 )
 from src.services.mcp.tool_loader import (
     MCP_SERVER_METADATA_KEY,
@@ -1129,8 +1138,12 @@ def _with_request_rag_defaults(
 
         object.__setattr__(bound_tool, "invoke", invoke_with_defaults)
 
+    # functools.wraps keeps the wrapped signature: the graph's tool node reads
+    # it to find the ``runtime`` parameter, and without it the MCP request
+    # carries no runtime, so the retrieval Sources lose their tool call id.
     original_coroutine = getattr(bound_tool, "coroutine", None)
     if callable(original_coroutine):
+        @functools.wraps(original_coroutine)
         async def coroutine_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return await original_coroutine(
                 *args,
@@ -1141,6 +1154,7 @@ def _with_request_rag_defaults(
 
     original_func = getattr(bound_tool, "func", None)
     if callable(original_func):
+        @functools.wraps(original_func)
         def func_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return original_func(
                 *args,
@@ -2381,6 +2395,64 @@ def _build_agentic_latencies(
 # ─── Non-streaming generation ─────────────────────────────────────────────────
 
 
+# FEATURE_INLINE_CITATIONS: handles are conversation scoped. A streamed turn
+# reads the Sources earlier turns stored before it hands out new ones; the
+# newest rows carry the highest handles, so the cap never lets a new handle
+# collide with one already in the thread.
+_PRIOR_SOURCES_TIMEOUT_S = 2.0
+_PRIOR_SOURCES_MAX_MESSAGES = 200
+
+
+async def _load_prior_sources(
+    conversation_id: str, message_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """The Sources earlier messages of the conversation stored, with their handles."""
+    cursor = (
+        Message.get_collection()
+        .find(
+            {
+                "conversation_id": conversation_id,
+                "$or": [
+                    {"metadata.citations": {"$exists": True}},
+                    {"metadata.sources_retrieved": {"$exists": True}},
+                ],
+            },
+            {"metadata.citations": 1, "metadata.sources_retrieved": 1},
+        )
+        .sort("timestamp", -1)
+        .limit(_PRIOR_SOURCES_MAX_MESSAGES)
+    )
+    rows = [
+        row
+        async for row in cursor
+        if message_id is None or str(row.get("_id")) != str(message_id)
+    ]
+    return prior_sources_from_rows(rows)
+
+
+async def _seed_conversation_sources(
+    registry: SourceRegistry, conversation_id: str, message_id: Optional[str]
+) -> bool:
+    """Seed ``registry`` from the conversation; False when the lookup failed.
+
+    Without the earlier handles a new one could take a number the thread
+    already uses and turn a cited passage into the wrong Source, so the
+    caller then runs the turn without handles.
+    """
+    try:
+        prior = await asyncio.wait_for(
+            _load_prior_sources(conversation_id, message_id),
+            _PRIOR_SOURCES_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning(
+            "citations.prior_sources_unavailable error=%s", type(exc).__name__
+        )
+        return False
+    registry.seed(prior)
+    return True
+
+
 async def generate_answer_agentic(
     request: GenerationRequest,
     *,
@@ -2660,6 +2732,9 @@ async def generate_answer_agentic(
                     msg.content if isinstance(msg.content, str) else str(msg.content)
                 )
                 break
+        # This route hands out no handles, but the model may copy one an
+        # earlier streamed turn left in the thread: it never reaches the user.
+        final_answer = strip_handles(final_answer)
         final_answer = await rewrite_answer_file_links(final_answer)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
@@ -2809,12 +2884,56 @@ async def generate_answer_agentic_stream_helper(
     step_frames: Optional[_StepFrames] = None
     # One row per model call that reported token counts (``final.usage``).
     usage_rows: List[Dict[str, Any]] = []
+    # The answer filter for [S<k>] handles. With FEATURE_INLINE_CITATIONS and
+    # the conversation's earlier Sources read (``citing``), it turns cited
+    # handles into [n] markers. Otherwise it knows no Source and only strips
+    # the handles the model may copy from the thread (an earlier flag-on turn):
+    # frames and the stored message carry no citation fields.
+    citing = False
+    citation_rewriter = CitationRewriter(SourceRegistry())
+    # A change to the marker list not yet sent on a token frame.
+    citations_dirty = False
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
     def _collected_artifact_ids() -> Optional[List[str]]:
         return list(artifact_ctx.collected_artifact_ids) or None
+
+    def _answer_text() -> str:
+        """The answer as streamed so far (text the citation filter holds is not in it)."""
+        return "".join(accumulated)
+
+    def _held_token_events() -> List[str]:
+        """Text the citation filter still holds, as one token frame, and into the answer.
+
+        Called before every terminal frame that follows streamed text, so the
+        stored answer is what the user saw.
+        """
+        rest = citation_rewriter.flush()
+        if not rest:
+            return []
+        accumulated.append(rest)
+        if output_format == "json":
+            return [f"data: {json.dumps({'type': 'token', 'content': rest})}\n\n"]
+        return [f"data: {rest}\n\n"]
+
+    def _citation_fields() -> Dict[str, Any]:
+        """``citations`` and ``sources_retrieved`` for the frame and the row; {} when off."""
+        return citation_payload(citation_rewriter) if citing else {}
+
+    def _log_citations(outcome: str) -> None:
+        if not citing:
+            return
+        # Counts only: never the answer, a passage or a handle's text.
+        logger.info(
+            "citations.summary outcome=%s cited=%d markers=%d invalid=%d sources=%d",
+            outcome,
+            len(citation_rewriter.numbers),
+            citation_rewriter.markers_seen - citation_rewriter.invalid,
+            citation_rewriter.invalid,
+            len(_retrieval_ctx.sources.sources),
+        )
 
     def _retrieval_state() -> tuple[List[Dict[str, Any]], bool]:
         """(documents, use_rag) from the retrieval ToolMessages seen so far."""
@@ -2843,6 +2962,7 @@ async def generate_answer_agentic_stream_helper(
                 final["endpoint"] = endpoint_metadata
             if usage_rows:
                 final["usage"] = list(usage_rows)
+            final.update(_citation_fields())
             if error is not None:
                 # A failure after streamed text: the legacy client ignores
                 # it, the AG-UI adapter maps it to RUN_ERROR. The code
@@ -2871,6 +2991,14 @@ async def generate_answer_agentic_stream_helper(
             return
 
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
+
+        if src_config.FEATURE_INLINE_CITATIONS:
+            citing = await _seed_conversation_sources(
+                _retrieval_ctx.sources, conversation_id, message_id
+            )
+            _retrieval_ctx.cite = citing
+            if citing:
+                citation_rewriter = CitationRewriter(_retrieval_ctx.sources)
 
         setup_latencies: Dict[str, float] = {}
 
@@ -3088,7 +3216,7 @@ async def generate_answer_agentic_stream_helper(
             return events
 
         def _flush_turn_buffer_to_events() -> List[str]:
-            nonlocal tokens_yielded, first_token_latency
+            nonlocal tokens_yielded, first_token_latency, citations_dirty
             if not turn_buffer:
                 return []
             items = list(turn_buffer)
@@ -3138,12 +3266,24 @@ async def generate_answer_agentic_stream_helper(
             for tok in answer_items:
                 if not tok:
                     continue
+                version = citation_rewriter.version
+                tok = citation_rewriter.feed(tok)
+                if citing and citation_rewriter.version != version:
+                    citations_dirty = True
+                if not tok:
+                    # Held, or a marker that only added an offset: the change
+                    # rides on the next token that carries text.
+                    continue
                 tokens_yielded += 1
                 accumulated.append(tok)
                 if output_format == "json":
-                    events.append(
-                        f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n"
-                    )
+                    token_frame: Dict[str, Any] = {"type": "token", "content": tok}
+                    if citations_dirty:
+                        # The whole list so far, only on a token after a
+                        # marker changed it (sources standard, section 3).
+                        token_frame["citations"] = citation_rewriter.citations()
+                        citations_dirty = False
+                    events.append(f"data: {json.dumps(token_frame)}\n\n")
                 else:
                     events.append(f"data: {tok}\n\n")
             return events
@@ -3201,18 +3341,23 @@ async def generate_answer_agentic_stream_helper(
                             # The cut calls go to the stored trace, not to the
                             # stream: the Stop route already closed it.
                             step_frames.cancel_pending()
+                            held_events = _held_token_events()
                             cancel_documents, cancel_use_rag = _retrieval_state()
                             await persist_message_state(
                                 message_id,
                                 trace_id=trace_id,
                                 stopped=True,
-                                output="".join(accumulated),
+                                output=_answer_text(),
                                 documents=cancel_documents,
                                 use_rag=cancel_use_rag,
                                 trace=trace_entries or None,
                                 artifact_ids=_collected_artifact_ids(),
+                                **_citation_fields(),
                             )
-                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            _log_citations("stopped")
+                            for event in held_events:
+                                yield event
+                            yield f"data: {json.dumps({'type': 'stopped', **_citation_fields()})}\n\n"
                             return
 
                         if mode == "custom":
@@ -3356,7 +3501,7 @@ async def generate_answer_agentic_stream_helper(
                 for event in _flush_turn_buffer_to_events():
                     yield event
         except Exception as exc:
-            answer = "".join(accumulated)
+            answer = _answer_text() or citation_rewriter.held
             if not _recoverable_after_agent_fallback(
                 fallback_used=fallback.used, has_answer=bool(answer)
             ):
@@ -3368,9 +3513,12 @@ async def generate_answer_agentic_stream_helper(
                 exc,
             )
 
+        for event in _held_token_events():
+            yield event
+
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
-        answer = await rewrite_answer_file_links("".join(accumulated))
+        answer = await rewrite_answer_file_links(_answer_text())
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -3444,7 +3592,9 @@ async def generate_answer_agentic_stream_helper(
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
             clear_error=bool(answer),
+            **_citation_fields(),
         )
+        _log_citations("answer")
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
@@ -3468,14 +3618,18 @@ async def generate_answer_agentic_stream_helper(
         await persist_message_state(
             message_id,
             trace_id=trace_id,
-            output="".join(accumulated),
+            output=_answer_text(),
             documents=cancelled_documents,
             use_rag=cancelled_use_rag,
             trace=trace_entries or None,
             stopped=stop,
             error=None if stop else build_error_payload(exc),
             artifact_ids=_collected_artifact_ids(),
+            **_citation_fields(),
         )
+        # No frame can follow here: text the filter still holds was never
+        # shown, so it stays out of the stored answer.
+        _log_citations("stopped" if stop else "cancelled")
         if not stop:
             # Worker shutdown or the deadline: a failed turn with its partial
             # output, and the cancel goes on to the caller.
@@ -3493,7 +3647,8 @@ async def generate_answer_agentic_stream_helper(
             error=exc,
             graph=agent_graph_type,
         )
-        answer = await rewrite_answer_file_links("".join(accumulated))
+        held_events = _held_token_events()
+        answer = await rewrite_answer_file_links(_answer_text())
         error_info = build_error_payload(exc)
         timeout_documents, timeout_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
@@ -3506,10 +3661,14 @@ async def generate_answer_agentic_stream_helper(
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),
+                **_citation_fields(),
             )
+        _log_citations("timeout")
         if final_emitted:
             return
         if answer:
+            for event in held_events:
+                yield event
             for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:
@@ -3527,7 +3686,8 @@ async def generate_answer_agentic_stream_helper(
             graph=agent_graph_type,
         )
         error_info = build_error_payload(exc)
-        answer = "".join(accumulated)
+        held_events = _held_token_events()
+        answer = _answer_text()
         error_documents, error_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
             await persist_message_state(
@@ -3539,10 +3699,14 @@ async def generate_answer_agentic_stream_helper(
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),
+                **_citation_fields(),
             )
+        _log_citations("error")
         if final_emitted:
             return
         if answer:
+            for event in held_events:
+                yield event
             for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:

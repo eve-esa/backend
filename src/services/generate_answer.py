@@ -273,6 +273,8 @@ async def persist_message_state(
     endpoint: Optional[Dict[str, Any]] = None,
     trace_id: Optional[str] = None,
     clear_error: bool = False,
+    citations: Optional[List[Dict[str, Any]]] = None,
+    sources_retrieved: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
     Best-effort persistence helper for Message state.
@@ -284,6 +286,8 @@ async def persist_message_state(
     - Sets Message.artifact_ids (MCP-produced artifacts from this run) if provided.
     - Sets Message.trace_id (OpenTelemetry trace of this run) if provided.
     - Drops metadata.error when clear_error is set and no new error is given.
+    - Sets metadata.citations and metadata.sources_retrieved (inline citations,
+      FEATURE_INLINE_CITATIONS) if provided, each replaced whole.
     """
     if stopped:
         # The answer's root span reads it: a stopped turn, not a failed one.
@@ -320,6 +324,10 @@ async def persist_message_state(
             existing_metadata["generated_model_name"] = generated_model_name
         if endpoint is not None:
             existing_metadata["endpoint"] = endpoint
+        if citations is not None:
+            existing_metadata["citations"] = citations
+        if sources_retrieved is not None:
+            existing_metadata["sources_retrieved"] = sources_retrieved
         if error is not None:
             filtered_error = _filter_null_values(error)
             if filtered_error:

@@ -107,6 +107,26 @@ def _is_error_code(value: Any) -> bool:
     return value in RUN_ERROR_MESSAGES
 
 
+def _is_citation_list(value: Any) -> bool:
+    """Sources standard section 3: cited Sources, each with id, n >= 1 and at offsets."""
+    return isinstance(value, list) and all(
+        isinstance(c, dict)
+        and isinstance(c.get("id"), str)
+        and _is_int(c.get("n"))
+        and c["n"] >= 1
+        and isinstance(c.get("at"), list)
+        and all(_is_int(a) and a >= 0 for a in c["at"])
+        and "retrieval" not in c
+        for c in value
+    )
+
+
+def _is_source_list(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(s, dict) and isinstance(s.get("id"), str) and "retrieval" not in s for s in value
+    )
+
+
 # Contract section 3: key -> (events it may appear on, value check, type text).
 # `eve.error.code` is allowed on RUN_ERROR only: decision 8.1 turns every
 # failure the user did not choose, a late one included, into RUN_ERROR, so the
@@ -123,6 +143,18 @@ EVENT_METADATA_KEYS: dict[str, tuple[frozenset[str], Any, str]] = {
     "eve.durationMs": (frozenset({"TOOL_CALL_RESULT"}), _is_int, "integer"),
     "eve.contentTruncated": (frozenset({"TOOL_CALL_RESULT"}), _is_bool, "boolean"),
     "eve.endpoint": (frozenset({"TEXT_MESSAGE_END"}), _is_obj, "object"),
+    # RUN_FINISHED is the fallback when the text message was already closed (a
+    # tool call after the last text, or a Stop with no text open).
+    "eve.citations": (
+        frozenset({"TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED"}),
+        _is_citation_list,
+        "a list of cited Sources with id, n and at",
+    ),
+    "eve.sourcesRetrieved": (
+        frozenset({"TEXT_MESSAGE_END", "RUN_FINISHED"}),
+        _is_source_list,
+        "a list of Sources",
+    ),
     "eve.latencies": (frozenset({"RUN_FINISHED"}), _is_obj, "object"),
     "eve.stopped": (frozenset({"RUN_FINISHED"}), _is_bool, "boolean"),
     "eve.error.code": (frozenset({"RUN_ERROR"}), _is_error_code, "a section 1.7 code"),
