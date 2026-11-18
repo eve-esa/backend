@@ -211,3 +211,26 @@ def test_interrupt_outcome_names_a_pending_call():
     assert violation_codes(_validate(_body(events))) == set()
     events[-1]["outcome"]["interrupts"][0]["id"] = "int-1"
     assert violation_codes(_validate(_body(events))) == {"outcome_interrupt"}
+
+
+def test_tool_arguments_that_do_not_parse_are_tool_args_json():
+    def mutate(events):
+        at = _index(events, "TOOL_CALL_ARGS")
+        events[at]["delta"] = '{"query": "Sentinel-2 revi'
+
+    assert violation_codes(_validate(_good1_with(mutate))) == {"tool_args_json"}
+
+
+def test_tool_call_on_a_later_model_call_message_passes_and_a_foreign_one_fails():
+    def later(events):
+        events[_index(events, "TOOL_CALL_START")]["parentMessageId"] = f"{MESSAGE_ID}:assistant:2"
+
+    def first_as_segment(events):
+        events[_index(events, "TOOL_CALL_START")]["parentMessageId"] = f"{MESSAGE_ID}:assistant:1"
+
+    def foreign(events):
+        events[_index(events, "TOOL_CALL_START")]["parentMessageId"] = "6a3f0c4a9b1d4e7f8a2b3c99:assistant:2"
+
+    assert violation_codes(_validate(_good1_with(later))) == set()
+    assert violation_codes(_validate(_good1_with(first_as_segment))) == {"tool_parent"}
+    assert violation_codes(_validate(_good1_with(foreign))) == {"tool_parent"}

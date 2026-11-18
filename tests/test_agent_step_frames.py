@@ -618,13 +618,13 @@ class TestFinalError:
         assert final["endpoint"]["requested"] == "main"
         assert "usage" not in final
 
-    async def test_empty_answer_ends_with_an_empty_final_and_no_error(self):
+    async def test_empty_answer_ends_with_the_empty_answer_error_frame(self):
         events, _ = await _run(_Graph([]))
 
-        [final] = _of(events, "final")
-        assert final["answer"] == ""
-        assert "error" not in final
-        assert _of(events, "error") == []
+        assert _of(events, "final") == []
+        [error] = _of(events, "error")
+        assert error["code"] == "empty_answer"
+        assert events[-1]["type"] == "error"
 
     async def test_error_before_text_with_a_pending_call_is_an_error_frame(self):
         events, _ = await _run(

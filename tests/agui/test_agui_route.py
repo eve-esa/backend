@@ -495,6 +495,9 @@ async def test_bus_raising_mid_stream_ends_with_stream_incomplete(
     assert events[-1]["code"] == "stream_incomplete"
     assert "agui.stream_failed error_type=ConnectionError" in caplog.text
     assert "secret-ish" not in caplog.text
+    # Nobody reads the run any more: it is stopped, not left running unseen.
+    assert fake.calls[0]["cancel_event"].is_set()
+    assert "reason=stream_failed" in caplog.text
 
 
 async def test_lost_bus_close_ends_at_the_stream_deadline(async_client, flag_on, runner, owner, monkeypatch):

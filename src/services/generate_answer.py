@@ -197,13 +197,32 @@ def build_error_payload(exc: BaseException) -> Dict[str, Any]:
     return {"code": code, "type": type(exc).__name__, "message": str(exc)[:500]}
 
 
+class EmptyAnswer(Exception):
+    """A generation that finished without an error and with nothing to show.
+
+    Never raised: recorded on the answer's root span, so the trace reads as the
+    failure the user sees.
+    """
+
+
 def build_empty_answer_payload() -> Dict[str, Any]:
     """Marker for a generation that completed without producing an answer."""
     return {
         "code": "empty_answer",
-        "type": "EmptyAnswer",
+        "type": EmptyAnswer.__name__,
         "message": "The model returned an empty answer",
     }
+
+
+def is_empty_answer(
+    answer: Optional[str], artifact_ids: Optional[List[str]] = None
+) -> bool:
+    """True when an agentic turn leaves the user nothing: no visible text, no artifact.
+
+    Whitespace is not an answer. An artifact is: a tool that saved a file or an
+    image answered even when the model wrote no text.
+    """
+    return not (answer or "").strip() and not artifact_ids
 
 
 def build_endpoint_metadata(
@@ -340,6 +359,12 @@ async def persist_message_state(
             # The same message can be written by an overlapping retry, so a
             # successful answer must not inherit that run's failure marker.
             existing_metadata.pop("error", None)
+        if stopped:
+            reason = _stop_reason(message_id)
+            if reason:
+                existing_metadata["stop_reason"] = reason
+            else:
+                existing_metadata.pop("stop_reason", None)
         message.metadata = existing_metadata
         await message.save()
     except Exception as e:
@@ -2404,15 +2429,31 @@ def release_stop_handle(conversation_id: str, message_id: str) -> None:
         cm.clear(message_id)
 
 
+def _stop_reason(message_id: str) -> Optional[str]:
+    """``metadata.stop_reason`` of a stopped turn: None for a Stop.
+
+    ``client_disconnected`` when the AG-UI client closed the request before
+    the run ended (a deploy rollover looks the same: the load balancer closes
+    the connection), so a client can offer a retry instead of "stopped".
+    """
+    with contextlib.suppress(Exception):
+        return get_cancel_manager().cancel_reason(message_id)
+    return None
+
+
 async def mark_message_stopped(message_id: str) -> None:
     """Set ``stopped`` with one update and no read.
 
     Unlike ``persist_message_state`` it touches no other field, so it cannot
     overwrite the partial output the generator saved a moment earlier.
     """
+    update: Dict[str, Any] = {"stopped": True}
+    reason = _stop_reason(message_id)
+    if reason:
+        update["metadata.stop_reason"] = reason
     try:
         await Message.get_collection().update_one(
-            {"_id": ObjectId(message_id)}, {"$set": {"stopped": True}}
+            {"_id": ObjectId(message_id)}, {"$set": update}
         )
     except Exception as e:
         logger.error(f"Failed to mark message stopped: {e}")

@@ -14,7 +14,7 @@ Three layers, in order:
 3. The EVE contract invariants, one code each (`first_event`,
    `terminal_count`, `after_terminal`, `missing_terminal`, `run_ids`,
    `forbidden_type`, `sequence`, `open_at_terminal`, `tool_reopen`,
-   `text_reopen`, `tool_parent`, `result_ref`, `pending_on_success`,
+   `text_reopen`, `segment_order`, `tool_parent`, `tool_args_json`, `result_ref`, `pending_on_success`,
    `outcome_cancelled`, `outcome_interrupt`, `run_error`, `custom_name`,
    `activity_type`, `metadata_keys`, `subagent`, `step_name`, `role`).
 
@@ -69,6 +69,9 @@ RESERVED_METADATA_KEY = "ag-ui"
 
 _TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 _SUMMARIZING_ID = re.compile(r"^(?P<mid>.+):summarizing:(?P<n>[1-9][0-9]*)$")
+# The assistant message of the n-th model call, n >= 2 (decision 0008); the
+# first model call uses the answer messageId itself.
+_SEGMENT_SUFFIX = re.compile(r"^:assistant:(?P<n>[2-9]|[1-9][0-9]+)$")
 
 
 def _is_str(value: Any) -> bool:
@@ -345,6 +348,7 @@ class _Run:
     open_text: dict[str, str | None] = field(default_factory=dict)
     text_roles: dict[str, str] = field(default_factory=dict)
     open_tools: dict[str, int] = field(default_factory=dict)
+    tool_args: dict[str, str] = field(default_factory=dict)
     tools_started: set[str] = field(default_factory=set)
     tools_ended: set[str] = field(default_factory=set)
     tool_results: set[str] = field(default_factory=set)
@@ -352,6 +356,9 @@ class _Run:
     open_steps: set[tuple[str | None, str]] = field(default_factory=set)
     subagents_seen: set[str] = field(default_factory=set)
     open_subagents: set[str] = field(default_factory=set)
+    # Highest model call number seen in an assistant message id (the answer
+    # messageId itself is call 1).
+    last_segment: int = 1
     last_text_end_line: int | None = None
     endpoint_lines: list[int] = field(default_factory=list)
 
@@ -479,6 +486,9 @@ class _Checker:
         previous = run.text_roles.get(mid)
         if previous is not None and previous != role:
             self.fail("text_reopen", event, f"text message {mid} reopened as {role!r}, opened as {previous!r}")
+        elif previous is not None:
+            self.fail("text_reopen", event, f"text message {mid} started again after its TEXT_MESSAGE_END")
+        self.check_segment(event, mid)
         run.text_roles[mid] = role
         run.open_text[mid] = event.data.get("subagentRunId")
 
@@ -523,6 +533,13 @@ class _Checker:
             return
         if parent == run.message_id:
             return
+        if (
+            isinstance(parent, str)
+            and parent.startswith(run.message_id)
+            and _SEGMENT_SUFFIX.match(parent[len(run.message_id):])
+        ):
+            self.check_segment(event, parent)
+            return
         prefix = f"{run.message_id}:sa:"
         if isinstance(parent, str) and parent.startswith(prefix):
             sid = parent[len(prefix):]
@@ -530,12 +547,38 @@ class _Checker:
                 return
             self.fail("tool_parent", event, f"parentMessageId names subagent {sid}, never started")
             return
-        self.fail("tool_parent", event, f"parentMessageId {parent!r} is neither the answer nor a subagent message")
+        self.fail(
+            "tool_parent",
+            event,
+            f"parentMessageId {parent!r} is neither an answer message nor a subagent message",
+        )
+
+    def check_segment(self, event: SseEvent, mid: Any) -> None:
+        """An assistant message id ``<messageId>:assistant:<n>`` takes the next n
+        at most: model calls are numbered in order, none skipped."""
+        run = self.run
+        if run.message_id is None or not isinstance(mid, str) or not mid.startswith(run.message_id):
+            return
+        match = _SEGMENT_SUFFIX.match(mid[len(run.message_id):])
+        if match is None:
+            return
+        n = int(match.group("n"))
+        if n > run.last_segment + 1:
+            self.fail(
+                "segment_order",
+                event,
+                f"assistant message {mid} skips model call {run.last_segment + 1}",
+            )
+        run.last_segment = max(run.last_segment, n)
 
     def on_tool_call_args(self, event: SseEvent) -> None:
         tid = event.data.get("toolCallId")
         if tid not in self.run.open_tools:
             self.fail("sequence", event, f"TOOL_CALL_ARGS for tool call {tid}, which is not open")
+            return
+        delta = event.data.get("delta")
+        if isinstance(delta, str):
+            self.run.tool_args[tid] = self.run.tool_args.get(tid, "") + delta
 
     def on_tool_call_end(self, event: SseEvent) -> None:
         run = self.run
@@ -545,6 +588,14 @@ class _Checker:
             return
         del run.open_tools[tid]
         run.tools_ended.add(tid)
+        # Our tools run agent-side, so the protocol's leniency about malformed
+        # argument text is not ours to use: a preview stays a JSON document.
+        args = run.tool_args.get(tid)
+        if args is not None:
+            try:
+                json.loads(args)
+            except ValueError:
+                self.fail("tool_args_json", event, f"arguments of tool call {tid} are not valid JSON")
 
     def on_tool_call_result(self, event: SseEvent) -> None:
         run = self.run

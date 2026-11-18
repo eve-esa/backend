@@ -38,6 +38,7 @@ from src.services.generate_answer import (
     finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
+    is_empty_answer,
     is_terminal_event,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -165,6 +166,16 @@ async def _preempt_active_generation(conversation_id: str) -> None:
             conversation_id,
             message_id,
         )
+
+
+def _empty_answer_http_error() -> HTTPException:
+    """An agentic turn that left nothing to show, as the sync routes report a
+    failed generation: HTTP 500 with ``detail: {"code", "message"}``."""
+    payload = build_empty_answer_payload()
+    return HTTPException(
+        status_code=500,
+        detail={"code": payload["code"], "message": payload["message"]},
+    )
 
 
 def _agent_summarizes(prompts: Any) -> bool:
@@ -761,7 +772,7 @@ async def retry(
         Response payload mirroring create_message with updated answer and metadata.
 
     Raises:
-        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
+        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors, and 500 ``empty_answer`` when an agentic retry left no text and no artifact (stored as ``metadata.error``).
     """
     slot = await acquire_generation_slot_or_raise("retry")
     # Hoisted so the failure handler reads plain locals. ownership_validated
@@ -821,6 +832,9 @@ async def retry(
                 conversation_id=conversation_id,
                 message_id=message.id,
             )
+            empty_answer = is_empty_answer(answer, artifact_ids)
+            if empty_answer:
+                answer = ""
 
             message.output = answer
             message.documents = documents
@@ -841,18 +855,21 @@ async def retry(
                 existing_metadata["generated_model_name"] = (
                     resolve_generated_model_name(endpoint)
                 )
-            if answer:
-                existing_metadata.pop("error", None)
-            else:
+            if empty_answer:
                 # An empty regeneration is not a success: without a marker the
                 # frontend would render a blank bubble with no explanation.
                 existing_metadata["error"] = build_empty_answer_payload()
+            else:
+                existing_metadata.pop("error", None)
             message.metadata = existing_metadata
             await message.save()
             generation_persisted = True
             await consume_tokens_for_user(
                 requesting_user, count_tokens_for_texts(message.input, answer)
             )
+            if empty_answer:
+                # Persisted above; the caller gets the failed retry's shape.
+                raise _empty_answer_http_error()
 
             if not _agent_summarizes(prompts):
                 background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -2147,7 +2164,7 @@ async def create_agentic_message(
         ``trace`` contains the agentic execution steps captured during generation.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors, and 500 ``empty_answer`` when the turn left no text and no artifact (stored as ``metadata.error``).
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
@@ -2156,6 +2173,9 @@ async def create_agentic_message(
     )
 
     message = None
+    # Set once the turn is saved: a later HTTPException (the empty answer) must
+    # not replace the stored metadata.error.
+    generation_persisted = False
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -2216,6 +2236,9 @@ async def create_agentic_message(
             conversation_id=conversation_id,
             message_id=message.id,
         )
+        empty_answer = is_empty_answer(answer, artifact_ids)
+        if empty_answer:
+            answer = ""
 
         message.output = answer
         message.documents = documents
@@ -2234,11 +2257,18 @@ async def create_agentic_message(
             existing_metadata["generated_model_name"] = resolve_generated_model_name(
                 endpoint
             )
+        if empty_answer:
+            # Same marker as the stream: the turn ended with nothing to show.
+            existing_metadata["error"] = build_empty_answer_payload()
         message.metadata = existing_metadata
         await message.save()
+        generation_persisted = True
         await consume_tokens_for_user(
             requesting_user, count_tokens_for_texts(request.query, answer)
         )
+        if empty_answer:
+            # Persisted above; an API client must not read it as a success.
+            raise _empty_answer_http_error()
 
         if not _agent_summarizes(prompts):
             background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -2255,7 +2285,7 @@ async def create_agentic_message(
             "metadata": {"latencies": latencies},
         }
     except HTTPException as http_exc:
-        if message:
+        if message and not generation_persisted:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
                 existing_metadata["error"] = build_error_payload(http_exc)

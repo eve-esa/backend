@@ -1038,7 +1038,10 @@ class TestModelViewFixes:
 # ── review fixes: AG-UI ─────────────────────────────────────────────────────
 
 GEOCODE = "geocode_search"
-BASELINE = __import__("pathlib").Path(__file__).parent / "agui" / "fixtures" / "flag_off_citations_baseline_d6c1fb9.txt"
+# Golden AG-UI transcript of a flag-off turn without handles (latency and
+# duration values zeroed): any byte change to it is deliberate. It was first
+# cut against d6c1fb9 and regenerated when the assistant message ids changed.
+GOLDEN = __import__("pathlib").Path(__file__).parent / "agui" / "fixtures" / "flag_off_citations_golden_transcript.txt"
 
 
 def _transcript(events) -> str:
@@ -1077,7 +1080,7 @@ class TestAguiFixes:
         assert [c["n"] for c in finished["metadata"]["eve.citations"]] == [1]
         assert [s["provider"] for s in finished["metadata"]["eve.sourcesRetrieved"]] == ["my-collections"]
 
-    async def test_flag_off_transcript_matches_the_baseline_bytes(self, flag_off):
+    async def test_flag_off_transcript_matches_the_golden_bytes(self, flag_off):
         from langchain_core.messages import AIMessageChunk
 
         doc = {"id": 7, "collection_name": "qwen-512-filtered", "score": 0.8,
@@ -1094,7 +1097,7 @@ class TestAguiFixes:
             if line.startswith("data: "):
                 line = "data: " + json.dumps(_scrub(json.loads(line[6:])), separators=(",", ":"), ensure_ascii=False)
             lines.append(line)
-        assert "\n".join(lines) + "\n" == BASELINE.read_text()
+        assert "\n".join(lines) + "\n" == GOLDEN.read_text()
 
 
 # ── local turn findings: tool call id, chunk suffix, markdown passages ─────

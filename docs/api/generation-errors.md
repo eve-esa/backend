@@ -27,7 +27,7 @@ only, never from `message` or `type`.
 | code | Meaning | Suggested copy angle |
 |---|---|---|
 | `timeout` | No first token within that model's budget. If nothing was sent, the next endpoint and then the fallback model were already tried; this code remains when those also produced nothing. Text already streamed is kept, and no second answer is appended. | "warming up, retry in a moment" |
-| `empty_answer` | Generation completed but produced nothing | "empty answer, retry" |
+| `empty_answer` | Generation completed but produced nothing. On agentic turns: no visible text (whitespace, or a `[TOOL_CALLS]` text call that was never run, counts as none) and no artifact. The stream ends with the `error` frame, the row stores `output: ""`, the backend logs one WARNING `generation.empty_answer` with the ids and marks the root span as an error (`eve.error.code`). The sync `/generate-agentic` and an agentic retry answer HTTP 500 with `detail: {"code": "empty_answer", "message"}` after storing the row | "empty answer, retry" |
 | `upstream_error` | Anything else from the model endpoint or pipeline | generic failure, retry |
 
 The set is extensible and additive; codes are never renamed. Clients MUST
@@ -109,7 +109,9 @@ Cancellation is NOT an error code: a user stop is carried by the SSE
 - A successful retry (`POST .../messages/{id}/retry`) sets the new output,
   resets `stopped` to false and removes `metadata.error`. A failed retry
   overwrites `metadata.error` and returns HTTP 500 with
-  `detail: {"code", "message"}`.
+  `detail: {"code", "message"}`. An agentic retry that ends with no text and
+  no artifact stores `metadata.error` `empty_answer` with the empty output and
+  returns the same HTTP 500, code `empty_answer`.
 - A failed hallucination check writes `metadata.hallucination_error`
   (namespaced so it cannot mask or be cleared as a generation failure).
 

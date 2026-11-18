@@ -50,13 +50,16 @@ from src.services.custom_model_service import (
 )
 from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
+    EmptyAnswer,
     _get_conversation_history_from_db,
+    build_empty_answer_payload,
     build_endpoint_metadata,
     build_error_payload,
     deadline_error,
     deadline_overrides,
     endpoint_answered_by,
     get_shared_llm_manager,
+    is_empty_answer,
     maybe_rollup_and_trim_history,
     persist_message_state,
     is_terminal_event,
@@ -125,6 +128,7 @@ from src.observability.context import (
     agent_span,
     cancel_is_stop,
     current_trace_id,
+    mark_error,
     set_llm_attributes,
     span_trace_id,
 )
@@ -180,6 +184,73 @@ except Exception:
     split_tool_calls_and_answer_text = None  # type: ignore
 
 
+def _strip_text_tool_calls(text: str) -> str:
+    """``text`` without a text-format tool call, the rule of the stream's turn buffer.
+
+    Recognised ``[TOOL_CALLS]`` calls go and the text after them stays; a marker
+    nothing parses leaves no answer. A call written as text is never run by the
+    sync path, so it is not an answer either.
+    """
+    if not (has_text_tool_call and has_text_tool_call(text)):
+        return text
+    calls, rest = (
+        split_tool_calls_and_answer_text(text)
+        if split_tool_calls_and_answer_text
+        else ([], "")
+    )
+    return rest if calls else ""
+
+
+def _content_text(content: Any) -> str:
+    """Message content as text: a list of parts is joined by its text parts,
+    the stream's rule, never turned into a Python repr."""
+    if isinstance(content, list):
+        return "".join(
+            c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+        )
+    return content if isinstance(content, str) else str(content or "")
+
+
+def _final_answer_text(
+    messages: List[Any], handles: Optional[SourceRegistry] = None
+) -> str:
+    """What the non-streaming routes return: the last model message without tool calls.
+
+    The model may copy an [S<k>] handle an earlier streamed turn left in the
+    thread: this route hands out none, so it never reaches the user.
+    ``handles`` is that conversation's stored Sources (``strip_handles``);
+    None strips every handle.
+    """
+    for msg in reversed(messages):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            return strip_handles(
+                _strip_text_tool_calls(_content_text(msg.content)), handles
+            )
+    return ""
+
+
+def _mark_empty_answer(span: Any) -> None:
+    """Record an empty answer on the turn's root span, as a raised failure would be."""
+    if span is None:
+        return
+    mark_error(span, EmptyAnswer(build_empty_answer_payload()["message"]))
+    with contextlib.suppress(Exception):
+        span.set_attribute("eve.error.code", "empty_answer")
+
+
+def _log_empty_answer(conversation_id: Optional[str], message_id: Optional[str]) -> None:
+    # Ids only: never the question or the model output.
+    logger.warning(
+        "generation.empty_answer conversation_id=%s message_id=%s",
+        conversation_id,
+        message_id,
+    )
+
+
 # ─── Trace serialisation ──────────────────────────────────────────────────────
 
 
@@ -231,6 +302,10 @@ def _enrich_trace_entry_with_message_metadata(
 # Per string value in a streamed tool_call event. A write_file call carries a
 # whole file; the full arguments stay in Message.trace.
 STREAM_TOOL_ARG_MAX_CHARS = 500
+
+# Between the answer text of two model calls in one turn (text, a tool call,
+# more text), so the stream and the stored answer do not glue them.
+PARAGRAPH_BREAK = "\n\n"
 
 
 def _stream_tool_args(value: Any) -> Any:
@@ -2603,6 +2678,20 @@ async def generate_answer_agentic(
                 config["metadata"] = skills_metadata
             setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
+        # This route hands out no handles, but the model may copy one an
+        # earlier streamed turn left in the thread: the handles that turn
+        # stored go, and with the flag on and no lookup, every handle goes.
+        handle_registry: Optional[SourceRegistry] = SourceRegistry()
+        if not (
+            conversation_id
+            and await _seed_conversation_sources(
+                handle_registry, conversation_id, message_id
+            )
+        ):
+            handle_registry = (
+                None if src_config.FEATURE_INLINE_CITATIONS else SourceRegistry()
+            )
+
         async def _run_graph(
             g: Any,
         ) -> tuple[List[Any], List[Dict[str, Any]], Dict[str, float], float, _FallbackUse]:
@@ -2693,13 +2782,20 @@ async def generate_answer_agentic(
                                 latency_map[latency_key] = step_latency_s
                 except Exception as exc:
                     graph_exc = exc
+                # While the root is open: a turn that ends with nothing to show
+                # is a failed turn in the trace too.
+                if graph_exc is None and is_empty_answer(
+                    _final_answer_text(raw_msgs, handle_registry),
+                    artifact_ctx.collected_artifact_ids,
+                ):
+                    _mark_empty_answer(root_span)
 
             if graph_exc is not None:
-                has_answer = any(
-                    isinstance(msg, AIMessage)
-                    and msg.content
-                    and not getattr(msg, "tool_calls", None)
-                    for msg in raw_msgs
+                # Whitespace or an unrun text call from the fallback is not an
+                # answer: the primary's failure stands.
+                has_answer = not is_empty_answer(
+                    _final_answer_text(raw_msgs, handle_registry),
+                    artifact_ctx.collected_artifact_ids,
                 )
                 if not _recoverable_after_agent_fallback(
                     fallback_used=fallback.used, has_answer=has_answer
@@ -2737,27 +2833,13 @@ async def generate_answer_agentic(
             fallback,
         ) = await _run_graph(graph)
 
-        final_answer = ""
-        for msg in reversed(all_messages):
-            if (
-                isinstance(msg, AIMessage)
-                and msg.content
-                and not getattr(msg, "tool_calls", None)
-            ):
-                final_answer = (
-                    msg.content if isinstance(msg.content, str) else str(msg.content)
-                )
-                break
-        # This route hands out no handles, but the model may copy one an
-        # earlier streamed turn left in the thread: it never reaches the user.
-        prior_sources = SourceRegistry()
-        if conversation_id and await _seed_conversation_sources(
-            prior_sources, conversation_id, message_id
-        ):
-            final_answer = strip_handles(final_answer, prior_sources)
-        elif src_config.FEATURE_INLINE_CITATIONS:
-            final_answer = strip_handles(final_answer)
-        final_answer = await rewrite_answer_file_links(final_answer)
+        final_answer = await rewrite_answer_file_links(
+            _final_answer_text(all_messages, handle_registry)
+        )
+        if is_empty_answer(final_answer, artifact_ctx.collected_artifact_ids):
+            # The router persists the empty_answer marker from the same check.
+            final_answer = ""
+            _log_empty_answer(conversation_id, message_id)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
@@ -2866,7 +2948,8 @@ async def generate_answer_agentic_stream_helper(
     the answer streamed, say) is still recorded in the persisted
     `metadata.error`, but the client is not handed an error banner on top of an
     answer it has already rendered. Only a turn with nothing streamed ends with
-    `error`.
+    `error`. A turn that ends without a failure but with no visible text and no
+    artifact ends with `error` too, code ``empty_answer``.
 
     Raises ``ValueError`` when ``conversation_id`` is empty: a streamed turn
     always persists its message in a conversation and runs on its thread.
@@ -3156,6 +3239,13 @@ async def generate_answer_agentic_stream_helper(
         step_frames = _StepFrames(tools)
 
         turn_buffer: List[str] = []
+        # A model call ended (its node update, the node changed, or the chunk
+        # id changed): the next answer text starts a new paragraph. The break rides that text, so a
+        # Stop or an end before it stores none.
+        paragraph_pending = False
+        # Chunk id of the model call that streamed last: a new id is a new
+        # call in the same node (a node retry, retry or fallback middleware).
+        model_call_id: Optional[str] = None
         current_node: Optional[str] = None
         # Tool calls already announced in the current agent step, keyed by
         # call id. One call can reach the stream up to three times (a complete
@@ -3258,6 +3348,33 @@ async def generate_answer_agentic_stream_helper(
                 events.append(f"data: {json.dumps(frame)}\n\n")
             return events
 
+        def _feed_answer_text(tok: str) -> str:
+            """``tok`` through the citation filter, with the paragraph break it opens."""
+            nonlocal paragraph_pending
+            if not paragraph_pending:
+                return citation_rewriter.feed(tok)
+            # The held text counts: it is streamed text the filter has not
+            # sent yet.
+            so_far = _answer_text() + citation_rewriter.held
+            if not so_far:
+                paragraph_pending = False
+                return citation_rewriter.feed(tok)
+            if not tok.strip():
+                # A call that writes only whitespace: the break waits for
+                # the next text, so no blank paragraph and no double break.
+                return ""
+            paragraph_pending = False
+            # A marker is written inside one model call: a handle prefix held
+            # from the last call is plain text, sent before the break.
+            head = citation_rewriter.flush()
+            body = tok.lstrip(" \t")
+            tail = so_far.rstrip(" \t")
+            have = (len(tail) - len(tail.rstrip("\n"))) + (
+                len(body) - len(body.lstrip("\n"))
+            )
+            sep = PARAGRAPH_BREAK[: max(0, len(PARAGRAPH_BREAK) - have)]
+            return head + citation_rewriter.feed(sep + body)
+
         def _flush_turn_buffer_to_events() -> List[str]:
             nonlocal tokens_yielded, first_token_latency, citations_dirty
             if not turn_buffer:
@@ -3310,7 +3427,7 @@ async def generate_answer_agentic_stream_helper(
                 if not tok:
                     continue
                 version = citation_rewriter.version
-                tok = citation_rewriter.feed(tok)
+                tok = _feed_answer_text(tok)
                 if citing and citation_rewriter.version != version:
                     citations_dirty = True
                 if not tok:
@@ -3436,6 +3553,9 @@ async def generate_answer_agentic_stream_helper(
                                     # A new agent step: a call the last tools
                                     # step passed by is a ghost, not pending.
                                     step_frames.drop_unanswered()
+                                    # That model call is over: later answer
+                                    # text comes from another one.
+                                    paragraph_pending = True
                                 for msg in msgs:
                                     if ToolMessage and isinstance(msg, ToolMessage):
                                         answer_budget_started_at = time.perf_counter()
@@ -3488,6 +3608,8 @@ async def generate_answer_agentic_stream_helper(
                                     )
                             for event in _flush_turn_buffer_to_events():
                                 yield event
+                            # One model call never spans two nodes.
+                            paragraph_pending = True
                             node_start_time = time.perf_counter()
                             current_node = node
 
@@ -3498,6 +3620,13 @@ async def generate_answer_agentic_stream_helper(
                             continue
 
                         if AIMessage and isinstance(chunk, AIMessage):
+                            chunk_id = getattr(chunk, "id", None)
+                            if chunk_id:
+                                if model_call_id and chunk_id != model_call_id:
+                                    for event in _flush_turn_buffer_to_events():
+                                        yield event
+                                    paragraph_pending = True
+                                model_call_id = chunk_id
                             if getattr(chunk, "tool_calls", None):
                                 # Kept only so a ToolMessage without a name can be
                                 # traced back to the tool it answered.
@@ -3516,12 +3645,7 @@ async def generate_answer_agentic_stream_helper(
                                         yield event
                                 continue
 
-                            content = chunk.content
-                            if isinstance(content, list):
-                                content = "".join(
-                                    c.get("text", "") if isinstance(c, dict) else str(c)
-                                    for c in content
-                                )
+                            content = _content_text(chunk.content)
                             if not content:
                                 continue
 
@@ -3543,10 +3667,25 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
+                # Still inside the root: the held text goes out first, so the
+                # check reads the answer the user saw and the row stores (the
+                # file link rewrite below never empties it). A
+                # Stop already set ends the turn stopped at the next await, so
+                # the trace is left to the Stop.
+                for event in _held_token_events():
+                    yield event
+                if not cancelled() and is_empty_answer(
+                    _answer_text(), _collected_artifact_ids()
+                ):
+                    _mark_empty_answer(root_span)
         except Exception as exc:
-            answer = _answer_text() or citation_rewriter.held
+            # Whitespace or an unrun text call from the fallback is not an
+            # answer: the primary's failure stands.
+            has_answer = not is_empty_answer(
+                _answer_text() + citation_rewriter.held, _collected_artifact_ids()
+            )
             if not _recoverable_after_agent_fallback(
-                fallback_used=fallback.used, has_answer=bool(answer)
+                fallback_used=fallback.used, has_answer=has_answer
             ):
                 raise
             graph_exc = exc
@@ -3556,12 +3695,19 @@ async def generate_answer_agentic_stream_helper(
                 exc,
             )
 
+        # Empty unless the graph raised after a recovered fallback: the normal
+        # end flushed inside the root above.
         for event in _held_token_events():
             yield event
 
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
         answer = await _rewrite_file_links()
+        # Whitespace, or a text tool call the turn buffer dropped, and no
+        # artifact: the user got nothing, so the turn is a failed one.
+        empty_answer = is_empty_answer(answer, _collected_artifact_ids())
+        if empty_answer:
+            answer = ""
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -3635,13 +3781,24 @@ async def generate_answer_agentic_stream_helper(
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
             clear_error=bool(answer),
+            **({"error": build_empty_answer_payload()} if empty_answer else {}),
             **_citation_fields(),
         )
         _log_citations("answer")
+        if empty_answer:
+            _log_empty_answer(conversation_id, message_id)
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
+        # Set before the terminal frame either way: the turn is persisted, and a
+        # Stop that lands on the publish must not replace it.
         final_emitted = True
+        if empty_answer:
+            # Nothing visible went out, so the error frame, not a final: the
+            # client renders it with Retry, as for any failure before text.
+            error_info = build_empty_answer_payload()
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
+            return
         for event in _final_events(answer, latencies):
             yield event
 
