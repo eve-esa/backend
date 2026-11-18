@@ -226,7 +226,9 @@ async def test_skip_rules(world):
     assert [r.email for r in plan.recipients] == [ok_none, ok_approved]
     assert plan.skipped["not_approved"] == 1
     assert plan.skipped["migrated"] == 1
-    assert plan.skipped["duplicate_email"] == 0  # the upper-case row is not matched by $in
+    # The list names ok_none twice (once through the upper-case row's address): one
+    # recipient, the repeat counted. The upper-case users row itself is not matched.
+    assert plan.skipped["duplicate_email"] == 1
     assert count_before == len(world["user_ids"])
 
     # Selected by _id slice, the address-less rows and the duplicate are counted too.
@@ -498,3 +500,272 @@ async def test_connect_ensure_indexes_flag(monkeypatch, ensure, expected):
         await manager.connect("mongodb://unused", ensure_indexes=False)
 
     assert collection.create_index.await_count == expected
+
+
+# ------------------------------------- pre-registered addresses without an account
+
+
+SIGNUP_SUBJECT = MAIL_SPECS["cohort_invite_signup"].subject
+
+
+class Killed(BaseException):
+    """A process kill between the send and the stamp: no except clause catches it."""
+
+
+@pytest.mark.no_db
+def test_claim_index_filters_use_only_documentdb_operators():
+    # DocumentDB 5.0 partial indexes accept $eq, $exists, a top-level $and and
+    # the range operators; $type, $or, $not and the array operators are refused.
+    allowed = {"$eq", "$exists", "$and", "$gt", "$gte", "$lt", "$lte"}
+    specs = command.CLAIM_INDEXES
+    assert {spec["name"] for spec in specs} == {
+        "cohort_invites_cohort_user",
+        "cohort_invites_cohort_email",
+    }
+    for spec in specs:
+        assert spec["unique"] is True
+        for condition in spec["partialFilterExpression"].values():
+            assert set(condition) <= allowed
+            assert condition == {"$exists": True}
+
+
+@pytest.mark.no_db
+def test_cli_takes_a_sign_up_url():
+    args = command._parse_args(["--cohort", "x", "--sign-up-url", "https://eve.example.org"])
+    assert args.sign_up_url == "https://eve.example.org"
+
+
+@pytest.mark.asyncio
+async def test_listed_address_without_account_gets_the_create_account_mail(
+    world, fake_mailer, pauses, caplog
+):
+    address = f"prereg-{world['tag']}@example.org"
+    with caplog.at_level(logging.INFO, logger=command.__name__):
+        summary = await send_cohort_invite(
+            world["cohort"],
+            apply=True,
+            emails=[address],
+            sleep_seconds=0,
+            sign_up_url="https://eve.example.org",
+        )
+
+    assert summary["sent"] == 1
+    assert summary["sent_cohort_invite_signup"] == 1
+    assert summary["sent_cohort_invite"] == 0
+    assert [m["to"] for m in fake_mailer.sent] == [address]
+    assert fake_mailer.sent[0]["subject"] == SIGNUP_SUBJECT
+    assert 'href="https://eve.example.org"' in fake_mailer.sent[0]["html"]
+    rows = await _sent_rows(world["cohort"])
+    assert len(rows) == 1
+    assert rows[0]["email"] == address
+    assert "user_id" not in rows[0]  # absent, not null: the user index skips it
+    assert rows[0]["sent_at"]
+    lines = [r.getMessage() for r in caplog.records if "cohort_invite_sent" in r.getMessage()]
+    assert len(lines) == 1 and "mail=cohort_invite_signup" in lines[0]
+    assert "@" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_address_listed_twice_in_any_case_gets_one_mail(world, fake_mailer, pauses):
+    ghost = f"Twice-{world['tag']}@Example.org"
+    _, known = await _user(world, "known")
+    emails = [ghost, ghost.lower(), f"  {ghost.upper()} ", known.upper(), known]
+
+    summary = await send_cohort_invite(world["cohort"], apply=True, emails=emails, sleep_seconds=0)
+
+    assert sorted(m["to"] for m in fake_mailer.sent) == sorted([ghost.lower(), known])
+    assert summary["sent"] == 2
+    assert summary["skipped_duplicate_email"] == 3
+    assert len(await _sent_rows(world["cohort"])) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_rows_for_one_address_never_both_get_mail(world, fake_mailer, pauses):
+    # Two users rows with one address: the email index refuses the second claim.
+    _, email = await _user(world, "twin")
+    await _user(world, None, email=email)
+    summary = await send_cohort_invite(world["cohort"], apply=True, emails=[email], sleep_seconds=0)
+    assert [m["to"] for m in fake_mailer.sent] == [email]
+    assert summary["skipped_duplicate_email"] == 1
+
+
+@pytest.mark.asyncio
+async def test_account_already_mailed_in_the_cohort_is_not_mailed_again(world, fake_mailer, pauses):
+    """On both lists: the first send claimed (user_id, cohort) with no email field."""
+    user_id, email = await _user(world, "legacy")
+    await get_collection(COLLECTION).insert_one(
+        {
+            "user_id": user_id,
+            "cohort": world["cohort"],
+            "claimed_at": datetime.now(timezone.utc),
+            "sent_at": datetime.now(timezone.utc),
+        }
+    )
+    summary = await send_cohort_invite(world["cohort"], apply=True, emails=[email], sleep_seconds=0)
+    assert summary["skipped_already_sent"] == 1
+    assert fake_mailer.sent == []
+
+
+@pytest.mark.asyncio
+async def test_create_account_mail_then_account_is_not_mailed_again(world, fake_mailer, pauses):
+    address = f"later-{world['tag']}@example.org"
+    first = await send_cohort_invite(world["cohort"], apply=True, emails=[address], sleep_seconds=0)
+    assert first["sent_cohort_invite_signup"] == 1
+
+    # The person creates an account; the next run of the cohort finds the row.
+    await _user(world, None, email=address)
+    second = await send_cohort_invite(world["cohort"], apply=True, emails=[address], sleep_seconds=0)
+    assert second["sent"] == 0
+    assert second["skipped_already_sent"] == 1
+    assert len(fake_mailer.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_account_created_after_the_plan_gets_the_account_mail_only(
+    world, fake_mailer, pauses, monkeypatch, capsys
+):
+    address = f"between-{world['tag']}@example.org"
+    dry = await send_cohort_invite(world["cohort"], emails=[address])
+    assert dry["recipients_cohort_invite_signup"] == 1
+    capsys.readouterr()
+
+    real_plan = command.plan_cohort
+    created: list[str] = []
+
+    async def plan_then_sign_up(*args, **kwargs):
+        plan = await real_plan(*args, **kwargs)
+        created.append((await _user(world, None, email=address))[0])
+        return plan
+
+    monkeypatch.setattr(command, "plan_cohort", plan_then_sign_up)
+    summary = await send_cohort_invite(world["cohort"], apply=True, emails=[address], sleep_seconds=0)
+
+    assert summary["sent_cohort_invite"] == 1
+    assert summary["sent_cohort_invite_signup"] == 0
+    assert [m["subject"] for m in fake_mailer.sent] == [COHORT_INVITE_SUBJECT]
+    rows = await _sent_rows(world["cohort"])
+    assert len(rows) == 1
+    assert rows[0]["user_id"] == created[0]
+    assert rows[0]["email"] == address
+
+
+@pytest.mark.asyncio
+async def test_rerun_after_a_crash_sends_nothing_twice(world, fake_mailer, pauses, monkeypatch):
+    _, account = await _user(world, "crash-account")
+    signup = f"crash-signup-{world['tag']}@example.org"
+    sent: list[str] = []
+
+    async def send_then_die(to, subject, html, text):
+        sent.append(to)
+        if to == signup:
+            raise Killed()  # the mail left, the stamp never happened
+
+    monkeypatch.setattr(command, "send_mail", send_then_die)
+    with pytest.raises(Killed):
+        await send_cohort_invite(
+            world["cohort"], apply=True, emails=[account, signup], sleep_seconds=0
+        )
+    rows = {row["email"]: row for row in await _sent_rows(world["cohort"])}
+    assert rows[account]["sent_at"] and rows[signup]["sent_at"] is None
+
+    rerun = await send_cohort_invite(
+        world["cohort"], apply=True, emails=[account, signup], sleep_seconds=0
+    )
+    assert rerun["sent"] == 0
+    assert rerun["skipped_already_sent"] == 1
+    assert rerun["skipped_in_doubt"] == 1
+    assert sent == [account, signup]
+
+
+@pytest.mark.asyncio
+async def test_failed_smtp_send_logs_reason_and_code_never_the_address(
+    world, fake_mailer, pauses, monkeypatch, caplog
+):
+    from src.services.mailer import MailDeliveryFailed
+
+    _, account = await _user(world, "refused")
+    signup = f"refused-signup-{world['tag']}@example.org"
+
+    async def refuse(to, subject, html, text):
+        if to == account:
+            raise MailDeliveryFailed(
+                f"SMTP send failed for {to}", reason="SMTPDataError", code=550
+            )
+        raise RuntimeError(f"relay said no to {to}")
+
+    monkeypatch.setattr(command, "send_mail", refuse)
+    with caplog.at_level(logging.INFO, logger=command.__name__):
+        summary = await send_cohort_invite(
+            world["cohort"], apply=True, emails=[account, signup], sleep_seconds=0
+        )
+
+    assert summary["failed"] == 2
+    assert await _sent_rows(world["cohort"]) == []  # released for the next run
+    failed = [r for r in caplog.records if "cohort_invite_failed" in r.getMessage()]
+    assert len(failed) == 2
+    messages = [r.getMessage() for r in failed]
+    assert any("reason=SMTPDataError code=550" in m for m in messages)
+    assert any("reason=RuntimeError" in m for m in messages)
+    for record, message in zip(failed, messages):
+        assert f"cohort={world['cohort']}" in message
+        assert "claim_id=" in message
+        assert "@" not in message
+        assert record.exc_info is None
+    assert account not in caplog.text and signup not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_dry_run_prints_one_count_per_mail_type(world, fake_mailer, pauses, capsys):
+    accounts = [(await _user(world, f"type{i}"))[1] for i in range(2)]
+    signups = [f"type-signup{i}-{world['tag']}@example.org" for i in range(3)]
+
+    summary = await send_cohort_invite(world["cohort"], emails=accounts + signups, batch_size=2)
+
+    assert summary["recipients"] == 5
+    assert summary["recipients_cohort_invite"] == 2
+    assert summary["recipients_cohort_invite_signup"] == 3
+    out = capsys.readouterr().out
+    assert "Launch mail to an account (cohort_invite): 2" in out
+    assert "Create-account mail (cohort_invite_signup): 3" in out
+    assert "Recipients: 5 in 3 batch(es)" in out
+    for address in accounts + signups:
+        assert address not in out
+    assert fake_mailer.sent == []
+    assert await _sent_rows(world["cohort"]) == []
+
+
+@pytest.mark.asyncio
+async def test_claim_indexes_replace_the_legacy_index_and_keep_old_claims(world):
+    collection = get_collection(f"cohort_invites_idx_{world['tag']}")
+    try:
+        await collection.create_index(
+            [("user_id", 1), ("cohort", 1)], name="cohort_invites_user_cohort", unique=True
+        )
+        await collection.insert_one({"user_id": "u1", "cohort": "c", "sent_at": None})
+
+        await command.ensure_claim_indexes(collection)
+        await command.ensure_claim_indexes(collection)  # a second run is a no-op
+
+        info = await collection.index_information()
+        assert "cohort_invites_user_cohort" not in info
+        assert info["cohort_invites_cohort_user"]["partialFilterExpression"] == {
+            "user_id": {"$exists": True}
+        }
+        assert info["cohort_invites_cohort_email"]["partialFilterExpression"] == {
+            "email": {"$exists": True}
+        }
+
+        from pymongo.errors import DuplicateKeyError
+
+        # The old claim keeps its user_id uniqueness.
+        with pytest.raises(DuplicateKeyError):
+            await collection.insert_one({"user_id": "u1", "cohort": "c", "email": "a@x.org"})
+        # Two claims without a user id do not collide on a missing field.
+        await collection.insert_one({"cohort": "c", "email": "b@x.org"})
+        await collection.insert_one({"cohort": "c", "email": "c@x.org"})
+        # A user claim and an email claim for one address collide.
+        with pytest.raises(DuplicateKeyError):
+            await collection.insert_one({"user_id": "u2", "cohort": "c", "email": "b@x.org"})
+        await collection.insert_one({"cohort": "other", "email": "b@x.org"})
+    finally:
+        await collection.drop()

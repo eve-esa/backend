@@ -73,7 +73,7 @@ Links are not restricted: a pack can point a button or an image at any host, and
 
 The Jinja sandbox is the only barrier between a bucket writer and code in the task, so `jinja2` stays current: its security updates are never held.
 
-`send_cohort_invite --subject` wins over the pack subject.
+`send_cohort_invite --subject` wins over the pack subject of `cohort_invite`. `cohort_invite_signup`, sent to a listed address with no account, always takes its subject from the pack or the bundled copy, and its button opens `--sign-up-url` (`FRONTEND_URL` otherwise).
 
 ### Contract
 
