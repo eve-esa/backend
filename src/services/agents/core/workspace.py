@@ -54,7 +54,7 @@ _PS = "ps -eo pid=,args="
 # shell may already be inside workspace, so fall back to ``.``.
 _FIND = (
     "if [ -d workspace ]; then root=workspace; else root=.; fi; "
-    "find \"$root\" -type f -printf '%P\\t%s\\t%T@\\n'"
+    "find -H \"$root\" -type f -printf '%P\\t%s\\t%T@\\n'"
 )
 _PS_LINE = re.compile(r"^(\d+)\s*(.*)$")
 _STATE_NAME = "workspace_state"
