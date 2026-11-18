@@ -525,6 +525,12 @@ async def _snapshot_workspace(conversation_id: str, record: dict[str, str]) -> N
 
     try:
         session = await asyncio.to_thread(attach_session, record)
+    except SandboxGone:
+        logger.info(
+            "workspace.snapshot_skipped conversation_id=%s reason=gone",
+            conversation_id,
+        )
+        return
     except Exception:
         logger.warning(
             "workspace.snapshot_attach_failed conversation_id=%s",

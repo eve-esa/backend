@@ -328,6 +328,31 @@ async def test_a_gone_sandbox_drops_its_entry_and_a_new_one_starts(
     )
 
 
+async def test_a_gone_sandbox_with_a_user_skips_the_snapshot_without_a_warning(
+    monkeypatch, clock, caplog
+):
+    state = _install(monkeypatch, clock)
+    lease = await acquire_sandbox("c1", None, user_id="user-1")
+    assert lease is not None
+    await release_sandbox(lease)
+    state["dead"] = True
+    caplog.clear()
+
+    with caplog.at_level("DEBUG"):
+        again = await acquire_sandbox("c1", None, user_id="user-1")
+
+    assert again is not None
+    assert state["killed"] == [lease.session.sandbox_id]
+    assert [r for r in caplog.records if r.levelno >= 30] == []
+    skipped = [
+        r for r in caplog.records if r.getMessage().startswith("workspace.snapshot")
+    ]
+    assert [r.getMessage() for r in skipped] == [
+        "workspace.snapshot_skipped conversation_id=c1 reason=gone"
+    ]
+    assert skipped[0].levelname == "INFO"
+
+
 class ResourceNotFoundException(Exception):
     """Stands for the boto3 error a wrong interpreter identifier also raises."""
 
