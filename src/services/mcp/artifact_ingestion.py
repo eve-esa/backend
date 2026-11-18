@@ -119,6 +119,23 @@ def clean_filename(filename: str) -> str:
     return name
 
 
+def _turn_file_key(filename: str) -> str:
+    """The name the stored file has in its folder, the one an answer links."""
+    return file_path_for("", filename)[1:]
+
+
+def _unique_in_turn(filename: str, ctx: ArtifactRequestContext) -> str:
+    """``filename``, or ``stem-2.ext``, ``stem-3.ext`` when the turn has it."""
+    taken = ctx.collected_artifact_files
+    if _turn_file_key(filename) not in taken:
+        return filename
+    stem, ext = os.path.splitext(filename)
+    n = 2
+    while _turn_file_key(f"{stem}-{n}{ext}") in taken:
+        n += 1
+    return f"{stem}-{n}{ext}"
+
+
 def md_escape(text: str) -> str:
     """Make *text* safe as markdown link text: one line, no link syntax."""
     return _MARKDOWN_SPECIALS.sub(r"\\\1", clean_filename(text))
@@ -645,7 +662,7 @@ class ArtifactInterceptor:
                     )
                 new_content.append(
                     _stub_text(
-                        filename=filename,
+                        filename=artifact.filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
                         size_bytes=len(data),
@@ -706,7 +723,7 @@ class ArtifactInterceptor:
                     )
                 new_content.append(
                     _stub_text(
-                        filename=filename,
+                        filename=artifact.filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
                         size_bytes=len(data),
@@ -763,11 +780,20 @@ class ArtifactInterceptor:
         """
         if not ctx.conversation_id:
             return None
-        filename = clean_filename(filename)
+        # Unique within the turn, reserved before the first await: two calls
+        # of one tool both default to ``{tool}-1.png``, and the answer links
+        # a file by that name.
+        filename = _unique_in_turn(clean_filename(filename), ctx)
         artifact_oid = ObjectId()
         relative = file_path_for(str(artifact_oid), filename)
+        turn_key = _turn_file_key(filename)
+        ctx.collected_artifact_files[turn_key] = str(artifact_oid)
         key = object_key(ctx.user_id, ctx.conversation_id, relative)
-        await storage_service.put_object(key, data, content_type)
+        try:
+            await storage_service.put_object(key, data, content_type)
+        except Exception:
+            ctx.collected_artifact_files.pop(turn_key, None)
+            raise
         artifact = Artifact(
             id=str(artifact_oid),
             user_id=ctx.user_id,
@@ -786,6 +812,7 @@ class ArtifactInterceptor:
         try:
             await Artifact.get_collection().insert_one(document)
         except Exception:
+            ctx.collected_artifact_files.pop(turn_key, None)
             logger.warning(
                 "artifacts.record_failed key=%s", key, exc_info=True
             )
@@ -797,7 +824,6 @@ class ArtifactInterceptor:
                 )
             raise
         ctx.collected_artifact_ids.append(artifact.id)
-        ctx.collected_artifact_files[os.path.basename(relative)] = artifact.id
         path = sandbox_path(relative)
         await upload_artifact(ctx.sandbox_backend, path, data)
         return artifact, path
@@ -881,7 +907,7 @@ class ArtifactInterceptor:
             artifact, output_path = stored
             stubs.append(
                 _stub_text(
-                    filename=filename,
+                    filename=artifact.filename,
                     artifact_id=artifact.id,
                     content_type=content_type,
                     size_bytes=len(data),

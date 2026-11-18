@@ -34,8 +34,8 @@ class ArtifactRequestContext:
     collected_artifact_ids: List[str] = field(default_factory=list)
     # Filename of each file a tool returned in this turn, to its artifact id.
     # The model sometimes links a tool image by its bare filename; the runner
-    # rewrites that link to ``/artifacts/{id}``. A later file with the same
-    # name replaces the earlier one.
+    # rewrites that link to ``/artifacts/{id}``. Names are unique within the
+    # turn: the interceptor gives a repeated name a ``-2`` suffix.
     collected_artifact_files: Dict[str, str] = field(default_factory=dict)
     # The live sandbox, set by the runner once the turn has one. The
     # interceptor uploads each new MCP file there. None when the turn has
