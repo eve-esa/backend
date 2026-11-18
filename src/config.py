@@ -279,6 +279,11 @@ MAIL_FALLBACK_TRANSPORT = getenv_or("MAIL_FALLBACK_TRANSPORT").lower()
 INTERNAL_API_SECRET = getenv_or("INTERNAL_API_SECRET")
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").strip()
+# Mail templates published as a pack (docs/mail-templates.md). Blank means no
+# S3 call at all and every mail renders from src/templates/mail/. The refresh
+# runs in the background every MAIL_TEMPLATES_REFRESH_S seconds.
+MAIL_TEMPLATES_BUCKET = getenv_or("MAIL_TEMPLATES_BUCKET")
+MAIL_TEMPLATES_REFRESH_S = int(getenv_or("MAIL_TEMPLATES_REFRESH_S", "300"))
 
 CORS_ALLOWED_ORIGINS = [
     origin.strip()

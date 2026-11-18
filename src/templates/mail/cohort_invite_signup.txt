@@ -1,0 +1,21 @@
+Your EVE account is one step away
+
+You registered your interest in the Earth Virtual Expert (EVE) with {{ email }}. EVE is now available, and you can create your account today.
+
+Create your EVE account: {{ sign_up_url }}
+
+
+HOW TO GET STARTED
+
+- Create your account: open {{ sign_up_url }} and sign up with {{ email }}.
+- Confirm your address: enter the code we send to your inbox.
+
+
+WHAT EVE DOES
+
+EVE answers Earth Observation questions with responses grounded in EO data and peer-reviewed science, and every answer is traceable to its sources.
+
+Kind regards,
+The EVE Team
+
+You are receiving this message because {{ email }} registered interest in EVE.

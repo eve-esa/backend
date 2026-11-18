@@ -1,0 +1,25 @@
+{#
+  The launch mail to a person who registered interest in EVE and has no account
+  yet, framed by base.html and laid out like cohort_invite.html. Neutral default
+  copy: a published pack carries the campaign wording. ``sign_up_url`` is the
+  button and link target.
+#}
+{% extends "base.html" %}
+{% block title %}Your EVE account is one step away{% endblock %}
+{% block body %}
+        <p style="margin:0 0 20px 0;">You registered your interest in the <strong>Earth Virtual Expert (EVE)</strong> with <strong>{{ email }}</strong>. EVE is now available, and you can create your account today.</p>
+        <p style="margin:0 0 24px 0;"><a href="{{ sign_up_url }}" style="color:#ffffff;background-color:#003247;padding:12px 22px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold;">Create your EVE account</a></p>
+
+        <p style="margin:0 0 8px 0;padding-top:20px;border-top:1px solid #d2dadc;font-size:17px;font-weight:bold;color:#003247;">How to get started</p>
+        <ul style="margin:0 0 20px 0;padding-left:20px;">
+          <li><strong>Create your account:</strong> open <a href="{{ sign_up_url }}" style="color:#003247;">{{ sign_up_url }}</a> and sign up with <strong>{{ email }}</strong>.</li>
+          <li><strong>Confirm your address:</strong> enter the code we send to your inbox.</li>
+        </ul>
+
+        <p style="margin:0 0 8px 0;padding-top:20px;border-top:1px solid #d2dadc;font-size:17px;font-weight:bold;color:#003247;">What EVE does</p>
+        <p style="margin:0 0 20px 0;">EVE answers Earth Observation questions with responses grounded in <strong>EO data and peer-reviewed science</strong>, and every answer is <strong>traceable to its sources</strong>.</p>
+
+        <p style="margin:0 0 24px 0;"><strong>Kind regards,</strong><br><strong>The EVE Team</strong></p>
+
+        <p style="margin:0;padding-top:16px;border-top:1px solid #d2dadc;font-size:12px;line-height:18px;color:#335e6f;">You are receiving this message because <strong>{{ email }}</strong> registered interest in EVE.</p>
+{% endblock %}

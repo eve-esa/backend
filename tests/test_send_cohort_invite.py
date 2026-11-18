@@ -19,9 +19,13 @@ from src.commands.send_cohort_invite import (
 )
 from src.database.mongo import AsyncMongoDBManager, async_mongo_manager, get_collection
 from src.services.account_notifications import (
-    COHORT_INVITE_SUBJECT,
+    MAIL_SPECS,
+    mail_template_store,
     render_cohort_invite,
 )
+from src.services.mail_templates import BUNDLED_DIR
+
+COHORT_INVITE_SUBJECT = MAIL_SPECS["cohort_invite"].subject
 from tests.conftest import _resolve_test_mongo_uri
 
 
@@ -159,9 +163,7 @@ def test_render_default_is_the_structured_launch_mail():
 
 @pytest.mark.no_db
 def test_mail_templates_carry_no_em_dash_or_middle_dot():
-    from src.services.account_notifications import _TEMPLATES_DIR
-
-    for path in sorted(_TEMPLATES_DIR.iterdir()):
+    for path in sorted(BUNDLED_DIR.iterdir()):
         content = path.read_text(encoding="utf-8")
         assert "\u2014" not in content, path.name
         assert "\u00b7" not in content, path.name
@@ -311,6 +313,56 @@ async def test_apply_sends_in_batches_and_is_idempotent(world, fake_mailer, paus
         f"{world['cohort']}-b", apply=True, emails=emails[:1], sleep_seconds=0
     )
     assert other["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_apply_refreshes_the_templates_once_and_logs_their_source(
+    world, fake_mailer, pauses, monkeypatch, caplog, capsys
+):
+    """A one-off task has no lifespan: it must fetch the pack before the first send."""
+    emails = [(await _user(world, f"tpl{i}"))[1] for i in range(3)]
+    refreshes = []
+
+    async def _refresh():
+        refreshes.append(len(fake_mailer.sent))
+        return False
+
+    monkeypatch.setattr(mail_template_store, "refresh", _refresh)
+    with caplog.at_level(logging.INFO, logger=command.__name__):
+        summary = await send_cohort_invite(
+            world["cohort"], apply=True, emails=emails, sleep_seconds=0
+        )
+
+    assert summary["sent"] == 3
+    assert refreshes == [0]
+    assert "Mail templates: bundled" in capsys.readouterr().out
+    sent_lines = [r.getMessage() for r in caplog.records if "cohort_invite_sent" in r.getMessage()]
+    assert len(sent_lines) == 3
+    for line in sent_lines:
+        assert f"cohort={world['cohort']}" in line
+        assert "template_source=bundled pack_version=none" in line
+        assert "@" not in line
+
+
+@pytest.mark.asyncio
+async def test_dry_run_makes_no_s3_call_and_prints_no_template_line(
+    world, fake_mailer, pauses, monkeypatch, capsys
+):
+    """The dry run output is the same as before the pack existed."""
+    emails = [(await _user(world, f"dry{i}"))[1] for i in range(2)]
+    refreshes = []
+
+    async def _refresh():
+        refreshes.append(True)
+        return False
+
+    monkeypatch.setattr(mail_template_store, "refresh", _refresh)
+    summary = await send_cohort_invite(world["cohort"], emails=emails, sleep_seconds=0)
+
+    assert summary["recipients"] == 2
+    assert refreshes == []
+    assert "Mail templates" not in capsys.readouterr().out
+    assert fake_mailer.sent == []
 
 
 @pytest.mark.asyncio
