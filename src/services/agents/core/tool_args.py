@@ -11,6 +11,8 @@ import json
 import logging
 from typing import Any
 
+from src.services.agents.core.run_hint import add_run_hints
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +79,10 @@ def repair_payload_tool_args(payload: dict) -> dict:
 def ensure_tool_args_are_json(llm: Any) -> Any:
     """Repair tool arguments on every request this model sends.
 
+    The same request also gets the shell form of each file the model wrote
+    in the sandbox (``run_hint.add_run_hints``). The stored messages do not
+    change.
+
     A model without ``_get_request_payload`` is returned unchanged. A second
     call does not wrap the method again.
     """
@@ -89,7 +95,9 @@ def ensure_tool_args_are_json(llm: Any) -> Any:
     def _get_request_payload(input_: Any, *, stop: Any = None, **kwargs: Any) -> dict:
         payload = original(input_, stop=stop, **kwargs)
         if isinstance(payload, dict):
-            return repair_payload_tool_args(drop_assistant_names(payload))
+            return add_run_hints(
+                repair_payload_tool_args(drop_assistant_names(payload))
+            )
         return payload
 
     llm._get_request_payload = _get_request_payload
