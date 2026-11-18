@@ -475,6 +475,14 @@ async def _cited_run(
         )
 
 
+ARTIFACT_ID = "6afc784fe283102b6482b693"
+# Sources an earlier flag-on turn of the conversation stored.
+STORED_HANDLES = [
+    {"id": "src_a", "handle": "S1", "document_key": "doi:a", "title": "A"},
+    {"id": "src_b", "handle": "S2", "document_key": "url:b", "title": "B"},
+]
+
+
 def _persist_kwargs(applied) -> Dict[str, Any]:
     return applied["persist_message_state"].await_args_list[-1].kwargs
 
@@ -491,7 +499,9 @@ class TestRunner:
 
     async def test_flag_off_strips_handles_left_in_the_thread(self, flag_off):
         # A handle a flag-on turn left in the thread never reaches the user.
-        events, applied = await _cited_run(["SAR is radar [S", "1]. More [S2, S3]."])
+        events, applied = await _cited_run(
+            ["SAR is radar [S", "1]. More [S2, S3]."], prior=STORED_HANDLES
+        )
         answer = "".join(t["content"] for t in _of(events, "token"))
         assert answer == "SAR is radar . More ."
         final = _of(events, "final")[0]
@@ -500,6 +510,27 @@ class TestRunner:
         kwargs = _persist_kwargs(applied)
         assert kwargs["output"] == answer
         assert "citations" not in kwargs
+
+    async def test_flag_off_keeps_brackets_no_turn_handed_out(self, flag_off):
+        text = "Sentinel-1 [S1] and Sentinel-2 [S2] both cover Rome. Compare [S1, S3]."
+        events, applied = await _cited_run([text[:14], text[14:]])
+        assert "".join(t["content"] for t in _of(events, "token")) == text
+        assert _of(events, "final")[0]["answer"] == text
+        assert _persist_kwargs(applied)["output"] == text
+
+    async def test_flag_off_keeps_a_handle_the_conversation_never_stored(self, flag_off):
+        events, _ = await _cited_run(["Old [S1]. Mission [S7]."], prior=STORED_HANDLES)
+        assert _of(events, "final")[0]["answer"] == "Old . Mission [S7]."
+
+    async def test_offsets_follow_the_file_link_rewrite(self, flag_on):
+        link = f"![map](/artifacts/{ARTIFACT_ID}/severity_map.png)"
+        events, applied = await _cited_run([f"See {link} first [S", "1]. Then [S2]."])
+        final = _of(events, "final")[0]
+        assert final["answer"] == f"See ![map](/artifacts/{ARTIFACT_ID}) first [1]. Then [2]."
+        assert marker_spans(final["answer"], final["citations"]) == ["[1]", "[2]"]
+        kwargs = _persist_kwargs(applied)
+        assert kwargs["output"] == final["answer"]
+        assert kwargs["citations"] == final["citations"]
 
     async def test_valid_citation_streams_persists_and_finals(self, flag_on):
         events, applied = await _cited_run(["SAR is radar [S", "1]. Files say so [S2]", "."])
@@ -625,6 +656,38 @@ class TestRunner:
         assert "eve.citations" not in body and "eve.sourcesRetrieved" not in body
 
 
+class TestRemap:
+    def test_shift_offset(self):
+        from src.services.sources.citations import shift_offset
+
+        edits = [(4, 10, 2), (20, 22, 6)]
+        assert shift_offset(3, edits) == 3
+        assert shift_offset(5, edits) == 5
+        assert shift_offset(10, edits) == 6
+        assert shift_offset(25, edits) == 25
+        assert shift_offset(15, []) == 15
+
+    def test_remap_moves_offsets_through_each_pass(self):
+        registry = SourceRegistry()
+        registry.register({"id": "src_a", "document_key": "doi:a", "title": "A"})
+        before = "[x](/artifacts/a/f.png) fact [S1]. [y](out.png) again [S1]."
+        text, rewriter = _rewrite(registry, [before])
+        assert text == "[x](/artifacts/a/f.png) fact [1]. [y](out.png) again [1]."
+        first = "[x](/artifacts/a) fact [1]. [y](out.png) again [1]."
+        after = "[x](/artifacts/a) fact [1]. [y](/conversations/c/workspace/out.png) again [1]."
+        passes = [[(0, 23, 17)], [(28, 40, 39)]]
+        assert first[:17] == "[x](/artifacts/a)" and first[28:40] == "[y](out.png)"
+        assert rewriter.remap(after, passes) == 0
+        assert marker_spans(after, rewriter.citations()) == ["[1]", "[1]"]
+
+    def test_remap_drops_an_offset_without_its_marker(self):
+        registry = SourceRegistry()
+        registry.register({"id": "src_a", "document_key": "doi:a", "title": "A"})
+        _, rewriter = _rewrite(registry, ["Fact [S1]."])
+        assert rewriter.remap("Fact .", [[(0, 1, 1)]]) == 1
+        assert rewriter.citations()[0]["at"] == []
+
+
 class TestPersist:
     async def test_citations_land_in_metadata(self, monkeypatch):
         from src.services import generate_answer as ga
@@ -748,19 +811,41 @@ class TestStripHandles:
 
         assert strip_handles("A [S1] b [S2, S3] c [1] d [S") == "A  b  c [1] d [S"
 
-    async def test_sync_route_strips_handles(self, flag_on):
+    def test_strip_handles_with_a_registry_strips_only_its_handles(self):
+        from src.services.sources.citations import strip_handles
+
+        registry = SourceRegistry()
+        registry.seed(STORED_HANDLES)
+        text = "Sentinel-1 [S1] and [S2, S9] but [S7] and [S"
+        assert strip_handles(text, registry) == "Sentinel-1  and  but [S7] and [S"
+        assert strip_handles(text, SourceRegistry()) == text
+
+    @staticmethod
+    async def _sync_answer(content: str, prior) -> str:
         from langchain_core.messages import AIMessage
 
+        from src.schemas.generation_request import GenerationRequest
         from src.services.agents.core.runner import generate_answer_agentic
         from tests.test_agentic_fallback import _FakeUpdatesGraph, _patched_runner
 
-        graph = _FakeUpdatesGraph([{"agent": {"messages": [AIMessage(content="Answer [S1] and [S2; S3].")]}}])
-        from src.schemas.generation_request import GenerationRequest
-
+        graph = _FakeUpdatesGraph([{"agent": {"messages": [AIMessage(content=content)]}}])
         request = GenerationRequest(query="hi", llm_type="main", agent="react")
-        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)):
+        loader = prior if isinstance(prior, AsyncMock) else AsyncMock(return_value=list(prior))
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)), patch(
+            f"{_RUNNER}._load_prior_sources", loader
+        ):
             final_answer, *_ = await generate_answer_agentic(request, user_id="test-user", conversation_id="c1")
-        assert final_answer == "Answer  and ."
+        return final_answer
+
+    async def test_sync_route_strips_handles(self, flag_on):
+        assert await self._sync_answer("Answer [S1] and [S2; S3].", STORED_HANDLES) == "Answer  and ."
+
+    async def test_sync_route_keeps_brackets_no_turn_handed_out(self, flag_off):
+        assert await self._sync_answer("Sentinel-1 [S1] and [S2].", []) == "Sentinel-1 [S1] and [S2]."
+
+    async def test_sync_route_strips_every_handle_when_the_lookup_fails(self, flag_on):
+        failed = AsyncMock(side_effect=TimeoutError())
+        assert await self._sync_answer("Answer [S1] and [S7].", failed) == "Answer  and ."
 
 
 # ── review fixes: held text, Stop, timeout, error ───────────────────────────

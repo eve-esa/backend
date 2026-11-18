@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from src.services.sources.descriptors import minimal_source, public_source, slug_for_provider
 
@@ -54,6 +54,9 @@ _LITERAL_OPEN = re.compile(r"\[(?=\s*S\d)")
 _MARKER_FIELDS = ("n", "at", "origin", "alias_handles")
 # The longest prefix held back before it is let through as text.
 MAX_HOLD_CHARS = 40
+# One replacement a rewrite pass made: (start, end, new length), in the text
+# that pass read.
+Edit = Tuple[int, int, int]
 
 
 @dataclass
@@ -100,6 +103,9 @@ class SourceRegistry:
 
     def get(self, handle: str) -> Optional[Dict[str, Any]]:
         return self._by_handle.get(handle) or self._prior_by_handle.get(handle)
+
+    def has_handles(self) -> bool:
+        return bool(self._by_handle or self._prior_by_handle)
 
     def by_id(self, source_id: str) -> Optional[Dict[str, Any]]:
         return self._by_id.get(source_id) or self._prior_by_id.get(source_id)
@@ -164,11 +170,31 @@ def neutralise_handles(value: Any) -> Any:
     return value
 
 
-class CitationRewriter:
-    """Rewrites ``[S<k>]`` handles in streamed answer text to ``[n]`` markers."""
+def shift_offset(at: int, edits: Iterable[Edit]) -> int:
+    """``at`` in the text one rewrite pass wrote, from its ``edits``.
 
-    def __init__(self, registry: SourceRegistry) -> None:
+    ``edits`` are sorted and do not overlap. An offset inside a replaced span
+    keeps its distance from the start of the span.
+    """
+    delta = 0
+    for start, end, length in edits:
+        if at < end:
+            break
+        delta += length - (end - start)
+    return at + delta
+
+
+class CitationRewriter:
+    """Rewrites ``[S<k>]`` handles in streamed answer text to ``[n]`` markers.
+
+    With ``cite=False`` it hands out no number: a marker that names a handle
+    of ``registry`` is dropped and any other marker stays as written, so a
+    model that never saw a handle keeps text such as ``Sentinel-1 [S1]``.
+    """
+
+    def __init__(self, registry: SourceRegistry, *, cite: bool = True) -> None:
         self._registry = registry
+        self._cite = cite
         self._held = ""
         self._emitted = 0  # code points written so far
         self.numbers: Dict[str, int] = {}  # source id -> display number
@@ -184,6 +210,8 @@ class CitationRewriter:
         """Rewritten text that is safe to send now; a possible marker is held back."""
         if not text:
             return ""
+        if not self._cite and not self._registry.has_handles():
+            return self._take(text)
         buffer = self._held + text
         self._held = ""
         out: List[str] = []
@@ -196,7 +224,7 @@ class CitationRewriter:
             out.append(self._take(buffer[i:start]))
             match = _MARKER.match(buffer, start)
             if match:
-                out.append(self._markers(match.group(1)))
+                out.append(self._markers(match.group(1)) if self._cite else self._strip(match))
                 i = match.end()
                 continue
             rest = buffer[start:]
@@ -221,6 +249,36 @@ class CitationRewriter:
     def _take(self, text: str) -> str:
         self._emitted += len(text)
         return text
+
+    def _strip(self, match: re.Match) -> str:
+        if any(self._registry.get(h) is not None for h in _HANDLE.findall(match.group(1))):
+            return ""
+        return self._take(match.group(0))
+
+    def remap(self, answer: str, passes: Iterable[List[Edit]]) -> int:
+        """Move every recorded offset through the rewrite ``passes`` that made ``answer``.
+
+        An offset where ``answer`` no longer has its marker is dropped.
+        Returns how many were dropped.
+        """
+        passes = [edits for edits in passes if edits]
+        if not passes:
+            return 0
+        dropped = 0
+        for sid, offsets in self.offsets.items():
+            marker = f"[{self.numbers[sid]}]"
+            moved: List[int] = []
+            for at in offsets:
+                for edits in passes:
+                    at = shift_offset(at, edits)
+                if answer[at : at + len(marker)] == marker:
+                    if at not in moved:
+                        moved.append(at)
+                else:
+                    dropped += 1
+            offsets[:] = moved
+        self.version += 1
+        return dropped
 
     def _markers(self, body: str) -> str:
         parts: List[str] = []
@@ -327,13 +385,18 @@ def _doc_key(source: Mapping[str, Any]) -> str:
     return source.get("document_key") or source["id"]
 
 
-def strip_handles(text: str) -> str:
-    """``text`` without any ``[S<k>]`` handle: the rewrite with no known Source.
+def strip_handles(text: str, registry: Optional[SourceRegistry] = None) -> str:
+    """``text`` without the ``[S<k>]`` handles the model may have copied.
 
     For the paths that hand out no handles (the sync agentic route, the flag
-    off) but whose model may still copy one from the checkpoint thread.
+    off) but whose model may still copy one an earlier turn left in the
+    checkpoint thread. ``registry`` holds that conversation's stored Sources:
+    only a marker naming one of them goes. Without it every handle goes.
     """
-    rewriter = CitationRewriter(SourceRegistry())
+    if registry is None:
+        rewriter = CitationRewriter(SourceRegistry())
+    else:
+        rewriter = CitationRewriter(registry, cite=False)
     return rewriter.feed(text or "") + rewriter.flush()
 
 

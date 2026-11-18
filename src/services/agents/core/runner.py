@@ -96,6 +96,7 @@ from src.services.mcp.retrieval_context import (
 )
 from src.services.sources.citations import (
     CitationRewriter,
+    Edit,
     SourceRegistry,
     citation_payload,
     prior_sources_from_rows,
@@ -1474,11 +1475,14 @@ _ARTIFACT_MARKDOWN = re.compile(
 )
 
 
-def _markdown_paths_to_artifact_urls(answer: str) -> str:
+def _markdown_paths_to_artifact_urls(
+    answer: str, edits: Optional[List[Edit]] = None
+) -> str:
     """Rewrite a markdown artifact link to the URL the chat can load.
 
     A link that is already ``/artifacts/{id}`` is left as it is. Any other
-    form is repaired, and a warning names the URL that was wrong.
+    form is repaired, and a warning names the URL that was wrong. Each repair
+    is appended to ``edits``.
     """
 
     def replace(match: re.Match) -> str:
@@ -1491,12 +1495,16 @@ def _markdown_paths_to_artifact_urls(answer: str) -> str:
                 original,
                 artifact_id,
             )
+            if edits is not None:
+                edits.append((match.start(), match.end(), len(repaired)))
         return repaired
 
     return _ARTIFACT_MARKDOWN.sub(replace, answer)
 
 
-async def rewrite_answer_file_links(answer: str) -> str:
+async def rewrite_answer_file_links(
+    answer: str, passes: Optional[List[List[Edit]]] = None
+) -> str:
     """Point embedded file markdown at the URL the chat can load.
 
     The instruction asks the model to embed ``/artifacts/{id}/{filename}``
@@ -1505,13 +1513,21 @@ async def rewrite_answer_file_links(answer: str) -> str:
     such as ``storage.googleapis.com/.../artifacts/{id}/file``, is rewritten
     in place. A workspace path is published the same way. An artifact the
     answer never mentions stays out of the answer.
+
+    ``passes`` receives the edits of each rewrite pass, in order, for
+    ``CitationRewriter.remap``.
     """
     if not answer:
         return answer
-    answer = _markdown_paths_to_artifact_urls(answer)
     from src.services.agents.core.workspace import publish_markdown_files
 
-    return await publish_markdown_files(answer)
+    artifact_edits: List[Edit] = []
+    workspace_edits: List[Edit] = []
+    answer = _markdown_paths_to_artifact_urls(answer, artifact_edits)
+    answer = await publish_markdown_files(answer, workspace_edits)
+    if passes is not None:
+        passes.extend([artifact_edits, workspace_edits])
+    return answer
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
@@ -2734,7 +2750,13 @@ async def generate_answer_agentic(
                 break
         # This route hands out no handles, but the model may copy one an
         # earlier streamed turn left in the thread: it never reaches the user.
-        final_answer = strip_handles(final_answer)
+        prior_sources = SourceRegistry()
+        if conversation_id and await _seed_conversation_sources(
+            prior_sources, conversation_id, message_id
+        ):
+            final_answer = strip_handles(final_answer, prior_sources)
+        elif src_config.FEATURE_INLINE_CITATIONS:
+            final_answer = strip_handles(final_answer)
         final_answer = await rewrite_answer_file_links(final_answer)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
@@ -2886,11 +2908,13 @@ async def generate_answer_agentic_stream_helper(
     usage_rows: List[Dict[str, Any]] = []
     # The answer filter for [S<k>] handles. With FEATURE_INLINE_CITATIONS and
     # the conversation's earlier Sources read (``citing``), it turns cited
-    # handles into [n] markers. Otherwise it knows no Source and only strips
-    # the handles the model may copy from the thread (an earlier flag-on turn):
-    # frames and the stored message carry no citation fields.
+    # handles into [n] markers; when that read fails it strips every handle.
+    # With the flag off it strips only the handles an earlier flag-on turn of
+    # this conversation stored, which the model may copy from the thread; any
+    # other [S<k>] is the model's own text. Frames and the stored message
+    # then carry no citation fields.
     citing = False
-    citation_rewriter = CitationRewriter(SourceRegistry())
+    citation_rewriter = CitationRewriter(SourceRegistry(), cite=False)
     # A change to the marker list not yet sent on a token frame.
     citations_dirty = False
 
@@ -2917,6 +2941,16 @@ async def generate_answer_agentic_stream_helper(
         if output_format == "json":
             return [f"data: {json.dumps({'type': 'token', 'content': rest})}\n\n"]
         return [f"data: {rest}\n\n"]
+
+    async def _rewrite_file_links() -> str:
+        """The answer with its file links rewritten; citation offsets follow the text."""
+        passes: List[List[Edit]] = []
+        answer = await rewrite_answer_file_links(_answer_text(), passes)
+        if citing:
+            dropped = citation_rewriter.remap(answer, passes)
+            if dropped:
+                logger.warning("citations.offsets_dropped count=%d", dropped)
+        return answer
 
     def _citation_fields() -> Dict[str, Any]:
         """``citations`` and ``sources_retrieved`` for the frame and the row; {} when off."""
@@ -2997,8 +3031,17 @@ async def generate_answer_agentic_stream_helper(
                 _retrieval_ctx.sources, conversation_id, message_id
             )
             _retrieval_ctx.cite = citing
-            if citing:
-                citation_rewriter = CitationRewriter(_retrieval_ctx.sources)
+            citation_rewriter = (
+                CitationRewriter(_retrieval_ctx.sources)
+                if citing
+                else CitationRewriter(SourceRegistry())
+            )
+        elif conversation_id:
+            prior_sources = SourceRegistry()
+            if await _seed_conversation_sources(
+                prior_sources, conversation_id, message_id
+            ):
+                citation_rewriter = CitationRewriter(prior_sources, cite=False)
 
         setup_latencies: Dict[str, float] = {}
 
@@ -3518,7 +3561,7 @@ async def generate_answer_agentic_stream_helper(
 
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
-        answer = await rewrite_answer_file_links(_answer_text())
+        answer = await _rewrite_file_links()
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -3648,7 +3691,7 @@ async def generate_answer_agentic_stream_helper(
             graph=agent_graph_type,
         )
         held_events = _held_token_events()
-        answer = await rewrite_answer_file_links(_answer_text())
+        answer = await _rewrite_file_links()
         error_info = build_error_payload(exc)
         timeout_documents, timeout_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):

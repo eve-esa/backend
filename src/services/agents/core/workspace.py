@@ -668,12 +668,15 @@ def workspace_file_url(conversation_id: str, relative: str) -> str:
     return f"/conversations/{conversation_id}/workspace/{relative}"
 
 
-async def publish_markdown_files(answer: str) -> str:
+async def publish_markdown_files(
+    answer: str, edits: Optional[list[tuple[int, int, int]]] = None
+) -> str:
     """Point a workspace markdown path at the saved workspace file.
 
     The chat loads ``/conversations/{id}/workspace/{path}``. The bytes are the
     workspace object, not a second artifact. A missing file is left as
-    written, with a warning.
+    written, with a warning. Each rewritten link is appended to ``edits`` as
+    ``(start, end, new length)``.
     """
     if not answer:
         return answer
@@ -696,15 +699,16 @@ async def publish_markdown_files(answer: str) -> str:
         if relative is None:
             pieces.append(match.group(0))
         else:
-            pieces.append(
-                await _link_workspace_file(
-                    match.group(0),
-                    match.group(1),
-                    path or "",
-                    relative,
-                    ctx,
-                )
+            piece = await _link_workspace_file(
+                match.group(0),
+                match.group(1),
+                path or "",
+                relative,
+                ctx,
             )
+            if edits is not None and piece != match.group(0):
+                edits.append((match.start(), match.end(), len(piece)))
+            pieces.append(piece)
         cursor = match.end()
     pieces.append(answer[cursor:])
     return "".join(pieces)
