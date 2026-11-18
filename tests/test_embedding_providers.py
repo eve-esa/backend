@@ -1,6 +1,7 @@
 """Embedding provider order: first provider that answers wins, the rest are fallbacks."""
 
 import asyncio
+import email.utils
 import json
 import threading
 import time
@@ -255,6 +256,10 @@ async def test_rate_limit_wait_follows_retry_after_with_a_cap():
     assert vsm._rate_limit_wait_s(limited({"retry-after": "30"})) == 2.0
     assert vsm._rate_limit_wait_s(limited({"retry-after": "Wed, 21 Oct"})) == 1.0
     assert vsm._rate_limit_wait_s(limited({})) == 1.0
+    # The shared parser: an HTTP date counts too, a negative value is unusable.
+    date = email.utils.formatdate(time.time() + 1.5, usegmt=True)
+    assert 0.0 < vsm._rate_limit_wait_s(limited({"retry-after": date})) <= 2.0
+    assert vsm._rate_limit_wait_s(limited({"retry-after": "-5"})) == 1.0
 
 
 async def test_concurrency_per_provider_is_capped(manager, monkeypatch):

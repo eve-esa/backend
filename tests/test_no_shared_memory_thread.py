@@ -60,7 +60,13 @@ class _Manager:
     def resolve_chain(self, _llm_type):
         return ["main"]
 
+    def open_circuits(self, _llm_type, _chain):
+        return []
+
     def get_client_for_model(self, _llm_type):
+        return self.llm
+
+    def client_for_candidate(self, _llm_type):
         return self.llm
 
 

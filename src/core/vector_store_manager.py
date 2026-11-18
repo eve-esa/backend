@@ -68,6 +68,7 @@ from src.constants import (
     PUBLIC_ENV_STAGING,
     WILEY_PUBLIC_COLLECTIONS,
 )
+from src.core.llm_health import parse_retry_after, retry_after_header
 from src.utils.error_logger import Component, PipelineStage, get_error_logger
 from src.utils.helpers import all_known_public_collection_labels, iter_public_catalog
 
@@ -330,11 +331,8 @@ async def _embedding_client(api_key: str, base_url: str) -> _EmbeddingClient:
 
 def _rate_limit_wait_s(error: RateLimitError) -> float:
     """Seconds to wait before the one retry: Retry-After, capped, 1 s without it."""
-    try:
-        wait = float(error.response.headers.get("retry-after", "1"))
-    except (AttributeError, TypeError, ValueError):
-        wait = 1.0
-    return min(max(wait, 0.0), EMBEDDING_RATE_LIMIT_WAIT_MAX_S)
+    wait = parse_retry_after(retry_after_header(error), time.time())
+    return min(1.0 if wait is None else wait, EMBEDDING_RATE_LIMIT_WAIT_MAX_S)
 
 
 async def _create_embeddings(

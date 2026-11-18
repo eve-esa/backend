@@ -163,9 +163,17 @@ def test_each_endpoint_carries_its_own_first_token_budget(
     monkeypatch, getter, base_url_attr, api_key_name, expected_timeout
 ):
     captured = {}
-    monkeypatch.setattr(
-        "src.core.llm_manager.ChatOpenAI", lambda **kwargs: captured.update(kwargs)
-    )
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def guard(self, health, llm_type):
+            return self
+
+    # The JSC clients are the rate-limit aware subclass.
+    for name in ("ChatOpenAI", "BreakerAwareChatOpenAI"):
+        monkeypatch.setattr(f"src.core.llm_manager.{name}", _Client)
     monkeypatch.setattr(f"src.core.llm_manager.{api_key_name}", "test-key")
     manager = LLMManager()
     monkeypatch.setattr(manager, base_url_attr, "https://endpoint.example/v1")

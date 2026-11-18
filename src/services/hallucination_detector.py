@@ -93,7 +93,11 @@ class HallucinationResult(BaseModel):
 
 class HallucinationDetector:
     def __init__(self):
-        self.llm_manager = LLMManager()
+        # Built per request: share the process breaker, so a rate limit window
+        # or an open circuit holds here too.
+        from src.services.generate_answer import get_shared_llm_manager
+
+        self.llm_manager = LLMManager(health=get_shared_llm_manager().health)
         self.parser_hallucination = PydanticOutputParser(
             pydantic_object=HallucinationResult
         )

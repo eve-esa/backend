@@ -197,6 +197,15 @@ class _FakeRedis:
         entry = self._live(key)
         return None if entry is None else entry[0]
 
+    def mget(self, keys):
+        self._check("mget")
+        return [self.peek(key) for key in keys]
+
+    def pttl(self, key: str) -> int:
+        self._check("pttl")
+        entry = self._live(key)
+        return -2 if entry is None else int((entry[1] - self.clock()) * 1000)
+
 
 @pytest.fixture(autouse=True)
 def _fresh_stores():
