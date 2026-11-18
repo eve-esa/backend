@@ -19,11 +19,14 @@ is made in one place, :func:`_choose_transport`.
 
 ``MAIL_FALLBACK_TRANSPORT=ses`` keeps a relay outage from losing mail: when
 the chosen transport is SMTP and the send raises, the same message goes out
-through SES with the SES sender, and one WARNING line says why. Delivery is
-at-least-once by choice. Once the relay has answered DATA the mail counts as
-sent and nothing after it (a failed QUIT) falls back; a disconnect or timeout
-while waiting for that answer is ambiguous, because the relay may have queued
-the message, and it falls back: a second copy of a code mail beats none.
+through SES with the SES sender, and one WARNING line says why. Once the relay
+has answered DATA the mail counts as sent and nothing after it (a failed QUIT)
+falls back. ``send_message`` hides which step failed, so a dropped line or a
+timeout during it is ambiguous: the relay may have queued the message. By
+default it falls back too (at-least-once: a second copy of a code mail beats
+none); a caller that must mail at most once passes
+``fallback_on_uncertain=False`` and gets the uncertain failure instead of a
+second copy.
 
 Deadlines: each SMTP operation (connect, EHLO, STARTTLS, AUTH, MAIL, RCPT,
 DATA) waits at most ``SMTP_TIMEOUT_SECONDS``, so a black-holed relay costs one
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -91,16 +95,30 @@ class MailDeliveryFailed(RuntimeError):
 
     smtplib errors such as ``SMTPRecipientsRefused`` carry the recipient in their
     text, and so does the SES ``MessageRejected`` message, while callers log
-    failures with ``exc_info``. The class name and the SMTP reply code or AWS
-    error code survive as attributes, for the fallback log line.
+    failures with ``exc_info``. The class name, the SMTP reply code or AWS
+    error code and the SMTP enhanced status code (``5.4.5``) survive as
+    attributes, for the log lines.
+
+    ``uncertain`` is true when the message may have reached the relay: the
+    line dropped or timed out inside ``send_message``, after the login, with
+    no answer from the relay. A caller that must not mail twice treats such a
+    failure as possibly sent.
     """
 
     def __init__(
-        self, message: str, *, reason: str = "", code: int | str | None = None
+        self,
+        message: str,
+        *,
+        reason: str = "",
+        code: int | str | None = None,
+        status: str | None = None,
+        uncertain: bool = False,
     ):
         super().__init__(message)
         self.reason = reason
         self.code = code
+        self.status = status
+        self.uncertain = uncertain
 
 
 _ses_client = None
@@ -123,14 +141,60 @@ def _smtp_code(exc: smtplib.SMTPException) -> int | None:
     return None
 
 
-def _failure_reason(exc: BaseException) -> str:
-    """``reason=<class>[ code=<n>]`` for a failed send, with no address in it."""
+# RFC 3463 enhanced status code, the first token of a reply text: "5.4.5".
+_ENHANCED_STATUS = re.compile(r"^[245]\.\d{1,3}\.\d{1,3}$")
+
+
+def _smtp_status(exc: smtplib.SMTPException) -> str | None:
+    """The enhanced status code of a refused SMTP command, when it has one.
+
+    Only the first token of the reply text is read and only when it has the
+    ``x.y.z`` shape, so nothing else of the text (which can name the
+    recipient) leaves this function.
+    """
+    text: object = None
+    if isinstance(exc, smtplib.SMTPResponseException):
+        text = exc.smtp_error
+    elif isinstance(exc, smtplib.SMTPRecipientsRefused) and exc.recipients:
+        _, text = next(iter(exc.recipients.values()))
+    if isinstance(text, bytes):
+        text = text.decode("ascii", errors="replace")
+    if not isinstance(text, str) or not text.split():
+        return None
+    token = text.split()[0]
+    return token if _ENHANCED_STATUS.match(token) else None
+
+
+def failure_reason(exc: BaseException) -> str:
+    """``<class>[ code=<n>][ status=<x.y.z>]`` for a failed send, with no address in it."""
     if isinstance(exc, MailDeliveryFailed) and exc.reason:
         reason = exc.reason
         if exc.code is not None:
             reason += f" code={exc.code}"
+        if exc.status:
+            reason += f" status={exc.status}"
         return reason
     return type(exc).__name__
+
+
+def delivery_uncertain(exc: BaseException) -> bool:
+    """True when a failed send may still have reached the relay."""
+    return isinstance(exc, MailDeliveryFailed) and exc.uncertain
+
+
+def _send_left_unclear(exc: BaseException) -> bool:
+    """True for a failure inside ``send_message`` that may have queued the mail.
+
+    ``send_message`` runs MAIL, RCPT and DATA in one call and hides which step
+    failed, so a dropped line or a timeout during it (smtplib wraps socket
+    errors into ``SMTPServerDisconnected``; ``TimeoutError`` and other
+    ``OSError`` cover the rest) counts as uncertain. A reply code from the
+    relay (``SMTPResponseException``, ``SMTPRecipientsRefused``) and every
+    other ``SMTPException`` is a definite refusal: nothing left.
+    """
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    return isinstance(exc, OSError) and not isinstance(exc, smtplib.SMTPException)
 
 
 def _choose_transport(transport: str, to: str) -> str:
@@ -236,6 +300,7 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     # Not a ``with`` block: its QUIT can raise after the relay accepted DATA,
     # and that error must not read as a failed send and trigger a second copy.
     server = None
+    sending = False
     delivered = False
     try:
         server = smtplib.SMTP(
@@ -247,6 +312,7 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
         if SMTP_USERNAME:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        sending = True
         server.send_message(message, to_addrs=[to])
         delivered = True
         server.quit()
@@ -256,11 +322,20 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
                 "mail smtp session ended with %s after the relay accepted the message",
                 type(exc).__name__,
             )
+        elif sending and _send_left_unclear(exc):
+            # The line dropped or timed out inside send_message with no answer
+            # from the relay: it may have queued the message.
+            raise MailDeliveryFailed(
+                f"SMTP send result unknown: {type(exc).__name__}",
+                reason=type(exc).__name__,
+                uncertain=True,
+            ) from None
         elif isinstance(exc, smtplib.SMTPException):
             raise MailDeliveryFailed(
                 f"SMTP send failed: {type(exc).__name__}",
                 reason=type(exc).__name__,
                 code=_smtp_code(exc),
+                status=_smtp_status(exc),
             ) from None
         else:
             raise
@@ -348,13 +423,25 @@ def _fallback_for_smtp() -> str:
     return ""
 
 
-async def send_mail(to: str, subject: str, html: str, text: str) -> None:
+async def send_mail(
+    to: str,
+    subject: str,
+    html: str,
+    text: str,
+    *,
+    fallback_on_uncertain: bool = True,
+) -> None:
     """Deliver one message, or explain why it could not be delivered.
 
     Raises :class:`MailNotConfigured` when the transport cannot run at all, and
     lets whatever the transport raises through otherwise. Callers decide what a
     failure means: the approval endpoint answers 502, the sign-in path logs and
     carries on.
+
+    ``fallback_on_uncertain=False`` keeps an unclear SMTP send (the relay may
+    have the message) from going out again through the SES fallback: the
+    uncertain :class:`MailDeliveryFailed` is raised instead. A definite SMTP
+    failure still falls back, since nothing left.
     """
     transport = _choose_transport((MAIL_TRANSPORT or TRANSPORT_OFF).strip().lower(), to)
 
@@ -377,12 +464,22 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
                 text=text,
             )
         except Exception as exc:
+            if delivery_uncertain(exc) and not fallback_on_uncertain:
+                logger.warning(
+                    "mail.no_fallback from=%s to=%s reason=%s uncertain=true "
+                    "recipient_domain=%s",
+                    TRANSPORT_SMTP,
+                    TRANSPORT_SES,
+                    failure_reason(exc),
+                    _recipient_domain(to),
+                )
+                raise
             # The SMTP error is only logged: the caller sees SES's verdict.
             logger.warning(
                 "mail.fallback from=%s to=%s reason=%s recipient_domain=%s",
                 TRANSPORT_SMTP,
                 TRANSPORT_SES,
-                _failure_reason(exc),
+                failure_reason(exc),
                 _recipient_domain(to),
             )
             transport = TRANSPORT_SES
