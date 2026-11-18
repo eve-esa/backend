@@ -33,6 +33,7 @@ class _Body:
 class _Store:
     def __init__(self, objects=None):
         self.objects = dict(objects or {})
+        self.types: dict[str, str] = {}
         self.deleted: list[str] = []
 
     def list_key_records(self, prefix, max_keys):
@@ -51,6 +52,7 @@ class _Store:
 
     async def put_object(self, key, body, content_type, tagging=None):
         self.objects[key] = body
+        self.types[key] = content_type
 
     async def delete_object(self, key):
         self.deleted.append(key)
@@ -173,6 +175,29 @@ async def test_save_uploads_a_changed_file_and_deletes_a_removed_one(monkeypatch
     state = json.loads(store.objects[workspace_state_key("u1", "c1")])
     assert "skills/roll.md" not in state["files"]
     assert state["files"]["plot.png"]["sha256"] == hashlib.sha256(new).hexdigest()
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_save_types_each_file_by_its_bytes(monkeypatch):
+    prefix = workspace_prefix("u1", "c1")
+    store = _Store()
+    _install(monkeypatch, store)
+    sandbox = _Sandbox(
+        {
+            "plot.png": (b"\x89PNG\r\n\x1a\n" + b"\x00" * 32, "1.0"),
+            "fake.png": (b"<html><script>alert(1)</script></html>", "1.0"),
+            "report.html": (b"<html><body>hi</body></html>", "1.0"),
+            "notes.txt": (b"hello", "1.0"),
+        }
+    )
+
+    await save_workspace(sandbox, "u1", "c1")
+
+    assert store.types[f"{prefix}plot.png"] == "image/png"
+    assert store.types[f"{prefix}fake.png"] == "application/octet-stream"
+    assert store.types[f"{prefix}report.html"] == "application/octet-stream"
+    assert store.types[f"{prefix}notes.txt"] == "text/plain"
 
 
 @pytest.mark.no_db

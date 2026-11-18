@@ -21,14 +21,15 @@ from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.services.agents.core.tool_results import tool_result_prefix
+from src.services.agents.core.workspace import workspace_prefix, workspace_state_key
 from src.services.storage import storage_service
 
 logger = logging.getLogger(__name__)
 
-# Each half of the cascade (artifacts, tool results) has its own deadline,
-# so a hung S3 call cannot hold a conversation delete. The threadpool call
-# keeps running (bounded by the S3 client timeouts), the request does not
-# wait for it.
+# Each part of the cascade (artifacts, tool results, workspace) has its own
+# deadline, so a hung S3 call cannot hold a conversation delete. The
+# threadpool call keeps running (bounded by the S3 client timeouts), the
+# request does not wait for it.
 CASCADE_TIMEOUT_S = 10
 # Rows read per round; the cascade reads rounds until none is left.
 CASCADE_BATCH_SIZE = 1000
@@ -38,8 +39,8 @@ PREFIX_DELETE_MAX_KEYS = 10_000
 class ArtifactCascadeIncomplete(Exception):
     """A conversation's files were not all erased; a retry finishes the job.
 
-    ``failed`` names the halves that did not finish: ``artifacts``,
-    ``tool_results`` or both.
+    ``failed`` names the parts that did not finish: any of ``artifacts``,
+    ``tool_results`` and ``workspace``.
     """
 
     def __init__(self, failed: list[str]):
@@ -94,10 +95,10 @@ async def delete_artifact(artifact: Artifact) -> None:
 
 
 async def delete_conversation_artifacts(user_id: str, conversation_id: str) -> None:
-    """Remove a conversation's artifacts and offloaded tool results.
+    """Remove a conversation's artifacts, offloaded tool results and workspace.
 
-    The two halves run side by side, each with its own deadline, so one that
-    fails or hangs never skips the other. An artifact a message in another of
+    The three parts run side by side, each with its own deadline, so one that
+    fails or hangs never skips the others. An artifact a message in another of
     the owner's conversations still shows (as a tool output or as an attached
     upload) is kept and moved to that conversation, so a later delete of that
     one removes it. Every failure is a WARNING with ids only.
@@ -111,6 +112,7 @@ async def delete_conversation_artifacts(user_id: str, conversation_id: str) -> N
     results = await asyncio.gather(
         _bounded("artifacts", _delete_artifacts, user_id, conversation_id),
         _bounded("tool_results", _delete_tool_results, user_id, conversation_id),
+        _bounded("workspace", _delete_workspace, user_id, conversation_id),
     )
     failed = [kind for kind, ok in results if not ok]
     if failed:
@@ -118,7 +120,7 @@ async def delete_conversation_artifacts(user_id: str, conversation_id: str) -> N
 
 
 async def _bounded(kind: str, step, user_id: str, conversation_id: str) -> tuple[str, bool]:
-    """Run one half of the cascade under its deadline; True when it finished."""
+    """Run one part of the cascade under its deadline; True when it finished."""
     try:
         async with asyncio.timeout(CASCADE_TIMEOUT_S):
             return kind, await step(user_id, conversation_id)
@@ -235,3 +237,19 @@ async def _delete_tool_results(user_id: str, conversation_id: str) -> bool:
         max_keys=PREFIX_DELETE_MAX_KEYS,
     )
     return deleted < PREFIX_DELETE_MAX_KEYS
+
+
+async def _delete_workspace(user_id: str, conversation_id: str) -> bool:
+    """Empty the saved workspace and drop its state file; False when the cap was hit.
+
+    Like tool results, the workspace has no Mongo row. The state file goes
+    only once the prefix is empty, so a capped run leaves both for the retry.
+    """
+    deleted = await storage_service.delete_prefix(
+        workspace_prefix(user_id, conversation_id),
+        max_keys=PREFIX_DELETE_MAX_KEYS,
+    )
+    if deleted >= PREFIX_DELETE_MAX_KEYS:
+        return False
+    await storage_service.delete_object(workspace_state_key(user_id, conversation_id))
+    return True

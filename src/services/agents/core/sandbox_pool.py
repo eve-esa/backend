@@ -578,10 +578,17 @@ async def _retire(
     conversation_id: str,
     record: dict[str, str],
     guard: LockGuard,
+    *,
+    snapshot: bool = True,
 ) -> bool:
-    """Stop the sandbox and drop its record. False leaves the record for a retry."""
+    """Stop the sandbox and drop its record. False leaves the record for a retry.
+
+    ``snapshot`` saves the workspace before the kill; a conversation delete
+    turns it off, since it erases the workspace right after.
+    """
     await guard.check()
-    await _snapshot_workspace(conversation_id, record)
+    if snapshot:
+        await _snapshot_workspace(conversation_id, record)
     try:
         await asyncio.to_thread(kill_record, record)
     except Exception:
@@ -797,9 +804,10 @@ async def _release(lease: SandboxLease) -> None:
 async def discard_conversation_sandbox(conversation_id: str) -> None:
     """Destroy the conversation's sandbox. Never raises.
 
-    A conversation delete calls this. A failure leaves the provider's own
-    expiry to stop the sandbox, and the reaper retries once the deadline passes
-    when the record is still there.
+    A conversation delete calls this, before it erases the workspace, so no
+    snapshot is saved. A failure leaves the provider's own expiry to stop the
+    sandbox, and the reaper retries once the deadline passes when the record
+    is still there.
     """
     if not conversation_id:
         return
@@ -816,7 +824,7 @@ async def discard_conversation_sandbox(conversation_id: str) -> None:
                 await guard.check()
                 await store.delete(conversation_id)
                 return
-            if await _retire(store, conversation_id, record, guard):
+            if await _retire(store, conversation_id, record, guard, snapshot=False):
                 logger.info(
                     "sandbox.discarded conversation_id=%s provider=%s sandbox_id=%s",
                     conversation_id,

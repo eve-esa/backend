@@ -42,6 +42,7 @@ class FakeStorage:
             "Body": _FakeBody(obj["body"]),
             "ETag": '"fake-etag"',
             "ContentLength": len(obj["body"]),
+            "ContentType": obj["content_type"],
         }
 
     async def stream_body(self, body, chunk_size=65536):

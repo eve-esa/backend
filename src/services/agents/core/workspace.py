@@ -24,7 +24,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import mimetypes
 import re
 import time
 import urllib.parse
@@ -65,6 +64,13 @@ def workspace_state_key(user_id: str, conversation_id: str) -> str:
     return (
         f"users/{user_id}/conversations/{conversation_id}/{_STATE_NAME}"
     )
+
+
+def _content_type(data: bytes, relative: str) -> str:
+    """Stored type of a workspace file: the bytes decide, never the name alone."""
+    from src.services.mcp.artifact_ingestion import detect_content_type
+
+    return detect_content_type(data, relative.rsplit("/", 1)[-1])
 
 
 def capture_process_baseline(backend: Any) -> str:
@@ -279,11 +285,8 @@ async def _save(
             continue
         digest = hashlib.sha256(data).hexdigest()
         if prior is None or prior.get("sha256") != digest:
-            content_type = mimetypes.guess_type(relative)[0] or (
-                "application/octet-stream"
-            )
             await storage_service.put_object(
-                f"{prefix}{relative}", data, content_type
+                f"{prefix}{relative}", data, _content_type(data, relative)
             )
         kept[relative] = {"size": size, "mtime": mtime, "sha256": digest}
         total += size
@@ -720,8 +723,7 @@ async def _link_workspace_file(
     key = f"{workspace_prefix(ctx.user_id, ctx.conversation_id)}{relative}"
     data = await _download_first(ctx.sandbox_backend, _read_candidates(session_path))
     if data:
-        content_type = mimetypes.guess_type(relative)[0] or "application/octet-stream"
-        await storage_service.put_object(key, data, content_type)
+        await storage_service.put_object(key, data, _content_type(data, relative))
     elif not await _workspace_object_exists(key):
         logger.warning("workspace.markdown_unreadable url=%s", original)
         return original

@@ -388,6 +388,26 @@ async def test_delete_destroys_the_sandbox(monkeypatch, clock, sandbox_store):
     assert await sandbox_store.deadline("c1") is None
 
 
+async def test_delete_does_not_save_the_workspace_it_is_about_to_erase(
+    monkeypatch, clock, sandbox_store
+):
+    state = _install(monkeypatch, clock)
+    snapshots = []
+
+    async def _snapshot(conversation_id, _record):
+        snapshots.append(conversation_id)
+
+    monkeypatch.setattr(f"{_POOL}._snapshot_workspace", _snapshot)
+    lease = await acquire_sandbox("c1", None)
+    assert lease is not None
+    await release_sandbox(lease)
+
+    await discard_conversation_sandbox("c1")
+
+    assert state["killed"] == [lease.session.sandbox_id]
+    assert snapshots == []
+
+
 async def test_a_failed_stop_keeps_the_record_for_the_reaper(
     monkeypatch, clock, sandbox_store
 ):
