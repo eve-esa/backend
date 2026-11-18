@@ -48,7 +48,12 @@ async def test_empty_answer_is_untouched():
 @pytest.mark.no_db
 def test_the_instruction_says_to_embed_the_tool_path():
     assert "/artifacts/{id}/{filename}" in _ARTIFACT_MARKDOWN_INSTRUCTION
-    assert "storage.googleapis.com" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    # Naming a host, even as a "never", gave the model one to copy (U7 on
+    # dev, 2026-11-18).
+    assert "googleapis" not in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "Never put a scheme or a host in front of a path." in (
+        _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
     assert "workspace/" in _ARTIFACT_MARKDOWN_INSTRUCTION
     assert "/skills/" in _ARTIFACT_MARKDOWN_INSTRUCTION
     assert "/large_tool_results/" in _ARTIFACT_MARKDOWN_INSTRUCTION
@@ -350,3 +355,72 @@ async def test_citation_offsets_survive_the_three_rewrite_passes(turn_context):
     assert len(passes) == 3 and all(passes)
     assert rewriter.remap(answer, passes) == 0
     assert marker_spans(answer, rewriter.citations()) == ["[1]"] * 5
+
+
+# U7 on dev, 2026-11-18 20:45 UTC (dummy_image): the model wrapped the id of
+# the image it had just received in an invented bucket URL.
+_U7_ARTIFACT_ID = "6afe0e94f584dfa22d6ed15d"
+_U7_ANSWER = (
+    "![get_sample_image-1.png](https://storage.googleapis.com/"
+    f"phi-lab-ai-platform-artifacts/{_U7_ARTIFACT_ID}/get_sample_image-1.png)"
+)
+
+
+@pytest.fixture
+def u7_turn(turn_context):
+    ctx, store = turn_context
+    ctx.collected_artifact_ids.append(_U7_ARTIFACT_ID)
+    ctx.collected_artifact_files["get_sample_image-1.png"] = _U7_ARTIFACT_ID
+    return ctx, store
+
+
+@pytest.mark.asyncio
+async def test_an_invented_host_around_an_artifact_of_this_turn_is_rewritten(
+    u7_turn, caplog
+):
+    caplog.set_level(logging.INFO)
+
+    answer = await rewrite_answer_file_links(_U7_ANSWER)
+
+    assert answer == f"![get_sample_image-1.png](/artifacts/{_U7_ARTIFACT_ID})"
+    assert f"reason=turn_id to=/artifacts/{_U7_ARTIFACT_ID}" in caplog.text
+    assert not _warnings(caplog, "markdown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    [
+        f"http://example.org/{_U7_ARTIFACT_ID}.png",
+        f"https://cdn.example.org/a/b/{_U7_ARTIFACT_ID}",
+        f"//host/x/{_U7_ARTIFACT_ID}/y.png?sig=1",
+        f"gs://bucket/{_U7_ARTIFACT_ID}/get_sample_image-1.png",
+    ],
+)
+async def test_any_scheme_and_host_around_a_turn_artifact_id_is_rewritten(
+    u7_turn, target
+):
+    answer = await rewrite_answer_file_links(f"see [file]({target}) here")
+
+    assert answer == f"see [file](/artifacts/{_U7_ARTIFACT_ID}) here"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "original",
+    [
+        # An id the turn never captured.
+        _U7_ANSWER.replace(_U7_ARTIFACT_ID, "6afe0e94f584dfa22d6ed15e"),
+        # The id inside a longer hex run is not that id.
+        f"![x](https://example.org/{_U7_ARTIFACT_ID}ff/a.png)",
+        # Quoted as code.
+        f"`{_U7_ANSWER}`",
+    ],
+)
+async def test_a_link_without_a_captured_id_is_left_alone(u7_turn, original):
+    assert await rewrite_answer_file_links(original) == original
+
+
+@pytest.mark.asyncio
+async def test_the_invented_host_stays_when_the_turn_captured_nothing():
+    assert await rewrite_answer_file_links(_U7_ANSWER) == _U7_ANSWER

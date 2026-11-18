@@ -1490,8 +1490,7 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "To show a file from any of these directories, write normal markdown. "
     "An image is `![filename](path)`. Any other file is `[filename](path)`. "
     "A file in the working directory is `ndvi.png` or `/workspace/ndvi.png`. "
-    "Do not add a host or a scheme. `storage.googleapis.com` is never an "
-    "image URL. "
+    "Never put a scheme or a host in front of a path. "
     "There is no display tool. Do not call display."
 )
 
@@ -1580,8 +1579,10 @@ def _markdown_paths_to_artifact_urls(
     return _ARTIFACT_MARKDOWN.sub(replace, answer)
 
 
-# A markdown link whose target is a path, not a URL with a scheme.
-_MARKDOWN_PATH_LINK = re.compile(r"(!?\[[^\]]*])\(([^)\s:]+)\)")
+# A markdown link with any target.
+_MARKDOWN_LINK = re.compile(r"(!?\[[^\]]*])\(([^)\s]+)\)")
+# A 24 hex run that is not part of a longer one: a candidate artifact id.
+_HEX_ID = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{24}(?![0-9a-fA-F])")
 
 
 def _turn_artifact_filename(target: str) -> Optional[str]:
@@ -1589,8 +1590,10 @@ def _turn_artifact_filename(target: str) -> Optional[str]:
 
     A bare ``name.png``, ``./name.png`` or ``/artifacts/name.png`` (the id
     left out). A path into another directory, ``/workspace/name.png``
-    included, is not a tool file.
+    included, is not a tool file. A target with a scheme is not either.
     """
+    if ":" in target:
+        return None
     raw = urllib.parse.unquote(target.split("?", 1)[0].split("#", 1)[0]).strip()
     for prefix in ("./", "/artifacts/", "artifacts/"):
         if raw.startswith(prefix):
@@ -1601,39 +1604,54 @@ def _turn_artifact_filename(target: str) -> Optional[str]:
     return raw
 
 
-def _filenames_to_turn_artifact_urls(
+def _links_to_turn_artifact_urls(
     answer: str, edits: Optional[List[Edit]] = None
 ) -> str:
     """Point a link to a file a tool returned in this turn at its artifact.
 
     The stub tells the model ``/artifacts/{id}/{filename}``, yet a model may
-    write only the filename. That name is matched against the files the MCP
-    interceptor stored in this turn. Any other link is left to the workspace
-    pass. Each rewrite is appended to ``edits``.
+    write only the filename, or wrap the id in a host it made up, such as
+    ``https://storage.googleapis.com/<bucket>/{id}/file.png``. A target that
+    holds the id of an artifact the MCP interceptor stored in this turn
+    becomes ``/artifacts/{id}``, whatever the scheme and host; a bare name
+    is matched against the filenames of those artifacts. Any other link is
+    left to the workspace pass. Each rewrite is appended to ``edits``.
     """
     from src.services.mcp.artifact_context import get_artifact_context
 
     ctx = get_artifact_context()
-    files = getattr(ctx, "collected_artifact_files", None) if ctx else None
-    if not files:
+    if ctx is None:
+        return answer
+    files = getattr(ctx, "collected_artifact_files", None) or {}
+    ids = {i.lower() for i in getattr(ctx, "collected_artifact_ids", None) or []}
+    if not files and not ids:
         return answer
 
     def replace(match: re.Match) -> str:
-        name = _turn_artifact_filename(match.group(2))
-        artifact_id = files.get(name) if name else None
+        target = match.group(2)
+        reason = "turn_id"
+        found = (m.group(0).lower() for m in _HEX_ID.finditer(target))
+        artifact_id = next((i for i in found if i in ids), None)
+        if artifact_id is None:
+            reason = "turn_filename"
+            name = _turn_artifact_filename(target)
+            artifact_id = files.get(name) if name else None
         if artifact_id is None:
             return match.group(0)
         repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        if repaired == match.group(0):
+            return repaired
         # The id only: the original link is model text.
         logger.info(
-            "artifact.markdown_repaired reason=turn_filename to=/artifacts/%s",
+            "artifact.markdown_repaired reason=%s to=/artifacts/%s",
+            reason,
             artifact_id,
         )
         if edits is not None:
             edits.append((match.start(), match.end(), len(repaired)))
         return repaired
 
-    return _MARKDOWN_PATH_LINK.sub(replace, answer)
+    return _MARKDOWN_LINK.sub(replace, answer)
 
 
 # Code the model quotes: a fenced block (to its closing fence or the end of
@@ -1668,7 +1686,8 @@ async def rewrite_answer_file_links(
     as normal markdown. The chat loads ``/artifacts/{id}``, so that path is
     rewritten before the answer is stored. A host wrapped around the same id,
     such as ``storage.googleapis.com/.../artifacts/{id}/file``, is rewritten
-    in place. A workspace path is published the same way. An artifact the
+    in place, and so is any host around the id of an artifact this turn
+    stored. A workspace path is published the same way. An artifact the
     answer never mentions stays out of the answer.
 
     A link inside inline code or a fenced block is an example the model
@@ -1688,7 +1707,7 @@ async def rewrite_answer_file_links(
     filename_edits: List[Edit] = []
     workspace_edits: List[Edit] = []
     text = _markdown_paths_to_artifact_urls(text, artifact_edits)
-    text = _filenames_to_turn_artifact_urls(text, filename_edits)
+    text = _links_to_turn_artifact_urls(text, filename_edits)
     text = await publish_markdown_files(text, workspace_edits)
     rewrite_passes = [artifact_edits, filename_edits, workspace_edits]
     for start, end in regions:
