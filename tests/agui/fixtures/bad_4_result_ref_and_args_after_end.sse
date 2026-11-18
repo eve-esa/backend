@@ -1,0 +1,12 @@
+data: {"type":"RUN_STARTED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","protocolVersion":"1.0","metadata":{"eve.traceId":"4481c48c462beed158f2fe9a26f5b456","eve.conversationId":"6a3f0c2e9b1d4e7f8a2b3c4d","eve.messageId":"6a3f0c4a9b1d4e7f8a2b3c55","eve.graph":"react"}}
+
+data: {"type":"TOOL_CALL_START","toolCallId":"call_d4","toolCallName":"gdacs_events","parentMessageId":"6a3f0c4a9b1d4e7f8a2b3c55"}
+
+data: {"type":"TOOL_CALL_END","toolCallId":"call_d4"}
+
+data: {"type":"TOOL_CALL_ARGS","toolCallId":"call_d4","delta":"{}"}
+
+data: {"type":"TOOL_CALL_RESULT","messageId":"6a3f0c4a9b1d4e7f8a2b3c55:tool:call_x9","toolCallId":"call_x9","role":"tool","content":"ok"}
+
+data: {"type":"RUN_FINISHED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","outcome":{"type":"cancelled"},"metadata":{"eve.stopped":true}}
+

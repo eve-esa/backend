@@ -1,0 +1,34 @@
+data: {"type":"RUN_STARTED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","protocolVersion":"1.0","metadata":{"eve.traceId":"4481c48c462beed158f2fe9a26f5b456","eve.conversationId":"6a3f0c2e9b1d4e7f8a2b3c4d","eve.messageId":"6a3f0c4a9b1d4e7f8a2b3c55","eve.graph":"react"}}
+
+data: {"type":"STEP_STARTED","stepName":"thinking"}
+
+: keepalive
+
+data: {"type":"STEP_FINISHED","stepName":"thinking"}
+
+data: {"type":"TOOL_CALL_START","toolCallId":"call_a1","toolCallName":"eve_retrieval_retrieve","parentMessageId":"6a3f0c4a9b1d4e7f8a2b3c55","metadata":{"eve.server":"eve_retrieval","eve.label":"Searching EVE sources"}}
+
+data: {"type":"TOOL_CALL_ARGS","toolCallId":"call_a1","delta":"{\"query\":\"Sentinel-2 revisit time\"}"}
+
+data: {"type":"TOOL_CALL_END","toolCallId":"call_a1"}
+
+data: {"type":"TOOL_CALL_RESULT","messageId":"6a3f0c4a9b1d4e7f8a2b3c55:tool:call_a1","toolCallId":"call_a1","role":"tool","content":"10 documents found","metadata":{"eve.status":"ok","eve.server":"eve_retrieval","eve.durationMs":2140,"eve.contentTruncated":true}}
+
+data: {"type":"CUSTOM","name":"eve.sources","value":{"toolCallId":"call_a1","documents":[{"id":"d1","title":"Sentinel-2 mission guide"}]}}
+
+data: {"type":"STEP_STARTED","stepName":"thinking"}
+
+data: {"type":"STEP_FINISHED","stepName":"thinking"}
+
+data: {"type":"TEXT_MESSAGE_START","messageId":"6a3f0c4a9b1d4e7f8a2b3c55","role":"assistant"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"6a3f0c4a9b1d4e7f8a2b3c55","delta":"Sentinel-2 revisits "}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"6a3f0c4a9b1d4e7f8a2b3c55","delta":"every 5 days."}
+
+data: {"type":"TEXT_MESSAGE_END","messageId":"6a3f0c4a9b1d4e7f8a2b3c55","metadata":{"eve.endpoint":{"requested":null,"answered":"eve_jsc","substituted":false}}}
+
+data: {"type":"CUSTOM","name":"eve.artifacts","value":{"artifactIds":["6a3f0c4b9b1d4e7f8a2b3c60"]}}
+
+data: {"type":"RUN_FINISHED","threadId":"6a3f0c2e9b1d4e7f8a2b3c4d","runId":"0f8e6c1a-3b2d-4e5f-9a7b-1c2d3e4f5a6b","outcome":{"type":"success"},"usage":[{"provider":"jsc","model":"20 - EVE-Instruct","inputTokens":5120,"outputTokens":64,"totalTokens":5184}],"metadata":{"eve.latencies":{"total_s":9.4}}}
+
