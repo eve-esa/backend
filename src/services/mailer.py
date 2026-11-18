@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -91,16 +92,30 @@ class MailDeliveryFailed(RuntimeError):
 
     smtplib errors such as ``SMTPRecipientsRefused`` carry the recipient in their
     text, and so does the SES ``MessageRejected`` message, while callers log
-    failures with ``exc_info``. The class name and the SMTP reply code or AWS
-    error code survive as attributes, for the fallback log line.
+    failures with ``exc_info``. The class name, the SMTP reply code or AWS
+    error code and the SMTP enhanced status code (``5.4.5``) survive as
+    attributes, for the log lines.
+
+    ``uncertain`` is true when the message may have reached the relay: the
+    line dropped or timed out after the transaction started and before the
+    relay answered DATA. A caller that must not mail twice treats such a
+    failure as possibly sent.
     """
 
     def __init__(
-        self, message: str, *, reason: str = "", code: int | str | None = None
+        self,
+        message: str,
+        *,
+        reason: str = "",
+        code: int | str | None = None,
+        status: str | None = None,
+        uncertain: bool = False,
     ):
         super().__init__(message)
         self.reason = reason
         self.code = code
+        self.status = status
+        self.uncertain = uncertain
 
 
 _ses_client = None
@@ -123,14 +138,55 @@ def _smtp_code(exc: smtplib.SMTPException) -> int | None:
     return None
 
 
-def _failure_reason(exc: BaseException) -> str:
-    """``reason=<class>[ code=<n>]`` for a failed send, with no address in it."""
+# RFC 3463 enhanced status code, the first token of a reply text: "5.4.5".
+_ENHANCED_STATUS = re.compile(r"^[245]\.\d{1,3}\.\d{1,3}$")
+
+
+def _smtp_status(exc: smtplib.SMTPException) -> str | None:
+    """The enhanced status code of a refused SMTP command, when it has one.
+
+    Only the first token of the reply text is read and only when it has the
+    ``x.y.z`` shape, so nothing else of the text (which can name the
+    recipient) leaves this function.
+    """
+    text: object = None
+    if isinstance(exc, smtplib.SMTPResponseException):
+        text = exc.smtp_error
+    elif isinstance(exc, smtplib.SMTPRecipientsRefused) and exc.recipients:
+        _, text = next(iter(exc.recipients.values()))
+    if isinstance(text, bytes):
+        text = text.decode("ascii", errors="replace")
+    if not isinstance(text, str) or not text.split():
+        return None
+    token = text.split()[0]
+    return token if _ENHANCED_STATUS.match(token) else None
+
+
+def failure_reason(exc: BaseException) -> str:
+    """``<class>[ code=<n>][ status=<x.y.z>]`` for a failed send, with no address in it."""
     if isinstance(exc, MailDeliveryFailed) and exc.reason:
         reason = exc.reason
         if exc.code is not None:
             reason += f" code={exc.code}"
+        if exc.status:
+            reason += f" status={exc.status}"
         return reason
     return type(exc).__name__
+
+
+def delivery_uncertain(exc: BaseException) -> bool:
+    """True when a failed send may still have reached the relay."""
+    return isinstance(exc, MailDeliveryFailed) and exc.uncertain
+
+
+# A definite answer from the relay, or a refusal before anything was sent:
+# the message did not leave. Anything else raised once the transaction has
+# started (a dropped line, a read timeout) leaves the outcome unknown.
+_SMTP_DEFINITE_REFUSALS = (
+    smtplib.SMTPResponseException,
+    smtplib.SMTPRecipientsRefused,
+    smtplib.SMTPNotSupportedError,
+)
 
 
 def _choose_transport(transport: str, to: str) -> str:
@@ -236,6 +292,7 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     # Not a ``with`` block: its QUIT can raise after the relay accepted DATA,
     # and that error must not read as a failed send and trigger a second copy.
     server = None
+    handed_over = False
     delivered = False
     try:
         server = smtplib.SMTP(
@@ -247,6 +304,7 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
         if SMTP_USERNAME:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        handed_over = True
         server.send_message(message, to_addrs=[to])
         delivered = True
         server.quit()
@@ -256,11 +314,20 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
                 "mail smtp session ended with %s after the relay accepted the message",
                 type(exc).__name__,
             )
+        elif handed_over and not isinstance(exc, _SMTP_DEFINITE_REFUSALS):
+            # The line dropped or timed out inside MAIL, RCPT or DATA with no
+            # answer from the relay: it may have queued the message.
+            raise MailDeliveryFailed(
+                f"SMTP send result unknown: {type(exc).__name__}",
+                reason=type(exc).__name__,
+                uncertain=True,
+            ) from None
         elif isinstance(exc, smtplib.SMTPException):
             raise MailDeliveryFailed(
                 f"SMTP send failed: {type(exc).__name__}",
                 reason=type(exc).__name__,
                 code=_smtp_code(exc),
+                status=_smtp_status(exc),
             ) from None
         else:
             raise
@@ -382,18 +449,31 @@ async def send_mail(to: str, subject: str, html: str, text: str) -> None:
                 "mail.fallback from=%s to=%s reason=%s recipient_domain=%s",
                 TRANSPORT_SMTP,
                 TRANSPORT_SES,
-                _failure_reason(exc),
+                failure_reason(exc),
                 _recipient_domain(to),
             )
+            smtp_uncertain = delivery_uncertain(exc)
             transport = TRANSPORT_SES
-            await asyncio.to_thread(
-                _send_ses,
-                sender=_sender(TRANSPORT_SES),
-                to=to,
-                subject=subject,
-                html=html,
-                text=text,
-            )
+            try:
+                await asyncio.to_thread(
+                    _send_ses,
+                    sender=_sender(TRANSPORT_SES),
+                    to=to,
+                    subject=subject,
+                    html=html,
+                    text=text,
+                )
+            except Exception as ses_exc:
+                if not smtp_uncertain:
+                    raise
+                # SES refused, but the relay may already have the message:
+                # the caller must not read this as "nothing left".
+                raise MailDeliveryFailed(
+                    f"SES fallback failed after an unclear SMTP send: {type(ses_exc).__name__}",
+                    reason=getattr(ses_exc, "reason", "") or type(ses_exc).__name__,
+                    code=getattr(ses_exc, "code", None),
+                    uncertain=True,
+                ) from None
         _log_sent(transport, subject, to)
         return
 
