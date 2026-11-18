@@ -386,8 +386,8 @@ async def test_get_artifact_owner(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
-    """A different user cannot fetch someone else's artifact (403)."""
+async def test_get_artifact_other_user_not_found(async_client, monkeypatch):
+    """A different user gets 404 for someone else's artifact, not 403."""
 
     _use_fake_storage(monkeypatch)
     owner, owner_token = await create_test_user_and_token()
@@ -400,7 +400,7 @@ async def test_get_artifact_other_user_forbidden(async_client, monkeypatch):
         resp = await async_client.get(
             f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {intr_token}"}
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
     finally:
         await Artifact.delete_many({"user_id": owner.id})
         await cleanup_models([owner, intruder])
@@ -644,7 +644,7 @@ async def test_disposition_inline_for_pdf(async_client, monkeypatch):
         await cleanup_models([user])
 
 
-# ---------------- List / delete -----------------
+# ---------------- List -----------------
 
 
 @pytest.mark.asyncio
@@ -706,47 +706,6 @@ async def test_list_artifacts_filtered_by_conversation(async_client, monkeypatch
         await cleanup_models([user])
 
 
-@pytest.mark.asyncio
-async def test_artifacts_cannot_be_deleted(async_client, monkeypatch):
-    """An uploaded artifact is permanent: there is no endpoint to remove it.
-
-    This replaces three tests that exercised DELETE /artifacts/{id} — the happy
-    path, the storage-failure path that kept the record, and the 403 that spared
-    MCP artifacts. None of that has to be right any more, because the method is
-    not served: once a file is uploaded it stays, which is how the products this
-    one is measured against behave.
-
-    405 rather than 404 is the point. The path still exists for GET, so FastAPI
-    answers "method not allowed" — that is what tells a client the resource is
-    real and the operation is gone, instead of leaving it to guess.
-    """
-
-    fake = _use_fake_storage(monkeypatch)
-    user, token = await create_test_user_and_token()
-    try:
-        artifact_id = (
-            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
-        ).json()["id"]
-        key = (await Artifact.find_by_id(artifact_id)).key
-
-        del_resp = await async_client.delete(
-            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert del_resp.status_code == 405
-
-        # Not merely refused: still there, in the database and in the object store,
-        # and still readable. A 405 with the bytes gone would be worse than a 200.
-        assert await Artifact.find_by_id(artifact_id) is not None
-        assert key in fake.objects
-        get_resp = await async_client.get(
-            f"/artifacts/{artifact_id}", headers={"Authorization": f"Bearer {token}"}
-        )
-        assert get_resp.status_code == 200
-    finally:
-        await Artifact.delete_many({"user_id": user.id})
-        await cleanup_models([user])
-
-
 # ---------------- Chat wiring -----------------
 
 
@@ -756,9 +715,10 @@ async def _mock_generate_answer(request, conversation_id=None, user_id=None):
 
 @pytest.mark.asyncio
 async def test_message_with_artifact_ids_persists_attachments(async_client, monkeypatch):
-    """artifact_ids on a message persist attachments and backfill conversation_id."""
+    """artifact_ids on a message persist attachments and move the upload into the conversation."""
 
-    _use_fake_storage(monkeypatch)
+    fake = _use_fake_storage(monkeypatch)
+    monkeypatch.setattr("src.services.artifact_cleanup.storage_service", fake)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
 
     user, token = await create_test_user_and_token()
@@ -766,6 +726,8 @@ async def test_message_with_artifact_ids_persists_attachments(async_client, monk
         image_id = (
             await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
         ).json()["id"]
+        upload_key = (await Artifact.find_by_id(image_id)).key
+        assert upload_key.startswith(f"users/{user.id}/artifacts/")
 
         conv_id = (
             await async_client.post(
@@ -794,9 +756,149 @@ async def test_message_with_artifact_ids_persists_attachments(async_client, monk
         assert attachments[0]["content_type"] == "image/png"
         assert attachments[0]["source"]["type"] == "upload"
 
-        # conversation_id was backfilled on the artifact
         artifact = await Artifact.find_by_id(image_id)
         assert artifact.conversation_id == conv_id
+        moved_key = f"users/{user.id}/conversations/{conv_id}/artifacts/{image_id}/pic.png"
+        assert artifact.key == moved_key
+        assert fake.objects[moved_key]["body"] == PNG_BYTES
+        assert fake.objects[moved_key]["content_type"] == "image/png"
+        assert upload_key not in fake.objects
+
+        served = await async_client.get(
+            f"/artifacts/{image_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert served.status_code == 200
+        assert served.content == PNG_BYTES
+
+        await async_client.delete(
+            f"/conversations/{conv_id}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert moved_key not in fake.objects
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_with_conversation_writes_once_into_its_folder(async_client, monkeypatch):
+    """A known conversation gets the object directly; the attach then copies nothing."""
+
+    fake = _use_fake_storage(monkeypatch)
+    monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
+    copies = []
+
+    async def record_copy(source_key, dest_key):
+        copies.append((source_key, dest_key))
+
+    monkeypatch.setattr(fake, "copy_object", record_copy)
+
+    user, token = await create_test_user_and_token()
+    try:
+        conv_id = (
+            await async_client.post(
+                "/conversations",
+                json={"name": "Direct upload"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+        resp = await async_client.post(
+            "/artifacts",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": ("pic.png", io.BytesIO(PNG_BYTES), "image/png")},
+            data={"conversation_id": conv_id},
+        )
+        assert resp.status_code == 200
+        image_id = resp.json()["id"]
+
+        key = f"users/{user.id}/conversations/{conv_id}/artifacts/{image_id}/pic.png"
+        assert list(fake.objects) == [key]
+        artifact = await Artifact.find_by_id(image_id)
+        assert artifact.key == key
+        assert artifact.conversation_id == conv_id
+
+        msg_resp = await async_client.post(
+            f"/conversations/{conv_id}/messages",
+            json={"query": "look", "artifact_ids": [image_id]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert msg_resp.status_code == 200
+        assert copies == []
+        assert (await Artifact.find_by_id(image_id)).key == key
+    finally:
+        await Artifact.delete_many({"user_id": user.id})
+        await _cleanup_quota(user.id)
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_upload_into_other_users_conversation_not_found(async_client, monkeypatch):
+    """Another user's conversation answers 404, stores nothing and spends no quota."""
+
+    fake = _use_fake_storage(monkeypatch)
+    owner, owner_token = await create_test_user_and_token()
+    intruder, intr_token = await create_test_user_and_token()
+    try:
+        conv_id = (
+            await async_client.post(
+                "/conversations",
+                json={"name": "Not yours"},
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+        ).json()["id"]
+        resp = await async_client.post(
+            "/artifacts",
+            headers={"Authorization": f"Bearer {intr_token}"},
+            files={"file": ("pic.png", io.BytesIO(PNG_BYTES), "image/png")},
+            data={"conversation_id": conv_id},
+        )
+        assert resp.status_code == 404
+        assert fake.objects == {}
+        assert await get_collection("image_upload_quota").count_documents(
+            {"user_id": intruder.id}
+        ) == 0
+    finally:
+        await Artifact.delete_many({"user_id": {"$in": [owner.id, intruder.id]}})
+        await cleanup_models([owner, intruder])
+
+
+@pytest.mark.asyncio
+async def test_attach_keeps_upload_key_when_copy_fails(async_client, monkeypatch):
+    """A refused copy still attaches the file: the row keeps the key that serves it."""
+
+    fake = _use_fake_storage(monkeypatch)
+    monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
+
+    async def refuse_copy(source_key, dest_key):
+        raise RuntimeError("copy refused")
+
+    monkeypatch.setattr(fake, "copy_object", refuse_copy)
+
+    user, token = await create_test_user_and_token()
+    try:
+        image_id = (
+            await _upload(async_client, token, "pic.png", PNG_BYTES, "image/png")
+        ).json()["id"]
+        upload_key = (await Artifact.find_by_id(image_id)).key
+
+        conv_id = (
+            await async_client.post(
+                "/conversations",
+                json={"name": "Copy refused"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        ).json()["id"]
+
+        msg_resp = await async_client.post(
+            f"/conversations/{conv_id}/messages",
+            json={"query": "look", "artifact_ids": [image_id]},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert msg_resp.status_code == 200
+
+        artifact = await Artifact.find_by_id(image_id)
+        assert artifact.conversation_id == conv_id
+        assert artifact.key == upload_key
+        assert upload_key in fake.objects
 
         await async_client.delete(
             f"/conversations/{conv_id}", headers={"Authorization": f"Bearer {token}"}
@@ -849,8 +951,8 @@ async def test_message_with_legacy_image_ids_alias_accepted(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_message_with_other_users_image_forbidden(async_client, monkeypatch):
-    """Attaching another user's artifact to a message is forbidden (403)."""
+async def test_message_with_other_users_image_not_found(async_client, monkeypatch):
+    """Attaching another user's artifact to a message answers 404, not 403."""
 
     _use_fake_storage(monkeypatch)
     monkeypatch.setattr("src.routers.message.generate_answer", _mock_generate_answer)
@@ -875,7 +977,7 @@ async def test_message_with_other_users_image_forbidden(async_client, monkeypatc
             json={"query": "look", "artifact_ids": [image_id]},
             headers={"Authorization": f"Bearer {intr_token}"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 404
 
         await async_client.delete(
             f"/conversations/{conv_id}",

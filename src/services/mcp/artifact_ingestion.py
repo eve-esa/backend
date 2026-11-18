@@ -22,6 +22,8 @@ import base64
 import json
 import logging
 import os
+import re
+import unicodedata
 import weakref
 from typing import Any, List, Optional, Tuple
 
@@ -43,7 +45,14 @@ from src.services.mcp.conversation_artifacts import (
     sandbox_path,
     upload_artifact,
 )
-from src.services.storage import guess_extension_from_content_type, storage_service
+from src.services.storage import (
+    ARTIFACT_TYPE_CONTENT_TYPES,
+    INLINE_IMAGE_CONTENT_TYPES,
+    OPAQUE_CONTENT_TYPE,
+    guess_extension_from_content_type,
+    sniff_artifact_type,
+    storage_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +72,58 @@ except Exception:
     _mcp_types_available = False
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+# Longest filename stored or shown. A longer one keeps its extension (up to
+# ``_MAX_KEPT_EXTENSION`` characters) and loses the end of its stem.
+MAX_FILENAME_CHARS = 255
+_MAX_KEPT_EXTENSION = 16
+_MARKDOWN_SPECIALS = re.compile(r'([\\\[\]()<>"])')
+
+
+def detect_content_type(data: bytes, filename: Optional[str] = None) -> str:
+    """Content type from the bytes, through the upload allowlist.
+
+    The type a tool declares, and a filename extension alone, are never
+    trusted: anything the allowlist cannot classify is stored opaque.
+    Text types still need a matching extension plus clean UTF-8, as on upload.
+    """
+    kind = sniff_artifact_type(data[:16], filename, data)
+    if kind is None:
+        return OPAQUE_CONTENT_TYPE
+    return ARTIFACT_TYPE_CONTENT_TYPES.get(kind, OPAQUE_CONTENT_TYPE)
+
+
+def strip_format_chars(text: str) -> str:
+    """Drop Unicode format characters (category Cf).
+
+    Bidi overrides and isolates (U+202A to U+202E, U+2066 to U+2069) would
+    show ``report<U+202E>fdp.exe`` as ``reportexe.pdf``; zero-width ones hide
+    characters. None of them belongs in a filename.
+    """
+    return "".join(char for char in text if unicodedata.category(char) != "Cf")
+
+
+def clean_filename(filename: str) -> str:
+    """A filename safe to store and show: one line, no format characters, capped.
+
+    Control characters (new lines included) become spaces, Unicode format
+    characters go, and a name longer than ``MAX_FILENAME_CHARS`` is cut
+    before its extension.
+    """
+    name = _CONTROL_CHARS.sub(" ", strip_format_chars(str(filename))).strip() or "file"
+    if len(name) > MAX_FILENAME_CHARS:
+        stem, ext = os.path.splitext(name)
+        if len(ext) > _MAX_KEPT_EXTENSION:
+            ext = ""
+        name = stem[: MAX_FILENAME_CHARS - len(ext)] + ext
+    return name
+
+
+def md_escape(text: str) -> str:
+    """Make *text* safe as markdown link text: one line, no link syntax."""
+    return _MARKDOWN_SPECIALS.sub(r"\\\1", clean_filename(text))
+
+
 def _filename_from_uri(uri: Any) -> Optional[str]:
     """Best-effort basename extraction from a resource URI, for a display filename."""
     try:
@@ -77,18 +138,19 @@ def _filename_from_uri(uri: Any) -> Optional[str]:
 def _provenance_title(server_name: Optional[str], tool_name: Optional[str]) -> str:
     """Build a plain, quote-safe markdown title attributing the MCP source.
 
-    Double quotes are stripped from both names since markdown's title syntax
-    delimits with them (`"title"`); an unescaped quote in a server/tool name
-    would otherwise break the link/image syntax. Falls back to a bare "MCP"
-    when either name is missing/unresolved rather than embedding one of this
-    module's internal placeholder defaults ("unknown", "tool") as if it were
-    real data.
+    Server names are user-registered, so both names lose control characters
+    (a blank line would end the paragraph), double quotes (the title
+    delimiter) and backslashes (which would escape the closing quote). Falls
+    back to a bare "MCP" when either name is missing/unresolved rather than
+    embedding one of this module's internal placeholder defaults ("unknown",
+    "tool") as if it were real data.
     """
 
     def _clean(value: Optional[str]) -> Optional[str]:
         if not value or value in ("unknown", "tool"):
             return None
-        return value.replace('"', "")
+        cleaned = _CONTROL_CHARS.sub(" ", str(value)).replace('"', "").replace("\\", "")
+        return cleaned.strip() or None
 
     server = _clean(server_name)
     tool = _clean(tool_name)
@@ -97,9 +159,32 @@ def _provenance_title(server_name: Optional[str], tool_name: Optional[str]) -> s
     return "MCP"
 
 
+def artifact_markdown_line(
+    *,
+    artifact_id: str,
+    filename: Optional[str],
+    content_type: Optional[str],
+    server_name: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    provenance: bool = True,
+) -> str:
+    """The one markdown reference to a stored artifact.
+
+    An image embed only for the raster allowlist, a plain link for anything
+    else (SVG and HTML included). Used by the tool stub, by the stubs the
+    runner appends to an answer and by the upload response, so all agree.
+    ``provenance=False`` drops the MCP title, for a user's own upload.
+    """
+    url = f"/artifacts/{artifact_id}"
+    target = f'{url} "{_provenance_title(server_name, tool_name)}"' if provenance else url
+    label = md_escape(filename or "file")
+    if content_type in INLINE_IMAGE_CONTENT_TYPES:
+        return f"![{label}]({target})"
+    return f"[{label}]({target})"
+
+
 def _stub_text(
     *,
-    is_image: bool,
     filename: str,
     artifact_id: str,
     content_type: str,
@@ -117,15 +202,18 @@ def _stub_text(
     in that JSON is the sandbox location when a conversation copy was stored.
     """
     url = f"/artifacts/{artifact_id}"
-    title = _provenance_title(server_name, tool_name)
-    link_line = (
-        f'![{filename}]({url} "{title}")' if is_image else f'[{filename}]({url} "{title}")'
+    link_line = artifact_markdown_line(
+        artifact_id=artifact_id,
+        filename=filename,
+        content_type=content_type,
+        server_name=server_name,
+        tool_name=tool_name,
     )
     meta: dict[str, Any] = {
         "artifact_id": artifact_id,
         "url": url,
         "content_type": content_type,
-        "filename": filename,
+        "filename": clean_filename(filename),
         "size_bytes": size_bytes,
     }
     # The sandbox path, without the users/.../conversations/... prefix.
@@ -536,7 +624,8 @@ class ArtifactInterceptor:
                     new_content.append(_warning_text("exceeds size limit"))
                     continue
 
-                content_type = block.mimeType or "application/octet-stream"
+                # block.mimeType is the tool's claim; only the bytes count.
+                content_type = detect_content_type(data)
                 ext = guess_extension_from_content_type(content_type)
                 filename = _named_from_sources(_eve_source_paths(block), used_names)
                 if filename is None:
@@ -556,7 +645,6 @@ class ArtifactInterceptor:
                     )
                 new_content.append(
                     _stub_text(
-                        is_image=True,
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -593,11 +681,12 @@ class ArtifactInterceptor:
                     new_content.append(_warning_text("exceeds size limit"))
                     continue
 
-                content_type = resource.mimeType or "application/octet-stream"
+                uri_filename = _filename_from_uri(getattr(resource, "uri", None))
+                content_type = detect_content_type(data, uri_filename)
                 ext = guess_extension_from_content_type(content_type)
                 filename = _named_from_sources(_eve_source_paths(block), used_names)
                 if filename is None:
-                    filename = _filename_from_uri(getattr(resource, "uri", None))
+                    filename = uri_filename
                     if filename:
                         used_names.add(filename)
                     else:
@@ -617,7 +706,6 @@ class ArtifactInterceptor:
                     )
                 new_content.append(
                     _stub_text(
-                        is_image=content_type.startswith("image/"),
                         filename=filename,
                         artifact_id=artifact.id,
                         content_type=content_type,
@@ -675,6 +763,7 @@ class ArtifactInterceptor:
         """
         if not ctx.conversation_id:
             return None
+        filename = clean_filename(filename)
         artifact_oid = ObjectId()
         relative = file_path_for(str(artifact_oid), filename)
         key = object_key(ctx.user_id, ctx.conversation_id, relative)
@@ -767,8 +856,9 @@ class ArtifactInterceptor:
             if len(data) > ARTIFACT_MAX_BYTES:
                 return None
 
-            content_type = getattr(item, "mimeType", None) or "application/octet-stream"
-            prepared.append((data, content_type, _filename_from_uri(getattr(item, "uri", None))))
+            uri_filename = _filename_from_uri(getattr(item, "uri", None))
+            content_type = detect_content_type(data, uri_filename)
+            prepared.append((data, content_type, uri_filename))
 
         if not prepared:
             return None
@@ -790,7 +880,6 @@ class ArtifactInterceptor:
             artifact, output_path = stored
             stubs.append(
                 _stub_text(
-                    is_image=content_type.startswith("image/"),
                     filename=filename,
                     artifact_id=artifact.id,
                     content_type=content_type,

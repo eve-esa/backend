@@ -14,6 +14,7 @@ from .error_log import router as error_log_router
 from .internal_notifications import router as internal_notifications_router
 from .internal_bug_reports import router as internal_bug_reports_router
 from .migration import router as migration_router
+from .agui import router as agui_router
 from .openai_proxy import OpenAIProxyDispatcher
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "internal_notifications_router",
     "internal_bug_reports_router",
     "migration_router",
+    "agui_router",
     "OpenAIProxyDispatcher",
 ]

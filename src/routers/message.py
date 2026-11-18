@@ -38,6 +38,7 @@ from src.services.generate_answer import (
     finish_turn_if_cancelled_unstarted,
     generate_answer,
     get_shared_llm_manager,
+    is_empty_answer,
     is_terminal_event,
     maybe_rollup_and_trim_history,
     persist_message_state,
@@ -47,6 +48,7 @@ from src.services.generate_answer import (
     should_use_rag,
 )
 from src.database.models.artifact import Artifact
+from src.routers.artifact import move_to_conversation
 from src.services.generate_answer_agentic import (
     generate_answer_agentic,
     run_agentic_generation_to_bus,
@@ -55,6 +57,9 @@ from src.services.agentic_utils import is_agentic_generation_request
 from src.services.custom_model_service import get_owned_custom_model
 from src.services.hallucination_detector import (
     HallucinationDetector,
+    answer_clock_time,
+    build_tool_evidence,
+    hallucination_answer_prompt,
     load_new_turn_history_prefix,
 )
 from src.services.langfuse_scores import schedule_feedback_scores
@@ -128,6 +133,20 @@ async def _signal_stop(conversation_id: str) -> Optional[str]:
     return message_id
 
 
+async def stop_active_generation(conversation_id: str, timeout_s: float) -> bool:
+    """Stop the conversation's in-flight generation (the /stop path) and wait.
+
+    Returns True when nothing runs any more, False when the turn did not
+    unwind within ``timeout_s``.
+    """
+    message_id = await _signal_stop(conversation_id)
+    if not message_id:
+        return True
+    return await get_cancel_manager().wait_until_finished(
+        conversation_id, message_id, timeout_s
+    )
+
+
 async def _preempt_active_generation(conversation_id: str) -> None:
     """Stop the conversation's in-flight generation and wait for it to end."""
     message_id = await _signal_stop(conversation_id)
@@ -149,6 +168,16 @@ async def _preempt_active_generation(conversation_id: str) -> None:
         )
 
 
+def _empty_answer_http_error() -> HTTPException:
+    """An agentic turn that left nothing to show, as the sync routes report a
+    failed generation: HTTP 500 with ``detail: {"code", "message"}``."""
+    payload = build_empty_answer_payload()
+    return HTTPException(
+        status_code=500,
+        detail={"code": payload["code"], "message": payload["message"]},
+    )
+
+
 def _agent_summarizes(prompts: Any) -> bool:
     """True when the agentic turn ran the deep graph.
 
@@ -165,9 +194,9 @@ async def resolve_artifact_attachments(
 
     The request field is named ``artifact_ids`` (the legacy alias ``image_ids``
     is still accepted for backward compatibility). Validates that each artifact
-    exists and belongs to the requesting user, backfills the owning
-    conversation, and returns the attachment payloads to be persisted on the
-    message.
+    exists and belongs to the requesting user, binds it to the conversation
+    (moving its object into the conversation's ``artifacts/`` folder), and
+    returns the attachment payloads to be persisted on the message.
 
     Args:
         artifact_ids (list | None): IDs of previously uploaded artifacts to attach.
@@ -178,7 +207,7 @@ async def resolve_artifact_attachments(
         A list of attachment dicts, or None if no artifacts were requested.
 
     Raises:
-        HTTPException: 404 if any artifact is missing; 403 if any belongs to another user.
+        HTTPException: 404 if any artifact is missing or belongs to another user.
     """
     if not artifact_ids:
         return None
@@ -188,18 +217,15 @@ async def resolve_artifact_attachments(
 
     attachments = []
     for artifact_id in unique_artifact_ids:
-        artifact = await Artifact.find_by_id(artifact_id)
-        if not artifact:
+        # Primary: the upload may be the previous request, and a secondary
+        # that has not caught up would answer "not found". Another user's
+        # artifact answers the same 404, so its existence is not confirmed.
+        artifact = await Artifact.find_by_id_on_primary(artifact_id)
+        if not artifact or artifact.user_id != requesting_user.id:
             raise HTTPException(
                 status_code=404, detail=f"Image {artifact_id} not found"
             )
-        if artifact.user_id != requesting_user.id:
-            raise HTTPException(
-                status_code=403, detail="You are not allowed to use this image"
-            )
-        if artifact.conversation_id != conversation_id:
-            artifact.conversation_id = conversation_id
-            await artifact.save()
+        await move_to_conversation(artifact, conversation_id)
         attachments.append(
             {
                 "image_id": artifact.id,
@@ -746,7 +772,7 @@ async def retry(
         Response payload mirroring create_message with updated answer and metadata.
 
     Raises:
-        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
+        HTTPException: 404 if conversation/message not found; 403 if ownership invalid; 400 if message cannot be retried; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors, and 500 ``empty_answer`` when an agentic retry left no text and no artifact (stored as ``metadata.error``).
     """
     slot = await acquire_generation_slot_or_raise("retry")
     # Hoisted so the failure handler reads plain locals. ownership_validated
@@ -806,6 +832,9 @@ async def retry(
                 conversation_id=conversation_id,
                 message_id=message.id,
             )
+            empty_answer = is_empty_answer(answer, artifact_ids)
+            if empty_answer:
+                answer = ""
 
             message.output = answer
             message.documents = documents
@@ -826,18 +855,21 @@ async def retry(
                 existing_metadata["generated_model_name"] = (
                     resolve_generated_model_name(endpoint)
                 )
-            if answer:
-                existing_metadata.pop("error", None)
-            else:
+            if empty_answer:
                 # An empty regeneration is not a success: without a marker the
                 # frontend would render a blank bubble with no explanation.
                 existing_metadata["error"] = build_empty_answer_payload()
+            else:
+                existing_metadata.pop("error", None)
             message.metadata = existing_metadata
             await message.save()
             generation_persisted = True
             await consume_tokens_for_user(
                 requesting_user, count_tokens_for_texts(message.input, answer)
             )
+            if empty_answer:
+                # Persisted above; the caller gets the failed retry's shape.
+                raise _empty_answer_http_error()
 
             if not _agent_summarizes(prompts):
                 background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -1402,6 +1434,8 @@ async def hallucination_detect(
             docs=build_context(message.documents),
             llm_type=message.request_input.llm_type,
             conversation=conversation_prefix,
+            tool_evidence=build_tool_evidence(getattr(message, "trace", None)),
+            now=answer_clock_time(message),
         )
         total_latency = time.perf_counter() - total_start
 
@@ -1498,8 +1532,6 @@ async def stream_hallucination(
         import json
         import time
 
-        from src.utils.template_loader import get_template
-
         total_start = time.perf_counter()
         detector = HallucinationDetector()
         try:
@@ -1518,6 +1550,8 @@ async def stream_hallucination(
                 docs=build_context(message.documents),
                 llm_type=message.request_input.llm_type,
                 conversation=conversation_prefix,
+                tool_evidence=build_tool_evidence(getattr(message, "trace", None)),
+                now=answer_clock_time(message),
             )
             detect_latency = time.perf_counter() - t0
 
@@ -1633,11 +1667,10 @@ async def stream_hallucination(
                 context = ""
 
             # Step 4: Stream final answer from LLM using the hallucination answer template
-            template = get_template(
-                "llm_answer_template", filename="hallucination_detector.yaml"
-            )
             # Inject retrieved context for better grounding
-            prompt = template.format(query=rewritten_question or message.input)
+            prompt = hallucination_answer_prompt(
+                rewritten_question or message.input, answer_clock_time(message)
+            )
             if context:
                 prompt = f"{prompt}\n\nContext:\n{context}"
 
@@ -2131,7 +2164,7 @@ async def create_agentic_message(
         ``trace`` contains the agentic execution steps captured during generation.
 
     Raises:
-        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors.
+        HTTPException: 404 if conversation is not found; 403 if ownership invalid; 429 ``overloaded`` past the worker's in-flight cap; 500 for server errors, and 500 ``empty_answer`` when the turn left no text and no artifact (stored as ``metadata.error``).
     """
     set_user_context(requesting_user.id)
     set_conversation_context(conversation_id)
@@ -2140,6 +2173,9 @@ async def create_agentic_message(
     )
 
     message = None
+    # Set once the turn is saved: a later HTTPException (the empty answer) must
+    # not replace the stored metadata.error.
+    generation_persisted = False
     try:
         conversation = await Conversation.find_by_id(conversation_id)
         if not conversation:
@@ -2200,6 +2236,9 @@ async def create_agentic_message(
             conversation_id=conversation_id,
             message_id=message.id,
         )
+        empty_answer = is_empty_answer(answer, artifact_ids)
+        if empty_answer:
+            answer = ""
 
         message.output = answer
         message.documents = documents
@@ -2218,11 +2257,18 @@ async def create_agentic_message(
             existing_metadata["generated_model_name"] = resolve_generated_model_name(
                 endpoint
             )
+        if empty_answer:
+            # Same marker as the stream: the turn ended with nothing to show.
+            existing_metadata["error"] = build_empty_answer_payload()
         message.metadata = existing_metadata
         await message.save()
+        generation_persisted = True
         await consume_tokens_for_user(
             requesting_user, count_tokens_for_texts(request.query, answer)
         )
+        if empty_answer:
+            # Persisted above; an API client must not read it as a success.
+            raise _empty_answer_http_error()
 
         if not _agent_summarizes(prompts):
             background_tasks.add_task(maybe_rollup_and_trim_history, conversation_id)
@@ -2239,7 +2285,7 @@ async def create_agentic_message(
             "metadata": {"latencies": latencies},
         }
     except HTTPException as http_exc:
-        if message:
+        if message and not generation_persisted:
             try:
                 existing_metadata = dict(getattr(message, "metadata", {}) or {})
                 existing_metadata["error"] = build_error_payload(http_exc)

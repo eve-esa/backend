@@ -1,0 +1,2459 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://ag-ui.com/spec/1.0/schema.json",
+ "title": "AG-UI Protocol",
+ "$ref": "#/$defs/Event",
+ "$defs": {
+  "Event": {
+   "$anchor": "Event",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/TextMessageStartEvent"
+    },
+    {
+     "$ref": "#/$defs/TextMessageContentEvent"
+    },
+    {
+     "$ref": "#/$defs/TextMessageEndEvent"
+    },
+    {
+     "$ref": "#/$defs/TextMessageChunkEvent"
+    },
+    {
+     "$ref": "#/$defs/ToolCallStartEvent"
+    },
+    {
+     "$ref": "#/$defs/ToolCallArgsEvent"
+    },
+    {
+     "$ref": "#/$defs/ToolCallEndEvent"
+    },
+    {
+     "$ref": "#/$defs/ToolCallChunkEvent"
+    },
+    {
+     "$ref": "#/$defs/ToolCallResultEvent"
+    },
+    {
+     "$ref": "#/$defs/StateSnapshotEvent"
+    },
+    {
+     "$ref": "#/$defs/StateDeltaEvent"
+    },
+    {
+     "$ref": "#/$defs/MessagesSnapshotEvent"
+    },
+    {
+     "$ref": "#/$defs/ActivitySnapshotEvent"
+    },
+    {
+     "$ref": "#/$defs/ActivityDeltaEvent"
+    },
+    {
+     "$ref": "#/$defs/RawEvent"
+    },
+    {
+     "$ref": "#/$defs/CustomEvent"
+    },
+    {
+     "$ref": "#/$defs/RunStartedEvent"
+    },
+    {
+     "$ref": "#/$defs/RunFinishedEvent"
+    },
+    {
+     "$ref": "#/$defs/RunErrorEvent"
+    },
+    {
+     "$ref": "#/$defs/StepStartedEvent"
+    },
+    {
+     "$ref": "#/$defs/StepFinishedEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningStartEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningMessageStartEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningMessageContentEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningMessageEndEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningMessageChunkEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningEndEvent"
+    },
+    {
+     "$ref": "#/$defs/ReasoningEncryptedValueEvent"
+    },
+    {
+     "$ref": "#/$defs/SubagentStartedEvent"
+    },
+    {
+     "$ref": "#/$defs/SubagentFinishedEvent"
+    },
+    {
+     "$ref": "#/$defs/SubagentErrorEvent"
+    }
+   ]
+  },
+  "EventType": {
+   "$anchor": "EventType",
+   "type": "string",
+   "enum": [
+    "TEXT_MESSAGE_START",
+    "TEXT_MESSAGE_CONTENT",
+    "TEXT_MESSAGE_END",
+    "TEXT_MESSAGE_CHUNK",
+    "TOOL_CALL_START",
+    "TOOL_CALL_ARGS",
+    "TOOL_CALL_END",
+    "TOOL_CALL_CHUNK",
+    "TOOL_CALL_RESULT",
+    "STATE_SNAPSHOT",
+    "STATE_DELTA",
+    "MESSAGES_SNAPSHOT",
+    "ACTIVITY_SNAPSHOT",
+    "ACTIVITY_DELTA",
+    "RAW",
+    "CUSTOM",
+    "RUN_STARTED",
+    "RUN_FINISHED",
+    "RUN_ERROR",
+    "STEP_STARTED",
+    "STEP_FINISHED",
+    "REASONING_START",
+    "REASONING_MESSAGE_START",
+    "REASONING_MESSAGE_CONTENT",
+    "REASONING_MESSAGE_END",
+    "REASONING_MESSAGE_CHUNK",
+    "REASONING_END",
+    "REASONING_ENCRYPTED_VALUE",
+    "SUBAGENT_STARTED",
+    "SUBAGENT_FINISHED",
+    "SUBAGENT_ERROR"
+   ]
+  },
+  "BaseEvent": {
+   "$anchor": "BaseEvent",
+   "type": "object",
+   "properties": {
+    "type": {
+     "$ref": "#/$defs/EventType"
+    },
+    "timestamp": {
+     "type": "integer",
+     "minimum": -9007199254740991,
+     "maximum": 9007199254740991
+    },
+    "rawEvent": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "type"
+   ]
+  },
+  "Attributable": {
+   "$anchor": "Attributable",
+   "type": "object",
+   "properties": {
+    "subagentRunId": {
+     "$ref": "#/$defs/SubagentRunId"
+    }
+   }
+  },
+  "SubagentRunId": {
+   "$anchor": "SubagentRunId",
+   "type": "string"
+  },
+  "Metadata": {
+   "$anchor": "Metadata",
+   "type": "object",
+   "additionalProperties": true
+  },
+  "State": {
+   "$anchor": "State"
+  },
+  "TextMessageRole": {
+   "$anchor": "TextMessageRole",
+   "type": "string",
+   "enum": [
+    "developer",
+    "system",
+    "assistant",
+    "user"
+   ]
+  },
+  "Role": {
+   "$anchor": "Role",
+   "type": "string",
+   "enum": [
+    "developer",
+    "system",
+    "assistant",
+    "user",
+    "tool",
+    "activity",
+    "reasoning"
+   ]
+  },
+  "TextMessageStartEvent": {
+   "$anchor": "TextMessageStartEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TEXT_MESSAGE_START"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "role": {
+     "$ref": "#/$defs/TextMessageRole",
+     "default": "assistant"
+    },
+    "name": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "TextMessageContentEvent": {
+   "$anchor": "TextMessageContentEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TEXT_MESSAGE_CONTENT"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "delta"
+   ],
+   "unevaluatedProperties": false
+  },
+  "TextMessageEndEvent": {
+   "$anchor": "TextMessageEndEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TEXT_MESSAGE_END"
+    },
+    "messageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "TextMessageChunkEvent": {
+   "$anchor": "TextMessageChunkEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TEXT_MESSAGE_CHUNK"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "role": {
+     "$ref": "#/$defs/TextMessageRole"
+    },
+    "delta": {
+     "type": "string"
+    },
+    "name": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCallStartEvent": {
+   "$anchor": "ToolCallStartEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TOOL_CALL_START"
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "toolCallName": {
+     "type": "string"
+    },
+    "parentMessageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "toolCallId",
+    "toolCallName"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCallArgsEvent": {
+   "$anchor": "ToolCallArgsEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TOOL_CALL_ARGS"
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "toolCallId",
+    "delta"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCallEndEvent": {
+   "$anchor": "ToolCallEndEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TOOL_CALL_END"
+    },
+    "toolCallId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "toolCallId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCallChunkEvent": {
+   "$anchor": "ToolCallChunkEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TOOL_CALL_CHUNK"
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "toolCallName": {
+     "type": "string"
+    },
+    "parentMessageId": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCallResultEvent": {
+   "$anchor": "ToolCallResultEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "TOOL_CALL_RESULT"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "content": {
+     "oneOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "array",
+       "items": {
+        "$ref": "#/$defs/ContentPart"
+       }
+      }
+     ]
+    },
+    "role": {
+     "const": "tool"
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "toolCallId",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "StateSnapshotEvent": {
+   "$anchor": "StateSnapshotEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "STATE_SNAPSHOT"
+    },
+    "snapshot": {
+     "$ref": "#/$defs/State"
+    }
+   },
+   "required": [
+    "type",
+    "snapshot"
+   ],
+   "unevaluatedProperties": false
+  },
+  "StateDeltaEvent": {
+   "$anchor": "StateDeltaEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "STATE_DELTA"
+    },
+    "delta": {
+     "$ref": "#/$defs/JsonPatch"
+    }
+   },
+   "required": [
+    "type",
+    "delta"
+   ],
+   "unevaluatedProperties": false
+  },
+  "MessagesSnapshotEvent": {
+   "$anchor": "MessagesSnapshotEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "MESSAGES_SNAPSHOT"
+    },
+    "messages": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/Message"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "messages"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ActivitySnapshotEvent": {
+   "$anchor": "ActivitySnapshotEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "ACTIVITY_SNAPSHOT"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "activityType": {
+     "type": "string"
+    },
+    "content": {
+     "type": "object",
+     "additionalProperties": true
+    },
+    "replace": {
+     "type": "boolean",
+     "default": true
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "activityType",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ActivityDeltaEvent": {
+   "$anchor": "ActivityDeltaEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "ACTIVITY_DELTA"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "activityType": {
+     "type": "string"
+    },
+    "patch": {
+     "$ref": "#/$defs/JsonPatch"
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "activityType",
+    "patch"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RawEvent": {
+   "$anchor": "RawEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "RAW"
+    },
+    "event": {},
+    "source": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "event"
+   ],
+   "unevaluatedProperties": false
+  },
+  "CustomEvent": {
+   "$anchor": "CustomEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "CUSTOM"
+    },
+    "name": {
+     "type": "string"
+    },
+    "value": {}
+   },
+   "required": [
+    "type",
+    "name",
+    "value"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunStartedEvent": {
+   "$anchor": "RunStartedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "RUN_STARTED"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "runId": {
+     "type": "string"
+    },
+    "protocolVersion": {
+     "type": "string"
+    },
+    "parentRunId": {
+     "type": "string"
+    },
+    "input": {
+     "$ref": "#/$defs/RunAgentInput"
+    }
+   },
+   "required": [
+    "type",
+    "threadId",
+    "runId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunFinishedEvent": {
+   "$anchor": "RunFinishedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "RUN_FINISHED"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "runId": {
+     "type": "string"
+    },
+    "result": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "outcome": {
+     "$ref": "#/$defs/RunFinishedOutcome"
+    },
+    "usage": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/TokenUsage"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "threadId",
+    "runId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunErrorEvent": {
+   "$anchor": "RunErrorEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "RUN_ERROR"
+    },
+    "message": {
+     "type": "string"
+    },
+    "code": {
+     "type": "string"
+    },
+    "usage": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/TokenUsage"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "message"
+   ],
+   "unevaluatedProperties": false
+  },
+  "StepStartedEvent": {
+   "$anchor": "StepStartedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "STEP_STARTED"
+    },
+    "stepName": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "stepName"
+   ],
+   "unevaluatedProperties": false
+  },
+  "StepFinishedEvent": {
+   "$anchor": "StepFinishedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "STEP_FINISHED"
+    },
+    "stepName": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "stepName"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningStartEvent": {
+   "$anchor": "ReasoningStartEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_START"
+    },
+    "messageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningMessageStartEvent": {
+   "$anchor": "ReasoningMessageStartEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_MESSAGE_START"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "role": {
+     "const": "reasoning"
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "role"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningMessageContentEvent": {
+   "$anchor": "ReasoningMessageContentEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_MESSAGE_CONTENT"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId",
+    "delta"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningMessageEndEvent": {
+   "$anchor": "ReasoningMessageEndEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_MESSAGE_END"
+    },
+    "messageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningMessageChunkEvent": {
+   "$anchor": "ReasoningMessageChunkEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_MESSAGE_CHUNK"
+    },
+    "messageId": {
+     "type": "string"
+    },
+    "delta": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningEndEvent": {
+   "$anchor": "ReasoningEndEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_END"
+    },
+    "messageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "messageId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningEncryptedValueEvent": {
+   "$anchor": "ReasoningEncryptedValueEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    },
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "REASONING_ENCRYPTED_VALUE"
+    },
+    "subtype": {
+     "$ref": "#/$defs/ReasoningEncryptedValueSubtype"
+    },
+    "entityId": {
+     "type": "string"
+    },
+    "encryptedValue": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "subtype",
+    "entityId",
+    "encryptedValue"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningEncryptedValueSubtype": {
+   "$anchor": "ReasoningEncryptedValueSubtype",
+   "type": "string",
+   "enum": [
+    "tool-call",
+    "message"
+   ]
+  },
+  "SubagentStartedEvent": {
+   "$anchor": "SubagentStartedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "SUBAGENT_STARTED"
+    },
+    "subagentRunId": {
+     "$ref": "#/$defs/SubagentRunId"
+    },
+    "name": {
+     "type": "string"
+    },
+    "description": {
+     "type": "string"
+    },
+    "parentSubagentRunId": {
+     "$ref": "#/$defs/SubagentRunId"
+    },
+    "parentToolCallId": {
+     "type": "string"
+    },
+    "parentMessageId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "subagentRunId",
+    "name"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SubagentFinishedEvent": {
+   "$anchor": "SubagentFinishedEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "SUBAGENT_FINISHED"
+    },
+    "subagentRunId": {
+     "$ref": "#/$defs/SubagentRunId"
+    },
+    "result": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "outcome": {
+     "$ref": "#/$defs/SubagentFinishedOutcome"
+    }
+   },
+   "required": [
+    "type",
+    "subagentRunId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SubagentErrorEvent": {
+   "$anchor": "SubagentErrorEvent",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseEvent"
+    }
+   ],
+   "properties": {
+    "type": {
+     "const": "SUBAGENT_ERROR"
+    },
+    "subagentRunId": {
+     "$ref": "#/$defs/SubagentRunId"
+    },
+    "message": {
+     "type": "string"
+    },
+    "code": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "subagentRunId",
+    "message"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunFinishedOutcome": {
+   "$anchor": "RunFinishedOutcome",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/RunFinishedSuccessOutcome"
+    },
+    {
+     "$ref": "#/$defs/RunFinishedInterruptOutcome"
+    },
+    {
+     "$ref": "#/$defs/RunFinishedCancelledOutcome"
+    }
+   ]
+  },
+  "RunFinishedSuccessOutcome": {
+   "$anchor": "RunFinishedSuccessOutcome",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "success"
+    },
+    "pendingToolCallIds": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunFinishedInterruptOutcome": {
+   "$anchor": "RunFinishedInterruptOutcome",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "interrupt"
+    },
+    "interrupts": {
+     "type": "array",
+     "minItems": 1,
+     "items": {
+      "$ref": "#/$defs/Interrupt"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "interrupts"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunFinishedCancelledOutcome": {
+   "$anchor": "RunFinishedCancelledOutcome",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "cancelled"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SubagentFinishedOutcome": {
+   "$anchor": "SubagentFinishedOutcome",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/SubagentFinishedSuccessOutcome"
+    },
+    {
+     "$ref": "#/$defs/SubagentFinishedSuspendedOutcome"
+    }
+   ]
+  },
+  "SubagentFinishedSuccessOutcome": {
+   "$anchor": "SubagentFinishedSuccessOutcome",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "success"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SubagentFinishedSuspendedOutcome": {
+   "$anchor": "SubagentFinishedSuspendedOutcome",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "suspended"
+    },
+    "interruptIds": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "unevaluatedProperties": false
+  },
+  "Interrupt": {
+   "$anchor": "Interrupt",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "reason": {
+     "type": "string"
+    },
+    "message": {
+     "type": "string"
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "responseSchema": {
+     "type": "object",
+     "additionalProperties": true
+    },
+    "expiresAt": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "reason"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ResumeEntry": {
+   "$anchor": "ResumeEntry",
+   "type": "object",
+   "properties": {
+    "interruptId": {
+     "type": "string"
+    },
+    "status": {
+     "type": "string",
+     "enum": [
+      "resolved",
+      "cancelled"
+     ]
+    },
+    "payload": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "interruptId",
+    "status"
+   ],
+   "unevaluatedProperties": false
+  },
+  "TokenUsage": {
+   "$anchor": "TokenUsage",
+   "type": "object",
+   "properties": {
+    "provider": {
+     "type": "string"
+    },
+    "model": {
+     "type": "string"
+    },
+    "inputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "outputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "totalTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "reasoningTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "cachedInputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "cacheWriteInputTokens": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "Message": {
+   "$anchor": "Message",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/DeveloperMessage"
+    },
+    {
+     "$ref": "#/$defs/SystemMessage"
+    },
+    {
+     "$ref": "#/$defs/AssistantMessage"
+    },
+    {
+     "$ref": "#/$defs/UserMessage"
+    },
+    {
+     "$ref": "#/$defs/ToolMessage"
+    },
+    {
+     "$ref": "#/$defs/ActivityMessage"
+    },
+    {
+     "$ref": "#/$defs/ReasoningMessage"
+    }
+   ]
+  },
+  "BaseMessage": {
+   "$anchor": "BaseMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "role": {
+     "type": "string"
+    },
+    "name": {
+     "type": "string"
+    },
+    "encryptedValue": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "role"
+   ]
+  },
+  "DeveloperMessage": {
+   "$anchor": "DeveloperMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseMessage"
+    }
+   ],
+   "properties": {
+    "role": {
+     "const": "developer"
+    },
+    "content": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SystemMessage": {
+   "$anchor": "SystemMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseMessage"
+    }
+   ],
+   "properties": {
+    "role": {
+     "const": "system"
+    },
+    "content": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "AssistantMessage": {
+   "$anchor": "AssistantMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseMessage"
+    }
+   ],
+   "properties": {
+    "role": {
+     "const": "assistant"
+    },
+    "content": {
+     "type": "string"
+    },
+    "toolCalls": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/ToolCall"
+     }
+    }
+   },
+   "required": [
+    "id",
+    "role"
+   ],
+   "unevaluatedProperties": false
+  },
+  "UserMessage": {
+   "$anchor": "UserMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/BaseMessage"
+    }
+   ],
+   "properties": {
+    "role": {
+     "const": "user"
+    },
+    "content": {
+     "oneOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "array",
+       "items": {
+        "$ref": "#/$defs/ContentPart"
+       }
+      }
+     ]
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolMessage": {
+   "$anchor": "ToolMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "role": {
+     "const": "tool"
+    },
+    "content": {
+     "oneOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "array",
+       "items": {
+        "$ref": "#/$defs/ContentPart"
+       }
+      }
+     ]
+    },
+    "toolCallId": {
+     "type": "string"
+    },
+    "error": {
+     "type": "string"
+    },
+    "encryptedValue": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "content",
+    "toolCallId"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ActivityMessage": {
+   "$anchor": "ActivityMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "role": {
+     "const": "activity"
+    },
+    "activityType": {
+     "type": "string"
+    },
+    "content": {
+     "type": "object",
+     "additionalProperties": true
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "activityType",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ReasoningMessage": {
+   "$anchor": "ReasoningMessage",
+   "type": "object",
+   "allOf": [
+    {
+     "$ref": "#/$defs/Attributable"
+    }
+   ],
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "role": {
+     "const": "reasoning"
+    },
+    "content": {
+     "type": "string"
+    },
+    "encryptedValue": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "role",
+    "content"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ToolCall": {
+   "$anchor": "ToolCall",
+   "type": "object",
+   "properties": {
+    "id": {
+     "type": "string"
+    },
+    "type": {
+     "const": "function"
+    },
+    "function": {
+     "$ref": "#/$defs/FunctionCall"
+    },
+    "encryptedValue": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "id",
+    "type",
+    "function"
+   ],
+   "unevaluatedProperties": false
+  },
+  "FunctionCall": {
+   "$anchor": "FunctionCall",
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "arguments": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "arguments"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ContentPart": {
+   "$anchor": "ContentPart",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/TextPart"
+    },
+    {
+     "$ref": "#/$defs/ImagePart"
+    },
+    {
+     "$ref": "#/$defs/AudioPart"
+    },
+    {
+     "$ref": "#/$defs/VideoPart"
+    },
+    {
+     "$ref": "#/$defs/DocumentPart"
+    }
+   ]
+  },
+  "TextPart": {
+   "$anchor": "TextPart",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "text"
+    },
+    "id": {
+     "type": "string"
+    },
+    "text": {
+     "type": "string"
+    },
+    "metadata": {
+     "not": {
+      "type": "null"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "text"
+   ],
+   "unevaluatedProperties": false
+  },
+  "ImagePart": {
+   "$anchor": "ImagePart",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "image"
+    },
+    "id": {
+     "type": "string"
+    },
+    "source": {
+     "$ref": "#/$defs/PartSource"
+    },
+    "metadata": {
+     "not": {
+      "type": "null"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "source"
+   ],
+   "unevaluatedProperties": false
+  },
+  "AudioPart": {
+   "$anchor": "AudioPart",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "audio"
+    },
+    "id": {
+     "type": "string"
+    },
+    "source": {
+     "$ref": "#/$defs/PartSource"
+    },
+    "metadata": {
+     "not": {
+      "type": "null"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "source"
+   ],
+   "unevaluatedProperties": false
+  },
+  "VideoPart": {
+   "$anchor": "VideoPart",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "video"
+    },
+    "id": {
+     "type": "string"
+    },
+    "source": {
+     "$ref": "#/$defs/PartSource"
+    },
+    "metadata": {
+     "not": {
+      "type": "null"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "source"
+   ],
+   "unevaluatedProperties": false
+  },
+  "DocumentPart": {
+   "$anchor": "DocumentPart",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "document"
+    },
+    "id": {
+     "type": "string"
+    },
+    "source": {
+     "$ref": "#/$defs/PartSource"
+    },
+    "metadata": {
+     "not": {
+      "type": "null"
+     }
+    }
+   },
+   "required": [
+    "type",
+    "source"
+   ],
+   "unevaluatedProperties": false
+  },
+  "PartSource": {
+   "$anchor": "PartSource",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/DataSource"
+    },
+    {
+     "$ref": "#/$defs/UrlSource"
+    },
+    {
+     "$ref": "#/$defs/FileSource"
+    }
+   ]
+  },
+  "DataSource": {
+   "$anchor": "DataSource",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "data"
+    },
+    "value": {
+     "type": "string",
+     "contentEncoding": "base64"
+    },
+    "mimeType": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "value",
+    "mimeType"
+   ],
+   "unevaluatedProperties": false
+  },
+  "UrlSource": {
+   "$anchor": "UrlSource",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "url"
+    },
+    "value": {
+     "type": "string"
+    },
+    "mimeType": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "value"
+   ],
+   "unevaluatedProperties": false
+  },
+  "FileSource": {
+   "$anchor": "FileSource",
+   "type": "object",
+   "properties": {
+    "type": {
+     "const": "file"
+    },
+    "value": {
+     "type": "string"
+    },
+    "provider": {
+     "type": "string"
+    },
+    "mimeType": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "type",
+    "value"
+   ],
+   "unevaluatedProperties": false
+  },
+  "Context": {
+   "$anchor": "Context",
+   "type": "object",
+   "properties": {
+    "description": {
+     "type": "string"
+    },
+    "value": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "description",
+    "value"
+   ],
+   "unevaluatedProperties": false
+  },
+  "Tool": {
+   "$anchor": "Tool",
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "description": {
+     "type": "string"
+    },
+    "parameters": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "required": [
+    "name",
+    "description"
+   ],
+   "unevaluatedProperties": false
+  },
+  "RunAgentInput": {
+   "$anchor": "RunAgentInput",
+   "type": "object",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    },
+    "runId": {
+     "type": "string"
+    },
+    "protocolVersion": {
+     "type": "string"
+    },
+    "parentRunId": {
+     "type": "string"
+    },
+    "state": {
+     "not": {
+      "type": "null"
+     },
+     "$ref": "#/$defs/State"
+    },
+    "messages": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/Message"
+     }
+    },
+    "tools": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/Tool"
+     }
+    },
+    "context": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/Context"
+     }
+    },
+    "forwardedProps": {
+     "not": {
+      "type": "null"
+     }
+    },
+    "resume": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/ResumeEntry"
+     }
+    }
+   },
+   "required": [
+    "threadId",
+    "runId",
+    "messages"
+   ],
+   "unevaluatedProperties": false
+  },
+  "SubagentInfo": {
+   "$anchor": "SubagentInfo",
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "description": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "unevaluatedProperties": false
+  },
+  "IdentityCapabilities": {
+   "$anchor": "IdentityCapabilities",
+   "type": "object",
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "type": {
+     "type": "string"
+    },
+    "description": {
+     "type": "string"
+    },
+    "version": {
+     "type": "string"
+    },
+    "provider": {
+     "type": "string"
+    },
+    "documentationUrl": {
+     "type": "string"
+    },
+    "metadata": {
+     "$ref": "#/$defs/Metadata"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "TransportCapabilities": {
+   "$anchor": "TransportCapabilities",
+   "type": "object",
+   "properties": {
+    "streaming": {
+     "type": "boolean"
+    },
+    "websocket": {
+     "type": "boolean"
+    },
+    "httpBinary": {
+     "type": "boolean"
+    },
+    "pushNotifications": {
+     "type": "boolean"
+    },
+    "resumable": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "ToolsCapabilities": {
+   "$anchor": "ToolsCapabilities",
+   "type": "object",
+   "properties": {
+    "supported": {
+     "type": "boolean"
+    },
+    "items": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/Tool"
+     }
+    },
+    "parallelCalls": {
+     "type": "boolean"
+    },
+    "clientProvided": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "OutputCapabilities": {
+   "$anchor": "OutputCapabilities",
+   "type": "object",
+   "properties": {
+    "structuredOutput": {
+     "type": "boolean"
+    },
+    "supportedMimeTypes": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "StateCapabilities": {
+   "$anchor": "StateCapabilities",
+   "type": "object",
+   "properties": {
+    "snapshots": {
+     "type": "boolean"
+    },
+    "deltas": {
+     "type": "boolean"
+    },
+    "memory": {
+     "type": "boolean"
+    },
+    "persistentState": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "MultiAgentCapabilities": {
+   "$anchor": "MultiAgentCapabilities",
+   "type": "object",
+   "properties": {
+    "supported": {
+     "type": "boolean"
+    },
+    "delegation": {
+     "type": "boolean"
+    },
+    "handoffs": {
+     "type": "boolean"
+    },
+    "subagents": {
+     "type": "array",
+     "items": {
+      "$ref": "#/$defs/SubagentInfo"
+     }
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "ReasoningCapabilities": {
+   "$anchor": "ReasoningCapabilities",
+   "type": "object",
+   "properties": {
+    "supported": {
+     "type": "boolean"
+    },
+    "streaming": {
+     "type": "boolean"
+    },
+    "encrypted": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "MultimodalInputCapabilities": {
+   "$anchor": "MultimodalInputCapabilities",
+   "type": "object",
+   "properties": {
+    "image": {
+     "type": "boolean"
+    },
+    "audio": {
+     "type": "boolean"
+    },
+    "video": {
+     "type": "boolean"
+    },
+    "pdf": {
+     "type": "boolean"
+    },
+    "file": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "MultimodalOutputCapabilities": {
+   "$anchor": "MultimodalOutputCapabilities",
+   "type": "object",
+   "properties": {
+    "image": {
+     "type": "boolean"
+    },
+    "audio": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "MultimodalCapabilities": {
+   "$anchor": "MultimodalCapabilities",
+   "type": "object",
+   "properties": {
+    "input": {
+     "$ref": "#/$defs/MultimodalInputCapabilities"
+    },
+    "output": {
+     "$ref": "#/$defs/MultimodalOutputCapabilities"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "ExecutionCapabilities": {
+   "$anchor": "ExecutionCapabilities",
+   "type": "object",
+   "properties": {
+    "codeExecution": {
+     "type": "boolean"
+    },
+    "sandboxed": {
+     "type": "boolean"
+    },
+    "maxIterations": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    },
+    "maxExecutionTime": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 9007199254740991
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "HumanInTheLoopCapabilities": {
+   "$anchor": "HumanInTheLoopCapabilities",
+   "type": "object",
+   "properties": {
+    "supported": {
+     "type": "boolean"
+    },
+    "approvals": {
+     "type": "boolean"
+    },
+    "interventions": {
+     "type": "boolean"
+    },
+    "feedback": {
+     "type": "boolean"
+    },
+    "interrupts": {
+     "type": "boolean"
+    },
+    "approveWithEdits": {
+     "type": "boolean"
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "AgentCapabilities": {
+   "$anchor": "AgentCapabilities",
+   "type": "object",
+   "properties": {
+    "identity": {
+     "$ref": "#/$defs/IdentityCapabilities"
+    },
+    "transport": {
+     "$ref": "#/$defs/TransportCapabilities"
+    },
+    "tools": {
+     "$ref": "#/$defs/ToolsCapabilities"
+    },
+    "output": {
+     "$ref": "#/$defs/OutputCapabilities"
+    },
+    "state": {
+     "$ref": "#/$defs/StateCapabilities"
+    },
+    "multiAgent": {
+     "$ref": "#/$defs/MultiAgentCapabilities"
+    },
+    "reasoning": {
+     "$ref": "#/$defs/ReasoningCapabilities"
+    },
+    "multimodal": {
+     "$ref": "#/$defs/MultimodalCapabilities"
+    },
+    "execution": {
+     "$ref": "#/$defs/ExecutionCapabilities"
+    },
+    "humanInTheLoop": {
+     "$ref": "#/$defs/HumanInTheLoopCapabilities"
+    },
+    "custom": {
+     "type": "object",
+     "additionalProperties": true
+    }
+   },
+   "unevaluatedProperties": false
+  },
+  "JsonPatch": {
+   "$anchor": "JsonPatch",
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/JsonPatchOperation"
+   }
+  },
+  "JsonPatchOperation": {
+   "$anchor": "JsonPatchOperation",
+   "oneOf": [
+    {
+     "$ref": "#/$defs/AddOperation"
+    },
+    {
+     "$ref": "#/$defs/RemoveOperation"
+    },
+    {
+     "$ref": "#/$defs/ReplaceOperation"
+    },
+    {
+     "$ref": "#/$defs/MoveOperation"
+    },
+    {
+     "$ref": "#/$defs/CopyOperation"
+    },
+    {
+     "$ref": "#/$defs/TestOperation"
+    }
+   ]
+  },
+  "AddOperation": {
+   "$anchor": "AddOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "add"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    },
+    "value": {}
+   },
+   "required": [
+    "op",
+    "path",
+    "value"
+   ]
+  },
+  "RemoveOperation": {
+   "$anchor": "RemoveOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "remove"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    }
+   },
+   "required": [
+    "op",
+    "path"
+   ]
+  },
+  "ReplaceOperation": {
+   "$anchor": "ReplaceOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "replace"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    },
+    "value": {}
+   },
+   "required": [
+    "op",
+    "path",
+    "value"
+   ]
+  },
+  "MoveOperation": {
+   "$anchor": "MoveOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "move"
+    },
+    "from": {
+     "$ref": "#/$defs/JsonPointer"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    }
+   },
+   "required": [
+    "op",
+    "from",
+    "path"
+   ]
+  },
+  "CopyOperation": {
+   "$anchor": "CopyOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "copy"
+    },
+    "from": {
+     "$ref": "#/$defs/JsonPointer"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    }
+   },
+   "required": [
+    "op",
+    "from",
+    "path"
+   ]
+  },
+  "TestOperation": {
+   "$anchor": "TestOperation",
+   "type": "object",
+   "properties": {
+    "op": {
+     "const": "test"
+    },
+    "path": {
+     "$ref": "#/$defs/JsonPointer"
+    },
+    "value": {}
+   },
+   "required": [
+    "op",
+    "path",
+    "value"
+   ]
+  },
+  "JsonPointer": {
+   "$anchor": "JsonPointer",
+   "type": "string",
+   "pattern": "^(/([^/~]|~[01])*)*$"
+  }
+ }
+}

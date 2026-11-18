@@ -9,14 +9,18 @@ separate path (not this router) and are read-only here.
 
 import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
+from bson import ObjectId
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from src import config
 from src.config import (
     ARTIFACT_UPLOAD_ALLOWED_TYPES,
     ARTIFACT_UPLOAD_MAX_BYTES,
@@ -24,13 +28,24 @@ from src.config import (
     S3_PRESIGN_TTL_SECONDS,
 )
 from src.database.models.artifact import Artifact, ArtifactSource
+from src.database.models.conversation import Conversation
 from src.database.models.user import User
 from src.database.mongo import get_collection
 from src.database.mongo_model import PaginatedResponse
 from src.middlewares.auth import get_current_user
 from src.schemas.common import Pagination
+from src.services.artifact_cleanup import delete_artifact
+from src.services.mcp.artifact_ingestion import (
+    artifact_markdown_line,
+    clean_filename,
+    strip_format_chars,
+)
+from src.services.mcp.conversation_artifacts import file_path_for, object_key
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
+    INLINE_CONTENT_TYPES,
+    OPAQUE_CONTENT_TYPE,
+    TOOL_INLINE_CONTENT_TYPES,
     ObjectNotFoundError,
     sniff_artifact_type,
     storage_service,
@@ -43,18 +58,10 @@ logger = logging.getLogger(__name__)
 # Collection holding the atomic per-user-per-day upload counters.
 QUOTA_COLLECTION = "image_upload_quota"
 
-# Content types allowed to be served with `Content-Disposition: inline`. Anything
-# else (html, svg, unknown) is forced to `attachment` so a browser never
-# executes a stored artifact as a page (stored-XSS defense).
-INLINE_CONTENT_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "application/pdf",
-    "text/plain",
-    "application/json",
-}
+# Characters that never reach a filename in a header: controls (CR/LF split
+# the header, the rest make uvicorn refuse it), quotes, backslashes and path
+# separators.
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f\x7f"\\/]+')
 
 
 async def reserve_daily_quota_slot(user_id: str) -> None:
@@ -96,25 +103,128 @@ async def reserve_daily_quota_slot(user_id: str) -> None:
 
 
 async def get_owned_artifact(artifact_id: str, requesting_user: User) -> Artifact:
-    """Fetch an artifact and validate that the requesting user owns it."""
+    """Fetch an artifact the requesting user owns.
+
+    A missing id and another user's id both answer 404, so the answer never
+    confirms that someone else's artifact exists.
+    """
     artifact = await Artifact.find_by_id(artifact_id)
-    if not artifact:
+    if not artifact or artifact.user_id != requesting_user.id:
         raise HTTPException(status_code=404, detail="Artifact not found")
-
-    if artifact.user_id != requesting_user.id:
-        raise HTTPException(
-            status_code=403, detail="You are not allowed to access this artifact"
-        )
-
     return artifact
+
+
+async def move_to_conversation(artifact: Artifact, conversation_id: str) -> None:
+    """Bind an artifact to a conversation and keep its object in that conversation's folder.
+
+    The object goes to
+    ``users/{user_id}/conversations/{conversation_id}/artifacts/{artifact_id}/{filename}``,
+    the layout MCP outputs use, so a new sandbox restores it under
+    ``/artifacts/`` and the conversation's delete cascade finds it. The copy
+    and the row are written first and the old object is deleted last, so a
+    failure leaves a stray object, never a row without bytes. A failed copy
+    keeps the old key: the attachment still renders from it.
+    """
+    key = object_key(
+        artifact.user_id, conversation_id, file_path_for(artifact.id, artifact.filename)
+    )
+    if artifact.conversation_id == conversation_id and artifact.key == key:
+        return
+    old_key = artifact.key
+    artifact.conversation_id = conversation_id
+    if old_key != key:
+        try:
+            await storage_service.copy_object(old_key, key)
+        except Exception as exc:  # noqa: BLE001 - the old key still serves
+            logger.warning(
+                "artifact.move_failed artifact=%s conversation=%s error=%s",
+                artifact.id,
+                conversation_id,
+                type(exc).__name__,
+            )
+        else:
+            artifact.key = key
+    await artifact.save()
+    if artifact.key != old_key:
+        try:
+            await storage_service.delete_object(old_key)
+        except Exception as exc:  # noqa: BLE001 - a stray object, reclaimed by GC
+            logger.warning(
+                "artifact.move_cleanup_failed artifact=%s error=%s",
+                artifact.id,
+                type(exc).__name__,
+            )
+
+
+def require_uploads_enabled() -> None:
+    """404 while ``FEATURE_ARTIFACT_UPLOADS`` is off, as if the route did not exist.
+
+    A dependency, not a conditional mount: GET /artifacts shares the path, so
+    an unmounted POST would answer 405 and confirm the route exists. Listed
+    first, so a closed route spends no rate limit token.
+    """
+    if not config.FEATURE_ARTIFACT_UPLOADS:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def serving_headers(artifact: Artifact) -> tuple[str, str]:
+    """Media type and ``Content-Disposition`` an artifact is served with.
+
+    Only the inline allowlist keeps its stored type: ``INLINE_CONTENT_TYPES``
+    for a user's upload, ``TOOL_INLINE_CONTENT_TYPES`` (no PDF) for tool and
+    sandbox output. Anything else, including rows stored as ``image/svg+xml``
+    or ``text/html`` before the type came from the bytes, is served as
+    ``application/octet-stream`` with ``attachment``, so neither a browser
+    tab nor a blob URL renders it.
+    """
+    uploaded = getattr(artifact.source, "type", None) == "upload"
+    inline = INLINE_CONTENT_TYPES if uploaded else TOOL_INLINE_CONTENT_TYPES
+    if artifact.content_type in inline:
+        return artifact.content_type, content_disposition("inline", artifact.filename)
+    return OPAQUE_CONTENT_TYPE, content_disposition("attachment", artifact.filename)
+
+
+def content_disposition(disposition: str, filename: Optional[str]) -> str:
+    """``Content-Disposition`` value that any filename can travel in (RFC 6266).
+
+    Header values are encoded as latin-1, so a raw CJK, emoji or U+202F name
+    raised and the route answered 500. An ASCII name keeps the plain
+    ``filename="..."`` form. Any other name gets an ASCII fallback (accents
+    folded, the rest as ``_``) plus ``filename*=UTF-8''<percent-encoded>``.
+    Control characters, quotes, backslashes and path separators become ``_``
+    in both, so the header cannot be split or refused, nor the name used as
+    a path. Unicode format characters (bidi overrides, zero width) go, so a
+    saved file cannot show a reversed extension.
+    """
+    name = (
+        _UNSAFE_FILENAME_CHARS.sub("_", strip_format_chars(filename or "")).strip()
+        or "artifact"
+    )
+    if name.isascii():
+        return f'{disposition}; filename="{name}"'
+    fallback = "".join(
+        char if char.isascii() and char.isprintable() else "_"
+        for char in unicodedata.normalize("NFKD", name)
+        if not unicodedata.combining(char)
+    )
+    return (
+        f'{disposition}; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(name, safe='')}"
+    )
 
 
 @router.post(
     "/artifacts",
-    dependencies=[Depends(enforce_request_rate("upload"))],
+    dependencies=[
+        Depends(require_uploads_enabled),
+        Depends(enforce_request_rate("upload")),
+    ],
 )
 async def upload_artifact(
     file: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(
+        None, description="Conversation the file is for, when it already exists"
+    ),
     requesting_user: User = Depends(get_current_user),
 ) -> dict:
     """
@@ -123,12 +233,15 @@ async def upload_artifact(
     The Content-Type declared by the client is never trusted: images are
     sniffed from magic bytes, pdf from its magic prefix, and text-like types
     (csv, txt, json, geojson) require both a matching file extension and a
-    decodable UTF-8 payload. The stored object lives under the per-user
-    prefix ``users/{user_id}/artifacts/`` and is served through the stable
-    ``/artifacts/{id}`` route.
+    decodable UTF-8 payload. With ``conversation_id`` the object is written
+    straight into that conversation's folder. A new chat has no conversation
+    yet, so its object waits under ``users/{user_id}/artifacts/`` until a
+    message attaches it and ``move_to_conversation`` moves it. It is served
+    through the stable ``/artifacts/{id}`` route either way.
 
     Args:
         file (UploadFile): The file to upload.
+        conversation_id (str | None): An existing conversation of the user.
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
@@ -136,7 +249,8 @@ async def upload_artifact(
 
     Raises:
         HTTPException: 429 if the daily quota is exceeded; 413 if the file is too
-        large; 415 if the file is not an allowed/recognized type.
+        large; 415 if the file is not an allowed/recognized type; 404 if the
+        conversation is missing or another user's.
     """
     # Read with a hard cap so oversize payloads never reach storage.
     data = await file.read(ARTIFACT_UPLOAD_MAX_BYTES + 1)
@@ -149,30 +263,58 @@ async def upload_artifact(
             status_code=415, detail="Unsupported or unrecognized file type"
         )
 
+    if conversation_id:
+        # Another user's conversation answers like a missing one: a 403 would
+        # confirm that the id exists.
+        conversation = await Conversation.find_by_id(conversation_id)
+        if not conversation or conversation.user_id != requesting_user.id:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
     # Reserve a quota slot atomically once the payload is known-valid, so malformed
     # uploads don't burn quota and concurrent valid uploads can't exceed the cap.
     await reserve_daily_quota_slot(requesting_user.id)
 
     content_type = ARTIFACT_TYPE_CONTENT_TYPES[type_key]
-    key = storage_service.build_user_key(
-        requesting_user.id, type_key, prefix="artifacts"
-    )
+    # Cleaned and capped once here, so the list, the header, the markdown and
+    # the object key all carry the same safe name.
+    filename = clean_filename(file.filename) if file.filename else f"artifact.{type_key}"
+    artifact_oid = ObjectId()
+    if conversation_id:
+        key = object_key(
+            requesting_user.id,
+            conversation_id,
+            file_path_for(str(artifact_oid), filename),
+        )
+    else:
+        key = storage_service.build_user_key(
+            requesting_user.id, type_key, prefix="artifacts"
+        )
     await storage_service.put_object(key, data, content_type)
 
-    artifact = await Artifact.create(
+    artifact = Artifact(
+        id=str(artifact_oid),
         user_id=requesting_user.id,
         key=key,
-        filename=file.filename or f"artifact.{type_key}",
+        filename=filename,
         content_type=content_type,
         size_bytes=len(data),
         source=ArtifactSource(type="upload"),
+        conversation_id=conversation_id or None,
     )
+    document = artifact.to_dict()
+    document["_id"] = artifact_oid
+    await Artifact.get_collection().insert_one(document)
 
     url = f"/artifacts/{artifact.id}"
     return {
         "id": artifact.id,
         "url": url,
-        "markdown": f"![{artifact.filename}]({url})",
+        "markdown": artifact_markdown_line(
+            artifact_id=artifact.id,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            provenance=False,
+        ),
         "filename": artifact.filename,
         "content_type": artifact.content_type,
         "size_bytes": artifact.size_bytes,
@@ -225,14 +367,22 @@ async def get_artifact_presigned_url(
         artifact_id (str): Artifact identifier.
         requesting_user (User): Authenticated user injected by dependency.
 
+    The type and disposition are signed into the URL, so storage serves the
+    same headers as ``GET /artifacts/{id}`` whatever type the object carries.
+
     Returns:
         The presigned URL and its TTL in seconds.
 
     Raises:
-        HTTPException: 404 if not found; 403 if access is forbidden.
+        HTTPException: 404 if missing or owned by another user.
     """
     artifact = await get_owned_artifact(artifact_id, requesting_user)
-    url = await storage_service.generate_presigned_get(artifact.key)
+    media_type, disposition = serving_headers(artifact)
+    url = await storage_service.generate_presigned_get(
+        artifact.key,
+        response_content_type=media_type,
+        response_content_disposition=disposition,
+    )
     return {"url": url, "expires_in": S3_PRESIGN_TTL_SECONDS}
 
 
@@ -252,11 +402,11 @@ async def get_artifact(
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
-        Streaming response with the stored media type and caching headers.
+        Streaming response with the served media type and caching headers.
 
     Raises:
-        HTTPException: 404 if the record is missing or its bytes are gone from
-        storage; 403 if access is forbidden.
+        HTTPException: 404 if the record is missing, owned by another user, or
+        its bytes are gone from storage.
     """
     artifact = await get_owned_artifact(artifact_id, requesting_user)
     try:
@@ -271,16 +421,7 @@ async def get_artifact(
             status_code=404, detail="Artifact content is no longer available"
         )
 
-    # Sanitize the filename for the header (display-only): drop CR/LF, quotes,
-    # backslashes and path separators to prevent header injection.
-    safe_filename = re.sub(r'[\r\n"\\/]+', "_", artifact.filename or "artifact")
-
-    # Only a known-safe set of types render inline; everything else (html, svg,
-    # unrecognized) is forced to download so a stored artifact is never executed
-    # as a page by the browser.
-    disposition = (
-        "inline" if artifact.content_type in INLINE_CONTENT_TYPES else "attachment"
-    )
+    media_type, disposition = serving_headers(artifact)
 
     headers = {
         # Per-user authorized payload: force revalidation so a shared browser
@@ -290,7 +431,7 @@ async def get_artifact(
         "Vary": "Authorization",
         # Never let the browser MIME-sniff a mismatched/hostile type.
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": f'{disposition}; filename="{safe_filename}"',
+        "Content-Disposition": disposition,
     }
     etag = response.get("ETag")
     if etag:
@@ -301,8 +442,55 @@ async def get_artifact(
 
     return StreamingResponse(
         storage_service.stream_body(response["Body"]),
-        media_type=artifact.content_type,
+        media_type=media_type,
         headers=headers,
     )
 
 
+@router.delete("/artifacts/{artifact_id}")
+async def delete_owned_artifact(
+    artifact_id: str = Path(..., description="Artifact ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Delete an owned artifact: its object, its record and its message references.
+
+    References are both MCP outputs (``messages.artifact_ids``) and attached
+    uploads (``messages.attachments[].image_id``). The object goes first.
+    When storage refuses, the record stays and the answer is 503, so the user
+    can retry and nothing is orphaned. With versioning on, S3 keeps the bytes
+    as a noncurrent version until the lifecycle rule expires it.
+
+    Args:
+        artifact_id (str): Artifact identifier.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        Confirmation message.
+
+    Raises:
+        HTTPException: 404 if missing or owned by another user; 503 with
+        ``detail.code`` ``artifact_delete_failed`` if storage refused.
+    """
+    # Primary: a delete right after an upload or an attach must find the row.
+    # Another user's id answers 404 like a missing one.
+    artifact = await Artifact.find_by_id_on_primary(artifact_id)
+    if not artifact or artifact.user_id != requesting_user.id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    try:
+        await delete_artifact(artifact)
+    except Exception as exc:  # noqa: BLE001 - mapped to a retryable 503
+        logger.warning(
+            "artifact.delete_failed user=%s artifact=%s error=%s",
+            requesting_user.id,
+            artifact.id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "artifact_delete_failed",
+                "message": "The file could not be deleted. Try again later.",
+            },
+        )
+    return {"message": "Artifact deleted successfully"}

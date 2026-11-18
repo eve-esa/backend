@@ -362,6 +362,17 @@ FEATURE_LANGFUSE_SCORES = getenv_or("FEATURE_LANGFUSE_SCORES").lower() == "true"
 FEATURE_CONVERSATION_DOCUMENTS = (
     getenv_or("FEATURE_CONVERSATION_DOCUMENTS").lower() == "true"
 )
+# On: POST /conversations/{id}/agui streams an agentic turn as AG-UI 1.0 events
+# (src/routers/agui.py). Off: the route answers 404 and the legacy
+# stream-generate-agentic route is the only agentic stream. Default off, like
+# FEATURE_JSC_MODEL: only "true" turns it on.
+FEATURE_AGUI_STREAM = getenv_or("FEATURE_AGUI_STREAM").lower() == "true"
+# On: agentic turns hand the model each retrieved passage and STAC item with a
+# run-local handle (S1, S2, ...), rewrite the handles the answer cites into [n]
+# markers and persist message.metadata.citations and sources_retrieved
+# (src/services/sources). Off: the model context, the stream and the stored
+# message are unchanged. Default off, like FEATURE_JSC_MODEL.
+FEATURE_INLINE_CITATIONS = getenv_or("FEATURE_INLINE_CITATIONS").lower() == "true"
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
@@ -621,6 +632,12 @@ S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
 S3_PRESIGN_TTL_SECONDS = int(os.getenv("S3_PRESIGN_TTL_SECONDS", 300))
+# S3 client bounds (seconds, total attempts including the first). The calls run
+# in the threadpool, so these, not an asyncio deadline, decide how long a hung
+# S3 holds a thread.
+S3_CONNECT_TIMEOUT_S = float(getenv_or("S3_CONNECT_TIMEOUT_S", "5"))
+S3_READ_TIMEOUT_S = float(getenv_or("S3_READ_TIMEOUT_S", "15"))
+S3_MAX_ATTEMPTS = int(getenv_or("S3_MAX_ATTEMPTS", "2"))
 
 # Generic artifact knobs, consumed by MCP tool-output ingestion.
 ARTIFACT_MAX_BYTES = int(os.getenv("ARTIFACT_MAX_BYTES", 25 * 1024 * 1024))
@@ -644,6 +661,11 @@ ARTIFACT_UPLOAD_ALLOWED_TYPES = [
 ]
 ARTIFACT_UPLOAD_MAX_BYTES = int(os.getenv("ARTIFACT_UPLOAD_MAX_BYTES", 10 * 1024 * 1024))
 ARTIFACT_UPLOADS_PER_DAY = int(os.getenv("ARTIFACT_UPLOADS_PER_DAY", 100))
+
+# User uploads (POST /artifacts). Off by default: an environment whose frontend
+# offers attachments sets it to "true" (local compose, dev). Off answers 404;
+# reading, listing and the agent's own artifacts are not affected.
+FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "true"
 
 # Curated image catalog (demo). When enabled, a small static catalog of images
 # is offered to the answer-generation prompt so the model can embed them as

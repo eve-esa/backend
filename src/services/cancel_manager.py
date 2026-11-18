@@ -19,11 +19,20 @@ def _cancel_flag_key(message_id: str) -> str:
     return f"cancelled:{message_id}"
 
 
+# Why a run was cancelled, when it was not a Stop. A Stop (POST /stop, a retry
+# or a delete pre-empting the run) records no reason, as before.
+CANCEL_REASON_CLIENT_DISCONNECTED = "client_disconnected"
+# The AG-UI stream failed before its terminal event (contract 2.4): the run is
+# stopped rather than left running with nobody reading it.
+CANCEL_REASON_STREAM_FAILED = "stream_failed"
+
+
 class CancelManager:
     def __init__(self):
         self._events: Dict[str, asyncio.Event] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._conv_to_msg: Dict[str, str] = {}
+        self._reasons: Dict[str, str] = {}
         self._logger = logging.getLogger(__name__)
         # Redis-related fields (lazy init)
         self._redis = None
@@ -58,6 +67,8 @@ class CancelManager:
             # so the flag read below cannot miss one sent in between.
             await pubsub.get_message(timeout=1.0)
             if await redis.get(_cancel_flag_key(message_id)):
+                # Only a Stop publishes: it wins over a disconnect seen here.
+                self._reasons.pop(message_id, None)
                 ev.set()
                 self._logger.info(
                     "cancel_manager.redis_received_cancel message_id=%s", message_id
@@ -76,6 +87,7 @@ class CancelManager:
                     if isinstance(data, bytes):
                         data = data.decode("utf-8", errors="ignore")
                     if data == "1" or data == "cancel":
+                        self._reasons.pop(message_id, None)
                         ev.set()
                         self._logger.info(
                             "cancel_manager.redis_received_cancel message_id=%s",
@@ -135,24 +147,48 @@ class CancelManager:
         except Exception:
             pass
 
-    def cancel(self, message_id: str) -> None:
+    def cancel(self, message_id: str, reason: Optional[str] = None) -> None:
+        """Cancel the run of ``message_id``: set its event, cancel its task once.
+
+        Idempotent: once the event is set, the run is already stopping (it may
+        be saving its partial answer in its cancel handler), so a second cancel
+        never cancels the task again. ``reason`` None is a Stop and is
+        published to the other workers; a Stop also wins over a reason recorded
+        earlier. A reason (``client_disconnected``) is recorded only by the
+        first cancel and is local: the worker that saw the disconnect owns the
+        run.
+        """
         ev = self._events.get(message_id)
+        already = ev is not None and ev.is_set()
+        if reason is None:
+            self._reasons.pop(message_id, None)
+        elif not already:
+            self._reasons[message_id] = reason
         if ev is not None:
             ev.set()
         task = self._tasks.get(message_id)
-        if task is not None and not task.done():
+        if not already and task is not None and not task.done():
             task.cancel()
         # Publish cancel to Redis so other workers receive it
-        if self._is_redis_enabled():
+        if reason is None and self._is_redis_enabled():
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._publish_cancel(message_id))
             except Exception:
                 pass
         try:
-            self._logger.info("cancel_manager.cancel message_id=%s", message_id)
+            self._logger.info(
+                "cancel_manager.cancel message_id=%s reason=%s repeat=%s",
+                message_id,
+                reason or "stop",
+                already,
+            )
         except Exception:
             pass
+
+    def cancel_reason(self, message_id: str) -> Optional[str]:
+        """Why the run was cancelled when it was not a Stop, else None."""
+        return self._reasons.get(message_id)
 
     async def _publish_cancel(self, message_id: str):
         try:
@@ -169,6 +205,7 @@ class CancelManager:
     def clear(self, message_id: str) -> None:
         self._events.pop(message_id, None)
         self._tasks.pop(message_id, None)
+        self._reasons.pop(message_id, None)
         # Stop channel subscription task if any
         task = self._channel_tasks.pop(message_id, None)
         if task is not None:

@@ -14,6 +14,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from src.services.sources.citations import SourceRegistry
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,11 @@ class RetrievalRequestContext:
     """
 
     calls: List[RetrievalCall] = field(default_factory=list)
+    # Set by a streamed run with FEATURE_INLINE_CITATIONS, the only path that
+    # rewrites the handles; ``sources`` then holds the Sources of this run and
+    # the handles the model saw them under.
+    cite: bool = False
+    sources: SourceRegistry = field(default_factory=SourceRegistry)
 
     @property
     def documents(self) -> List[Dict[str, Any]]:

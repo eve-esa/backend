@@ -42,13 +42,37 @@ class FakeStorage:
             "Body": _FakeBody(obj["body"]),
             "ETag": '"fake-etag"',
             "ContentLength": len(obj["body"]),
+            "ContentType": obj["content_type"],
         }
 
     async def stream_body(self, body, chunk_size=65536):
         yield body.data
 
+    async def copy_object(self, source_key, dest_key):
+        if source_key not in self.objects:
+            raise ObjectNotFoundError(source_key)
+        self.objects[dest_key] = dict(self.objects[source_key])
+
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
-    async def generate_presigned_get(self, key, expires_in=None):
+    async def delete_prefix(self, prefix, max_keys=10_000):
+        doomed = [k for k in self.objects if k.startswith(prefix)][:max_keys]
+        for key in doomed:
+            del self.objects[key]
+        return len(doomed)
+
+    async def generate_presigned_get(
+        self,
+        key,
+        expires_in=None,
+        *,
+        response_content_type=None,
+        response_content_disposition=None,
+    ):
+        self.last_presign = {
+            "key": key,
+            "response_content_type": response_content_type,
+            "response_content_disposition": response_content_disposition,
+        }
         return f"http://minio.local/{key}?signed=1"

@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -48,6 +49,116 @@ _LARGE_TOOL_RESULTS = "/large_tool_results/"
 # rewrite the suffix of ``/large_tool_results/skills_1``. ``/artifacts`` is
 # an MCP file stored for this conversation.
 _SHELL_PREFIXES = ("/large_tool_results", "/artifacts", "/skills")
+
+
+# OpenSandbox logs every failed endpoint lookup at WARNING before it raises,
+# including the 404 for a sandbox that expired or was removed. Reattach and
+# kill expect that answer and log it themselves at INFO with ids only.
+_OPENSANDBOX_SDK_LOGGER = "opensandbox.sync.adapters.sandboxes_adapter"
+_OPENSANDBOX_GONE_LINE = re.compile(
+    r"\bsandbox \S+ not found\b|\bHTTP 4(04|10)\b", re.IGNORECASE
+)
+_expect_gone: ContextVar[bool] = ContextVar("sandbox_expect_gone", default=False)
+
+
+class _GoneLookupFilter(logging.Filter):
+    """Drop the SDK's WARNING for a gone sandbox, only inside our attach.
+
+    Outside ``_attach_opensandbox`` every line passes. Inside it, a timeout, a
+    5xx or an auth error keeps its WARNING. The readiness 404 the SDK retries
+    while a pod has no IP yet is not a gone sandbox and also keeps it.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not _expect_gone.get():
+            return True
+        message = record.getMessage()
+        if not message.startswith("Failed to retrieve sandbox endpoint"):
+            return True
+        if "POD_IP_NOT_AVAILABLE" in message:
+            return True
+        return _OPENSANDBOX_GONE_LINE.search(message) is None
+
+
+# The SDK transport logs each retry at WARNING, also while execd starts and
+# the readiness ping meets a closed connection. Inside our create and connect
+# calls (which run that ping) a retry is expected, and retries that run out
+# raise and are logged once at WARNING by ``_start_opensandbox`` or
+# ``_attach_opensandbox``. Everywhere else (command runs, file uploads inside
+# a tool call) a retry keeps its WARNING, so an outage mid-turn still shows.
+_OPENSANDBOX_RETRY_LOGGERS = (
+    "opensandbox.transport._sync_retry",
+    "opensandbox.transport._async_retry",
+)
+_quiet_retries: ContextVar[bool] = ContextVar("sandbox_quiet_retries", default=False)
+
+
+class _RetryAsInfoFilter(logging.Filter):
+    """Log the SDK's ``retrying ...`` lines at INFO inside create and connect."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            _quiet_retries.get()
+            and record.levelno == logging.WARNING
+            and str(record.msg).startswith("retrying ")
+        ):
+            record.levelno = logging.INFO
+            record.levelname = logging.getLevelName(logging.INFO)
+        return True
+
+
+# A user Stop cancels the tool call while the SDK thread still streams the
+# command; the closed HTTP stream then fails the read (``Errno 9``) and the
+# SDK logs ERROR "Failed to run command". ``asyncio.to_thread`` copies the
+# context, so the thread holds the turn's Stop binding and sees an event set
+# after it started. A Stop is not an error; without one the ERROR stays.
+_OPENSANDBOX_COMMAND_LOGGERS = (
+    "opensandbox.sync.adapters.command_adapter",
+    "opensandbox.adapters.command_adapter",
+)
+_COMMAND_FAILED = "Failed to run command"
+
+
+class _StoppedCommandFilter(logging.Filter):
+    """Log a command failure caused by a user Stop at INFO, with the reason."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.WARNING or record.msg != _COMMAND_FAILED:
+            return True
+        from src.observability.context import stop_requested
+
+        if not stop_requested():
+            return True
+        exc = record.exc_info[1] if record.exc_info else None
+        record.msg = "%s: turn stopped by the user reason=stop error=%s"
+        record.args = (_COMMAND_FAILED, type(exc).__name__ if exc else "none")
+        record.exc_info = None
+        record.exc_text = None
+        record.levelno = logging.INFO
+        record.levelname = logging.getLevelName(logging.INFO)
+        return True
+
+
+# Marks our filters on the SDK loggers. A module reload (local development)
+# builds new ContextVars, so an older instance is replaced, not kept.
+_FILTER_MARK = "_eve_sandbox_filter"
+
+
+def _add_filter_once(name: str, filter_: logging.Filter) -> None:
+    target = logging.getLogger(name)
+    kind = type(filter_).__name__
+    for old in list(target.filters):
+        if getattr(old, _FILTER_MARK, None) == kind:
+            target.removeFilter(old)
+    setattr(filter_, _FILTER_MARK, kind)
+    target.addFilter(filter_)
+
+
+_add_filter_once(_OPENSANDBOX_SDK_LOGGER, _GoneLookupFilter())
+for _name in _OPENSANDBOX_RETRY_LOGGERS:
+    _add_filter_once(_name, _RetryAsInfoFilter())
+for _name in _OPENSANDBOX_COMMAND_LOGGERS:
+    _add_filter_once(_name, _StoppedCommandFilter())
 
 
 class SandboxError(RuntimeError):
@@ -385,11 +496,21 @@ def _start_opensandbox() -> SandboxSession:
     # protocol must raise SandboxError even when the package is not installed.
     image, config = _opensandbox_connection()
     from opensandbox import SandboxSync
-    remote = SandboxSync.create(
-        image,
-        connection_config=config,
-        timeout=timedelta(seconds=sandbox_busy_ttl_s()),
-    )
+    quiet = _quiet_retries.set(True)
+    try:
+        remote = SandboxSync.create(
+            image,
+            connection_config=config,
+            timeout=timedelta(seconds=sandbox_busy_ttl_s()),
+        )
+    except Exception as exc:
+        logger.warning(
+            "sandbox.create_failed provider=opensandbox error=%s",
+            type(exc).__name__,
+        )
+        raise
+    finally:
+        _quiet_retries.reset(quiet)
     return _opensandbox_session(remote)
 
 
@@ -397,6 +518,9 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
     _image, config = _opensandbox_connection()
     from opensandbox import SandboxSync
     sandbox_id = record["sandbox_id"]
+    # Set and reset in this thread: the SDK logs from the same call stack.
+    token = _expect_gone.set(True)
+    quiet = _quiet_retries.set(True)
     try:
         remote = SandboxSync.connect(sandbox_id, connection_config=config)
     except SandboxGone:
@@ -404,7 +528,15 @@ def _attach_opensandbox(record: dict[str, str]) -> SandboxSession:
     except Exception as exc:
         if getattr(exc, "status_code", None) in (404, 410):
             raise SandboxGone(f"opensandbox {sandbox_id} is gone") from exc
+        logger.warning(
+            "sandbox.connect_failed provider=opensandbox sandbox_id=%s error=%s",
+            sandbox_id,
+            type(exc).__name__,
+        )
         raise
+    finally:
+        _quiet_retries.reset(quiet)
+        _expect_gone.reset(token)
     return _opensandbox_session(remote, skills_digest=record.get("skills_digest", ""))
 
 

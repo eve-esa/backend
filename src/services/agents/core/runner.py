@@ -8,16 +8,20 @@ cancellation, error logging, token consumption, and stream bus publishing.
 import asyncio
 import contextlib
 import copy
+import functools
 import inspect
 import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import BackgroundTasks
 
+from src import config as src_config
 from src.config import (
     AGENT_CONTEXT_WINDOW_TOKENS,
     AGENTIC_LLM_TYPE,
@@ -32,6 +36,9 @@ from src.config import (
 )
 from src.core.llm_health import is_endpoint_failure
 from src.core.llm_manager import LLMType, endpoint_timeout
+from bson import ObjectId
+
+from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.database.models.user import User
@@ -43,13 +50,16 @@ from src.services.custom_model_service import (
 )
 from src.schemas.generation_request import GenerationRequest
 from src.services.generate_answer import (
+    EmptyAnswer,
     _get_conversation_history_from_db,
+    build_empty_answer_payload,
     build_endpoint_metadata,
     build_error_payload,
     deadline_error,
     deadline_overrides,
     endpoint_answered_by,
     get_shared_llm_manager,
+    is_empty_answer,
     maybe_rollup_and_trim_history,
     persist_message_state,
     is_terminal_event,
@@ -71,7 +81,11 @@ from src.services.agents.core.sandbox import (
     open_sandbox,
 )
 from src.services.agents.core.sandbox_pool import acquire_sandbox, release_sandbox
-from src.services.agents.core.skills import resolve_skills_root
+from src.services.agents.core.skills import (
+    cached_skills_root_key,
+    resolve_skills_root,
+    skills_root_key,
+)
 from src.services.checkpoint_retention import build_mongo_checkpointer
 from src.services.conversation_documents import attached_document_names
 from src.services.mcp.artifact_context import (
@@ -83,7 +97,16 @@ from src.services.mcp.retrieval_context import (
     reset_retrieval_context,
     set_retrieval_context,
 )
+from src.services.sources.citations import (
+    CitationRewriter,
+    Edit,
+    SourceRegistry,
+    citation_payload,
+    prior_sources_from_rows,
+    strip_handles,
+)
 from src.services.mcp.tool_loader import (
+    MCP_SERVER_METADATA_KEY,
     _MCPToolsWithClient,
     load_mcp_tools_for_servers as _load_mcp_tools_for_servers,
 )
@@ -105,6 +128,7 @@ from src.observability.context import (
     agent_span,
     cancel_is_stop,
     current_trace_id,
+    mark_error,
     set_llm_attributes,
     span_trace_id,
 )
@@ -160,6 +184,73 @@ except Exception:
     split_tool_calls_and_answer_text = None  # type: ignore
 
 
+def _strip_text_tool_calls(text: str) -> str:
+    """``text`` without a text-format tool call, the rule of the stream's turn buffer.
+
+    Recognised ``[TOOL_CALLS]`` calls go and the text after them stays; a marker
+    nothing parses leaves no answer. A call written as text is never run by the
+    sync path, so it is not an answer either.
+    """
+    if not (has_text_tool_call and has_text_tool_call(text)):
+        return text
+    calls, rest = (
+        split_tool_calls_and_answer_text(text)
+        if split_tool_calls_and_answer_text
+        else ([], "")
+    )
+    return rest if calls else ""
+
+
+def _content_text(content: Any) -> str:
+    """Message content as text: a list of parts is joined by its text parts,
+    the stream's rule, never turned into a Python repr."""
+    if isinstance(content, list):
+        return "".join(
+            c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+        )
+    return content if isinstance(content, str) else str(content or "")
+
+
+def _final_answer_text(
+    messages: List[Any], handles: Optional[SourceRegistry] = None
+) -> str:
+    """What the non-streaming routes return: the last model message without tool calls.
+
+    The model may copy an [S<k>] handle an earlier streamed turn left in the
+    thread: this route hands out none, so it never reaches the user.
+    ``handles`` is that conversation's stored Sources (``strip_handles``);
+    None strips every handle.
+    """
+    for msg in reversed(messages):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            return strip_handles(
+                _strip_text_tool_calls(_content_text(msg.content)), handles
+            )
+    return ""
+
+
+def _mark_empty_answer(span: Any) -> None:
+    """Record an empty answer on the turn's root span, as a raised failure would be."""
+    if span is None:
+        return
+    mark_error(span, EmptyAnswer(build_empty_answer_payload()["message"]))
+    with contextlib.suppress(Exception):
+        span.set_attribute("eve.error.code", "empty_answer")
+
+
+def _log_empty_answer(conversation_id: Optional[str], message_id: Optional[str]) -> None:
+    # Ids only: never the question or the model output.
+    logger.warning(
+        "generation.empty_answer conversation_id=%s message_id=%s",
+        conversation_id,
+        message_id,
+    )
+
+
 # ─── Trace serialisation ──────────────────────────────────────────────────────
 
 
@@ -212,6 +303,10 @@ def _enrich_trace_entry_with_message_metadata(
 # whole file; the full arguments stay in Message.trace.
 STREAM_TOOL_ARG_MAX_CHARS = 500
 
+# Between the answer text of two model calls in one turn (text, a tool call,
+# more text), so the stream and the stored answer do not glue them.
+PARAGRAPH_BREAK = "\n\n"
+
 
 def _stream_tool_args(value: Any) -> Any:
     """Tool call arguments for a stream event, long strings cut."""
@@ -226,6 +321,338 @@ def _stream_tool_args(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return _stream_tool_args(str(value))
+
+
+def _stream_args_truncated(value: Any) -> bool:
+    """True when ``_stream_tool_args`` would cut a string inside *value*."""
+    if isinstance(value, str):
+        return len(value) > STREAM_TOOL_ARG_MAX_CHARS
+    if isinstance(value, dict):
+        return any(_stream_args_truncated(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_stream_args_truncated(v) for v in value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return False
+    return _stream_args_truncated(str(value))
+
+
+# ─── Step frames ──────────────────────────────────────────────────────────────
+# Additive fields on the tool_call and tool_result frames, and the same fields
+# under ``step`` in the persisted trace. The legacy client ignores them.
+
+_SKILL_FILE = re.compile(r"^/skills/([^/]+)/SKILL\.md$")
+_SKILL_READ_TOOLS = frozenset({"read_file"})
+_SUBAGENT_TOOLS = frozenset({"task"})
+
+
+def _tool_server(tool: Any) -> Optional[str]:
+    meta = getattr(tool, "metadata", None)
+    if isinstance(meta, dict):
+        server = meta.get(MCP_SERVER_METADATA_KEY)
+        if isinstance(server, str) and server:
+            return server
+    return None
+
+
+# Content prefixes the agents react tools node writes for a failed call. Up to
+# the agents fix it leaves ``ToolMessage.status`` at its default, so the prefix
+# is the only failure signal there. ``Error:`` (LangChain ToolNode, deep) is
+# only stripped before the timeout check: a result may start with it.
+_TOOL_ERROR_PREFIXES = ("Tool error:", "Unknown tool:")
+_TOOL_ERROR_HEADS = _TOOL_ERROR_PREFIXES + ("Error:",)
+# Timeout words, matched only at the head of the error text and before any
+# quote, where exception names and messages sit: an echoed query or argument
+# (quoted, or later in the text) cannot turn a plain error into a timeout.
+_TIMEOUT_HEAD = re.compile(r"timeout|timed out", re.IGNORECASE)
+_TIMEOUT_HEAD_CHARS = 60
+
+
+def _tool_status(lc_status: Any, content: Any) -> str:
+    """``ok``, ``error`` or ``timeout`` for one ToolMessage."""
+    text = stringify_tool_content(content).lstrip()
+    if lc_status != "error" and not text.startswith(_TOOL_ERROR_PREFIXES):
+        return "ok"
+    if text.startswith("Unknown tool:"):
+        return "error"
+    prefix = next((p for p in _TOOL_ERROR_HEADS if text.startswith(p)), "")
+    head = text[len(prefix) :]
+    head = re.split(r"['\"]", head[:_TIMEOUT_HEAD_CHARS], maxsplit=1)[0]
+    return "timeout" if _TIMEOUT_HEAD.search(head) else "error"
+
+
+def _tool_duration_ms(message: Any) -> Optional[int]:
+    """The call's own time when the tools node stamped it (agents fix)."""
+    meta = getattr(message, "response_metadata", None)
+    value = meta.get("duration_ms") if isinstance(meta, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return int(value)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+class _StepFrames:
+    """Ids, kinds, servers, status and durations of the tool steps of one run.
+
+    ``tool_call_id`` is unique within the run: a missing raw id is generated,
+    a raw id already used by another call gets ``~2``, ``~3`` (text-format
+    models repeat ``call_1_x`` across steps). A call with the same tool and
+    arguments as a call whose result failed is a retry: it gets its own id,
+    counts ``attempt`` and names the failed attempt in ``retry_of``.
+
+    ``duration_ms`` is the call's own time when the tools node stamps it on
+    the ToolMessage; otherwise it runs from the announcement to the result,
+    which on a multi-call step includes the calls that ran before it. Clocks
+    use ``time.monotonic`` so the ``perf_counter`` latencies are left alone.
+
+    The trace steps written by ``annotate_trace_calls`` stay referenced, so a
+    Stop or a ghost call updates the persisted trace in place.
+    """
+
+    def __init__(self, tools: Any = ()) -> None:
+        self._server_by_tool: Dict[str, str] = {}
+        for tool in tools or []:
+            name = getattr(tool, "name", None)
+            server = _tool_server(tool)
+            if isinstance(name, str) and name and server:
+                self._server_by_tool[name] = server
+        self._step_by_raw: Dict[str, str] = {}
+        self._used: set = set()
+        self._pending: Dict[str, Dict[str, Any]] = {}
+        self._failed: Dict[str, tuple] = {}
+        self._fields_by_announce_key: Dict[str, Dict[str, Any]] = {}
+        self._trace_steps: Dict[str, Dict[str, Any]] = {}
+        self._seq = 0
+        self._last_result_seq = 0
+
+    @staticmethod
+    def call_key(name: str, args: Any) -> str:
+        return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+
+    def _new_id(self, raw_id: Any) -> str:
+        base = str(raw_id) if raw_id else f"call_eve_{uuid.uuid4().hex[:16]}"
+        candidate, n = base, 1
+        while candidate in self._used:
+            n += 1
+            candidate = f"{base}~{n}"
+        return candidate
+
+    def _kind(self, name: str, args: Dict[str, Any], step_id: str) -> tuple:
+        if name in _SUBAGENT_TOOLS:
+            extra: Dict[str, Any] = {"subagent_run_id": f"sa-{step_id}"}
+            subagent = args.get("subagent_type")
+            if isinstance(subagent, str) and subagent:
+                extra["subagent_name"] = subagent
+            return "subagent", extra
+        if name in _SKILL_READ_TOOLS:
+            match = _SKILL_FILE.match(str(args.get("file_path") or ""))
+            if match:
+                return "skill", {"skill_name": match.group(1)}
+        if name in self._server_by_tool:
+            return "mcp", {}
+        return "builtin", {}
+
+    def call(
+        self,
+        name: str,
+        args: Any,
+        raw_id: Any,
+        *,
+        announce_key: str,
+        model: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fields for a tool_call frame; records the call as pending.
+
+        ``model`` is always our endpoint key (``main``, ``fallback``, ...);
+        ``model_name`` the provider's own model id, when the message has one.
+        """
+        safe_args = args if isinstance(args, dict) else {}
+        key = self.call_key(name, args)
+        retried = self._failed.pop(key, None)
+        step_id = self._new_id(raw_id)
+        attempt = retried[1] + 1 if retried is not None else 1
+        self._used.add(step_id)
+        if raw_id:
+            self._step_by_raw[str(raw_id)] = step_id
+        kind, extra = self._kind(name, safe_args, step_id)
+        server = self._server_by_tool.get(name)
+        fields: Dict[str, Any] = {
+            "tool_call_id": step_id,
+            "kind": kind,
+            "server": server,
+            "started_at": _utc_now_iso(),
+            "attempt": attempt,
+            **extra,
+        }
+        if retried is not None:
+            fields["retry_of"] = retried[0]
+        if model:
+            fields["model"] = model
+        if model_name:
+            fields["model_name"] = model_name
+        if _stream_args_truncated(args):
+            fields["args_truncated"] = True
+        self._seq += 1
+        self._pending[step_id] = {
+            "name": name,
+            "key": key,
+            "started": time.monotonic(),
+            "attempt": attempt,
+            "retry_of": fields.get("retry_of"),
+            "server": server,
+            "kind": kind,
+            "seq": self._seq,
+        }
+        self._fields_by_announce_key[announce_key] = fields
+        return fields
+
+    def result(
+        self,
+        name: Any,
+        raw_id: Any,
+        lc_status: Any,
+        content: Any,
+        duration_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fields for a tool_result frame; pairs it with its pending call."""
+        step_id: Optional[str] = None
+        if raw_id:
+            step_id = self._step_by_raw.get(str(raw_id))
+        elif name:
+            step_id = next(
+                (sid for sid, s in self._pending.items() if s["name"] == name), None
+            )
+        if step_id is None and not raw_id and self._pending:
+            step_id = next(iter(self._pending))
+        state = self._pending.pop(step_id, None) if step_id else None
+        if step_id is None:
+            step_id = str(raw_id) if raw_id else self._new_id(None)
+            self._used.add(step_id)
+        self._seq += 1
+        self._last_result_seq = self._seq
+        status = _tool_status(lc_status, content)
+        tool = str(name or "")
+        fields: Dict[str, Any] = {
+            "tool_call_id": step_id,
+            "status": status,
+            "kind": state["kind"] if state else self._kind(tool, {}, step_id)[0],
+            "server": state["server"] if state else self._server_by_tool.get(tool),
+            "attempt": state["attempt"] if state else 1,
+        }
+        if duration_ms is not None:
+            fields["duration_ms"] = duration_ms
+        elif state is not None:
+            fields["duration_ms"] = int(
+                round((time.monotonic() - state["started"]) * 1000)
+            )
+        if state is not None and state.get("retry_of"):
+            fields["retry_of"] = state["retry_of"]
+        if status != "ok":
+            fields["error_code"] = "timeout" if status == "timeout" else "tool_error"
+            if state is not None:
+                self._failed[state["key"]] = (step_id, state["attempt"])
+        return fields
+
+    def drop_unanswered(self) -> int:
+        """Forget calls a tools step already passed by without a result.
+
+        Called at each agent update: a call announced before the last result
+        and still pending is a ghost (a text-format call no tool ran). It is
+        neither finished nor cancelled; its trace step reads ``not_run``.
+        """
+        stale = [
+            sid
+            for sid, state in self._pending.items()
+            if state["seq"] < self._last_result_seq
+        ]
+        for sid in stale:
+            self._pending.pop(sid, None)
+            step = self._trace_steps.get(sid)
+            if step is not None:
+                step["status"] = "not_run"
+        return len(stale)
+
+    def cancel_pending(self) -> List[Dict[str, Any]]:
+        """Pending calls as ``cancelled`` entries; clears them.
+
+        Their trace steps get the same status and duration, so the stored
+        trace says which calls a Stop cut.
+        """
+        now = time.monotonic()
+        cancelled = []
+        for step_id, state in self._pending.items():
+            entry = {
+                "tool_call_id": step_id,
+                "status": "cancelled",
+                "attempt": state["attempt"],
+                "duration_ms": int(round((now - state["started"]) * 1000)),
+            }
+            cancelled.append(entry)
+            step = self._trace_steps.get(step_id)
+            if step is not None:
+                step["status"] = "cancelled"
+                step["duration_ms"] = entry["duration_ms"]
+        self._pending.clear()
+        return cancelled
+
+    def annotate_trace_calls(self, entry: Dict[str, Any]) -> None:
+        """Copy the announced fields onto the trace entry's tool calls."""
+        for call in entry.get("tool_calls") or []:
+            key = call.get("id") or self.call_key(
+                call.get("name", "tool"), call.get("args") or {}
+            )
+            fields = self._fields_by_announce_key.get(key)
+            if fields is not None:
+                step = dict(fields)
+                call["step"] = step
+                self._trace_steps[fields["tool_call_id"]] = step
+
+
+_USAGE_COUNT_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "input_token_details",
+    "output_token_details",
+)
+
+
+def _usage_row(
+    message: Any, endpoint_key: Optional[str], model_name: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """One ``final.usage`` row: the counts of one model call, no content.
+
+    ``provider`` is our endpoint key, ``model`` the provider's model id when
+    the message names it. None when the provider reported no count.
+    """
+    usage = getattr(message, "usage_metadata", None)
+    if not isinstance(usage, dict):
+        return None
+    row = {k: usage[k] for k in _USAGE_COUNT_KEYS if usage.get(k) is not None}
+    if not row:
+        return None
+    if endpoint_key:
+        row["provider"] = endpoint_key
+    if model_name or endpoint_key:
+        row["model"] = model_name or endpoint_key
+    return row
+
+
+def _endpoint_switch_frame(endpoint: Optional[Dict[str, Any]]) -> Optional[str]:
+    """``model_fallback`` frame when the chain skipped the requested endpoint
+    because its circuit is open; None otherwise."""
+    if not endpoint:
+        return None
+    requested = endpoint.get("requested")
+    answered = endpoint.get("answered")
+    if not requested or not answered or requested == answered:
+        return None
+    if requested not in (endpoint.get("circuit_open") or []):
+        return None
+    return f"data: {json.dumps({'type': 'model_fallback', 'from': requested, 'to': answered, 'reason': 'circuit_open'})}\n\n"
 
 
 def _serialise_trace_entry(
@@ -787,8 +1214,12 @@ def _with_request_rag_defaults(
 
         object.__setattr__(bound_tool, "invoke", invoke_with_defaults)
 
+    # functools.wraps keeps the wrapped signature: the graph's tool node reads
+    # it to find the ``runtime`` parameter, and without it the MCP request
+    # carries no runtime, so the retrieval Sources lose their tool call id.
     original_coroutine = getattr(bound_tool, "coroutine", None)
     if callable(original_coroutine):
+        @functools.wraps(original_coroutine)
         async def coroutine_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return await original_coroutine(
                 *args,
@@ -799,6 +1230,7 @@ def _with_request_rag_defaults(
 
     original_func = getattr(bound_tool, "func", None)
     if callable(original_func):
+        @functools.wraps(original_func)
         def func_with_defaults(*args: Any, **kwargs: Any) -> Any:
             return original_func(
                 *args,
@@ -1070,6 +1502,7 @@ def _build_initial_messages(
     message_id: Optional[str] = None,
     new_checkpoint: Optional[bool] = None,
     agent_graph_type: Optional[str] = None,
+    attached_files: Optional[List[str]] = None,
 ) -> List[Any]:
     """Return the graph's initial ``messages`` state for this turn.
 
@@ -1087,7 +1520,9 @@ def _build_initial_messages(
 
     ``prior`` is the stored turns seeded into a deep thread that has no
     checkpoint. ``message_id`` is written on the new human message so a later
-    summary can name the range it covers.
+    summary can name the range it covers. ``attached_files`` (sandbox paths)
+    follow the query in that message, so the thread keeps them with the turn
+    they came with.
     """
     if new_checkpoint is None:
         new_checkpoint = not history
@@ -1099,7 +1534,11 @@ def _build_initial_messages(
     human_kwargs: Dict[str, Any] = {}
     if message_id:
         human_kwargs["additional_kwargs"] = {"eve_message_id": str(message_id)}
-    messages.append(HumanMessage(content=request.query, **human_kwargs))
+    content = request.query
+    block = attached_files_block(attached_files or [])
+    if block:
+        content = f"{content}\n\n{block}" if content else block
+    messages.append(HumanMessage(content=content, **human_kwargs))
     return messages
 
 
@@ -1112,11 +1551,14 @@ _ARTIFACT_MARKDOWN = re.compile(
 )
 
 
-def _markdown_paths_to_artifact_urls(answer: str) -> str:
+def _markdown_paths_to_artifact_urls(
+    answer: str, edits: Optional[List[Edit]] = None
+) -> str:
     """Rewrite a markdown artifact link to the URL the chat can load.
 
     A link that is already ``/artifacts/{id}`` is left as it is. Any other
-    form is repaired, and a warning names the URL that was wrong.
+    form is repaired, and a warning names the URL that was wrong. Each repair
+    is appended to ``edits``.
     """
 
     def replace(match: re.Match) -> str:
@@ -1129,12 +1571,16 @@ def _markdown_paths_to_artifact_urls(answer: str) -> str:
                 original,
                 artifact_id,
             )
+            if edits is not None:
+                edits.append((match.start(), match.end(), len(repaired)))
         return repaired
 
     return _ARTIFACT_MARKDOWN.sub(replace, answer)
 
 
-async def rewrite_answer_file_links(answer: str) -> str:
+async def rewrite_answer_file_links(
+    answer: str, passes: Optional[List[List[Edit]]] = None
+) -> str:
     """Point embedded file markdown at the URL the chat can load.
 
     The instruction asks the model to embed ``/artifacts/{id}/{filename}``
@@ -1143,13 +1589,21 @@ async def rewrite_answer_file_links(answer: str) -> str:
     such as ``storage.googleapis.com/.../artifacts/{id}/file``, is rewritten
     in place. A workspace path is published the same way. An artifact the
     answer never mentions stays out of the answer.
+
+    ``passes`` receives the edits of each rewrite pass, in order, for
+    ``CitationRewriter.remap``.
     """
     if not answer:
         return answer
-    answer = _markdown_paths_to_artifact_urls(answer)
     from src.services.agents.core.workspace import publish_markdown_files
 
-    return await publish_markdown_files(answer)
+    artifact_edits: List[Edit] = []
+    workspace_edits: List[Edit] = []
+    answer = _markdown_paths_to_artifact_urls(answer, artifact_edits)
+    answer = await publish_markdown_files(answer, workspace_edits)
+    if passes is not None:
+        passes.extend([artifact_edits, workspace_edits])
+    return answer
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
@@ -1600,6 +2054,62 @@ async def _with_attached_documents(agent: Any, tools: Any, request: Any) -> Any:
     return _agent_with_system_line(agent, attached_documents_line(names))
 
 
+def attached_files_block(paths: List[str]) -> Optional[str]:
+    """The block naming this message's attached files by sandbox path, or None."""
+    if not paths:
+        return None
+    return "## Attached files\nThe user attached the following files:\n" + "\n".join(
+        paths
+    )
+
+
+async def _attached_files(
+    request: Any, user_id: Optional[str], conversation_id: Optional[str], lease: Any
+) -> List[str]:
+    """Sandbox paths of the files attached to this message, present in ``lease``.
+
+    The router has already moved each attachment into the conversation's
+    ``artifacts/`` folder. A new sandbox restored that folder before the
+    turn; a reused one gets this message's files copied in here. Without a
+    sandbox the paths would name nothing, so there are none. A lookup that
+    fails leaves the turn without the block.
+    """
+    ids = list(dict.fromkeys(getattr(request, "artifact_ids", None) or []))
+    if not ids or not user_id or not conversation_id or lease is None:
+        return []
+    from src.services.mcp.conversation_artifacts import (
+        attached_file_paths,
+        copy_into_sandbox,
+    )
+
+    try:
+        oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+        docs = (
+            await Artifact.get_primary_collection()
+            .find(
+                {
+                    "_id": {"$in": oids},
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                },
+                {"key": 1},
+            )
+            .to_list(length=len(oids))
+        )
+        keys = {str(doc["_id"]): doc.get("key") or "" for doc in docs}
+        files = attached_file_paths(
+            user_id, conversation_id, [keys[i] for i in ids if i in keys]
+        )
+        if not getattr(lease, "fresh", False):
+            await copy_into_sandbox(lease.backend, files)
+    except Exception:
+        logger.warning(
+            "Could not attach files conversation=%s", conversation_id, exc_info=True
+        )
+        return []
+    return [path for path, _key in files]
+
+
 def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]]:
     """The collections each retrieval call of this run searched, in call order.
 
@@ -1617,14 +2127,21 @@ def _retrieval_call_collections(rag_tool_names: set[str]) -> List[Dict[str, Any]
     ]
 
 
-async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
-    """True when this conversation already has a checkpoint.
+# Stands for a checkpoint that exists but could not be read. The thread may
+# hold a stale skill list, so the skills check lists again.
+_CHECKPOINT_UNREADABLE = object()
+
+
+async def _read_checkpoint(checkpointer: Any, conversation_id: str) -> tuple[bool, Any]:
+    """Whether this conversation already has a checkpoint, and the tuple read.
 
     A lookup error is treated as "the thread is there": seeding on top of a
-    thread that could not be read would duplicate it.
+    thread that could not be read would duplicate it. The tuple is then
+    ``_CHECKPOINT_UNREADABLE``; it is ``None`` when no checkpointer or no
+    checkpoint exists.
     """
     if checkpointer is None:
-        return False
+        return False, None
     try:
         found = await checkpointer.aget_tuple(
             {"configurable": {"thread_id": conversation_id}}
@@ -1633,8 +2150,118 @@ async def _checkpoint_exists(checkpointer: Any, conversation_id: str) -> bool:
         logger.warning(
             "checkpoint lookup failed conversation=%s", conversation_id, exc_info=True
         )
-        return True
-    return found is not None
+        return True, _CHECKPOINT_UNREADABLE
+    return found is not None, found
+
+
+# Checkpoint metadata key holding the skills key a turn ran with. LangGraph
+# copies string values of ``config["metadata"]`` onto every checkpoint the
+# turn writes, so the next turn reads it from the tuple it already has.
+_SKILLS_KEY_METADATA = "eve_skills_key"
+# Bound on the wait for the local tree scan, not on the scan: a thread cannot
+# be cancelled, so a late scan finishes in the background and fills the cache.
+_SKILLS_CHECK_TIMEOUT_S = 2.0
+# Checks that ran out of time in this process. Under load the wait mostly
+# measures the default executor queue, so each one is an INFO line with the
+# running count, not a WARNING per turn.
+_skills_check_timeouts = 0
+
+
+def _stored_skills_key(checkpoint: Any) -> Optional[str]:
+    metadata = getattr(checkpoint, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get(_SKILLS_KEY_METADATA)
+    return value if isinstance(value, str) and value else None
+
+
+def _has_skills_load_errors(checkpoint: Any) -> bool:
+    """True when the last listing on this thread reported errors."""
+    state = getattr(checkpoint, "checkpoint", None)
+    if not isinstance(state, dict):
+        return False
+    values = state.get("channel_values")
+    if not isinstance(values, dict):
+        return False
+    errors = values.get("skills_load_errors")
+    return isinstance(errors, list) and bool(errors)
+
+
+async def _skills_reload_input(
+    checkpoint: Any, conversation_id: Optional[str], skills_root: Any
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    """Graph input and config metadata that keep a thread's skill list current.
+
+    SkillsMiddleware lists ``/skills/`` once per thread and keeps the list in
+    the checkpoint; ``{"skills_metadata": None}`` asks it to list again. The
+    decision compares the key of this turn's local tree with the key the last
+    turn recorded in its checkpoint metadata, never with the checkpointed list:
+    on the sandbox path that list comes from the sandbox listing, and duplicate
+    names resolve in listing order, so a list that differs from the local tree
+    would force a reload on every turn.
+
+    A stored key that is missing or differs from this turn's key reloads; only
+    equal keys keep the list. A key goes missing when the last turn ran with
+    no skills tree (no middleware, nothing recorded, the old list still in
+    state) or on a thread from before this check: one extra listing then.
+    Also reloaded: a checkpoint that could not be read, and a thread whose
+    last listing reported errors (a failed listing would otherwise stick to
+    the thread until the key changes). With no checkpoint there is nothing to
+    reload: the middleware lists anyway.
+
+    A scan failure or timeout keeps the list and re-records the previous key,
+    so a change is still caught on a later turn; with no previous key nothing
+    is recorded and the next turn reloads. Known gaps: a read from a lagging
+    secondary can return an older checkpoint whose key equals this turn's
+    key (a change made and reverted in between), and two turns on one thread
+    at once can write the old list back; both stay until the key changes
+    again.
+    """
+    if skills_root is None or not conversation_id:
+        return {}, {}
+    global _skills_check_timeouts
+    unreadable = checkpoint is _CHECKPOINT_UNREADABLE
+    stored = None if unreadable else _stored_skills_key(checkpoint)
+    wanted = cached_skills_root_key(skills_root)
+    if wanted is None:
+        try:
+            wanted = await asyncio.wait_for(
+                asyncio.to_thread(skills_root_key, skills_root),
+                timeout=_SKILLS_CHECK_TIMEOUT_S,
+            )
+        except TimeoutError:
+            _skills_check_timeouts += 1
+            logger.info(
+                "skills reload check: no key within %.1f s, kept the list "
+                "conversation=%s timeouts=%d",
+                _SKILLS_CHECK_TIMEOUT_S,
+                conversation_id,
+                _skills_check_timeouts,
+            )
+        except Exception as exc:
+            logger.warning(
+                "skills reload check failed, kept the list conversation=%s error=%s",
+                conversation_id,
+                type(exc).__name__,
+            )
+    recorded = wanted or stored
+    metadata_out = {_SKILLS_KEY_METADATA: recorded} if recorded else {}
+    if checkpoint is None or wanted is None:
+        return {}, metadata_out
+    if unreadable:
+        reason = "unreadable_checkpoint"
+    elif _has_skills_load_errors(checkpoint):
+        reason = "load_errors"
+    elif stored is None:
+        reason = "not_recorded"
+    elif wanted != stored:
+        reason = "changed"
+    else:
+        return {}, metadata_out
+    logger.info(
+        "skills reload conversation=%s reason=%s", conversation_id, reason
+    )
+    return {"skills_metadata": None}, metadata_out
 
 
 async def save_agent_summary(graph: Any, conversation_id: str) -> None:
@@ -1744,19 +2371,23 @@ async def _prepare_agent_context(
     conversation_id: Optional[str],
     checkpointer: Any,
     message_id: Optional[str],
-) -> tuple[List[Any], Optional[str], List[Any], bool, Any]:
-    """Return history, summary, seeded turns, new-checkpoint, and the agent.
+) -> tuple[List[Any], Optional[str], List[Any], bool, Any, Any]:
+    """Return history, summary, seeded turns, new-checkpoint, agent, checkpoint.
 
     A deep turn with a checkpoint uses that thread and no rolling summary.
     Without one, the stored turns are seeded into the new thread. ``simple``
-    and ``react`` keep the rolling summary and the one-turn window.
+    and ``react`` keep the rolling summary and the one-turn window. The
+    checkpoint tuple is the deep turn's one read of the thread, ``None``, or
+    ``_CHECKPOINT_UNREADABLE`` when the read failed.
     """
     history, summary = await _fetch_conversation_context(conversation_id)
     prior: List[Any] = []
+    checkpoint: Any = None
     new_checkpoint = not history
     agent = get_agent_graph(agent_graph_type)
     if agent_graph_type == "deep" and conversation_id:
-        if await _checkpoint_exists(checkpointer, conversation_id):
+        exists, checkpoint = await _read_checkpoint(checkpointer, conversation_id)
+        if exists:
             history, summary = [], None
             new_checkpoint = False
         else:
@@ -1766,7 +2397,7 @@ async def _prepare_agent_context(
         agent = _agent_with_pinned_context(agent)
     elif agent_graph_type != "simple":
         summary = note_searchable_history(summary)
-    return history, summary, prior, new_checkpoint, agent
+    return history, summary, prior, new_checkpoint, agent, checkpoint
 
 
 def _generation_unattributed_s(
@@ -1856,6 +2487,64 @@ def _build_agentic_latencies(
 # ─── Non-streaming generation ─────────────────────────────────────────────────
 
 
+# FEATURE_INLINE_CITATIONS: handles are conversation scoped. A streamed turn
+# reads the Sources earlier turns stored before it hands out new ones; the
+# newest rows carry the highest handles, so the cap never lets a new handle
+# collide with one already in the thread.
+_PRIOR_SOURCES_TIMEOUT_S = 2.0
+_PRIOR_SOURCES_MAX_MESSAGES = 200
+
+
+async def _load_prior_sources(
+    conversation_id: str, message_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """The Sources earlier messages of the conversation stored, with their handles."""
+    cursor = (
+        Message.get_collection()
+        .find(
+            {
+                "conversation_id": conversation_id,
+                "$or": [
+                    {"metadata.citations": {"$exists": True}},
+                    {"metadata.sources_retrieved": {"$exists": True}},
+                ],
+            },
+            {"metadata.citations": 1, "metadata.sources_retrieved": 1},
+        )
+        .sort("timestamp", -1)
+        .limit(_PRIOR_SOURCES_MAX_MESSAGES)
+    )
+    rows = [
+        row
+        async for row in cursor
+        if message_id is None or str(row.get("_id")) != str(message_id)
+    ]
+    return prior_sources_from_rows(rows)
+
+
+async def _seed_conversation_sources(
+    registry: SourceRegistry, conversation_id: str, message_id: Optional[str]
+) -> bool:
+    """Seed ``registry`` from the conversation; False when the lookup failed.
+
+    Without the earlier handles a new one could take a number the thread
+    already uses and turn a cited passage into the wrong Source, so the
+    caller then runs the turn without handles.
+    """
+    try:
+        prior = await asyncio.wait_for(
+            _load_prior_sources(conversation_id, message_id),
+            _PRIOR_SOURCES_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning(
+            "citations.prior_sources_unavailable error=%s", type(exc).__name__
+        )
+        return False
+    registry.seed(prior)
+    return True
+
+
 async def generate_answer_agentic(
     request: GenerationRequest,
     *,
@@ -1912,7 +2601,14 @@ async def generate_answer_agentic(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -1950,6 +2646,9 @@ async def generate_answer_agentic(
         # and a new list would drop the client strong reference.
         if held is not None:
             artifact_ctx.sandbox_backend = held.backend
+        attached_files = await _attached_files(
+            request, user_id, conversation_id, sandbox_lease
+        )
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -1970,6 +2669,29 @@ async def generate_answer_agentic(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}} if conversation_id else {}
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
+
+        # This route hands out no handles, but the model may copy one an
+        # earlier streamed turn left in the thread: the handles that turn
+        # stored go, and with the flag on and no lookup, every handle goes.
+        handle_registry: Optional[SourceRegistry] = SourceRegistry()
+        if not (
+            conversation_id
+            and await _seed_conversation_sources(
+                handle_registry, conversation_id, message_id
+            )
+        ):
+            handle_registry = (
+                None if src_config.FEATURE_INLINE_CITATIONS else SourceRegistry()
+            )
 
         async def _run_graph(
             g: Any,
@@ -2014,7 +2736,9 @@ async def generate_answer_agentic(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                                attached_files=attached_files,
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode="updates",
@@ -2059,13 +2783,20 @@ async def generate_answer_agentic(
                                 latency_map[latency_key] = step_latency_s
                 except Exception as exc:
                     graph_exc = exc
+                # While the root is open: a turn that ends with nothing to show
+                # is a failed turn in the trace too.
+                if graph_exc is None and is_empty_answer(
+                    _final_answer_text(raw_msgs, handle_registry),
+                    artifact_ctx.collected_artifact_ids,
+                ):
+                    _mark_empty_answer(root_span)
 
             if graph_exc is not None:
-                has_answer = any(
-                    isinstance(msg, AIMessage)
-                    and msg.content
-                    and not getattr(msg, "tool_calls", None)
-                    for msg in raw_msgs
+                # Whitespace or an unrun text call from the fallback is not an
+                # answer: the primary's failure stands.
+                has_answer = not is_empty_answer(
+                    _final_answer_text(raw_msgs, handle_registry),
+                    artifact_ctx.collected_artifact_ids,
                 )
                 if not _recoverable_after_agent_fallback(
                     fallback_used=fallback.used, has_answer=has_answer
@@ -2103,18 +2834,13 @@ async def generate_answer_agentic(
             fallback,
         ) = await _run_graph(graph)
 
-        final_answer = ""
-        for msg in reversed(all_messages):
-            if (
-                isinstance(msg, AIMessage)
-                and msg.content
-                and not getattr(msg, "tool_calls", None)
-            ):
-                final_answer = (
-                    msg.content if isinstance(msg.content, str) else str(msg.content)
-                )
-                break
-        final_answer = await rewrite_answer_file_links(final_answer)
+        final_answer = await rewrite_answer_file_links(
+            _final_answer_text(all_messages, handle_registry)
+        )
+        if is_empty_answer(final_answer, artifact_ctx.collected_artifact_ids):
+            # The router persists the empty_answer marker from the same check.
+            final_answer = ""
+            _log_empty_answer(conversation_id, message_id)
 
         # Only retrieval output reaches the UI as documents. Every ToolMessage is
         # still kept verbatim in the trace by _serialise_trace_entry above.
@@ -2223,7 +2949,8 @@ async def generate_answer_agentic_stream_helper(
     the answer streamed, say) is still recorded in the persisted
     `metadata.error`, but the client is not handed an error banner on top of an
     answer it has already rendered. Only a turn with nothing streamed ends with
-    `error`.
+    `error`. A turn that ends without a failure but with no visible text and no
+    artifact ends with `error` too, code ``empty_answer``.
 
     Raises ``ValueError`` when ``conversation_id`` is empty: a streamed turn
     always persists its message in a conversation and runs on its thread.
@@ -2257,12 +2984,74 @@ async def generate_answer_agentic_stream_helper(
     root_span: Any = None
     trace_id: Optional[str] = current_trace_id()
     sandbox_lease: Any = None
+    # Bound before the try: a Stop that lands mid-run persists the trace with
+    # the calls it cut, from the in-loop check or from the cancel handler.
+    trace_entries: List[Dict[str, Any]] = []
+    step_frames: Optional[_StepFrames] = None
+    # One row per model call that reported token counts (``final.usage``).
+    usage_rows: List[Dict[str, Any]] = []
+    # The answer filter for [S<k>] handles. With FEATURE_INLINE_CITATIONS and
+    # the conversation's earlier Sources read (``citing``), it turns cited
+    # handles into [n] markers; when that read fails it strips every handle.
+    # With the flag off it strips only the handles an earlier flag-on turn of
+    # this conversation stored, which the model may copy from the thread; any
+    # other [S<k>] is the model's own text. Frames and the stored message
+    # then carry no citation fields.
+    citing = False
+    citation_rewriter = CitationRewriter(SourceRegistry(), cite=False)
+    # A change to the marker list not yet sent on a token frame.
+    citations_dirty = False
 
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
     def _collected_artifact_ids() -> Optional[List[str]]:
         return list(artifact_ctx.collected_artifact_ids) or None
+
+    def _answer_text() -> str:
+        """The answer as streamed so far (text the citation filter holds is not in it)."""
+        return "".join(accumulated)
+
+    def _held_token_events() -> List[str]:
+        """Text the citation filter still holds, as one token frame, and into the answer.
+
+        Called before every terminal frame that follows streamed text, so the
+        stored answer is what the user saw.
+        """
+        rest = citation_rewriter.flush()
+        if not rest:
+            return []
+        accumulated.append(rest)
+        if output_format == "json":
+            return [f"data: {json.dumps({'type': 'token', 'content': rest})}\n\n"]
+        return [f"data: {rest}\n\n"]
+
+    async def _rewrite_file_links() -> str:
+        """The answer with its file links rewritten; citation offsets follow the text."""
+        passes: List[List[Edit]] = []
+        answer = await rewrite_answer_file_links(_answer_text(), passes)
+        if citing:
+            dropped = citation_rewriter.remap(answer, passes)
+            if dropped:
+                logger.warning("citations.offsets_dropped count=%d", dropped)
+        return answer
+
+    def _citation_fields() -> Dict[str, Any]:
+        """``citations`` and ``sources_retrieved`` for the frame and the row; {} when off."""
+        return citation_payload(citation_rewriter) if citing else {}
+
+    def _log_citations(outcome: str) -> None:
+        if not citing:
+            return
+        # Counts only: never the answer, a passage or a handle's text.
+        logger.info(
+            "citations.summary outcome=%s cited=%d markers=%d invalid=%d sources=%d",
+            outcome,
+            len(citation_rewriter.numbers),
+            citation_rewriter.markers_seen - citation_rewriter.invalid,
+            citation_rewriter.invalid,
+            len(_retrieval_ctx.sources.sources),
+        )
 
     def _retrieval_state() -> tuple[List[Dict[str, Any]], bool]:
         """(documents, use_rag) from the retrieval ToolMessages seen so far."""
@@ -2274,11 +3063,30 @@ async def generate_answer_agentic_stream_helper(
         )
         return documents, retrieval_calls > 0
 
-    def _final_events(answer: str, latencies: Dict[str, Any]) -> List[str]:
+    def _final_events(
+        answer: str,
+        latencies: Dict[str, Any],
+        error: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
         if output_format == "json":
-            return [
-                f"data: {json.dumps({'type': 'final', 'answer': answer, 'latencies': latencies, 'artifact_ids': _collected_artifact_ids(), 'trace_id': trace_id})}\n\n"
-            ]
+            final: Dict[str, Any] = {
+                "type": "final",
+                "answer": answer,
+                "latencies": latencies,
+                "artifact_ids": _collected_artifact_ids(),
+                "trace_id": trace_id,
+            }
+            if endpoint_metadata:
+                final["endpoint"] = endpoint_metadata
+            if usage_rows:
+                final["usage"] = list(usage_rows)
+            final.update(_citation_fields())
+            if error is not None:
+                # A failure after streamed text: the legacy client ignores
+                # it, the AG-UI adapter maps it to RUN_ERROR. The code
+                # only: ``message`` is raw exception text.
+                final["error"] = {"code": error["code"]}
+            return [f"data: {json.dumps(final)}\n\n"]
         return ["data: [DONE]\n\n"]
 
     def _attribution() -> Dict[str, Any]:
@@ -2302,6 +3110,23 @@ async def generate_answer_agentic_stream_helper(
 
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
 
+        if src_config.FEATURE_INLINE_CITATIONS:
+            citing = await _seed_conversation_sources(
+                _retrieval_ctx.sources, conversation_id, message_id
+            )
+            _retrieval_ctx.cite = citing
+            citation_rewriter = (
+                CitationRewriter(_retrieval_ctx.sources)
+                if citing
+                else CitationRewriter(SourceRegistry())
+            )
+        elif conversation_id:
+            prior_sources = SourceRegistry()
+            if await _seed_conversation_sources(
+                prior_sources, conversation_id, message_id
+            ):
+                citation_rewriter = CitationRewriter(prior_sources, cite=False)
+
         setup_latencies: Dict[str, float] = {}
 
         agent_graph_type = _resolve_agent_graph_type(request)
@@ -2319,7 +3144,14 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_checkpointer_s"] = time.perf_counter() - step_start
 
         step_start = time.perf_counter()
-        history, summary, prior, new_checkpoint, agent = await _prepare_agent_context(
+        (
+            history,
+            summary,
+            prior,
+            new_checkpoint,
+            agent,
+            checkpoint,
+        ) = await _prepare_agent_context(
             agent_graph_type, conversation_id, checkpointer, message_id
         )
         agent = await _with_attached_documents(agent, tools, request)
@@ -2331,6 +3163,9 @@ async def generate_answer_agentic_stream_helper(
         )
         setup_latencies["setup_llm_resolve_s"] = time.perf_counter() - step_start
         endpoint_metadata = llm_prompts.pop("endpoint", None)
+        switch_frame = _endpoint_switch_frame(endpoint_metadata)
+        if switch_frame is not None and output_format == "json":
+            yield switch_frame
 
         # Time the sandbox only when this graph can take one. An extra
         # perf_counter call would shift the setup clocks of every other graph.
@@ -2353,6 +3188,9 @@ async def generate_answer_agentic_stream_helper(
         # and a new list would drop the client strong reference.
         if sandbox_lease is not None:
             artifact_ctx.sandbox_backend = sandbox_lease.backend
+        attached_files = await _attached_files(
+            request, user_id, conversation_id, sandbox_lease
+        )
         step_start = time.perf_counter()
         graph = _build_react_graph(
             request.llm_type,
@@ -2376,6 +3214,15 @@ async def generate_answer_agentic_stream_helper(
         setup_latencies["setup_graph_compile_s"] = time.perf_counter() - step_start
 
         config = {"configurable": {"thread_id": conversation_id}}
+        skills_reload: Dict[str, Any] = {}
+        if skills_root is not None:
+            step_start = time.perf_counter()
+            skills_reload, skills_metadata = await _skills_reload_input(
+                checkpoint, conversation_id, skills_root
+            )
+            if skills_metadata:
+                config["metadata"] = skills_metadata
+            setup_latencies["setup_skills_check_s"] = time.perf_counter() - step_start
 
         gen_start = time.perf_counter()
         # First-answer budget. gen_start stays put: generation_latency uses it.
@@ -2384,15 +3231,22 @@ async def generate_answer_agentic_stream_helper(
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
         fallback = _FallbackUse()
-        trace_entries: List[Dict[str, Any]] = []
         node_start_time: float = gen_start
         node_latencies: Dict[str, float] = {}
         # Separate from node_start_time/node_latencies above (kept for
         # metadata.latencies): the timeline computes each trace entry's real
         # started_at_s/latency_s per the agent/tool/final-answer timing rules.
         trace_timeline = _TraceTimeline(gen_start)
+        step_frames = _StepFrames(tools)
 
         turn_buffer: List[str] = []
+        # A model call ended (its node update, the node changed, or the chunk
+        # id changed): the next answer text starts a new paragraph. The break rides that text, so a
+        # Stop or an end before it stores none.
+        paragraph_pending = False
+        # Chunk id of the model call that streamed last: a new id is a new
+        # call in the same node (a node retry, retry or fallback middleware).
+        model_call_id: Optional[str] = None
         current_node: Optional[str] = None
         # Tool calls already announced in the current agent step, keyed by
         # call id. One call can reach the stream up to three times (a complete
@@ -2400,7 +3254,56 @@ async def generate_answer_agentic_stream_helper(
         # update) and must open one chip only. Cleared when a tool answers.
         announced_tool_calls: set = set()
 
-        def _tool_call_events(tool_calls: List[Any]) -> List[str]:
+        def _step_model(msg: Any = None, node: Optional[str] = None) -> tuple:
+            """(endpoint key, provider model id) behind a step.
+
+            The key is always ours (``main``, ``fallback``, ...); the provider
+            id comes from the message, when it carries one.
+            """
+            meta = getattr(msg, "response_metadata", None) or {}
+            name = meta.get("model_name") or meta.get("model")
+            provider = name if isinstance(name, str) and name else None
+            if fallback.used or node == "agent_fallback":
+                return LLMType.Fallback.value, provider
+            return (endpoint_metadata or {}).get("answered"), provider
+
+        def _record_tool_result(chunk: Any, node: str) -> Dict[str, Any]:
+            """Trace entry and step fields for one ToolMessage; the frame."""
+            graph_messages.append(chunk)
+            announced_tool_calls.clear()
+            started_at_s, entry_latency_s = trace_timeline.tool_step(
+                getattr(chunk, "tool_call_id", None),
+                at=time.perf_counter(),
+            )
+            result_fields = step_frames.result(
+                getattr(chunk, "name", None),
+                getattr(chunk, "tool_call_id", None),
+                getattr(chunk, "status", None),
+                chunk.content,
+                duration_ms=_tool_duration_ms(chunk),
+            )
+            tool_entry = _serialise_trace_entry(
+                chunk,
+                node=node,
+                latency_s=entry_latency_s,
+                started_at_s=started_at_s,
+            )
+            tool_entry["step"] = dict(result_fields)
+            trace_entries.append(tool_entry)
+            result_frame: Dict[str, Any] = {
+                "type": "tool_result",
+                "content": stringify_tool_content(chunk.content)[:200],
+                "tool": getattr(chunk, "name", None),
+                "id": getattr(chunk, "tool_call_id", None),
+            }
+            result_frame.update(result_fields)
+            return result_frame
+
+        def _tool_call_events(
+            tool_calls: List[Any],
+            model: Optional[str] = None,
+            model_name: Optional[str] = None,
+        ) -> List[str]:
             nonlocal answer_budget_started_at
             events: List[str] = []
             for tc in tool_calls:
@@ -2422,13 +3325,59 @@ async def generate_answer_agentic_stream_helper(
                 query_used = args.get("query", "")
                 label = tool_call_label(tname) if tool_call_label else f"Calling {tname}"
                 msg = f"{label}: {query_used}" if query_used else f"{label}…"
-                events.append(
-                    f"data: {json.dumps({'type': 'tool_call', 'content': msg, 'tool': tname, 'label': label, 'query': query_used or None, 'id': call_id, 'args': _stream_tool_args(args)})}\n\n"
+                frame = {
+                    "type": "tool_call",
+                    "content": msg,
+                    "tool": tname,
+                    "label": label,
+                    "query": query_used or None,
+                    "id": call_id,
+                    "args": _stream_tool_args(args),
+                }
+                if model is None:
+                    model, model_name = _step_model()
+                frame.update(
+                    step_frames.call(
+                        tname,
+                        args,
+                        call_id,
+                        announce_key=key,
+                        model=model,
+                        model_name=model_name,
+                    )
                 )
+                events.append(f"data: {json.dumps(frame)}\n\n")
             return events
 
+        def _feed_answer_text(tok: str) -> str:
+            """``tok`` through the citation filter, with the paragraph break it opens."""
+            nonlocal paragraph_pending
+            if not paragraph_pending:
+                return citation_rewriter.feed(tok)
+            # The held text counts: it is streamed text the filter has not
+            # sent yet.
+            so_far = _answer_text() + citation_rewriter.held
+            if not so_far:
+                paragraph_pending = False
+                return citation_rewriter.feed(tok)
+            if not tok.strip():
+                # A call that writes only whitespace: the break waits for
+                # the next text, so no blank paragraph and no double break.
+                return ""
+            paragraph_pending = False
+            # A marker is written inside one model call: a handle prefix held
+            # from the last call is plain text, sent before the break.
+            head = citation_rewriter.flush()
+            body = tok.lstrip(" \t")
+            tail = so_far.rstrip(" \t")
+            have = (len(tail) - len(tail.rstrip("\n"))) + (
+                len(body) - len(body.lstrip("\n"))
+            )
+            sep = PARAGRAPH_BREAK[: max(0, len(PARAGRAPH_BREAK) - have)]
+            return head + citation_rewriter.feed(sep + body)
+
         def _flush_turn_buffer_to_events() -> List[str]:
-            nonlocal tokens_yielded, first_token_latency
+            nonlocal tokens_yielded, first_token_latency, citations_dirty
             if not turn_buffer:
                 return []
             items = list(turn_buffer)
@@ -2478,12 +3427,24 @@ async def generate_answer_agentic_stream_helper(
             for tok in answer_items:
                 if not tok:
                     continue
+                version = citation_rewriter.version
+                tok = _feed_answer_text(tok)
+                if citing and citation_rewriter.version != version:
+                    citations_dirty = True
+                if not tok:
+                    # Held, or a marker that only added an offset: the change
+                    # rides on the next token that carries text.
+                    continue
                 tokens_yielded += 1
                 accumulated.append(tok)
                 if output_format == "json":
-                    events.append(
-                        f"data: {json.dumps({'type': 'token', 'content': tok})}\n\n"
-                    )
+                    token_frame: Dict[str, Any] = {"type": "token", "content": tok}
+                    if citations_dirty:
+                        # The whole list so far, only on a token after a
+                        # marker changed it (sources standard, section 3).
+                        token_frame["citations"] = citation_rewriter.citations()
+                        citations_dirty = False
+                    events.append(f"data: {json.dumps(token_frame)}\n\n")
                 else:
                     events.append(f"data: {tok}\n\n")
             return events
@@ -2518,7 +3479,9 @@ async def generate_answer_agentic_stream_helper(
                                 message_id=message_id,
                                 new_checkpoint=new_checkpoint,
                                 agent_graph_type=agent_graph_type,
-                            )
+                                attached_files=attached_files,
+                            ),
+                            **skills_reload,
                         },
                         config=config,
                         stream_mode=["messages", "updates", "custom"],
@@ -2526,17 +3489,36 @@ async def generate_answer_agentic_stream_helper(
                 ) as graph_stream:
                     async for mode, payload in graph_stream:
                         if cancelled():
+                            # The event that trips the check is often the
+                            # result of the call the Stop waited on: that call
+                            # finished, so it is paired before the rest is cut.
+                            if mode == "messages" and ToolMessage:
+                                stop_chunk = payload[0] if isinstance(payload, tuple) else None
+                                if isinstance(stop_chunk, ToolMessage):
+                                    _record_tool_result(
+                                        stop_chunk,
+                                        (payload[1] or {}).get("langgraph_node", ""),
+                                    )
+                            # The cut calls go to the stored trace, not to the
+                            # stream: the Stop route already closed it.
+                            step_frames.cancel_pending()
+                            held_events = _held_token_events()
                             cancel_documents, cancel_use_rag = _retrieval_state()
                             await persist_message_state(
                                 message_id,
                                 trace_id=trace_id,
                                 stopped=True,
-                                output="".join(accumulated),
+                                output=_answer_text(),
                                 documents=cancel_documents,
                                 use_rag=cancel_use_rag,
+                                trace=trace_entries or None,
                                 artifact_ids=_collected_artifact_ids(),
+                                **_citation_fields(),
                             )
-                            yield f"data: {json.dumps({'type': 'stopped'})}\n\n"
+                            _log_citations("stopped")
+                            for event in held_events:
+                                yield event
+                            yield f"data: {json.dumps({'type': 'stopped', **_citation_fields()})}\n\n"
                             return
 
                         if mode == "custom":
@@ -2546,7 +3528,14 @@ async def generate_answer_agentic_stream_helper(
                             continue
 
                         if mode == "updates":
+                            fallback_before = fallback.used
                             fallback.observe(payload)
+                            if (
+                                fallback.used
+                                and not fallback_before
+                                and output_format == "json"
+                            ):
+                                yield f"data: {json.dumps({'type': 'model_fallback', 'from': (endpoint_metadata or {}).get('answered'), 'to': LLMType.Fallback.value, 'reason': 'agent_error'})}\n\n"
                             # An agent step is traced from its node update, not from
                             # the streamed chunks: the first chunk carrying a tool
                             # call has no arguments yet when the provider streams
@@ -2559,9 +3548,24 @@ async def generate_answer_agentic_stream_helper(
                                 )
                                 if not isinstance(msgs, list):
                                     msgs = [msgs]
+                                if AIMessage and any(
+                                    isinstance(m, AIMessage) for m in msgs
+                                ):
+                                    # A new agent step: a call the last tools
+                                    # step passed by is a ghost, not pending.
+                                    step_frames.drop_unanswered()
+                                    # That model call is over: later answer
+                                    # text comes from another one.
+                                    paragraph_pending = True
                                 for msg in msgs:
                                     if ToolMessage and isinstance(msg, ToolMessage):
                                         answer_budget_started_at = time.perf_counter()
+                                    if AIMessage and isinstance(msg, AIMessage):
+                                        row = _usage_row(
+                                            msg, *_step_model(msg, update_node)
+                                        )
+                                        if row is not None:
+                                            usage_rows.append(row)
                                     if not (
                                         AIMessage
                                         and isinstance(msg, AIMessage)
@@ -2573,17 +3577,21 @@ async def generate_answer_agentic_stream_helper(
                                             msg.tool_calls, at=time.perf_counter()
                                         )
                                     )
-                                    trace_entries.append(
-                                        _serialise_trace_entry(
-                                            msg,
-                                            node=update_node,
-                                            latency_s=entry_latency_s,
-                                            started_at_s=started_at_s,
-                                        )
+                                    agent_entry = _serialise_trace_entry(
+                                        msg,
+                                        node=update_node,
+                                        latency_s=entry_latency_s,
+                                        started_at_s=started_at_s,
                                     )
+                                    trace_entries.append(agent_entry)
                                     # The update carries the complete arguments,
                                     # so the tool call is announced from here.
-                                    for event in _tool_call_events(msg.tool_calls):
+                                    call_events = _tool_call_events(
+                                        msg.tool_calls,
+                                        *_step_model(msg, update_node),
+                                    )
+                                    step_frames.annotate_trace_calls(agent_entry)
+                                    for event in call_events:
                                         yield event
                             continue
 
@@ -2601,30 +3609,25 @@ async def generate_answer_agentic_stream_helper(
                                     )
                             for event in _flush_turn_buffer_to_events():
                                 yield event
+                            # One model call never spans two nodes.
+                            paragraph_pending = True
                             node_start_time = time.perf_counter()
                             current_node = node
 
                         if ToolMessage and isinstance(chunk, ToolMessage):
                             answer_budget_started_at = time.perf_counter()
-                            graph_messages.append(chunk)
-                            announced_tool_calls.clear()
-                            preview = stringify_tool_content(chunk.content)[:200]
-                            started_at_s, entry_latency_s = trace_timeline.tool_step(
-                                getattr(chunk, "tool_call_id", None),
-                                at=time.perf_counter(),
-                            )
-                            trace_entries.append(
-                                _serialise_trace_entry(
-                                    chunk,
-                                    node=node,
-                                    latency_s=entry_latency_s,
-                                    started_at_s=started_at_s,
-                                )
-                            )
-                            yield f"data: {json.dumps({'type': 'tool_result', 'content': preview, 'tool': getattr(chunk, 'name', None), 'status': 'ok', 'id': getattr(chunk, 'tool_call_id', None)})}\n\n"
+                            result_frame = _record_tool_result(chunk, node)
+                            yield f"data: {json.dumps(result_frame)}\n\n"
                             continue
 
                         if AIMessage and isinstance(chunk, AIMessage):
+                            chunk_id = getattr(chunk, "id", None)
+                            if chunk_id:
+                                if model_call_id and chunk_id != model_call_id:
+                                    for event in _flush_turn_buffer_to_events():
+                                        yield event
+                                    paragraph_pending = True
+                                model_call_id = chunk_id
                             if getattr(chunk, "tool_calls", None):
                                 # Kept only so a ToolMessage without a name can be
                                 # traced back to the tool it answered.
@@ -2636,16 +3639,14 @@ async def generate_answer_agentic_stream_helper(
                                 if not (
                                     AIMessageChunk and isinstance(chunk, AIMessageChunk)
                                 ):
-                                    for event in _tool_call_events(chunk.tool_calls):
+                                    for event in _tool_call_events(
+                                        chunk.tool_calls,
+                                        *_step_model(chunk, node),
+                                    ):
                                         yield event
                                 continue
 
-                            content = chunk.content
-                            if isinstance(content, list):
-                                content = "".join(
-                                    c.get("text", "") if isinstance(c, dict) else str(c)
-                                    for c in content
-                                )
+                            content = _content_text(chunk.content)
                             if not content:
                                 continue
 
@@ -2667,10 +3668,25 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
+                # Still inside the root: the held text goes out first, so the
+                # check reads the answer the user saw and the row stores (the
+                # file link rewrite below never empties it). A
+                # Stop already set ends the turn stopped at the next await, so
+                # the trace is left to the Stop.
+                for event in _held_token_events():
+                    yield event
+                if not cancelled() and is_empty_answer(
+                    _answer_text(), _collected_artifact_ids()
+                ):
+                    _mark_empty_answer(root_span)
         except Exception as exc:
-            answer = "".join(accumulated)
+            # Whitespace or an unrun text call from the fallback is not an
+            # answer: the primary's failure stands.
+            has_answer = not is_empty_answer(
+                _answer_text() + citation_rewriter.held, _collected_artifact_ids()
+            )
             if not _recoverable_after_agent_fallback(
-                fallback_used=fallback.used, has_answer=bool(answer)
+                fallback_used=fallback.used, has_answer=has_answer
             ):
                 raise
             graph_exc = exc
@@ -2680,9 +3696,19 @@ async def generate_answer_agentic_stream_helper(
                 exc,
             )
 
+        # Empty unless the graph raised after a recovered fallback: the normal
+        # end flushed inside the root above.
+        for event in _held_token_events():
+            yield event
+
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
-        answer = await rewrite_answer_file_links("".join(accumulated))
+        answer = await _rewrite_file_links()
+        # Whitespace, or a text tool call the turn buffer dropped, and no
+        # artifact: the user got nothing, so the turn is a failed one.
+        empty_answer = is_empty_answer(answer, _collected_artifact_ids())
+        if empty_answer:
+            answer = ""
         total_latency = time.perf_counter() - total_start
 
         latencies = fallback.merge_latencies(
@@ -2756,11 +3782,24 @@ async def generate_answer_agentic_stream_helper(
             trace=trace_entries if trace_entries else None,
             artifact_ids=_collected_artifact_ids(),
             clear_error=bool(answer),
+            **({"error": build_empty_answer_payload()} if empty_answer else {}),
+            **_citation_fields(),
         )
+        _log_citations("answer")
+        if empty_answer:
+            _log_empty_answer(conversation_id, message_id)
 
         _schedule_after_turn(agent_graph_type, graph, conversation_id, background_tasks)
 
+        # Set before the terminal frame either way: the turn is persisted, and a
+        # Stop that lands on the publish must not replace it.
         final_emitted = True
+        if empty_answer:
+            # Nothing visible went out, so the error frame, not a final: the
+            # client renders it with Retry, as for any failure before text.
+            error_info = build_empty_answer_payload()
+            yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
+            return
         for event in _final_events(answer, latencies):
             yield event
 
@@ -2773,17 +3812,25 @@ async def generate_answer_agentic_stream_helper(
         if final_emitted or (isinstance(exc, GeneratorExit) and not stop):
             raise
         logger.info("Agentic generation cancelled")
+        if step_frames is not None:
+            # Same worker Stop: the route cancelled this task mid-call.
+            step_frames.cancel_pending()
         cancelled_documents, cancelled_use_rag = _retrieval_state()
         await persist_message_state(
             message_id,
             trace_id=trace_id,
-            output="".join(accumulated),
+            output=_answer_text(),
             documents=cancelled_documents,
             use_rag=cancelled_use_rag,
+            trace=trace_entries or None,
             stopped=stop,
             error=None if stop else build_error_payload(exc),
             artifact_ids=_collected_artifact_ids(),
+            **_citation_fields(),
         )
+        # No frame can follow here: text the filter still holds was never
+        # shown, so it stays out of the stored answer.
+        _log_citations("stopped" if stop else "cancelled")
         if not stop:
             # Worker shutdown or the deadline: a failed turn with its partial
             # output, and the cancel goes on to the caller.
@@ -2801,7 +3848,8 @@ async def generate_answer_agentic_stream_helper(
             error=exc,
             graph=agent_graph_type,
         )
-        answer = await rewrite_answer_file_links("".join(accumulated))
+        held_events = _held_token_events()
+        answer = await _rewrite_file_links()
         error_info = build_error_payload(exc)
         timeout_documents, timeout_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
@@ -2814,11 +3862,15 @@ async def generate_answer_agentic_stream_helper(
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),
+                **_citation_fields(),
             )
+        _log_citations("timeout")
         if final_emitted:
             return
         if answer:
-            for event in _final_events(answer, {}):
+            for event in held_events:
+                yield event
+            for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"
@@ -2835,7 +3887,8 @@ async def generate_answer_agentic_stream_helper(
             graph=agent_graph_type,
         )
         error_info = build_error_payload(exc)
-        answer = "".join(accumulated)
+        held_events = _held_token_events()
+        answer = _answer_text()
         error_documents, error_use_rag = _retrieval_state()
         with contextlib.suppress(Exception):
             await persist_message_state(
@@ -2847,11 +3900,15 @@ async def generate_answer_agentic_stream_helper(
                 error=error_info,
                 artifact_ids=_collected_artifact_ids(),
                 **_attribution(),
+                **_citation_fields(),
             )
+        _log_citations("error")
         if final_emitted:
             return
         if answer:
-            for event in _final_events(answer, {}):
+            for event in held_events:
+                yield event
+            for event in _final_events(answer, {}, error=error_info):
                 yield event
         else:
             yield f"data: {json.dumps({'type': 'error', 'code': error_info['code'], 'message': error_info['message']})}\n\n"

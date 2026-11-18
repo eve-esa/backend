@@ -853,6 +853,20 @@ async def _stream_events(graph) -> list:
         ]
 
 
+# The keys the legacy client reads. B-S2 adds fields next to them; these keep
+# their exact values.
+_LEGACY_TOOL_CALL_KEYS = ("type", "content", "tool", "label", "query", "id", "args")
+_LEGACY_TOOL_RESULT_KEYS = ("type", "content", "tool", "status", "id")
+
+
+def _legacy(events: list, kind: str) -> list:
+    keys = _LEGACY_TOOL_CALL_KEYS if kind == "tool_call" else _LEGACY_TOOL_RESULT_KEYS
+    frames = [e for e in events if e["type"] == kind]
+    for frame in frames:
+        assert frame["tool_call_id"], "every enriched tool frame carries tool_call_id"
+    return [{k: frame[k] for k in keys} for frame in frames]
+
+
 class TestStructuredToolEvents:
     """The tool events carry machine-readable fields for clients that render
     tool activity themselves. ``content`` keeps the ready-made display string,
@@ -881,7 +895,7 @@ class TestStructuredToolEvents:
 
         events = await _stream_events(graph)
 
-        assert [e for e in events if e["type"] == "tool_call"] == [
+        assert _legacy(events, "tool_call") == [
             {
                 "type": "tool_call",
                 "content": "Calling dummy search: sea ice",
@@ -943,7 +957,7 @@ class TestStructuredToolEvents:
 
         events = await _stream_events(graph)
 
-        assert [e for e in events if e["type"] == "tool_result"] == [
+        assert _legacy(events, "tool_result") == [
             {
                 "type": "tool_result",
                 "content": "x" * 200,
@@ -974,7 +988,7 @@ class TestStructuredToolEvents:
 
         events = await _stream_events(graph)
 
-        assert [e for e in events if e["type"] == "tool_call"] == [
+        assert _legacy(events, "tool_call") == [
             {
                 "type": "tool_call",
                 "content": "Calling dummy search: sea ice",
@@ -1292,7 +1306,11 @@ class TestTraceTiming:
 
         agent_steps = [e for e in trace if e.get("tool_calls")]
         assert len(agent_steps) == 1
-        assert agent_steps[0]["tool_calls"] == [call]
+        assert [
+            {k: v for k, v in c.items() if k != "step"}
+            for c in agent_steps[0]["tool_calls"]
+        ] == [call]
+        assert agent_steps[0]["tool_calls"][0]["step"]["tool_call_id"] == "call-1"
         assert agent_steps[0]["response_metadata"]["model_name"] == "test-model"
         assert agent_steps[0]["usage_metadata"]["total_tokens"] == 12
         tool_step = next(e for e in trace if e["role"] == "tool")
@@ -2572,9 +2590,11 @@ class TestSandboxInGeneration:
         # The conversation keeps the sandbox. Release drops local clients only,
         # and AgentCore's local close is a no-op so the session is not stopped.
         assert sandbox.closed == 0
+        # The spy sees every to_thread call: the skills reload check scans
+        # the local tree off the event loop between the open and the release.
         # Release leaves the client up while the workspace save is running.
         # That save detaches, and it is not a pool thread call.
-        assert names == ["_open_sync"]
+        assert names == ["_open_sync", "skills_root_key"]
         await _finish_workspace_sync()
         assert latencies["setup_sandbox_s"] >= 0
 

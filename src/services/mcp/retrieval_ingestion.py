@@ -13,16 +13,39 @@ message; the model gets the same JSON shape reduced to what it needs to
 answer: collection name, chunk text and the descriptive metadata (title, url,
 doi, year, authors, ...).
 
+With ``FEATURE_INLINE_CITATIONS`` on a streamed run each passage (each result
+of a Wiley envelope included), and each item of a ``search_stac`` result, also
+gets a conversation handle under ``eve_ref`` (``S1``, ``S2``, ...) and the
+reduced result one sentence on how to cite it; the Source descriptors go to the
+same request context (``sources``), never to the model. Handles quoted inside
+the source text are taken out of marker form first, and the stored documents
+of a licensed provider (Wiley) are cut to the licence cap; the model context
+keeps the full passage.
+
 Follows the ``ToolCallInterceptor`` protocol from ``langchain-mcp-adapters``.
 Fail-open: any error leaves the original result untouched.
 """
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
+from src import config
 from src.services.mcp.retrieval_context import get_retrieval_context, RetrievalCall
-from src.utils.helpers import extract_documents_from_retrieval_payload
+from src.services.sources.citations import (
+    CITATION_INSTRUCTION,
+    HANDLE_KEY,
+    SourceRegistry,
+    neutralise_handles,
+)
+from src.services.sources.descriptors import (
+    cap_licensed_document,
+    envelope_result_document,
+    source_from_document,
+    source_from_stac_item,
+    wiley_envelope,
+)
+from src.utils.helpers import extract_document_data, extract_documents_from_retrieval_payload
 
 logger = logging.getLogger(__name__)
 
@@ -96,18 +119,155 @@ def slim_document_for_model(doc: Dict[str, Any]) -> Dict[str, Any]:
     return slim
 
 
-def slim_retrieval_response_for_model(response: Dict[str, Any]) -> Dict[str, Any]:
-    """Rebuild a ``/retrieve`` response with only what the model needs."""
-    docs = response.get("retrieved_docs") or []
-    slim: Dict[str, Any] = {
-        "retrieved_docs": [
-            slim_document_for_model(d) for d in docs if isinstance(d, dict)
-        ]
-    }
+# One handle per document: a string, or one handle (or None) per result of a
+# Wiley envelope, or None for a document that became no Source.
+DocRefs = Union[None, str, List[Optional[str]]]
+
+
+def _with_handle(value: Dict[str, Any], handle: str) -> Dict[str, Any]:
+    """``value`` with the handle written last, so no field of its own replaces it."""
+    out = {k: v for k, v in value.items() if k != HANDLE_KEY}
+    out[HANDLE_KEY] = handle
+    return out
+
+
+def _envelope_with_handles(text: Any, refs: List[Optional[str]]) -> Any:
+    """The envelope in ``text`` with each result's handle, in the shape it came in."""
+    envelope = wiley_envelope(text)
+    if envelope is None:
+        return text
+    results = []
+    for index, item in enumerate(envelope["results"]):
+        ref = refs[index] if index < len(refs) else None
+        results.append(_with_handle(item, ref) if ref and isinstance(item, dict) else item)
+    out = {**envelope, "results": results}
+    return json.dumps(out, ensure_ascii=False) if isinstance(text, str) else out
+
+
+def slim_retrieval_response_for_model(
+    response: Dict[str, Any],
+    refs: Optional[List[DocRefs]] = None,
+) -> Dict[str, Any]:
+    """Rebuild a ``/retrieve`` response with only what the model needs.
+
+    ``refs`` (citations on) holds one ``DocRefs`` per dict document, in order;
+    with it the source text loses any handle written in marker form, every
+    slim document carries its handle under ``eve_ref`` (inside the envelope
+    results for Wiley), and the response the citation instruction.
+    """
+    docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
+    slim_docs: List[Dict[str, Any]] = []
+    for index, doc in enumerate(docs):
+        slim_doc = slim_document_for_model(doc)
+        if refs is not None:
+            if isinstance(slim_doc.get("metadata"), dict):
+                slim_doc["metadata"].pop(HANDLE_KEY, None)
+            slim_doc = neutralise_handles(slim_doc)
+            ref = refs[index] if index < len(refs) else None
+            if isinstance(ref, str):
+                slim_doc = _with_handle(slim_doc, ref)
+            elif isinstance(ref, list):
+                slim_doc["text"] = _envelope_with_handles(slim_doc.get("text"), ref)
+        slim_docs.append(slim_doc)
+    slim: Dict[str, Any] = {"retrieved_docs": slim_docs}
     for key in _RESPONSE_KEYS_KEPT:
         if response.get(key) not in (None, ""):
             slim[key] = response[key]
+    if refs is not None:
+        slim = neutralise_handles(slim)
+        if any(refs):
+            slim["citation_instruction"] = CITATION_INSTRUCTION
     return slim
+
+
+def register_retrieval_sources(
+    registry: SourceRegistry,
+    response: Dict[str, Any],
+    tool_call_id: Optional[str],
+) -> List[DocRefs]:
+    """One ``DocRefs`` per dict document of ``response``.
+
+    A Wiley document whose text is a Scholar Gateway envelope gives one Source
+    per result; a document with no text gives none.
+    """
+    refs: List[DocRefs] = []
+    docs = [d for d in (response.get("retrieved_docs") or []) if isinstance(d, dict)]
+    rank = 0
+    for doc in docs:
+        data = extract_document_data(doc)
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        envelope = next(
+            (
+                env
+                for env in (
+                    wiley_envelope(data.get("text")),
+                    wiley_envelope(payload.get("text")),
+                    wiley_envelope(payload.get("content")),
+                )
+                if env is not None
+            ),
+            None,
+        )
+        if envelope is not None:
+            result_refs: List[Optional[str]] = []
+            for result in envelope["results"]:
+                record = envelope_result_document(result, data.get("collection_name"))
+                source = (
+                    source_from_document(record, rank=rank, tool_call_id=tool_call_id)
+                    if record is not None
+                    else None
+                )
+                rank += 1
+                result_refs.append(registry.register(source) if source is not None else None)
+            refs.append(result_refs if any(result_refs) else None)
+            continue
+        source = source_from_document(data, rank=rank, tool_call_id=tool_call_id)
+        rank += 1
+        refs.append(registry.register(source) if source is not None else None)
+    return refs
+
+
+def _parse_stac_response(text: Any) -> Optional[Dict[str, Any]]:
+    """The parsed ``search_stac`` result (``{catalog, items: [...]}``), or None."""
+    if not isinstance(text, str) or not text.lstrip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
+        return None
+    if "catalog" not in parsed:
+        return None
+    return parsed
+
+
+def register_stac_sources(
+    registry: SourceRegistry,
+    response: Dict[str, Any],
+    *,
+    provider: str,
+    tool_call_id: Optional[str],
+) -> Dict[str, Any]:
+    """``response`` with its source text neutralised and a handle on every item that became a Source."""
+    items: List[Any] = []
+    any_ref = False
+    for rank, item in enumerate(response.get("items") or []):
+        source = (
+            source_from_stac_item(item, provider=provider, rank=rank, tool_call_id=tool_call_id)
+            if isinstance(item, dict)
+            else None
+        )
+        if source is None:
+            items.append(neutralise_handles(item))
+            continue
+        items.append(_with_handle(neutralise_handles(item), registry.register(source)))
+        any_ref = True
+    out = neutralise_handles({k: v for k, v in response.items() if k != "items"})
+    out["items"] = items
+    if any_ref:
+        out["citation_instruction"] = CITATION_INSTRUCTION
+    return out
 
 
 def _parse_retrieval_response(text: Any) -> Optional[Dict[str, Any]]:
@@ -147,6 +307,12 @@ def _collection_args(request: Any) -> Dict[str, Any]:
     }
 
 
+def _tool_call_id(request: Any) -> Optional[str]:
+    """The LangChain tool call id from the graph runtime, when there is one."""
+    value = getattr(getattr(request, "runtime", None), "tool_call_id", None)
+    return value if isinstance(value, str) and value else None
+
+
 class RetrievalContextInterceptor:
     """Stash the full retrieval documents, hand the model a reduced copy.
 
@@ -171,7 +337,11 @@ class RetrievalContextInterceptor:
 
         try:
             return self._reduce(
-                result, _graph_tool_name(request), _collection_args(request)
+                result,
+                _graph_tool_name(request),
+                _collection_args(request),
+                tool_call_id=_tool_call_id(request),
+                server_name=str(getattr(request, "server_name", "") or ""),
             )
         except Exception:
             logger.warning(
@@ -188,10 +358,16 @@ class RetrievalContextInterceptor:
         result: "CallToolResult",
         tool_name: str,
         collections: Optional[Dict[str, Any]] = None,
+        *,
+        tool_call_id: Optional[str] = None,
+        server_name: str = "",
     ) -> "CallToolResult":
         ctx = get_retrieval_context()
         if ctx is None:
             return result
+        # Only a run that rewrites the handles hands them out: a sync agentic
+        # turn would store raw [S1] text.
+        citations_on = bool(ctx.cite and config.FEATURE_INLINE_CITATIONS)
 
         new_content: List[Any] = []
         rewritten = False
@@ -201,19 +377,50 @@ class RetrievalContextInterceptor:
                 continue
             response = _parse_retrieval_response(block.text)
             if response is None:
-                new_content.append(block)
+                stac = (
+                    _parse_stac_response(block.text)
+                    if citations_on
+                    and not getattr(result, "isError", False)
+                    and tool_name.endswith("search_stac")
+                    else None
+                )
+                if stac is None:
+                    new_content.append(block)
+                    continue
+                with_refs = register_stac_sources(
+                    ctx.sources,
+                    stac,
+                    provider=(server_name or "stac").lower(),
+                    tool_call_id=tool_call_id,
+                )
+                new_content.append(
+                    block.model_copy(
+                        update={"text": json.dumps(with_refs, ensure_ascii=False)}
+                    )
+                )
+                rewritten = True
                 continue
 
             latencies = response.get("latencies")
+            documents = extract_documents_from_retrieval_payload(response)
+            if citations_on:
+                # The licence cap applies to what the user sees, not to the
+                # passage the model reads.
+                documents = [cap_licensed_document(d) for d in documents]
             ctx.calls.append(
                 RetrievalCall(
                     tool_name=tool_name,
-                    documents=extract_documents_from_retrieval_payload(response),
+                    documents=documents,
                     latencies=dict(latencies) if isinstance(latencies, dict) else {},
                     collections=dict(collections or {}),
                 )
             )
-            slim = slim_retrieval_response_for_model(response)
+            refs = (
+                register_retrieval_sources(ctx.sources, response, tool_call_id)
+                if citations_on
+                else None
+            )
+            slim = slim_retrieval_response_for_model(response, refs)
             new_content.append(
                 block.model_copy(
                     update={"text": json.dumps(slim, ensure_ascii=False)}
