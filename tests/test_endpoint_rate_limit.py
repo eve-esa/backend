@@ -24,8 +24,10 @@ from langchain_openai import ChatOpenAI
 from openai import APIStatusError
 
 from src.core.llm_health import (
+    PROBE_LEASE_S,
     EndpointHealth,
     EndpointRateLimited,
+    is_endpoint_failure,
     parse_retry_after,
     reset_shared_stores,
 )
@@ -314,6 +316,32 @@ def test_only_the_probe_closes_the_window_and_a_newer_429_survives_it(shared):
     assert health.close_rate_limit_window(JSC, started_at=permit.started_at) is True
     assert health.is_rate_limited(JSC) is False
     assert health.admit(JSC).probe is False
+
+
+@pytest.mark.parametrize("probe_s", [5, 300], ids=["short-budget", "long-budget"])
+@pytest.mark.parametrize("shared", [False, True], ids=["local", "shared"])
+def test_the_probe_lease_has_one_fixed_length(shared, probe_s):
+    clock = _clock()
+    store = _FakeRedis(clock) if shared else None
+
+    def worker():
+        return EndpointHealth(
+            cooldown_s=120, clock=clock, wall_clock=clock, redis_client=store, probe_s=probe_s
+        )
+
+    worker_a = worker()
+    worker_b = worker() if shared else worker_a
+    worker_a.record_failure(JSC, _rate_limited({"retry-after": "30"}))
+    clock.now = 1030.0
+    assert worker_a.admit(JSC).probe is True
+
+    # A probe that never reports (a Stop, a crash) holds the endpoint for the
+    # lease, whatever the endpoint's first-token budget.
+    clock.now = 1030.0 + PROBE_LEASE_S - 0.5
+    with pytest.raises(EndpointRateLimited):
+        worker_b.admit(JSC)
+    clock.now = 1030.0 + PROBE_LEASE_S
+    assert worker_b.admit(JSC).probe is True
 
 
 def test_the_log_line_names_the_window_and_nothing_else(caplog):
@@ -723,6 +751,42 @@ async def test_the_translated_429_keeps_no_upstream_error_attached():
     assert raised.value.__cause__ is None
     assert raised.value.__suppress_context__ is True
     assert SECRET_KEY not in "".join(traceback.format_exception(raised.value))
+
+
+def _jsc_plain_text_200(body: dict, _calls: int) -> httpx.Response:
+    # Blablador has answered throttling with an error text inside a 200.
+    return httpx.Response(
+        200, content=b"Rate limit exceeded", headers={"content-type": "text/plain"}
+    )
+
+
+async def test_an_error_text_inside_a_200_fails_the_call_but_is_not_a_429():
+    health = _health(_clock())
+    jsc = _Upstream(_jsc_plain_text_200)
+
+    with pytest.raises(Exception) as raised:
+        await _jsc_client(jsc, health).ainvoke("hi")
+
+    assert not isinstance(raised.value, EndpointRateLimited)
+    assert getattr(raised.value, "status_code", None) != 429
+    # As on main: not an endpoint failure, so no cooldown, and no window.
+    assert is_endpoint_failure(raised.value) is False
+    health.record_failure(JSC, raised.value)
+    assert health.is_rate_limited(JSC) is False
+
+
+async def test_a_turn_whose_jsc_answers_an_error_text_in_a_200_ends_on_the_fallback():
+    health = _health(_clock())
+    jsc = _Upstream(_jsc_plain_text_200)
+    mistral = _Upstream(_agent_turn)
+
+    answer = await _run_react_turn(
+        _jsc_client(jsc, health), _client(ChatOpenAI, mistral, "https://fallback.example/v1")
+    )
+
+    assert answer == "The answer."
+    assert mistral.calls == 2
+    assert health.is_rate_limited(JSC) is False
 
 
 # ─── the guard across workers ─────────────────────────────────────────────────
