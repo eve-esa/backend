@@ -667,6 +667,12 @@ ARTIFACT_UPLOADS_PER_DAY = int(os.getenv("ARTIFACT_UPLOADS_PER_DAY", 100))
 # reading, listing and the agent's own artifacts are not affected.
 FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "true"
 
+# Conversation files and sandbox API (GET /conversations/{id}/files,
+# /conversations/{id}/sandbox and /sandbox/files). Read-only today. It shows
+# sandbox internals, so it is off by default and on only where an environment
+# opts in (dev). Off answers 404 and the routes are left out of the schema.
+FEATURE_SANDBOX_API = getenv_or("FEATURE_SANDBOX_API").lower() == "true"
+
 # Curated image catalog (demo). When enabled, a small static catalog of images
 # is offered to the answer-generation prompt so the model can embed them as
 # markdown. Disabled -> the composed generation prompts are byte-identical to
