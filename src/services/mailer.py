@@ -21,11 +21,12 @@ is made in one place, :func:`_choose_transport`.
 the chosen transport is SMTP and the send raises, the same message goes out
 through SES with the SES sender, and one WARNING line says why. Once the relay
 has answered DATA the mail counts as sent and nothing after it (a failed QUIT)
-falls back. A dropped line or a timeout once DATA has started is ambiguous,
-because the relay may have queued the message. By default it falls back too
-(at-least-once: a second copy of a code mail beats none); a caller that must
-mail at most once passes ``fallback_on_uncertain=False`` and gets the
-uncertain failure instead of a second copy.
+falls back. ``send_message`` hides which step failed, so a dropped line or a
+timeout during it is ambiguous: the relay may have queued the message. By
+default it falls back too (at-least-once: a second copy of a code mail beats
+none); a caller that must mail at most once passes
+``fallback_on_uncertain=False`` and gets the uncertain failure instead of a
+second copy.
 
 Deadlines: each SMTP operation (connect, EHLO, STARTTLS, AUTH, MAIL, RCPT,
 DATA) waits at most ``SMTP_TIMEOUT_SECONDS``, so a black-holed relay costs one
@@ -99,9 +100,9 @@ class MailDeliveryFailed(RuntimeError):
     attributes, for the log lines.
 
     ``uncertain`` is true when the message may have reached the relay: the
-    line dropped or timed out after DATA started and before the relay
-    answered it. A caller that must not mail twice treats such a failure as
-    possibly sent.
+    line dropped or timed out inside ``send_message``, after the login, with
+    no answer from the relay. A caller that must not mail twice treats such a
+    failure as possibly sent.
     """
 
     def __init__(
@@ -181,18 +182,19 @@ def delivery_uncertain(exc: BaseException) -> bool:
     return isinstance(exc, MailDeliveryFailed) and exc.uncertain
 
 
-# A definite answer from the relay: the message did not leave.
-_SMTP_DEFINITE_REFUSALS = (
-    smtplib.SMTPResponseException,
-    smtplib.SMTPRecipientsRefused,
-    smtplib.SMTPNotSupportedError,
-)
+def _send_left_unclear(exc: BaseException) -> bool:
+    """True for a failure inside ``send_message`` that may have queued the mail.
 
-# What a dropped line or a read timeout looks like. smtplib wraps socket errors
-# into SMTPServerDisconnected; OSError (TimeoutError included) covers the rest.
-# Only once DATA has started does it leave the outcome unknown: before the
-# relay answers the final dot it cannot have queued anything (RFC 5321 4.1.1.4).
-_SMTP_LINE_ERRORS = (smtplib.SMTPServerDisconnected, OSError)
+    ``send_message`` runs MAIL, RCPT and DATA in one call and hides which step
+    failed, so a dropped line or a timeout during it (smtplib wraps socket
+    errors into ``SMTPServerDisconnected``; ``TimeoutError`` and other
+    ``OSError`` cover the rest) counts as uncertain. A reply code from the
+    relay (``SMTPResponseException``, ``SMTPRecipientsRefused``) and every
+    other ``SMTPException`` is a definite refusal: nothing left.
+    """
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    return isinstance(exc, OSError) and not isinstance(exc, smtplib.SMTPException)
 
 
 def _choose_transport(transport: str, to: str) -> str:
@@ -295,14 +297,10 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
     message = _build_message(
         sender=sender, to=to, subject=subject, html=html, text=text
     )
-    # CRLF line ends, as ``send_message`` flattened them: ``data`` fixes line
-    # ends only for a str, and many relays refuse a bare LF.
-    payload = message.as_bytes(policy=message.policy.clone(linesep="\r\n"))
-    envelope_from = parseaddr(sender)[1]
     # Not a ``with`` block: its QUIT can raise after the relay accepted DATA,
     # and that error must not read as a failed send and trigger a second copy.
     server = None
-    data_started = False
+    sending = False
     delivered = False
     try:
         server = smtplib.SMTP(
@@ -314,19 +312,8 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
         if SMTP_USERNAME:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        # MAIL, RCPT and DATA one by one, as ``sendmail`` does, so the code
-        # knows whether DATA had started when a line drops.
-        server.ehlo_or_helo_if_needed()
-        code, reply = server.mail(envelope_from)
-        if code != 250:
-            raise smtplib.SMTPSenderRefused(code, reply, envelope_from)
-        code, reply = server.rcpt(to)
-        if code not in (250, 251):
-            raise smtplib.SMTPRecipientsRefused({to: (code, reply)})
-        data_started = True
-        code, reply = server.data(payload)
-        if code != 250:
-            raise smtplib.SMTPDataError(code, reply)
+        sending = True
+        server.send_message(message, to_addrs=[to])
         delivered = True
         server.quit()
     except Exception as exc:
@@ -335,16 +322,9 @@ def _send_smtp(*, sender: str, to: str, subject: str, html: str, text: str) -> N
                 "mail smtp session ended with %s after the relay accepted the message",
                 type(exc).__name__,
             )
-        elif isinstance(exc, _SMTP_DEFINITE_REFUSALS):
-            raise MailDeliveryFailed(
-                f"SMTP send failed: {type(exc).__name__}",
-                reason=type(exc).__name__,
-                code=_smtp_code(exc),
-                status=_smtp_status(exc),
-            ) from None
-        elif data_started and isinstance(exc, _SMTP_LINE_ERRORS):
-            # The line dropped or timed out inside DATA with no answer from
-            # the relay: it may have queued the message.
+        elif sending and _send_left_unclear(exc):
+            # The line dropped or timed out inside send_message with no answer
+            # from the relay: it may have queued the message.
             raise MailDeliveryFailed(
                 f"SMTP send result unknown: {type(exc).__name__}",
                 reason=type(exc).__name__,
@@ -484,8 +464,7 @@ async def send_mail(
                 text=text,
             )
         except Exception as exc:
-            smtp_uncertain = delivery_uncertain(exc)
-            if smtp_uncertain and not fallback_on_uncertain:
+            if delivery_uncertain(exc) and not fallback_on_uncertain:
                 logger.warning(
                     "mail.no_fallback from=%s to=%s reason=%s uncertain=true "
                     "recipient_domain=%s",
@@ -504,26 +483,14 @@ async def send_mail(
                 _recipient_domain(to),
             )
             transport = TRANSPORT_SES
-            try:
-                await asyncio.to_thread(
-                    _send_ses,
-                    sender=_sender(TRANSPORT_SES),
-                    to=to,
-                    subject=subject,
-                    html=html,
-                    text=text,
-                )
-            except Exception as ses_exc:
-                if not smtp_uncertain:
-                    raise
-                # SES refused, but the relay may already have the message:
-                # the caller must not read this as "nothing left".
-                raise MailDeliveryFailed(
-                    f"SES fallback failed after an unclear SMTP send: {type(ses_exc).__name__}",
-                    reason=getattr(ses_exc, "reason", "") or type(ses_exc).__name__,
-                    code=getattr(ses_exc, "code", None),
-                    uncertain=True,
-                ) from None
+            await asyncio.to_thread(
+                _send_ses,
+                sender=_sender(TRANSPORT_SES),
+                to=to,
+                subject=subject,
+                html=html,
+                text=text,
+            )
         _log_sent(transport, subject, to)
         return
 

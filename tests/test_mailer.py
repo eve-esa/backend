@@ -10,7 +10,6 @@ Config is read once at import, so the knobs are monkeypatched on
 ``src.services.mailer`` rather than in the environment.
 """
 
-import email
 import email.utils
 import smtplib
 from unittest.mock import MagicMock
@@ -22,27 +21,6 @@ from src.services import mailer
 from src.services.mailer import MailDeliveryFailed, MailNotConfigured, send_mail
 
 pytestmark = pytest.mark.no_db
-
-OK = (250, b"2.0.0 OK")
-
-
-def _relay() -> MagicMock:
-    """A stand-in for ``smtplib.SMTP`` whose server accepts every command.
-
-    ``mail``, ``rcpt`` and ``data`` return a reply tuple like the real ones,
-    because the mailer reads their codes instead of trusting ``sendmail``.
-    """
-    smtp = MagicMock()
-    server = smtp.return_value
-    server.mail.return_value = OK
-    server.rcpt.return_value = OK
-    server.data.return_value = OK
-    return smtp
-
-
-def _smtp_message(smtp):
-    """The message as the relay received it after DATA."""
-    return email.message_from_bytes(smtp.return_value.data.call_args.args[0])
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +69,7 @@ async def test_smtp_builds_a_multipart_message(monkeypatch):
     monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
     monkeypatch.setattr(mailer, "SMTP_PASSWORD", "")
 
-    smtp = _relay()
+    smtp = MagicMock()
     server = smtp.return_value
     monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
 
@@ -105,7 +83,7 @@ async def test_smtp_builds_a_multipart_message(monkeypatch):
     server.starttls.assert_not_called()
     server.login.assert_not_called()
 
-    sent = _smtp_message(smtp)
+    sent = server.send_message.call_args.args[0]
     assert sent["Subject"] == "Hello"
     assert sent["To"] == "person@example.com"
     assert sent["From"] == "EVE <no-reply@eve.test>"
@@ -126,7 +104,7 @@ async def test_smtp_upgrades_and_authenticates_when_a_username_is_set(monkeypatc
     monkeypatch.setattr(mailer, "SMTP_USERNAME", "mailer")
     monkeypatch.setattr(mailer, "SMTP_PASSWORD", "secret")
 
-    smtp = _relay()
+    smtp = MagicMock()
     server = smtp.return_value
     monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
 
@@ -231,11 +209,15 @@ def both_transports(monkeypatch):
     monkeypatch.setattr(mailer, "SMTP_PORT", 587)
     monkeypatch.setattr(mailer, "SMTP_USERNAME", "mailer")
     monkeypatch.setattr(mailer, "SMTP_PASSWORD", "secret")
-    smtp = _relay()
+    smtp = MagicMock()
     monkeypatch.setattr(mailer.smtplib, "SMTP", smtp)
     ses = MagicMock()
     monkeypatch.setattr(mailer, "_get_ses_client", lambda: ses)
     return smtp, ses
+
+
+def _smtp_message(smtp):
+    return smtp.return_value.send_message.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -271,7 +253,7 @@ async def test_the_canary_tag_matches_regardless_of_case(monkeypatch, both_trans
     )
 
     ses.send_email.assert_not_called()
-    smtp.return_value.data.assert_called_once()
+    smtp.return_value.send_message.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -387,8 +369,9 @@ async def test_the_canary_path_upgrades_and_authenticates(monkeypatch, both_tran
     server.starttls.assert_called_once()
     server.login.assert_called_once_with("mailer", "secret")
     # Envelope recipient is the one address, never re-parsed from the header.
-    assert server.mail.call_args.args[0] == "eve@mail.example.org"
-    assert server.rcpt.call_args.args[0] == "person+eve-mail-canary@example.com"
+    assert server.send_message.call_args.kwargs["to_addrs"] == [
+        "person+eve-mail-canary@example.com"
+    ]
 
 
 @pytest.mark.asyncio
@@ -417,7 +400,9 @@ async def test_a_refused_recipient_never_reaches_the_error(monkeypatch, both_tra
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
     address = "person+eve-mail-canary@example.com"
     server = smtp.return_value
-    server.rcpt.return_value = (550, f"5.1.1 <{address}> does not exist".encode())
+    server.send_message.side_effect = smtplib.SMTPRecipientsRefused(
+        {address: (550, f"5.1.1 <{address}> does not exist".encode())}
+    )
 
     with pytest.raises(MailDeliveryFailed) as excinfo:
         await send_mail(to=address, subject="Hi", html="<p>Hi</p>", text="Hi")
@@ -468,7 +453,7 @@ async def test_smtp_with_a_tag_stays_smtp(monkeypatch, both_transports):
     await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
     ses.send_email.assert_not_called()
-    smtp.return_value.data.assert_called_once()
+    smtp.return_value.send_message.assert_called_once()
 
 
 def _fallback_lines(caplog):
@@ -506,7 +491,7 @@ def smtp_to_ses(monkeypatch, both_transports):
     "step, failure, reason",
     [
         ("login", smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials"), "SMTPAuthenticationError code=535 status=5.7.8"),
-        ("data", smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"), "SMTPDataError code=550 status=5.4.5"),
+        ("send_message", smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"), "SMTPDataError code=550 status=5.4.5"),
         # smtplib turns a read timeout or a reset into SMTPServerDisconnected; a raw
         # OSError only comes out of the constructor (refused, DNS, connect timeout).
         ("connect", TimeoutError("timed out"), "TimeoutError"),
@@ -553,7 +538,7 @@ async def test_a_disconnect_during_data_falls_back_at_least_once(smtp_to_ses):
     none, so an ambiguous end of DATA goes to SES.
     """
     smtp, ses = smtp_to_ses
-    smtp.return_value.data.side_effect = smtplib.SMTPServerDisconnected(
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected(
         "Connection unexpectedly closed"
     )
 
@@ -573,7 +558,7 @@ async def test_a_disconnect_during_data_falls_back_at_least_once(smtp_to_ses):
 async def test_an_error_after_the_relay_accepted_the_message_is_not_a_failure(
     smtp_to_ses, caplog, failure
 ):
-    """Once the relay answered DATA, the mail is delivered: a bad QUIT must not resend."""
+    """Once send_message returns, the mail is delivered: a bad QUIT must not resend."""
     smtp, ses = smtp_to_ses
     server = smtp.return_value
     server.quit.side_effect = failure
@@ -581,7 +566,7 @@ async def test_an_error_after_the_relay_accepted_the_message_is_not_a_failure(
     with caplog.at_level("INFO", logger=mailer.logger.name):
         await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
-    server.data.assert_called_once()
+    server.send_message.assert_called_once()
     ses.send_email.assert_not_called()
     assert not _fallback_lines(caplog)
     records = [r for r in caplog.records if r.name == mailer.logger.name]
@@ -601,7 +586,7 @@ async def test_a_failed_smtp_session_is_closed(smtp_to_ses):
 
     await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
-    server.mail.assert_not_called()
+    server.send_message.assert_not_called()
     server.close.assert_called()
 
 
@@ -646,7 +631,7 @@ async def test_a_failed_canary_falls_back_to_ses(monkeypatch, both_transports):
     monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "ses")
     monkeypatch.setattr(mailer, "MAIL_CANARY_TAG", CANARY_TAG)
     monkeypatch.setattr(mailer, "MAIL_FALLBACK_TRANSPORT", "ses")
-    smtp.return_value.data.side_effect = smtplib.SMTPDataError(
+    smtp.return_value.send_message.side_effect = smtplib.SMTPDataError(
         550, b"5.4.5 Daily user sending limit exceeded"
     )
 
@@ -788,7 +773,7 @@ async def test_an_unknown_fallback_never_blocks_plain_ses_mail(
 @pytest.mark.asyncio
 async def test_a_fallback_send_logs_the_usual_info_line_via_ses(smtp_to_ses, caplog):
     smtp, _ = smtp_to_ses
-    smtp.return_value.data.side_effect = smtplib.SMTPServerDisconnected("gone")
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected("gone")
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
         await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
@@ -847,6 +832,11 @@ def test_the_ses_client_has_short_deadlines_and_two_attempts(monkeypatch):
 
 
 # ------------------------------------------- definite refusal or unclear result
+#
+# The SMTP transaction is the one on main (connect, STARTTLS, login,
+# send_message). Only the classification of a failure inside send_message is
+# new: send_message hides which step failed, so a dropped line or a timeout
+# during it may have queued the mail and counts as uncertain.
 
 
 @pytest.fixture
@@ -858,82 +848,83 @@ def smtp_only(monkeypatch, both_transports):
 
 async def _verdict(**kwargs) -> MailDeliveryFailed:
     with pytest.raises(MailDeliveryFailed) as excinfo:
-        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi", **kwargs)
+        await send_mail(
+            to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi", **kwargs
+        )
     return excinfo.value
+
+
+@pytest.mark.asyncio
+async def test_the_smtp_transaction_is_connect_starttls_login_send_message(smtp_only):
+    """The wire path stays the one that works in staging and prod over Gmail."""
+    smtp, _ = smtp_only
+
+    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+    server = smtp.return_value
+    assert [c[0] for c in server.method_calls] == [
+        "starttls",
+        "login",
+        "send_message",
+        "quit",
+        "close",
+    ]
+    assert server.send_message.call_args.kwargs == {"to_addrs": ["person@example.com"]}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
-        smtplib.SMTPServerDisconnected("Connection unexpectedly closed"),
+        smtplib.SMTPServerDisconnected("Connection unexpectedly closed: timed out"),
         TimeoutError("timed out"),
         ConnectionResetError(104, "Connection reset by peer"),
+        OSError("network is unreachable"),
     ],
 )
-async def test_a_dropped_line_once_data_started_is_an_unclear_result(smtp_only, failure):
-    """After DATA the relay may hold the whole message: the outcome is unknown."""
+async def test_a_dropped_line_inside_send_message_is_an_unclear_result(smtp_only, failure):
     smtp, _ = smtp_only
-    smtp.return_value.data.side_effect = failure
+    smtp.return_value.send_message.side_effect = failure
 
     error = await _verdict()
 
     assert error.uncertain is True
     assert mailer.delivery_uncertain(error) is True
-    assert error.reason == type(failure).__name__
     assert mailer.failure_reason(error) == type(failure).__name__
     assert error.__cause__ is None and error.__suppress_context__ is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("step", ["mail", "rcpt"])
-@pytest.mark.parametrize(
-    "failure",
-    [
-        smtplib.SMTPServerDisconnected("Connection unexpectedly closed"),
-        smtplib.SMTPServerDisconnected("timed out"),
-    ],
-)
-async def test_a_dropped_line_before_data_is_a_definite_failure(smtp_only, step, failure):
-    """Nothing can be queued before DATA (RFC 5321 4.1.1.4): the mail did not leave."""
-    smtp, _ = smtp_only
-    getattr(smtp.return_value, step).side_effect = failure
-
-    error = await _verdict()
-
-    assert error.uncertain is False
-    assert mailer.failure_reason(error) == "SMTPServerDisconnected"
-    smtp.return_value.data.assert_not_called()
+    smtp.return_value.close.assert_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "step, outcome, line",
+    "failure, line",
     [
-        # A reply code that is not 250 to MAIL FROM, RCPT TO or the final dot.
-        ("mail", (421, b"4.7.0 Try again later"), "SMTPSenderRefused code=421 status=4.7.0"),
         (
-            "rcpt",
-            (550, b"5.1.1 <person@example.com> does not exist"),
+            smtplib.SMTPSenderRefused(421, b"4.7.0 Try again later", "eve@mail.example.org"),
+            "SMTPSenderRefused code=421 status=4.7.0",
+        ),
+        (
+            smtplib.SMTPRecipientsRefused(
+                {"person@example.com": (550, b"5.1.1 <person@example.com> does not exist")}
+            ),
             "SMTPRecipientsRefused code=550 status=5.1.1",
         ),
-        ("data", (550, b"5.4.5 Daily user sending limit exceeded."), "SMTPDataError code=550 status=5.4.5"),
-        ("data", (554, b"Transaction failed"), "SMTPDataError code=554"),
-        # DATA itself refused: smtplib raises before sending the message.
-        ("data", smtplib.SMTPDataError(451, b"4.3.0 Try later"), "SMTPDataError code=451 status=4.3.0"),
+        (
+            smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded."),
+            "SMTPDataError code=550 status=5.4.5",
+        ),
+        (smtplib.SMTPDataError(554, b"Transaction failed"), "SMTPDataError code=554"),
+        (smtplib.SMTPNotSupportedError("SMTPUTF8 not supported"), "SMTPNotSupportedError"),
     ],
 )
-async def test_a_reply_from_the_relay_is_a_definite_refusal(smtp_only, step, outcome, line):
+async def test_a_reply_from_the_relay_is_a_definite_refusal(smtp_only, failure, line):
     smtp, _ = smtp_only
-    command = getattr(smtp.return_value, step)
-    if isinstance(outcome, Exception):
-        command.side_effect = outcome
-    else:
-        command.return_value = outcome
+    smtp.return_value.send_message.side_effect = failure
 
     error = await _verdict()
 
     assert error.uncertain is False
+    assert mailer.delivery_uncertain(error) is False
     assert mailer.failure_reason(error) == line
     assert "person" not in str(error)
     assert error.__cause__ is None and error.__suppress_context__ is True
@@ -949,7 +940,7 @@ async def test_a_reply_from_the_relay_is_a_definite_refusal(smtp_only, step, out
         ("login", smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad credentials")),
     ],
 )
-async def test_a_failure_before_the_transaction_is_never_unclear(smtp_only, step, failure):
+async def test_a_failure_before_send_message_is_never_unclear(smtp_only, step, failure):
     smtp, _ = smtp_only
     if step == "connect":
         smtp.side_effect = failure
@@ -959,16 +950,25 @@ async def test_a_failure_before_the_transaction_is_never_unclear(smtp_only, step
     error = await _verdict()
 
     assert error.uncertain is False
-    smtp.return_value.mail.assert_not_called()
+    smtp.return_value.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("step", ["mail", "data"])
-async def test_a_code_bug_inside_the_transaction_is_raised_as_is(smtp_only, step):
+async def test_a_connect_timeout_is_raised_as_on_main(smtp_only):
+    """Before send_message a raw OSError keeps its class, as on main."""
+    smtp, _ = smtp_only
+    smtp.side_effect = TimeoutError("timed out")
+
+    with pytest.raises(TimeoutError):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+
+
+@pytest.mark.asyncio
+async def test_a_code_bug_inside_send_message_is_raised_as_is(smtp_only):
     """Only a dropped line is a delivery outcome; a bug keeps its class and traceback."""
     smtp, _ = smtp_only
     bug = ValueError("not a delivery problem")
-    getattr(smtp.return_value, step).side_effect = bug
+    smtp.return_value.send_message.side_effect = bug
 
     with pytest.raises(ValueError) as excinfo:
         await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
@@ -984,13 +984,12 @@ async def test_an_unclear_send_skips_ses_when_the_caller_forbids_a_second_copy(
 ):
     """The cohort mail is at most once: an unclear SMTP send must not go out again via SES."""
     smtp, ses = smtp_to_ses
-    smtp.return_value.data.side_effect = smtplib.SMTPServerDisconnected("gone")
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected("gone")
 
     with caplog.at_level("INFO", logger=mailer.logger.name):
         error = await _verdict(fallback_on_uncertain=False)
 
     assert error.uncertain is True
-    assert mailer.failure_reason(error) == "SMTPServerDisconnected"
     ses.send_email.assert_not_called()
     lines = [r for r in caplog.records if r.name == mailer.logger.name]
     assert [(r.levelname, r.getMessage()) for r in lines] == [
@@ -1003,12 +1002,19 @@ async def test_an_unclear_send_skips_ses_when_the_caller_forbids_a_second_copy(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "step, failure",
+    [
+        ("send_message", smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded")),
+        ("login", smtplib.SMTPServerDisconnected("closed during AUTH")),
+    ],
+)
 async def test_a_definite_smtp_failure_still_falls_back_when_a_second_copy_is_forbidden(
-    smtp_to_ses,
+    smtp_to_ses, step, failure
 ):
     """Nothing left through SMTP, so SES cannot make a duplicate."""
     smtp, ses = smtp_to_ses
-    smtp.return_value.rcpt.side_effect = smtplib.SMTPServerDisconnected("gone")
+    getattr(smtp.return_value, step).side_effect = failure
 
     await send_mail(
         to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi",
@@ -1019,157 +1025,78 @@ async def test_a_definite_smtp_failure_still_falls_back_when_a_second_copy_is_fo
 
 
 @pytest.mark.asyncio
-async def test_an_unclear_send_falls_back_to_ses_by_default(smtp_to_ses):
-    """Account mails keep at-least-once: a duplicate code mail beats none."""
+@pytest.mark.parametrize(
+    "failure", [smtplib.SMTPServerDisconnected("gone"), TimeoutError("timed out")]
+)
+async def test_an_unclear_send_falls_back_to_ses_by_default(smtp_to_ses, caplog, failure):
+    """Default as on main: at-least-once, a duplicate code mail beats none."""
     smtp, ses = smtp_to_ses
-    smtp.return_value.data.side_effect = TimeoutError("timed out")
+    smtp.return_value.send_message.side_effect = failure
 
-    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
+    with caplog.at_level("INFO", logger=mailer.logger.name):
+        await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
 
     ses.send_email.assert_called_once()
+    assert [r.getMessage() for r in _fallback_lines(caplog)] == [
+        f"mail.fallback from=smtp to=ses reason={type(failure).__name__} "
+        "recipient_domain=example.com"
+    ]
 
 
 @pytest.mark.asyncio
-async def test_an_unclear_smtp_send_stays_unclear_when_the_ses_fallback_fails(smtp_to_ses):
+async def test_by_default_a_failed_ses_fallback_raises_the_ses_error_as_on_main(smtp_to_ses):
     smtp, ses = smtp_to_ses
-    smtp.return_value.data.side_effect = smtplib.SMTPServerDisconnected("gone")
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected("gone")
     ses.send_email.side_effect = _message_rejected("person@example.com")
 
     error = await _verdict()
 
-    assert error.uncertain is True
-    assert error.code == "MessageRejected"
-    assert "person" not in str(error)
-
-
-@pytest.mark.asyncio
-async def test_a_definite_smtp_refusal_keeps_the_ses_verdict_when_ses_fails(smtp_to_ses):
-    smtp, ses = smtp_to_ses
-    smtp.return_value.login.side_effect = smtplib.SMTPAuthenticationError(535, b"5.7.8 Bad")
-    ses.send_email.side_effect = _message_rejected("person@example.com")
-
-    error = await _verdict()
-
-    assert error.uncertain is False
     assert str(error) == "SES send failed: ClientError MessageRejected"
+    assert error.uncertain is False
+
+
+@pytest.mark.asyncio
+async def test_an_account_mail_keeps_the_ses_fallback_as_on_main(
+    monkeypatch, smtp_to_ses, caplog
+):
+    """The sign-up and approval mails call send_mail with the default: unchanged."""
+    from src.services import account_notifications
+
+    smtp, ses = smtp_to_ses
+    monkeypatch.setattr(account_notifications, "FRONTEND_URL", "https://eve.example.org")
+    smtp.return_value.send_message.side_effect = smtplib.SMTPServerDisconnected("gone")
+
+    with caplog.at_level("INFO"):
+        await account_notifications.notify_account_pending(
+            "64b7f2c1a2b3c4d5e6f70123", "person@example.com"
+        )
+
+    server = smtp.return_value
+    server.send_message.assert_called_once()
+    assert server.send_message.call_args.kwargs == {"to_addrs": ["person@example.com"]}
+    request = ses.send_email.call_args.kwargs
+    assert request["FromEmailAddress"] == "EVE <no-reply@eve.test>"
+    assert request["Destination"] == {"ToAddresses": ["person@example.com"]}
+    logged = [r.getMessage() for r in caplog.records]
+    assert any(line.startswith("mail.fallback from=smtp to=ses") for line in logged)
+    assert not any("no_fallback" in line for line in logged)
+    assert any(line.startswith("account_mail_sent kind=pending") for line in logged)
 
 
 @pytest.mark.parametrize(
     "error, line",
     [
-        (MailDeliveryFailed("x", reason="SMTPDataError", code=550, status="5.4.5"), "SMTPDataError code=550 status=5.4.5"),
+        (
+            MailDeliveryFailed("x", reason="SMTPDataError", code=550, status="5.4.5"),
+            "SMTPDataError code=550 status=5.4.5",
+        ),
         (MailDeliveryFailed("x", reason="ClientError", code="Throttling"), "ClientError code=Throttling"),
-        (MailDeliveryFailed("x", reason="SMTPServerDisconnected", uncertain=True), "SMTPServerDisconnected"),
+        (
+            MailDeliveryFailed("x", reason="SMTPServerDisconnected", uncertain=True),
+            "SMTPServerDisconnected",
+        ),
         (RuntimeError("relay said no to person@example.com"), "RuntimeError"),
     ],
 )
 def test_failure_reason_is_public_and_never_carries_the_address(error, line):
     assert mailer.failure_reason(error) == line
-
-
-# ------------------------------------------------- a real smtplib on a socket
-
-
-class _ScriptedRelay:
-    """A minimal SMTP relay on a local socket that can drop the line on cue.
-
-    Exercises the real smtplib, so the classification is checked against what
-    smtplib actually raises, not against what a mock was told to raise.
-    ``drop_at`` is "mail", "rcpt" or "dot" (after the message, before the 250).
-    """
-
-    def __init__(self, drop_at: str | None = None):
-        import socket
-        import threading
-
-        self.drop_at = drop_at
-        self.received = b""
-        self._sock = socket.socket()
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(1)
-        self.port = self._sock.getsockname()[1]
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
-
-    def _serve(self):
-        conn, _ = self._sock.accept()
-        reader = conn.makefile("rb")
-        try:
-            conn.sendall(b"220 relay.test ESMTP\r\n")
-            while True:
-                line = reader.readline()
-                if not line:
-                    return
-                verb = line[:4].upper()
-                if verb in (b"EHLO", b"HELO"):
-                    conn.sendall(b"250 relay.test\r\n")
-                elif verb == b"MAIL":
-                    if self.drop_at == "mail":
-                        return
-                    conn.sendall(b"250 2.1.0 OK\r\n")
-                elif verb == b"RCPT":
-                    if self.drop_at == "rcpt":
-                        return
-                    conn.sendall(b"250 2.1.5 OK\r\n")
-                elif verb == b"DATA":
-                    conn.sendall(b"354 go ahead\r\n")
-                    while not self.received.endswith(b"\r\n.\r\n"):
-                        chunk = reader.readline()
-                        if not chunk:
-                            return
-                        self.received += chunk
-                    if self.drop_at == "dot":
-                        return
-                    conn.sendall(b"250 2.0.0 queued\r\n")
-                elif verb == b"QUIT":
-                    conn.sendall(b"221 bye\r\n")
-                    return
-                else:
-                    conn.sendall(b"502 5.5.1 unknown\r\n")
-        finally:
-            reader.close()
-            conn.close()
-            self._sock.close()
-
-    def join(self):
-        self._thread.join(timeout=5)
-
-
-@pytest.fixture
-def real_relay(monkeypatch):
-    monkeypatch.setattr(mailer, "MAIL_TRANSPORT", "smtp")
-    monkeypatch.setattr(mailer, "SMTP_HOST", "127.0.0.1")
-    monkeypatch.setattr(mailer, "SMTP_USERNAME", "")
-    monkeypatch.setattr(mailer, "SMTP_PASSWORD", "")
-
-    def _start(drop_at=None):
-        relay = _ScriptedRelay(drop_at)
-        monkeypatch.setattr(mailer, "SMTP_PORT", relay.port)
-        return relay
-
-    return _start
-
-
-@pytest.mark.asyncio
-async def test_a_real_relay_gets_the_message_with_crlf_line_ends(real_relay):
-    """Many relays refuse bare LF in DATA; smtplib only fixes line ends of a str."""
-    relay = real_relay()
-
-    await send_mail(to="person@example.com", subject="Hi", html="<p>Hi</p>", text="Hi")
-    relay.join()
-
-    body = relay.received
-    assert b"Subject: Hi\r\n" in body
-    assert b"\n" not in body.replace(b"\r\n", b"")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("drop_at, uncertain", [("mail", False), ("rcpt", False), ("dot", True)])
-async def test_a_real_dropped_line_is_unclear_only_after_data(real_relay, drop_at, uncertain):
-    relay = real_relay(drop_at)
-
-    error = await _verdict()
-    relay.join()
-
-    assert error.uncertain is uncertain
-    assert mailer.failure_reason(error) == "SMTPServerDisconnected"
