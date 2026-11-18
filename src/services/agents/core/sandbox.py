@@ -27,6 +27,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import time
 from contextvars import ContextVar
 from pathlib import Path
@@ -843,33 +844,80 @@ def _wrap_leading_path(
     return wrapped
 
 
+# A path token the model writes for the workspace: ``workspace/x``,
+# ``./workspace/x``, or the virtual absolute ``/workspace`` the file tools
+# report. Text inside a longer path (``var/workspace``) is not a token.
+_RELATIVE_WORKSPACE = re.compile(r"(?<![\w./\-])(?:\./)?workspace(?=/)")
+_ABSOLUTE_WORKSPACE = re.compile(r"(?<![\w./\-])/workspace(?=/|(?![\w./\-]))")
+
+
+def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
+    """Run a model command in its own shell from the workspace directory.
+
+    ``workspace_dir`` is the real directory where the file tools store a
+    relative path. ``count.py``, ``workspace/count.py`` and
+    ``/workspace/count.py`` all reach the file ``write_file`` wrote there.
+    The command is one quoted argument to ``sh -c``, so its quotes and ``$``
+    reach that shell unchanged. Without a known directory the shell enters
+    ``workspace`` relative to where it starts, as before.
+    """
+    if not workspace_dir:
+        target = "workspace"
+    else:
+        target = shlex.quote(workspace_dir)
+        command = _RELATIVE_WORKSPACE.sub(lambda _match: workspace_dir, command)
+        if workspace_dir != "/workspace":
+            command = _ABSOLUTE_WORKSPACE.sub(lambda _match: workspace_dir, command)
+    return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
+
+
 def prepare_workspace_layout(backend: Any) -> Any:
     """Create ``workspace`` and start shell commands inside it.
 
     ``skills``, ``large_tool_results``, and ``artifacts`` stay siblings
     of that directory. File paths that do not name one of them are stored
     under ``workspace``. A second call does nothing.
+
+    The session root is the provider cwd when it reports one (AgentCore) and
+    ``/`` otherwise (OpenSandbox stores ``/workspace/x`` as an absolute path).
+    Internal commands (workspace listing, process baseline) keep running from
+    that root through ``_eve_raw_execute``, without the model path rewrite.
     """
     if backend is None or getattr(backend, "_eve_workspace_ready", False):
         return backend
     session_cwd = ""
+    root: Optional[str] = "/"
     get_cwd = getattr(backend, "_get_cwd", None)
     if get_cwd is not None:
         try:
             session_cwd = str(get_cwd() or "").rstrip("/")
+            root = session_cwd or "/"
         except Exception:
             logger.warning("workspace.cwd_probe_failed", exc_info=True)
             session_cwd = ""
+            root = None
+    workspace_dir = f"{root.rstrip('/')}/workspace" if root else None
     execute = getattr(backend, "execute", None)
     if execute is not None:
+        if getattr(backend, "_eve_raw_execute", None) is None:
+            if root:
+                root_q = shlex.quote(root)
+
+                def execute_from_root(command: str, *args: Any, **kwargs: Any):
+                    return execute(f"cd {root_q} && {command}", *args, **kwargs)
+
+                backend._eve_raw_execute = execute_from_root
+            else:
+                backend._eve_raw_execute = execute
+        target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
         try:
-            execute("mkdir -p workspace")
+            execute(f"mkdir -p {target}")
         except Exception:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
         def execute_in_workspace(command: str, *args: Any, **kwargs: Any):
             return execute(
-                f"mkdir -p workspace && cd workspace && {command}",
+                workspace_shell_command(command, workspace_dir),
                 *args,
                 **kwargs,
             )
