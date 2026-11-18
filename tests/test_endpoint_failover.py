@@ -249,7 +249,9 @@ async def test_a_429_keeps_the_next_explicit_request_off_the_endpoint(monkeypatc
         manager = _patch_pipeline(monkeypatch, graph)
 
         await _stream(conversation, message, llm_type="eve_jsc")
-        assert manager.health.rate_limit_remaining_s("eve_jsc") == pytest.approx(30, abs=2)
+        view = manager.health._window_view("eve_jsc")
+        # Below the 60 s base, a first 429 keeps the endpoint out 60 s.
+        assert view.until - manager.health._wall() == pytest.approx(60, abs=2)
 
         second_message = await Message.create(
             conversation_id=conversation.id,

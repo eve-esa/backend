@@ -204,6 +204,71 @@ def _rate_limited_endpoint(model: Optional[str]) -> Optional[str]:
     return None
 
 
+class _ProbeAnswer:
+    """Accounts one upstream answer against the endpoint's rate limit window.
+
+    A 429 opens the window at once. A probe closes it only when the endpoint
+    really answered: a JSON or event-stream response whose body (or first
+    ``data:`` event) is a JSON object without ``error``. Blablador's
+    throttling answer is a ``200 text/plain`` body, so the status alone never
+    closes the window.
+    """
+
+    # The first event of a real stream arrives in the first few KB.
+    _MAX_SCAN = 64 * 1024
+
+    def __init__(
+        self,
+        endpoint: Optional[str],
+        permit: Optional[RateLimitPermit],
+        status: int,
+        headers,
+    ) -> None:
+        self._endpoint = endpoint
+        self._permit = permit
+        content_type = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        self._json = content_type == "application/json"
+        self._sse = content_type == "text/event-stream"
+        self._pending = permit is not None and permit.probe and status < 300
+        self._buffer = b""
+        if permit is not None and status == 429:
+            _endpoint_health().record_rate_limit(endpoint, headers.get("retry-after"))
+
+    def feed_json(self, parsed) -> None:
+        if self._pending and self._json:
+            self._settle(isinstance(parsed, dict) and "error" not in parsed)
+
+    def feed_stream(self, chunk: bytes) -> None:
+        if not self._pending:
+            return
+        if not self._sse:
+            self._pending = False
+            return
+        self._buffer += chunk
+        *lines, self._buffer = self._buffer.split(b"\n")
+        for line in lines:
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == b"[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except ValueError:
+                event = None
+            self._settle(isinstance(event, dict) and "error" not in event)
+            return
+        if len(self._buffer) > self._MAX_SCAN:
+            self._pending = False
+
+    def _settle(self, answered: bool) -> None:
+        self._pending = False
+        if answered:
+            _endpoint_health().close_rate_limit_window(
+                self._endpoint, self._permit.started_at
+            )
+
+
 def _build_forward_body(
     body: bytes,
     req_body: Optional[dict],
@@ -521,7 +586,7 @@ class OpenAIProxyDispatcher:
         try:
             await check_or_raise(principal, "proxy")
         except RequestRateLimited as limited:
-            await self._send_rate_limited(send, limited)
+            await self._send_rate_limited(send, limited.detail, limited.retry_after_s)
             response_started["value"] = True
             return
         except RateLimiterUnavailable:
@@ -584,7 +649,17 @@ class OpenAIProxyDispatcher:
             try:
                 permit = _endpoint_health().admit(endpoint)
             except EndpointRateLimited as limited:
-                await self._send_endpoint_rate_limited(send, limited)
+                retry_after = math.ceil(limited.retry_after_s)
+                await self._send_rate_limited(
+                    send,
+                    {
+                        "code": "endpoint_rate_limited",
+                        "message": (
+                            f"The model endpoint is rate limited, retry after {retry_after}s"
+                        ),
+                    },
+                    retry_after,
+                )
                 response_started["value"] = True
                 return
 
@@ -592,6 +667,9 @@ class OpenAIProxyDispatcher:
         estimated_tokens = count_tokens_for_texts(*req_texts) + token_array_len
         exceeded, reserved_tokens = await reserve_token_budget(user, estimated_tokens)
         if exceeded is not None:
+            if permit is not None:
+                # Nothing is sent: free the probe for the next request now.
+                _endpoint_health().release_probe(endpoint, permit)
             await self._send_budget_exceeded(send, exceeded)
             response_started["value"] = True
             return
@@ -624,8 +702,7 @@ class OpenAIProxyDispatcher:
             client = self._get_client()
             async with client.stream(method, url, headers=fwd_headers, content=fwd_body) as resp:
                 status = resp.status_code
-                if permit is not None:
-                    self._account_rate_limit(endpoint, permit, status, resp.headers)
+                probe = _ProbeAnswer(endpoint, permit, status, resp.headers)
                 resp_headers = [
                     [k.lower().encode(), v.encode()]
                     for k, v in resp.headers.items()
@@ -642,6 +719,7 @@ class OpenAIProxyDispatcher:
                     chunks: list[bytes] = []
                     async for chunk in resp.aiter_bytes():
                         chunks.append(chunk)
+                        probe.feed_stream(chunk)
                         await send({"type": "http.response.body", "body": chunk, "more_body": True})
                     await send({"type": "http.response.body", "body": b""})
 
@@ -655,6 +733,7 @@ class OpenAIProxyDispatcher:
 
                     try:
                         parsed = json.loads(full_body)
+                        probe.feed_json(parsed)
                         input_tokens, output_tokens, total_tokens = _parse_usage(parsed)
                         response_body = parsed
                     except (json.JSONDecodeError, AttributeError):
@@ -735,49 +814,17 @@ class OpenAIProxyDispatcher:
         await send({"type": "http.response.body", "body": body})
 
     @staticmethod
-    async def _send_rate_limited(send, limited: RequestRateLimited) -> None:
-        """429 in the OpenAI envelope, so the SDK honours Retry-After and retries."""
-        detail = limited.detail
+    async def _send_rate_limited(send, detail: dict, retry_after_s: int) -> None:
+        """429 in the OpenAI envelope, so the SDK honours Retry-After and retries.
+
+        *detail* is ``{"code", "message"}``: ``rate_limited`` from the
+        per-user limiter, ``endpoint_rate_limited`` from the model endpoint's
+        rate limit window (nothing was sent upstream).
+        """
         headers = [
             [b"content-type", b"application/json"],
             [b"x-should-retry", b"true"],
-            [b"retry-after", str(limited.retry_after_s).encode()],
-        ]
-        body = json.dumps({
-            "detail": detail,
-            "error": {
-                "message": detail["message"],
-                "type": "rate_limit_error",
-                "code": detail["code"],
-                "param": None,
-            },
-        }).encode()
-        await send({"type": "http.response.start", "status": 429, "headers": headers})
-        await send({"type": "http.response.body", "body": body})
-
-    @staticmethod
-    def _account_rate_limit(
-        endpoint: str, permit: RateLimitPermit, status: int, headers
-    ) -> None:
-        """An upstream 429 opens the window; the probe's answer closes it."""
-        health = _endpoint_health()
-        if status == 429:
-            health.record_rate_limit(endpoint, headers.get("retry-after"))
-        elif status < 400 and permit.probe:
-            health.close_rate_limit_window(endpoint, permit.started_at)
-
-    @staticmethod
-    async def _send_endpoint_rate_limited(send, limited: EndpointRateLimited) -> None:
-        """429 in the OpenAI envelope with the window's Retry-After; no upstream call."""
-        retry_after = math.ceil(limited.retry_after_s)
-        detail = {
-            "code": "endpoint_rate_limited",
-            "message": f"The model endpoint is rate limited, retry after {retry_after}s",
-        }
-        headers = [
-            [b"content-type", b"application/json"],
-            [b"x-should-retry", b"true"],
-            [b"retry-after", str(retry_after).encode()],
+            [b"retry-after", str(retry_after_s).encode()],
         ]
         body = json.dumps({
             "detail": detail,

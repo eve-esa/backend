@@ -41,13 +41,15 @@ Nothing is persisted and no SSE stream opens. The object codes sit in `detail.co
 | status | `detail.code` | Meaning | Retry |
 |---|---|---|---|
 | 429 | `rate_limited` | The user spent the request rate of this route class (`FEATURE_REQUEST_RATE_LIMIT` in enforce mode); one bucket per user, shared by the session and every API key | after `Retry-After`, 1 to 60 s |
+| 429 | `endpoint_rate_limited` | `/v1` only: a `jsc/` request for the model the chat calls while that endpoint's 429 window is open, or while another request is its probe; nothing is sent upstream | after `Retry-After`, 1 to 3600 s |
 | 429 | `overloaded` | This worker is at `MAX_INFLIGHT_GENERATIONS_PER_WORKER` | after `Retry-After: 10` |
 | 429 | none, `detail` is a string | The monthly token budget is spent | at the window reset, `Retry-After` when known |
 | 503 | `limiter_unavailable` | The rate limit store is down and `REQUEST_RATE_LIMIT_FAIL_CLOSED` is on (enforce mode only) | in a few seconds |
 
-On `/v1` the `rate_limited` 429 also carries the OpenAI envelope
-(`error.type` `rate_limit_error`, `error.code` `rate_limited`) and
-`x-should-retry: true`, so the OpenAI SDK waits for `Retry-After` and retries.
+On `/v1` the `rate_limited` and `endpoint_rate_limited` 429s also carry the
+OpenAI envelope (`error.type` `rate_limit_error`, `error.code` the same as
+`detail.code`) and `x-should-retry: true`, so the OpenAI SDK waits for
+`Retry-After` and retries.
 Route classes: `chat` (the nine generation and hallucination routes, `/generate`
 and `/generate-llm` included), `retrieve`, `proxy` (`/v1`), `mcp` (`tools/call`
 only), `upload` (documents and artifacts), `errlog` (`POST /log-error`).
@@ -94,18 +96,22 @@ payload with `answered: null` and the failed attempt listed:
 An explicit request is never promoted to another endpoint: asking for
 `eve_jsc` can only be answered by `eve_jsc` or the fallback model.
 
-A 429 opens a rate limit window on that endpoint for the `Retry-After` it
-sent (delay-seconds or an HTTP date; 60 s when missing, unreadable or a date
-already past; at most 3600 s), on every worker when `REDIS_URL` is set and per
-process otherwise. It applies to any endpoint that answers 429; the JSC
-clients also enforce it on each call. The request that got the 429 is not
+A 429 opens a rate limit window on that endpoint, on every worker when
+`REDIS_URL` is set and per process otherwise. The n-th 429 in a row keeps the
+endpoint out for the longer of its `Retry-After` (delay-seconds or an HTTP
+date; 60 s when missing, unreadable or a date already past) and 60 s times
+2^(n-1), at most 3600 s: Blablador doubles its block for every request it
+receives during it, so a fixed 60 s probe could land inside a block already
+doubled. The count goes back to zero when the endpoint answers a probe. New
+turns skip an endpoint inside its window even when they name it, so the
+fallback answers with `substituted: true`. For the JSC endpoints, which
+enforce the window on every call, the request that got the 429 is not
 retried: the turn moves to the fallback model at once, and a running agentic
-turn makes no further call to that endpoint. Until the window ends, new turns
-skip it even when they name it, so the fallback answers with
-`substituted: true`. After the window exactly one request in the fleet probes
-the endpoint while every other call still refuses, and only that endpoint's
-own answer closes the window; an answer the fallback gave in its place never
-does. A later 429 can only lengthen a window. Timeouts and 5xx keep the fixed
+turn makes no further call to that endpoint. After the window exactly one
+request in the fleet probes the endpoint while every other call still
+refuses, and only that endpoint's own output (text or a tool call; an error
+text inside a `200` does not count) closes the window; an answer the fallback
+gave in its place never does. A later 429 can only lengthen a window. Timeouts and 5xx keep the fixed
 `EVE_ENDPOINT_COOLDOWN_S` circuit and never touch a window. The `/v1` gateway
 shares the window for `jsc/` requests to the model the chat calls: inside it
 answers 429 `endpoint_rate_limited` with `Retry-After` and sends nothing

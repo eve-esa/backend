@@ -113,7 +113,12 @@ class _GuardedCall:
         self._answered = False
 
     def answered(self) -> None:
-        """The endpoint produced output: a probe closes its rate limit window."""
+        """The endpoint produced output: a probe closes its rate limit window.
+
+        Call it only with real output (text or a tool call): Blablador's
+        throttling answer is a ``200 text/plain`` body that yields no chunk,
+        and it must not close the window.
+        """
         if self._answered:
             return
         self._answered = True
@@ -121,6 +126,26 @@ class _GuardedCall:
             self.client._eve_health.close_rate_limit_window(
                 self.client._eve_llm_type, self.permit.started_at
             )
+
+
+def _has_output(message: Any) -> bool:
+    """True when a message or chunk carries text or a tool call."""
+    if message is None:
+        return False
+    if getattr(message, "content", None):
+        return True
+    if getattr(message, "tool_calls", None) or getattr(message, "tool_call_chunks", None):
+        return True
+    extra = getattr(message, "additional_kwargs", None) or {}
+    return bool(extra.get("tool_calls") or extra.get("function_call"))
+
+
+def _result_has_output(result: Any) -> bool:
+    """True when a non-streaming result holds text or a tool call."""
+    return any(
+        _has_output(getattr(generation, "message", None))
+        for generation in getattr(result, "generations", None) or []
+    )
 
 
 # The call a guarded client is running in this context. ChatOpenAI._agenerate
@@ -141,7 +166,10 @@ class BreakerAwareChatOpenAI(ChatOpenAI):
     step, off the endpoint after a 429. A 429 records the window and comes
     back as :class:`EndpointRateLimited`, which no retry policy retries. The
     probe's first output closes the window. Every other error passes through
-    untouched. Without :meth:`guard` it is a plain ChatOpenAI.
+    untouched. The probe's window closes only on output: the first chunk
+    with text or a tool call, or a non-streaming reply that holds one. A
+    stream that ends with no such chunk, or an error, closes nothing. Without
+    :meth:`guard` it is a plain ChatOpenAI.
     """
 
     _eve_health: Any = PrivateAttr(default=None)
@@ -179,31 +207,35 @@ class BreakerAwareChatOpenAI(ChatOpenAI):
             # from None: the upstream error, whose body can echo the key or
             # the prompt, must not ride along into span events and log lines.
             raise EndpointRateLimited(self._eve_llm_type, window_s) from None
-        else:
-            call.answered()
         finally:
             if token is not None:
                 _CURRENT_CALL.reset(token)
 
     def _generate(self, *args: Any, **kwargs: Any) -> Any:
-        with self._call(outer=True):
-            return super()._generate(*args, **kwargs)
+        with self._call(outer=True) as call:
+            result = super()._generate(*args, **kwargs)
+            if call is not None and _result_has_output(result):
+                call.answered()
+            return result
 
     async def _agenerate(self, *args: Any, **kwargs: Any) -> Any:
-        with self._call(outer=True):
-            return await super()._agenerate(*args, **kwargs)
+        with self._call(outer=True) as call:
+            result = await super()._agenerate(*args, **kwargs)
+            if call is not None and _result_has_output(result):
+                call.answered()
+            return result
 
     def _stream(self, *args: Any, **kwargs: Any) -> Any:
         with self._call(outer=False) as call:
             for chunk in super()._stream(*args, **kwargs):
-                if call is not None:
+                if call is not None and _has_output(getattr(chunk, "message", None)):
                     call.answered()
                 yield chunk
 
     async def _astream(self, *args: Any, **kwargs: Any) -> Any:
         with self._call(outer=False) as call:
             async for chunk in super()._astream(*args, **kwargs):
-                if call is not None:
+                if call is not None and _has_output(getattr(chunk, "message", None)):
                     call.answered()
                 yield chunk
 
@@ -518,12 +550,13 @@ class LLMManager:
                 continue
             candidates.append(name)
 
+        fallback_configured = self._is_configured(LLMType.Fallback.value)
         chain = [
             name
             for name in candidates
-            if name != LLMType.Fallback.value and not self._skips_rate_limited(name)
+            if name != LLMType.Fallback.value
+            and not (fallback_configured and self._health.is_rate_limited(name))
         ]
-        fallback_configured = self._is_configured(LLMType.Fallback.value)
         # Stable sort: closed circuits keep their configured order and open ones
         # sink to the back. When every candidate is open they all compare equal
         # and come back untouched, so a chain entirely in cooldown still answers.

@@ -386,7 +386,7 @@ class _WallClock:
         return self.now
 
 
-def _jsc_window(monkeypatch, retry_after: str = "45"):
+def _jsc_window(monkeypatch, retry_after: str = "60"):
     """A breaker with a JSC rate limit window opened at t=1000, wired into the proxy."""
     from src.core.llm_health import EndpointHealth
 
@@ -423,7 +423,7 @@ async def test_jsc_inside_a_rate_limit_window_answers_429_without_calling_upstre
         resp = await _post_jsc(async_client, token)
 
         assert resp.status_code == 429
-        assert resp.headers["retry-after"] == "45"
+        assert resp.headers["retry-after"] == "60"
         error = resp.json()["error"]
         assert error["type"] == "rate_limit_error"
         assert error["code"] == "endpoint_rate_limited"
@@ -437,7 +437,7 @@ async def test_an_upstream_jsc_429_opens_the_window(async_client, monkeypatch):
     user, token = await create_test_user_and_token()
     try:
         health, clock = _jsc_window(monkeypatch)
-        clock.now = 1045.0  # window over: this request is the probe
+        clock.now = 1060.0  # window over: this request is the probe
         _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
         client, stream_mock = _mock_client(status=429, body=b'{"error": {"message": "slow down"}}')
         client.stream.return_value.__aenter__.return_value.headers["retry-after"] = "120"
@@ -447,7 +447,9 @@ async def test_an_upstream_jsc_429_opens_the_window(async_client, monkeypatch):
 
         assert resp.status_code == 429
         assert stream_mock.call_count == 1
-        assert health.rate_limit_remaining_s("eve_jsc") == pytest.approx(120)
+        # The second 429 in a row: max(Retry-After 120, 60 s x 2).
+        view = health._window_view("eve_jsc")
+        assert view.until - clock.now == pytest.approx(120)
     finally:
         await cleanup_models([user])
 
@@ -457,7 +459,7 @@ async def test_the_jsc_probe_through_the_gateway_closes_the_window(async_client,
     user, token = await create_test_user_and_token()
     try:
         health, clock = _jsc_window(monkeypatch)
-        clock.now = 1045.0
+        clock.now = 1060.0
         _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
         client, stream_mock = _mock_client(body=_minimal_completion_body())
         monkeypatch.setattr(_proxy, "_client", client)
@@ -467,6 +469,111 @@ async def test_the_jsc_probe_through_the_gateway_closes_the_window(async_client,
         assert resp.status_code == 200
         assert health.is_rate_limited("eve_jsc") is False
         assert health.admit("eve_jsc").probe is False
+    finally:
+        await cleanup_models([user])
+
+
+async def _post_jsc_stream(async_client, token: str):
+    with patch("src.routers.openai_proxy.track_usage", new_callable=AsyncMock):
+        return await async_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "jsc/eve-model",
+                "stream": True,
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"Rate limit exceeded", "text/plain"),
+        (b'{"error": {"message": "slow down"}}', "application/json"),
+        (b"not json", "application/json"),
+    ],
+    ids=["text-plain", "json-error", "bad-json"],
+)
+async def test_a_jsc_probe_that_is_not_a_real_answer_keeps_the_window(
+    async_client, monkeypatch, body, content_type
+):
+    """Blablador has answered throttling with an error text inside a 200: the
+    status alone never closes the window."""
+    user, token = await create_test_user_and_token()
+    try:
+        health, clock = _jsc_window(monkeypatch)
+        clock.now = 1060.0
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        client, stream_mock = _mock_client(body=body, content_type=content_type)
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await _post_jsc(async_client, token)
+
+        assert resp.status_code == 200
+        assert stream_mock.call_count == 1
+        # Not closed: after the probe lease the next request probes again.
+        clock.now = 1090.0
+        assert health.admit("eve_jsc").probe is True
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_jsc_probe_closes_the_window_on_its_first_event(
+    async_client, monkeypatch
+):
+    user, token = await create_test_user_and_token()
+    try:
+        health, clock = _jsc_window(monkeypatch)
+        clock.now = 1060.0
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        event = json.dumps(
+            {"id": "c", "object": "chat.completion.chunk",
+             "choices": [{"index": 0, "delta": {"content": "ok"}}]}
+        ).encode()
+        client, _ = _mock_client(
+            body=b"data: " + event + b"\n\ndata: [DONE]\n\n", content_type="text/event-stream"
+        )
+        monkeypatch.setattr(_proxy, "_client", client)
+
+        resp = await _post_jsc_stream(async_client, token)
+
+        assert resp.status_code == 200
+        assert health.admit("eve_jsc").probe is False
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_jsc_probe_refused_by_the_token_budget_frees_the_lease(
+    async_client, monkeypatch
+):
+    """Nothing reached upstream: the next request may probe at once."""
+    from src.services.token_rate_limiter import TokenBudgetExceeded
+
+    user, token = await create_test_user_and_token()
+    try:
+        health, clock = _jsc_window(monkeypatch)
+        clock.now = 1060.0
+        _enable_proxy(monkeypatch, jsc_url=_FAKE_JSC_UPSTREAM)
+        client, stream_mock = _mock_client(body=_minimal_completion_body())
+        monkeypatch.setattr(_proxy, "_client", client)
+        exceeded = TokenBudgetExceeded(
+            group="free", max_tokens=100, used_tokens=100, reset_at=None
+        )
+        monkeypatch.setattr(
+            "src.routers.openai_proxy.reserve_token_budget",
+            AsyncMock(return_value=(exceeded, 0)),
+        )
+
+        resp = await _post_jsc(async_client, token)
+
+        assert resp.status_code == 429
+        assert resp.json()["error"]["code"] == "token_budget_exceeded"
+        stream_mock.assert_not_called()
+        assert health.admit("eve_jsc").probe is True
     finally:
         await cleanup_models([user])
 
