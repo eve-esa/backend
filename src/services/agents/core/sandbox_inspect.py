@@ -116,7 +116,7 @@ def _find_command(prefix: str, limit: int) -> str:
     return (
         "if [ ! -d workspace ] && [ -d ../workspace ]; then cd ..; fi; "
         f"for d in {quoted}; do "
-        "[ -d \"$d\" ] && find -H \"$d\" -type f -printf '%p\\t%s\\t%T@\\n'; "
+        "[ -d \"$d\" ] && find \"$d\" -type f -printf '%p\\t%s\\t%T@\\n'; "
         "done 2>/dev/null "
         f"{match}"
         f"| head -n {int(limit) + 1}"

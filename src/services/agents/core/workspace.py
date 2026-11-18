@@ -51,12 +51,10 @@ _SCAN_CAP = 500
 _PS = "ps -eo pid=,args="
 # List only the workspace directory. skills, large_tool_results, and
 # artifacts are siblings of it, so they are not in this tree. The
-# shell may already be inside workspace, so fall back to ``.``. Inside it,
-# ``workspace`` is the self-link to ``.``: ``-H`` follows that start point,
-# ``-type f`` drops the link itself, and find never descends into a link.
+# shell may already be inside workspace, so fall back to ``.``.
 _FIND = (
     "if [ -d workspace ]; then root=workspace; else root=.; fi; "
-    "find -H \"$root\" -type f -printf '%P\\t%s\\t%T@\\n'"
+    "find \"$root\" -type f -printf '%P\\t%s\\t%T@\\n'"
 )
 _PS_LINE = re.compile(r"^(\d+)\s*(.*)$")
 _STATE_NAME = "workspace_state"

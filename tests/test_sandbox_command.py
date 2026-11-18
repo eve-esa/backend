@@ -1,11 +1,6 @@
-"""A sandbox shell command sees the same paths as the file tools, byte for byte.
+"""A sandbox shell command runs from the workspace with its text unchanged."""
 
-The command text is never edited. ``workspace/x`` resolves through a
-``workspace -> .`` self-link inside the workspace, ``/workspace/x`` through an
-optional link where the process may write it.
-"""
-
-import asyncio
+import logging
 import shlex
 import subprocess
 from pathlib import Path
@@ -13,14 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.agents.core import sandbox
+from src.services.agents.core.runner import _ARTIFACT_MARKDOWN_INSTRUCTION
 from src.services.agents.core.sandbox import (
+    SandboxError,
     _bind_skills_shell,
     prepare_workspace_layout,
     workspace_shell_command,
 )
 from src.services.agents.core.sandbox_inspect import _find_command
-from src.services.agents.core.workspace import _FIND, _command, _list_files
+from src.services.agents.core.workspace import _command
 
 pytestmark = pytest.mark.no_db
 
@@ -44,10 +40,11 @@ class _LocalAgentCore:
     it and the shell starts there.
     """
 
-    def __init__(self, root: Path, *, failing_probes: int = 0):
+    def __init__(self, root: Path, *, failing_probes: int = 0, pwd_broken: bool = False):
         self.root = root
         self._cwd = None
         self.failing_probes = failing_probes
+        self.pwd_broken = pwd_broken
         self.commands: list[str] = []
 
     def _get_cwd(self) -> str:
@@ -61,6 +58,8 @@ class _LocalAgentCore:
 
     def execute(self, command, *, timeout=None):
         self.commands.append(command)
+        if self.pwd_broken and command == "pwd":
+            return SimpleNamespace(output="", exit_code=1)
         return _sh(command, self.root)
 
     def write(self, file_path, content):
@@ -83,16 +82,7 @@ class _RecordingOpenSandbox:
 
 
 @pytest.fixture
-def alias(tmp_path, monkeypatch):
-    """Point the ``/workspace`` link at a scratch path, never the real ``/``."""
-    target = tmp_path / "virtual" / "workspace"
-    target.parent.mkdir()
-    monkeypatch.setattr(sandbox, "_VIRTUAL_WORKSPACE", str(target), raising=False)
-    return target
-
-
-@pytest.fixture
-def agentcore(tmp_path, alias):
+def agentcore(tmp_path):
     root = tmp_path / "session"
     root.mkdir()
     inner = _LocalAgentCore(root)
@@ -100,61 +90,43 @@ def agentcore(tmp_path, alias):
 
 
 @pytest.mark.parametrize(
-    "written, run",
-    [
-        ("workspace/count.py", "python3 workspace/count.py"),
-        ("workspace/count.py", "python3 count.py"),
-        ("workspace/count.py", "python3 ./workspace/count.py"),
-        ("count.py", "python3 workspace/count.py"),
-        ("count.py", "cd workspace && python3 count.py"),
-        ("/workspace/count.py", "python3 count.py"),
-        ("/workspace/count.py", "cd workspace/workspace && python3 count.py"),
-    ],
+    "written",
+    ["count.py", "workspace/count.py", "./workspace/count.py", "/workspace/count.py"],
 )
-def test_a_written_file_runs_by_the_path_the_model_names(agentcore, written, run):
+def test_a_written_file_runs_as_its_name_from_the_workspace(agentcore, written):
     inner, backend = agentcore
 
     backend.write(written, "print(6 * 7)\n")
-    result = backend.execute(run)
+    result = backend.execute("python3 count.py")
 
     assert (inner.root / "workspace" / "count.py").is_file()
     assert result.exit_code == 0, result.output
     assert result.output.strip() == "42"
 
 
-def test_the_virtual_absolute_path_resolves_where_the_link_is_allowed(agentcore, alias):
+def test_a_written_file_runs_by_its_real_absolute_path(agentcore):
     inner, backend = agentcore
 
-    backend.write("count.py", "print(6 * 7)\n")
-    result = backend.execute(f"python3 {alias}/count.py")
+    written = backend.write("count.py", "print(6 * 7)\n").path
+    result = backend.execute(f"cd /tmp && python3 {written}")
 
-    assert alias.is_symlink()
     assert result.output.strip() == "42"
 
 
-def test_commands_still_run_when_the_virtual_link_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        sandbox, "_VIRTUAL_WORKSPACE", "/proc/eve-no-such-dir/workspace", raising=False
-    )
-    inner = _LocalAgentCore(tmp_path)
-    backend = prepare_workspace_layout(_bind_skills_shell(inner))
-
+def test_workspace_prefixed_paths_fail_loudly_in_the_shell(agentcore):
+    _, backend = agentcore
     backend.write("count.py", "print(6 * 7)\n")
+
     result = backend.execute("python3 workspace/count.py")
 
-    assert result.exit_code == 0, result.output
-    assert result.output.strip() == "42"
+    assert result.exit_code != 0
+    assert "workspace/count.py" in result.output
 
 
-def test_a_script_reaches_workspace_paths_it_names_itself(agentcore):
-    _, backend = agentcore
-    backend.write("data.txt", "seven\n")
-    backend.write("s.py", "print(open('workspace/data.txt').read().strip())\n")
-
-    result = backend.execute("python3 s.py")
-
-    assert result.exit_code == 0, result.output
-    assert result.output == "seven\n"
+def test_the_instruction_says_how_to_run_a_written_file():
+    assert "The shell starts there." in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "`python3 x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "`workspace/x` does not exist" in _ARTIFACT_MARKDOWN_INSTRUCTION
 
 
 @pytest.mark.parametrize(
@@ -164,13 +136,13 @@ def test_a_script_reaches_workspace_paths_it_names_itself(agentcore):
         "sed -n 's#workspace/a#HIT#p' data.txt",
         "python3 -c \"import re; print(re.findall(r'workspace/(\\w+)', open('data.txt').read()))\"",
         "echo 'Saved to workspace/out.png' /workspace/x @workspace/foo",
-        "cat <<'EOF'\nworkspace/a /workspace/b ./workspace/c\nEOF",
+        "cat <<'EOF'\nworkspace/a /workspace/b ./workspace/c $HOME `x`\nEOF",
         "X=7; printf '%s\\n' \"a'b\" 'c\"d' '$X' \"$X\" \"it's \\\"quoted\\\"\"",
         "python3 -c \"d = [1, 2]; print(f'Dice: {d[0]}, {d[1]}')\"",
     ],
 )
 def test_the_command_text_reaches_the_shell_unchanged(agentcore, tmp_path, command):
-    inner, backend = agentcore
+    _, backend = agentcore
     data = "workspace/a\nworkspace/b\n/workspace/c\n"
     backend.write("data.txt", data)
     plain = tmp_path / "plain"
@@ -211,41 +183,7 @@ def test_skills_paths_are_still_rewritten(agentcore):
     assert result.output.strip() == "rolled"
 
 
-def test_the_self_link_comes_back_after_the_model_deletes_it(agentcore):
-    inner, backend = agentcore
-    backend.write("count.py", "print(6 * 7)\n")
-
-    backend.execute("rm workspace")
-    result = backend.execute("python3 workspace/count.py")
-
-    assert result.output.strip() == "42"
-
-
-def test_listings_skip_the_self_link(agentcore):
-    inner, backend = agentcore
-    backend.write("a.txt", "a")
-    backend.write("sub/b.txt", "b")
-    link = inner.root / "workspace" / "workspace"
-    assert link.is_symlink()
-
-    rows, truncated = asyncio.run(_list_files(backend))
-    from_inside, _ = _command(SimpleNamespace(execute=lambda c: _sh(c, link.parent)), _FIND)
-    inspect, ok = _command(backend, _find_command("", 50))
-
-    assert [row[0] for row in rows] == ["a.txt", "sub/b.txt"]
-    assert not truncated
-    assert sorted(line.split("\t")[0] for line in from_inside.splitlines()) == [
-        "a.txt",
-        "sub/b.txt",
-    ]
-    assert ok
-    assert sorted(line.split("\t")[0] for line in inspect.splitlines()) == [
-        "workspace/a.txt",
-        "workspace/sub/b.txt",
-    ]
-
-
-def test_a_failed_cwd_probe_never_writes_into_workspace_workspace(tmp_path, alias):
+def test_a_failed_cwd_probe_is_read_again_through_the_raw_shell(tmp_path):
     inner = _LocalAgentCore(tmp_path, failing_probes=1)
     backend = prepare_workspace_layout(_bind_skills_shell(inner))
 
@@ -254,8 +192,20 @@ def test_a_failed_cwd_probe_never_writes_into_workspace_workspace(tmp_path, alia
 
     assert inner._cwd == str(tmp_path)
     assert (tmp_path / "workspace" / "count.py").is_file()
-    assert (tmp_path / "workspace" / "workspace").is_symlink()
+    assert not (tmp_path / "workspace" / "workspace").exists()
     assert result.output.strip() == "42"
+
+
+def test_an_unknown_cwd_fails_writes_instead_of_nesting_them(tmp_path, caplog):
+    inner = _LocalAgentCore(tmp_path, failing_probes=1, pwd_broken=True)
+    with caplog.at_level(logging.ERROR):
+        backend = prepare_workspace_layout(_bind_skills_shell(inner))
+
+    with pytest.raises(SandboxError):
+        backend.write("count.py", "print(6 * 7)\n")
+
+    assert "workspace.cwd_unknown" in caplog.text
+    assert not (tmp_path / "workspace" / "workspace").exists()
 
 
 def test_the_wrapper_runs_from_the_workspace_with_the_command_as_one_argument(tmp_path):
@@ -266,25 +216,19 @@ def test_the_wrapper_runs_from_the_workspace_with_the_command_as_one_argument(tm
 
     lines = result.output.splitlines()
     assert result.exit_code == 0, result.output
-    assert lines[0] == str(workspace)
-    assert lines[1] == "sh|"
-    assert lines[2] == "$HOME `x`"
-    assert (workspace / "workspace").is_symlink()
+    assert lines == [str(workspace), "sh|", "$HOME `x`"]
 
 
-def test_opensandbox_runs_in_the_absolute_workspace_with_no_virtual_link():
+def test_opensandbox_runs_in_the_absolute_workspace():
     inner = _RecordingOpenSandbox()
     backend = prepare_workspace_layout(inner)
     command = "python3 workspace/count.py && echo 'done'"
 
     backend.execute(command)
 
-    setup = inner.commands[0]
     argv = shlex.split(inner.commands[-1])
-    assert "ln -s . /workspace/workspace" in setup
-    assert "ln -s /workspace" not in setup
+    assert argv[:6] == ["mkdir", "-p", "/workspace", "&&", "cd", "/workspace"]
     assert argv[-4:] == ["exec", "sh", "-c", command]
-    assert "cd /workspace &&" in inner.commands[-1]
 
 
 def test_internal_listing_commands_run_from_the_root():

@@ -844,25 +844,6 @@ def _wrap_leading_path(
     return wrapped
 
 
-# The model names the workspace three ways: ``x`` (relative to the shell,
-# which starts there), ``workspace/x`` (as the file tools accept it), and
-# ``/workspace/x`` (the virtual path the file tools report). The command text
-# is never edited: the other spellings resolve on disk instead. A relative
-# self-link ``workspace -> .`` inside the workspace makes ``workspace/x``,
-# ``./workspace/x`` and ``cd workspace`` land in the workspace, also inside a
-# script. Where the session root is not ``/`` (AgentCore), a link
-# ``/workspace`` to the real directory is tried; a sandbox that does not let
-# the process write ``/`` keeps ``/workspace`` unresolved in the shell.
-SELF_LINK = "workspace"
-_VIRTUAL_WORKSPACE = "/workspace"
-
-
-def _self_link_shell(target: str) -> str:
-    """Shell that creates the self-link once. A failure never stops the caller."""
-    link = f"{target}/{SELF_LINK}"
-    return f"{{ [ -e {link} ] || ln -s . {link}; }} 2>/dev/null"
-
-
 def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
     """Run a model command in its own shell from the workspace directory.
 
@@ -870,44 +851,35 @@ def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
     relative path; without it the shell enters ``workspace`` relative to
     where it starts. The command is one quoted argument to ``sh -c`` and is
     passed byte for byte, so its quotes, ``$``, comments and heredocs reach
-    that shell unchanged.
+    that shell unchanged. A file written as ``x`` or ``workspace/x`` runs as
+    ``x`` from there; the agent instruction says so.
     """
-    target = shlex.quote(workspace_dir) if workspace_dir else SELF_LINK
-    return (
-        f"mkdir -p {target} && {_self_link_shell(target)}; "
-        f"cd {target} && exec sh -c {shlex.quote(command)}"
-    )
+    target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
+    return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
 
 
-def _layout_shell(workspace_dir: Optional[str]) -> str:
-    """Create the workspace, its self-link and, if allowed, ``/workspace``."""
-    target = shlex.quote(workspace_dir) if workspace_dir else SELF_LINK
-    shell = f"mkdir -p {target} && {_self_link_shell(target)}"
-    if workspace_dir and workspace_dir != _VIRTUAL_WORKSPACE:
-        alias = shlex.quote(_VIRTUAL_WORKSPACE)
-        shell += f"; {{ [ -e {alias} ] || ln -s {target} {alias}; }} 2>/dev/null"
-    return f"{shell}; true"
+def _raw_cwd(backend: Any, raw_execute: Any) -> str:
+    """Session cwd read through the raw shell, cached on the provider.
 
-
-def _probe_cwd(backend: Any, raw_execute: Any) -> str:
-    """Session cwd, read once more through the raw shell after a failed probe.
-
-    Caches the value on the provider (``_cwd``), so its lazy ``pwd`` never
-    runs through the workspace shell and caches ``<cwd>/workspace``.
-    Returns ``""`` when the shell cannot tell.
+    Raises ``SandboxError`` when the shell cannot tell. The provider's lazy
+    probe runs ``self.execute("pwd")``, which after the layout is the
+    workspace shell and would cache ``<cwd>/workspace``, so every file would
+    land in ``workspace/workspace``. A loud error is better than that.
     """
+    cached = getattr(backend, "_cwd", None)
+    if cached:
+        return cached
     try:
         result = raw_execute("pwd")
-    except Exception:
-        logger.warning("workspace.cwd_retry_failed", exc_info=True)
-        return ""
+    except Exception as exc:
+        raise SandboxError("sandbox working directory unknown") from exc
     text = (getattr(result, "output", "") or "").strip()
     if getattr(result, "exit_code", 0) not in (0, None) or not text:
-        return ""
-    cwd = text.splitlines()[-1].rstrip("/") or "/"
+        raise SandboxError("sandbox working directory unknown")
+    cwd = text.splitlines()[-1].rstrip("/")
     if hasattr(backend, "_cwd"):
-        backend._cwd = cwd.rstrip("/")
-    return cwd
+        backend._cwd = cwd
+    return cwd or "/"
 
 
 def prepare_workspace_layout(backend: Any) -> Any:
@@ -927,17 +899,27 @@ def prepare_workspace_layout(backend: Any) -> Any:
     session_cwd = ""
     root: Optional[str] = "/"
     execute = getattr(backend, "execute", None)
+    raw = getattr(backend, "_eve_raw_execute", None) or execute
     get_cwd = getattr(backend, "_get_cwd", None)
     if get_cwd is not None:
         try:
             session_cwd = str(get_cwd() or "").rstrip("/")
-            root = session_cwd or "/"
         except Exception:
             logger.warning("workspace.cwd_probe_failed", exc_info=True)
-            raw = getattr(backend, "_eve_raw_execute", None) or execute
-            probed = _probe_cwd(backend, raw) if raw is not None else ""
-            session_cwd = probed.rstrip("/")
-            root = probed or None
+            try:
+                probed = _raw_cwd(backend, raw) if raw is not None else ""
+            except SandboxError:
+                probed = ""
+            if probed:
+                session_cwd = probed.rstrip("/")
+            elif raw is not None:
+                # Every later probe reads pwd through the raw shell, so a
+                # write either finds the real root or fails with an error.
+                logger.error("workspace.cwd_unknown")
+                backend._get_cwd = lambda: _raw_cwd(backend, raw)
+                root = None
+        if root is not None:
+            root = session_cwd or "/"
     workspace_dir = f"{root.rstrip('/')}/workspace" if root else None
     if execute is not None:
         if getattr(backend, "_eve_raw_execute", None) is None:
@@ -950,8 +932,9 @@ def prepare_workspace_layout(backend: Any) -> Any:
                 backend._eve_raw_execute = execute_from_root
             else:
                 backend._eve_raw_execute = execute
+        target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
         try:
-            execute(_layout_shell(workspace_dir))
+            execute(f"mkdir -p {target}")
         except Exception:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
