@@ -17,6 +17,11 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 ARG AGENTS_REF=e50e253ad2523e294b8c4dc4a1ad1709b40ea628
 RUN pip install --no-cache-dir "eve-esa-agents[deep] @ git+https://github.com/eve-esa/agents.git@${AGENTS_REF}"
 
+# EVE-Instruct's tokenizer. Loaded from disk by src/core/token_counting.py.
+# The file is public on Hugging Face; the runtime never downloads it.
+RUN mkdir -p /opt/tokenizers/eve-instruct \
+    && python -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/eve-esa/EVE-Instruct/resolve/main/tokenizer.json', '/opt/tokenizers/eve-instruct/tokenizer.json')"
+
 # Runtime layout shared by the production image and the local dev image.
 FROM python:3.12-slim-bookworm AS runtime
 ENV VIRTUAL_ENV=/opt/venv
@@ -27,6 +32,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
 WORKDIR /code
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/tokenizers /code/tokenizers
 
 # Amazon DocumentDB TLS CA bundle: the cluster's CAs are AWS-private and not in any system
 # trust store, so the client must be pointed at this file (tlsCAFile=/code/global-bundle.pem).

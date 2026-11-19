@@ -1920,6 +1920,94 @@ def append_unreferenced_turn_images(answer: str) -> str:
 # ─── Graph compile helpers ────────────────────────────────────────────────────
 
 
+def _client_endpoint(llm: Any) -> Optional[tuple]:
+    """``(base_url, model_name, api_key)`` of a real chat client, else ``None``.
+
+    A test double has no string ``model_name``, so it never reaches a lookup.
+    """
+    base = getattr(llm, "openai_api_base", None)
+    name = getattr(llm, "model_name", None)
+    if not isinstance(base, str) or not isinstance(name, str):
+        return None
+    base = base.rstrip("/")
+    if not base or not name:
+        return None
+    key = getattr(llm, "openai_api_key", None)
+    if hasattr(key, "get_secret_value"):
+        secret = key.get_secret_value()
+    elif isinstance(key, str):
+        secret = key
+    else:
+        secret = ""
+    return base, name, secret
+
+
+def _stamp_window(llm: Any, window: int) -> None:
+    if llm is None:
+        return
+    try:
+        llm.profile = {"max_input_tokens": int(window)}
+    except Exception:
+        logger.warning("could not set the model profile")
+
+
+async def _context_compile_args(llm: Any, llm_type: Optional[str]) -> Dict[str, Any]:
+    """The turn's window, counter and fallback client.
+
+    The window is the smaller of the two models, so a larger fallback cannot
+    grow the thread past the model that answers the next turn. Under pytest
+    this stays empty unless ``MODEL_LIMITS_LIVE`` is set, so the suite does
+    not call ``/models``.
+    """
+    import os
+
+    if os.getenv("PYTEST_CURRENT_TEST") and not os.getenv("MODEL_LIMITS_LIVE"):
+        return {}
+    from src.core.model_limits import window_for
+    from src.core.token_counting import counter_for
+
+    fallback = None
+    try:
+        fallback = get_shared_llm_manager().get_client_for_model(LLMType.Fallback.value)
+    except Exception:
+        logger.warning("fallback model unavailable for the context window")
+
+    async def _window(client: Any) -> int:
+        endpoint = _client_endpoint(client)
+        if endpoint is None:
+            return AGENT_CONTEXT_WINDOW_TOKENS
+        base, name, secret = endpoint
+        return await window_for(base, name, secret)
+
+    try:
+        primary = await _window(llm)
+        other = await _window(fallback) if fallback is not None else primary
+    except Exception:
+        logger.warning("context window lookup failed; using the default")
+        primary = other = AGENT_CONTEXT_WINDOW_TOKENS
+    _stamp_window(llm, primary)
+    _stamp_window(fallback, other)
+    used = min(primary, other)
+    logger.info(
+        "context_window.resolved primary=%s fallback=%s used=%s llm_type=%s",
+        primary,
+        other,
+        used,
+        llm_type,
+    )
+    try:
+        counter = counter_for(llm_type)
+    except Exception:
+        logger.warning("token counter unavailable")
+        counter = None
+    args: Dict[str, Any] = {"context_window": used}
+    if fallback is not None:
+        args["fallback_llm"] = fallback
+    if counter is not None:
+        args["token_counter"] = counter
+    return args
+
+
 def _build_react_graph(
     llm_type: Optional[str],
     tools: List[Any],
@@ -1938,6 +2026,8 @@ def _build_react_graph(
     skills_root: Any = None,
     user_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
+    context_window: Optional[int] = None,
+    token_counter: Any = None,
 ) -> Any:
     """Compile the agent graph using the resolved LLM type.
 
@@ -2045,13 +2135,19 @@ def _build_react_graph(
     if _explicit_compile_param(agent, "tool_result_max_tokens"):
         compile_kwargs["tool_result_max_tokens"] = TOOL_RESULT_MAX_TOKENS
     summary_kwargs = {
-        "context_window": AGENT_CONTEXT_WINDOW_TOKENS,
+        "context_window": (
+            context_window
+            if context_window is not None
+            else AGENT_CONTEXT_WINDOW_TOKENS
+        ),
         "summary_trigger_fraction": SUMMARY_TRIGGER_FRACTION,
         "summary_keep_fraction": SUMMARY_KEEP_FRACTION,
         "summary_max_tokens": SUMMARY_MAX_TOKENS,
         "truncate_args_max_chars": TRUNCATE_ARGS_MAX_CHARS,
         "recall_note": SEARCH_NOTE,
     }
+    if token_counter is not None:
+        summary_kwargs["token_counter"] = token_counter
     for name, value in summary_kwargs.items():
         if _explicit_compile_param(agent, name):
             compile_kwargs[name] = value
@@ -2967,6 +3063,9 @@ async def generate_answer_agentic(
         attached_files = await _attached_files(
             request, user_id, conversation_id, sandbox_lease
         )
+        context_args = await _context_compile_args(
+            llm, llm_metadata.get("agentic_llm_resolved")
+        )
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -2975,6 +3074,7 @@ async def generate_answer_agentic(
             history=history,
             summary=summary,
             llm=llm,
+            **context_args,
             llm_idle_timeout=endpoint_timeout(
                 (endpoint_metadata or {}).get("answered")
             ),
@@ -3532,6 +3632,9 @@ async def generate_answer_agentic_stream_helper(
             request, user_id, conversation_id, sandbox_lease
         )
         step_start = time.perf_counter()
+        context_args = await _context_compile_args(
+            llm, llm_prompts.get("agentic_llm_resolved")
+        )
         graph = _build_react_graph(
             request.llm_type,
             tools,
@@ -3540,6 +3643,7 @@ async def generate_answer_agentic_stream_helper(
             history=history,
             summary=summary,
             llm=llm,
+            **context_args,
             llm_idle_timeout=endpoint_timeout(
                 (endpoint_metadata or {}).get("answered")
             ),

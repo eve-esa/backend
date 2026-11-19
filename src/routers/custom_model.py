@@ -94,6 +94,11 @@ async def create_custom_model(
             detail="Failed to store custom model credentials",
         )
 
+    from src.core.model_limits import schedule_window_lookup
+
+    schedule_window_lookup(
+        entry.provider.base_url, entry.model.model_name, request.api_key
+    )
     return await to_custom_model_public(model)
 
 
