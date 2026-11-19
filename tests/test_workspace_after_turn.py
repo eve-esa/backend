@@ -46,7 +46,7 @@ class _Store:
     async def get_object(self, key):
         raise workspace.ObjectNotFoundError(key)
 
-    async def put_object(self, key, body, content_type, tagging=None):
+    async def put_object(self, key, body, content_type):
         self.objects[key] = body
 
     async def delete_object(self, key):
@@ -234,11 +234,11 @@ async def test_a_put_in_flight_during_the_delete_leaves_no_key(
     backend = _AgentCoreLike({"a.txt": b"aaa", "b.txt": b"bbb"})
     real_put = storage.put_object
 
-    async def _slow_put(key, body, content_type, tagging=None):
+    async def _slow_put(key, body, content_type):
         # The delete runs while the write is on the wire; the write lands after.
         _erase(storage, sandbox_store)
         await asyncio.sleep(0)
-        await real_put(key, body, content_type, tagging)
+        await real_put(key, body, content_type)
 
     monkeypatch.setattr(storage, "put_object", _slow_put)
     caplog.set_level(logging.DEBUG)
@@ -278,10 +278,10 @@ async def test_a_state_write_in_flight_during_the_delete_is_removed(
     real_put = storage.put_object
     state_key = workspace_state_key("u1", "c1")
 
-    async def _slow_state_put(key, body, content_type, tagging=None):
+    async def _slow_state_put(key, body, content_type):
         if key == state_key:
             _erase(storage, sandbox_store)
-        await real_put(key, body, content_type, tagging)
+        await real_put(key, body, content_type)
 
     monkeypatch.setattr(storage, "put_object", _slow_state_put)
     caplog.set_level(logging.DEBUG)

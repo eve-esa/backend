@@ -25,7 +25,6 @@ from src.services.storage import ObjectNotFoundError, storage_service
 
 logger = logging.getLogger(__name__)
 
-TOOL_RESULT_TAG = "kind=tool-result"
 _CONTENT_TYPE = "text/plain; charset=utf-8"
 _ROUTE = "/large_tool_results"
 
@@ -251,7 +250,7 @@ class S3ToolResultBackend(BackendProtocol):
             if _object_exists(key):
                 return WriteResult(error=_exists_error(file_path))
             storage_service.put_object_sync(
-                key, content.encode("utf-8"), _CONTENT_TYPE, TOOL_RESULT_TAG
+                key, content.encode("utf-8"), _CONTENT_TYPE
             )
         except Exception as exc:
             logger.warning("tool_results.write_failed key=%s", key, exc_info=True)
@@ -271,7 +270,7 @@ class S3ToolResultBackend(BackendProtocol):
             if await _aobject_exists(key):
                 return WriteResult(error=_exists_error(file_path))
             await storage_service.put_object(
-                key, content.encode("utf-8"), _CONTENT_TYPE, TOOL_RESULT_TAG
+                key, content.encode("utf-8"), _CONTENT_TYPE
             )
         except Exception as exc:
             logger.warning("tool_results.write_failed key=%s", key, exc_info=True)

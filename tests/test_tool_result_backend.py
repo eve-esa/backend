@@ -232,13 +232,13 @@ async def test_async_edit_and_delete_are_refused(fake_s3):
     assert deleted.error == "Error: offloaded tool results are read-only"
 
 
-def test_the_object_key_has_no_extension_and_carries_the_tag(fake_s3):
+def test_the_object_key_has_no_extension_and_no_tag(fake_s3):
     written = _backend().write("/call-1", "hello")
 
     stored = fake_s3.objects[_key("call-1")]
     assert written.path == "/call-1"
     assert stored["Body"] == b"hello"
-    assert stored["Tagging"] == "kind=tool-result"
+    assert stored["Tagging"] is None
     assert "." not in _key("call-1").rsplit("/", 1)[-1]
 
 
@@ -293,12 +293,9 @@ async def test_awrite_does_not_replace_an_existing_object(fake_s3):
     ]
 
 
-def test_a_rejected_tag_still_stores_the_object(fake_s3):
+def test_writing_a_tool_result_makes_no_tagging_call(fake_s3):
     def boom(**_kwargs):
-        raise ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "no tags"}},
-            "PutObjectTagging",
-        )
+        raise AssertionError("put_object_tagging must not be called")
 
     fake_s3.put_object_tagging = boom
 
@@ -306,6 +303,19 @@ def test_a_rejected_tag_still_stores_the_object(fake_s3):
 
     assert written.error is None
     assert fake_s3.objects[_key("call-1")]["Body"] == b"hello"
+    assert fake_s3.objects[_key("call-1")]["Tagging"] is None
+
+
+async def test_awriting_a_tool_result_makes_no_tagging_call(fake_s3):
+    def boom(**_kwargs):
+        raise AssertionError("put_object_tagging must not be called")
+
+    fake_s3.put_object_tagging = boom
+
+    written = await _backend().awrite("/call-2", "hello")
+
+    assert written.error is None
+    assert fake_s3.objects[_key("call-2")]["Body"] == b"hello"
 
 
 def test_an_s3_failure_returns_an_error_and_does_not_mirror(fake_s3):
