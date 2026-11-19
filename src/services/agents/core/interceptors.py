@@ -17,6 +17,7 @@ import re
 import time
 from typing import Any, Optional, Tuple
 
+from src.services.agents.core.repeat_guard import check_tool_call
 from src.utils.error_logger import get_error_logger, redact_secrets
 
 try:
@@ -231,6 +232,34 @@ class ErrorLoggingInterceptor:
                 "tool": tool_name,
                 "server": server_name,
             },
+        )
+
+
+class RepeatGuardInterceptor:
+    """Refuses an MCP tool call the agent already made twice in this turn.
+
+    Counts through :func:`~src.services.agents.core.repeat_guard.check_tool_call`,
+    keyed by the graph facing name (``<server>_<tool>``) and the arguments.
+    A refused call never reaches the server: the model reads the refusal as a
+    plain text result (not ``isError``, which the adapter would raise).
+    Outside an agentic turn there is no guard and every call runs.
+    """
+
+    async def __call__(
+        self,
+        request: "MCPToolCallRequest",
+        handler: Any,
+    ) -> "MCPToolCallResult":
+        tool_name = getattr(request, "name", "unknown")
+        server_name = getattr(request, "server_name", None)
+        graph_name = f"{server_name}_{tool_name}" if server_name else tool_name
+        refusal = check_tool_call(graph_name, getattr(request, "args", None) or {})
+        if refusal is None:
+            return await handler(request)
+        from mcp.types import CallToolResult, TextContent
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=refusal)], isError=False
         )
 
 

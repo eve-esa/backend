@@ -8,7 +8,10 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from src.observability.context import child_span
-from src.services.agents.core.interceptors import ErrorLoggingInterceptor
+from src.services.agents.core.interceptors import (
+    ErrorLoggingInterceptor,
+    RepeatGuardInterceptor,
+)
 from src.services.agents.graphs_bundle import graphs_base_module
 from src.services.mcp.artifact_ingestion import ArtifactInterceptor
 from src.services.mcp.retrieval_ingestion import RetrievalContextInterceptor
@@ -208,6 +211,9 @@ async def _discover_mcp_tools_uncached(
         # retrieval payload, so the two never touch the same block.
         tool_interceptors=[
             TracingInterceptor(),
+            # Before the call is timed, logged or sent: a refused repeat
+            # never reaches the server.
+            RepeatGuardInterceptor(),
             LatencyInterceptor(),
             ErrorLoggingInterceptor(),
             RetrievalContextInterceptor(),
