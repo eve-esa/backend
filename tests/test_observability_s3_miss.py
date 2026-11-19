@@ -69,6 +69,7 @@ def test_s3_404_is_an_expected_miss(instrumented, exporter, method, code):
     assert span.status.status_code is StatusCode.UNSET
     assert span.attributes[EXPECTED_MISS_ATTRIBUTE] is True
     assert span.attributes["http.status_code"] == 404
+    assert not [e for e in span.events if e.name == "exception"]
 
 
 @pytest.mark.parametrize("code,status", [("AccessDenied", 403), ("InternalError", 500)])
@@ -78,6 +79,7 @@ def test_s3_other_errors_stay_errors(instrumented, exporter, code, status):
     span = _one_span(exporter)
     assert span.status.status_code is StatusCode.ERROR
     assert EXPECTED_MISS_ATTRIBUTE not in span.attributes
+    assert [e for e in span.events if e.name == "exception"]
 
 
 def test_s3_404_on_another_operation_stays_an_error(instrumented, exporter):

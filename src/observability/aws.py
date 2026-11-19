@@ -9,7 +9,8 @@ The instrumentation's ``response_hook`` runs after it set the status, and the
 SDK ignores ``set_status(UNSET)`` on a live span, so the hook only tags the
 span with ``eve.s3.expected_miss``; :class:`ExpectedMissSpanProcessor` clears
 the status of tagged spans before export, the same rebuild the Stop rewrite
-uses. Only S3 ``GetObject`` and ``HeadObject`` answering 404 are tagged: a
+uses, and drops its ``exception`` event so no view counts the miss (other
+events stay). Only S3 ``GetObject`` and ``HeadObject`` answering 404 are tagged: a
 403, a 5xx or any other service keeps its ERROR status.
 """
 
@@ -48,7 +49,7 @@ def instrument_botocore(tracer_provider: Any) -> None:
 
 
 def expected_miss_span(span: ReadableSpan) -> ReadableSpan:
-    """``span`` with its ERROR status cleared when it carries the miss tag."""
+    """``span`` with its ERROR status and exception event dropped when tagged."""
     if not (span.attributes or {}).get(EXPECTED_MISS_ATTRIBUTE):
         return span
     if span.status.status_code != trace.StatusCode.ERROR:
@@ -59,7 +60,7 @@ def expected_miss_span(span: ReadableSpan) -> ReadableSpan:
         parent=span.parent,
         resource=span.resource,
         attributes=span.attributes,
-        events=span.events,
+        events=[e for e in span.events if e.name != "exception"],
         links=span.links,
         kind=span.kind,
         status=trace.Status(trace.StatusCode.UNSET),
