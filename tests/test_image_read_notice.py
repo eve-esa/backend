@@ -29,7 +29,6 @@ from src.services.agents.core.image_notice import (
     install_image_read_notice,
     markdown_target,
 )
-from src.services.agents.core.runner import _ARTIFACT_MARKDOWN
 from src.services.agents.core.workspace import (
     _workspace_file,
     session_path_for_markdown,
@@ -88,15 +87,61 @@ def test_a_nested_workspace_image_links_relative_to_the_workspace(tmp_path):
     assert "write ![ndvi.png](charts/ndvi.png) in your answer." in read.text
 
 
-def test_an_uploaded_image_says_do_not_describe_and_keeps_its_artifact_path(tmp_path):
-    # U8: the user asks to describe an upload. The notice must keep the model
-    # from inventing content; the link is the path the artifact rewrite reads.
-    path = "/artifacts/6afdf5edf1a1fe86ea6ac150/light-home.png"
+CANNOT_SEE = (
+    "This model cannot see image content, so do not describe it or guess what "
+    "it shows. If the user asks what it shows, tell them you cannot see images "
+    "with the current model."
+)
+
+# U8 on dev after #399 (conversation 6afec27430a32b9aed3191e2): the user
+# uploaded light-home.png and asked for a description; the notice offered
+# "You can still show it", so the answer was only the upload again. An upload
+# or an artifact is never offered back: the user already has it, and tool
+# images are appended by the answer net (#396).
+UPLOAD_FORMS = [
+    f"/artifacts/{ARTIFACT_ID}/light-home.png",
+    f"artifacts/{ARTIFACT_ID}/light-home.png",
+    f"{AGENTCORE_ROOT}/artifacts/{ARTIFACT_ID}/light-home.png",
+    f"/workspace/artifacts/{ARTIFACT_ID}/light-home.png",
+    f"workspace/artifacts/{ARTIFACT_ID}/light-home.png",
+    f"{AGENTCORE_ROOT}/workspace/artifacts/{ARTIFACT_ID}/light-home.png",
+]
+
+
+@pytest.mark.parametrize("path", UPLOAD_FORMS)
+def test_an_uploaded_image_is_never_offered_back(path):
+    notice = image_read_notice(path, 10)
+
+    assert markdown_target(path) is None
+    assert CANNOT_SEE in notice
+    assert "You can still show it" not in notice
+    assert "![" not in notice
+
+
+@pytest.mark.parametrize("path", UPLOAD_FORMS[:3])
+def test_an_uploaded_image_is_not_offered_back_when_the_root_is_known(
+    path, monkeypatch
+):
+    monkeypatch.setattr(sandbox_module, "_session_roots", {AGENTCORE_ROOT})
+
+    assert markdown_target(path) is None
+    assert "![" not in image_read_notice(path, 10)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        f"/artifacts/{ARTIFACT_ID}/light-home.png",
+        f"{AGENTCORE_ROOT}/artifacts/{ARTIFACT_ID}/light-home.png",
+    ],
+)
+def test_an_uploaded_image_read_through_the_deep_agent_says_it_cannot_see_it(
+    tmp_path, path
+):
     read = _read_through_deep_agent(tmp_path, path, TEXT_ONLY)
 
-    assert "This model cannot see image content, so do not describe it" in read.text
-    assert "tell them you cannot see images with the current model." in read.text
-    assert f"write ![light-home.png]({path}) in your answer." in read.text
+    assert read.text.endswith(CANNOT_SEE)
+    assert "![" not in read.text
 
 
 def test_an_image_the_answer_cannot_link_gets_no_show_sentence(tmp_path):
@@ -212,14 +257,6 @@ def test_the_agentcore_path_read_through_the_deep_agent_gets_the_show_sentence(
 def test_an_artifact_path_the_rewrite_cannot_load_gets_no_link(path):
     assert markdown_target(path) is None
     assert "![" not in image_read_notice(path, 10)
-
-
-def test_an_artifact_link_is_one_the_answer_rewrite_matches():
-    path = f"/artifacts/{ARTIFACT_ID}/light home.png"
-    target = markdown_target(path)
-
-    assert target == f"/artifacts/{ARTIFACT_ID}/light%20home.png"
-    assert _ARTIFACT_MARKDOWN.fullmatch(f"![x]({target})")
 
 
 def test_a_file_name_cannot_carry_instructions_into_the_notice():
