@@ -232,7 +232,7 @@ APP_ENVIRONMENT=dev
 | `EVE_JSC_API_KEY` | No | API key for EVE-JSC, issued by Jülich (required when `llm_type` is `eve_jsc` or a model is called with the `jsc/` prefix; a blank value counts as unset). |
 | `OPENAI_PROXY_UPSTREAM_URL` | No | OpenAI-compatible URL the `/v1/*` proxy forwards `eve`/`runpod` models to. Setting this or `EVE_JSC_BASE_URL` enables the proxy. |
 | `OPENAI_PROXY_API_KEY` | No | API key for that upstream (falls back to `MAIN_MODEL_API_KEY`, which is the same RunPod endpoint). |
-| `REDIS_URL` | Yes | Redis connection string for pub/sub, cancellations, and the [conversation sandbox](sandbox.md) (optional; if not set, in-process cancellation is used and the sandbox map stays in this process)(default `redis://127.0.0.1:6379/0`). |
+| `REDIS_URL` | No | Redis connection string for pub/sub, cancellations, and the [conversation sandbox](sandbox.md). Unset uses in-process cancellation, and the sandbox map stays in this process (default `redis://127.0.0.1:6379/0`). |
 | `SANDBOX_PROVIDER` | No | `agentcore`, `opensandbox`, or `none`. Unset starts nothing. See [Sandbox](sandbox.md). |
 | `SANDBOX_IDLE_TTL_S` | No | Seconds a conversation sandbox stays up after its last turn (default `600`). |
 | `SANDBOX_MAX_LIFETIME_S` | No | AgentCore hard session cap in seconds (default `3600`, maximum `28800`). |

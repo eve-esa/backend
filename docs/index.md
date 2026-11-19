@@ -6,6 +6,7 @@ For setup and running the backend, see:
 
 - [Local development & configuration](https://eve-esa.github.io/eve-guide/backend/docs/local_setup/): prerequisites, environment variables, and running the backend directly on your machine
 - [Docker setup](https://eve-esa.github.io/eve-guide/backend/docs/docker_setup/): run the backend with Docker Compose
+- [Environments](environments.md): local ports, and what dev, staging, and prod share
 
 For additional deployment details, you can also refer to [README.md](https://github.com/eve-esa/backend/blob/main/README.md).
 
@@ -13,7 +14,11 @@ For additional deployment details, you can also refer to [README.md](https://git
 
 - **FastAPI**: HTTP API and dependency injection
 - **MongoDB/DocumentDB**: Primary datastore for users, collections, documents, conversations, messages
-- **Qdrant**: Vector store for embeddings and retrieval
+- **Redis**: Cancellation, and the conversation sandbox map when more than one worker can take the next message
+- **Qdrant**: Vector store for embeddings and retrieval. One cluster. The private collection name and the public `env` tag depend on [the environment](environments.md)
+- **Object storage**: S3 in AWS, MinIO in compose. Artifacts, the sandbox workspace, and large tool results
+- **Identity provider**: Keycloak locally, Cognito per AWS environment. This API validates the token. It does not sign the user in
+- **Agents**: The deep-agent graph comes from `eve-esa/agents`. This repo runs it
 - **LLM providers**: Pluggable via `src/core/llm_manager.py`
 - **Docs**: MkDocs Material + mkdocstrings (Google-style docstrings)
 
@@ -23,6 +28,8 @@ For additional deployment details, you can also refer to [README.md](https://git
 src/
   routers/            # FastAPI route handlers (user, collection, document, conversation, message, health_check, openai_proxy, mcp_proxy)
   services/           # Business logic (auth, generate_answer, email, hallucination, etc.)
+    agents/           # Deep-agent runner, sandbox, history search
+  observability/      # OpenTelemetry. Off unless an OTLP endpoint is set
   database/           # ODM-style models and pagination helpers
   core/               # Vector store and LLM managers
   middlewares/        # Authentication dependencies
@@ -55,7 +62,7 @@ docs/                 # Site content (this page, api references)
     - The deep agent keeps one sandbox per conversation and reuses it on the next message
     - See [Sandbox](sandbox.md)
 - **Context management**
-    - What the deep agent sends each turn, how it summarizes older messages, and where the conversation is stored
+    - What the deep agent sends each turn, how it summarizes older messages, the memory tools and their limits, and where the conversation is stored
     - See [Context management](context-management.md)
 - **Queryable history**
     - The deep agent can search and read the stored messages of the current conversation
@@ -82,8 +89,11 @@ Use [swagger-api](https://eve-esa.github.io/eve-guide/backend-swagger/) only whe
 | Target | Base URL |
 | --- | --- |
 | Production API | `https://eve-chat.chat/api` |
+| Staging API | `https://staging.eve-chat.chat/api` |
+| Dev API | `https://dev.eve-chat.chat/api` |
 | OpenAI-compatible gateway | `https://eve-chat.chat/api/v1` |
-| Local backend | `http://localhost:8000` |
+| Compose backend | `http://localhost:8001` |
+| Host process (`./start.sh`) | `http://localhost:8000` |
 
 ### Shared API setup
 
@@ -92,7 +102,7 @@ Use this once and reuse it across all API examples:
 ```python
 import requests
 
-BASE_URL = "https://eve-chat.chat/api"  # local: http://localhost:8000
+BASE_URL = "https://eve-chat.chat/api"  # compose: http://localhost:8001
 
 # Bearer credential, either of:
 # - an access token from the identity provider (sign in at https://eve-chat.chat)
