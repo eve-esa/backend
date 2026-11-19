@@ -1744,6 +1744,49 @@ def _code_regions(text: str) -> List[Tuple[int, int]]:
     return sorted(fenced + inline)
 
 
+# A markdown link whose label lost its ``]``: ``![name(target)``, with an
+# optional quoted title.
+_UNCLOSED_LABEL = re.compile(
+    r"(!?)\[([^\[\]()\n]{1,200})\(([^()\s]+)((?:[ \t]+\"[^\"\n]*\")?)\)"
+)
+
+
+def _names_a_link_target(label: str, target: str) -> bool:
+    """True when ``target`` can only be where a plain link points."""
+    if target.startswith(("/", "./", "../", "http://", "https://")):
+        return True
+    return target.rsplit("/", 1)[-1] == label.strip()
+
+
+def _close_link_labels(text: str, edits: Optional[List[Edit]] = None) -> str:
+    """``text`` with the ``]`` back in a markdown link label that lost it.
+
+    Blablador streams Mistral Large with every ``]`` removed when tools are
+    bound (sgl-project/sglang#44219), so ``![name](path)`` arrives as
+    ``![name(path)``. An image always gets its bracket back. A plain link
+    gets it only when the target is a path, an http(s) URL or ends in the
+    label, so prose such as ``[see note (a)`` stays as written. Each repair
+    is appended to ``edits``.
+    """
+    closed = 0
+
+    def replace(match: re.Match) -> str:
+        nonlocal closed
+        bang, label, target, title = match.groups()
+        if not bang and not _names_a_link_target(label, target):
+            return match.group(0)
+        closed += 1
+        repaired = f"{bang}[{label}]({target}{title})"
+        if edits is not None:
+            edits.append((match.start(), match.end(), len(repaired)))
+        return repaired
+
+    text = _UNCLOSED_LABEL.sub(replace, text)
+    if closed:
+        logger.info("markdown.label_closed count=%d", closed)
+    return text
+
+
 async def rewrite_answer_file_links(
     answer: str, passes: Optional[List[List[Edit]]] = None
 ) -> str:
@@ -1756,6 +1799,8 @@ async def rewrite_answer_file_links(
     in place, and so is any host around the id of an artifact this turn
     stored. A workspace path is published the same way. A plain link this
     rewrite points at an image file gains the ``!`` so the chat draws it.
+    A link label that lost its ``]`` gets it back first
+    (:func:`_close_link_labels`), so the other passes can read the link.
     An artifact the answer never mentions stays out of the answer here; the
     normal completion path adds a tool image through
     :func:`append_unreferenced_turn_images`.
@@ -1773,13 +1818,15 @@ async def rewrite_answer_file_links(
 
     regions = _code_regions(answer)
     text = _blank(answer, regions)
+    label_edits: List[Edit] = []
     artifact_edits: List[Edit] = []
     filename_edits: List[Edit] = []
     workspace_edits: List[Edit] = []
+    text = _close_link_labels(text, label_edits)
     text = _markdown_paths_to_artifact_urls(text, artifact_edits)
     text = _links_to_turn_artifact_urls(text, filename_edits)
     text = await publish_markdown_files(text, workspace_edits)
-    rewrite_passes = [artifact_edits, filename_edits, workspace_edits]
+    rewrite_passes = [label_edits, artifact_edits, filename_edits, workspace_edits]
     for start, end in regions:
         at = start
         for edits in rewrite_passes:
