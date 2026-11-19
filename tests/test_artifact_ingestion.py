@@ -1127,3 +1127,64 @@ async def test_two_calls_of_one_tool_in_a_turn_keep_both_images(
         )
     finally:
         await _cleanup()
+
+
+# ---------------- what the answer append reads -----------------
+
+
+@pytest.mark.asyncio
+async def test_a_shown_stub_records_its_type_and_that_it_was_shown(
+    interceptor, with_context
+):
+    """The runner appends a left-out tool image from these two records."""
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    icept, _fake = interceptor
+    result = CallToolResult(
+        content=[
+            ImageContent(type="image", data=PNG_B64, mimeType="image/png"),
+            TextContent(type="text", text='{"width": 512, "color": "blue"}'),
+        ]
+    )
+
+    out = await icept(
+        _request(name="get_sample_image", server_name="dummy_image"), _handler(result)
+    )
+
+    try:
+        artifact_id = _parse_stub(out.content[0])["artifact_id"]
+        assert with_context.collected_artifact_types == {artifact_id: "image/png"}
+        assert with_context.shown_artifact_ids == [artifact_id]
+        assert append_unreferenced_turn_images("Here it is:") == (
+            f"Here it is:\n\n![get_sample_image-1.png](/artifacts/{artifact_id})"
+        )
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.asyncio
+async def test_a_stub_folded_into_the_tool_json_is_not_shown(
+    interceptor, with_context
+):
+    """A file the tool names by path is data for the next step, not a picture."""
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    icept, _fake = interceptor
+    body = {"files": [{"name": "tile.png", "path": "tile.png", "bytes": len(PNG_BYTES)}]}
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(body)),
+            ImageContent(type="image", data=PNG_B64, mimeType="image/png"),
+        ]
+    )
+
+    out = await icept(_request(name="fetch_tiles", server_name="eo"), _handler(result))
+
+    try:
+        assert len(out.content) == 1
+        (artifact_id,) = with_context.collected_artifact_ids
+        assert with_context.collected_artifact_types == {artifact_id: "image/png"}
+        assert with_context.shown_artifact_ids == []
+        assert append_unreferenced_turn_images("Done.") == "Done."
+    finally:
+        await _cleanup()

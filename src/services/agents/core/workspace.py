@@ -40,7 +40,11 @@ from src.services.agents.core.tool_results import (
     RESTORE_MAX_BYTES,
     RESTORE_MAX_OBJECTS,
 )
-from src.services.storage import ObjectNotFoundError, storage_service
+from src.services.storage import (
+    INLINE_IMAGE_CONTENT_TYPES,
+    ObjectNotFoundError,
+    storage_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -905,13 +909,20 @@ def _workspace_file(path: Optional[str]) -> Optional[str]:
     return _markdown_relative(path[len("workspace/") :])
 
 
-_IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "svg"})
+# The extensions of the raster types the chat embeds
+# (``INLINE_IMAGE_CONTENT_TYPES``). No SVG: the server sends it as a
+# download, so an image tag cannot draw it.
+_IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
 
 
 def is_image_file(name: Optional[str], content_type: Optional[str] = None) -> bool:
-    """True when the stored type or the file extension says image."""
-    if content_type and content_type.lower().startswith("image/"):
-        return True
+    """True when the chat can draw the file as an image.
+
+    A known stored type decides (the bytes were sniffed); the extension
+    decides only when there is no stored type to read.
+    """
+    if content_type is not None:
+        return content_type.lower() in INLINE_IMAGE_CONTENT_TYPES
     raw = urllib.parse.unquote(str(name or "")).split("?", 1)[0].split("#", 1)[0]
     base = raw.rstrip("/").rsplit("/", 1)[-1]
     if "." not in base:
