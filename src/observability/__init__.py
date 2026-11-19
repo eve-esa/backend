@@ -155,6 +155,7 @@ def build_tracer_provider(exporter, *, batch: bool = True):
         ContextAttributesSpanProcessor,
         StoppedTurnSpanProcessor,
     )
+    from src.observability.aws import ExpectedMissSpanProcessor
     from src.observability.redaction import RedactingSpanExporter
 
     provider = TracerProvider(resource=build_resource(), span_limits=_span_limits())
@@ -162,7 +163,9 @@ def build_tracer_provider(exporter, *, batch: bool = True):
     provider.add_span_processor(ContextAttributesSpanProcessor())
     processor_cls = BatchSpanProcessor if batch else SimpleSpanProcessor
     provider.add_span_processor(
-        StoppedTurnSpanProcessor(processor_cls(RedactingSpanExporter(exporter)))
+        ExpectedMissSpanProcessor(
+            StoppedTurnSpanProcessor(processor_cls(RedactingSpanExporter(exporter)))
+        )
     )
     return provider
 
@@ -216,9 +219,9 @@ def _instrument_clients(tracer_provider) -> None:
         RedisInstrumentor().instrument(tracer_provider=tracer_provider)
 
     def _botocore():
-        from opentelemetry.instrumentation.botocore import BotocoreInstrumentor
+        from src.observability.aws import instrument_botocore
 
-        BotocoreInstrumentor().instrument(tracer_provider=tracer_provider)
+        instrument_botocore(tracer_provider)
 
     for name, fn in (
         ("httpx", _httpx),
