@@ -13,6 +13,7 @@ from src.services.agents.core.sandbox import (
     SandboxError,
     _bind_skills_shell,
     prepare_workspace_layout,
+    translate_workspace_paths,
     workspace_shell_command,
 )
 from src.services.agents.core.sandbox_inspect import _find_command
@@ -69,6 +70,15 @@ class _LocalAgentCore:
         Path(real).write_text(content)
         return SimpleNamespace(path=real, error=None)
 
+    def edit(self, file_path, old_string, new_string, replace_all=False):
+        cwd = self._get_cwd()
+        real = file_path if file_path.startswith(cwd + "/") else f"{cwd}/{file_path.lstrip('/')}"
+        text = Path(real).read_text()
+        if old_string not in text:
+            return SimpleNamespace(path=None, error=f"String not found in file: {old_string}")
+        Path(real).write_text(text.replace(old_string, new_string, 1))
+        return SimpleNamespace(path=real, error=None, occurrences=1)
+
 
 class _RecordingOpenSandbox:
     """OpenSandbox-like backend: no session cwd, file paths are absolute."""
@@ -113,23 +123,155 @@ def test_a_written_file_runs_by_its_real_absolute_path(agentcore):
     assert result.output.strip() == "42"
 
 
-@pytest.mark.parametrize("path", ["workspace/count.py", "/workspace/count.py"])
-def test_workspace_prefixed_paths_fail_loudly_in_the_shell(agentcore, path):
+def test_a_relative_workspace_prefix_fails_loudly_in_the_shell(agentcore):
     _, backend = agentcore
     backend.write("count.py", "print(6 * 7)\n")
 
-    result = backend.execute(f"python3 {path}")
+    result = backend.execute("python3 workspace/count.py")
 
     assert result.exit_code != 0
     assert "workspace/count.py" in result.output
 
 
-def test_the_instruction_says_how_to_run_a_written_file():
+def test_the_instruction_says_how_to_name_a_written_file():
     assert "The shell starts there." in _ARTIFACT_MARKDOWN_INSTRUCTION
     assert "`python3 x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
-    assert "`workspace/x` or `/workspace/x` as `x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
-    assert "never run a file through" in _ARTIFACT_MARKDOWN_INSTRUCTION
-    assert "Those paths do not exist there." in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "`x` or `/workspace/x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "never `workspace/x`" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "Those paths do not exist there." not in _ARTIFACT_MARKDOWN_INSTRUCTION
+
+
+# Dev, 2026-11-19 (AgentCore, deep graph): the model wrote /workspace/plot_ndvi.py,
+# ran `python3 /workspace/plot_ndvi.py` and saved with
+# plt.savefig('/workspace/ndvi.png'). AgentCore has no /workspace and cannot
+# create one, so each failed with "No such file or directory".
+
+
+def test_a_file_written_as_slash_workspace_runs_by_that_path(agentcore):
+    _, backend = agentcore
+
+    backend.write("/workspace/plot_ndvi.py", "print(6 * 7)\n")
+    result = backend.execute("python3 /workspace/plot_ndvi.py")
+
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "42"
+
+
+def test_slash_workspace_works_from_another_directory(agentcore):
+    _, backend = agentcore
+    backend.write("count.py", "print(6 * 7)\n")
+
+    result = backend.execute("cd /tmp && python3 /workspace/count.py")
+
+    assert result.output.strip() == "42"
+
+
+def test_a_written_script_saves_to_slash_workspace(agentcore):
+    inner, backend = agentcore
+    code = "with open('/workspace/ndvi.png', 'w') as f:\n    f.write('png')\n"
+
+    backend.write("/workspace/plot_ndvi.py", code)
+    result = backend.execute("python3 plot_ndvi.py")
+
+    assert result.exit_code == 0, result.output
+    assert (inner.root / "workspace" / "ndvi.png").read_text() == "png"
+
+
+def test_code_in_the_command_saves_to_slash_workspace(agentcore):
+    inner, backend = agentcore
+    command = (
+        "python3 - <<'EOF'\n"
+        "import os\n"
+        "os.makedirs('/workspace/out', exist_ok=True)\n"
+        "open(os.path.join('/workspace', 'out', 'a.txt'), 'w').write('ok')\n"
+        "EOF"
+    )
+
+    result = backend.execute(command)
+
+    assert result.exit_code == 0, result.output
+    assert (inner.root / "workspace" / "out" / "a.txt").read_text() == "ok"
+
+
+def test_a_data_file_keeps_its_text(agentcore):
+    inner, backend = agentcore
+    text = "WORKDIR /workspace\nsee /workspace/x\n"
+
+    backend.write("notes.md", text)
+
+    assert (inner.root / "workspace" / "notes.md").read_text() == text
+
+
+def test_an_edit_matches_the_path_the_model_wrote(agentcore):
+    inner, backend = agentcore
+    backend.write("plot.py", "out = '/workspace/a.png'\n")
+
+    result = backend.edit("plot.py", "'/workspace/a.png'", "'/workspace/b.png'")
+
+    assert result.error is None
+    assert backend.execute("python3 -c \"exec(open('plot.py').read()); print(out)\"").output.strip() == (
+        f"{inner.root}/workspace/b.png"
+    )
+
+
+def test_an_edit_still_matches_a_file_saved_with_the_virtual_path(agentcore):
+    inner, backend = agentcore
+    (inner.root / "workspace").mkdir(exist_ok=True)
+    (inner.root / "workspace" / "old.py").write_text("out = '/workspace/a.png'\n")
+
+    result = backend.edit("old.py", "'/workspace/a.png'", "'/workspace/b.png'")
+
+    assert result.error is None
+    assert (inner.root / "workspace" / "old.py").read_text() == (
+        f"out = '{inner.root}/workspace/b.png'\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "workspace/a",
+        "./workspace/a",
+        "~/workspace/a",
+        "${HOME}/workspace/a",
+        "$(pwd)/workspace/a",
+        "/workspaces/a",
+        "/workspace.py",
+        "/data/workspace/a",
+        "https://host/workspace/a",
+        "@workspace/a",
+    ],
+)
+def test_only_the_absolute_workspace_token_is_translated(text):
+    assert translate_workspace_paths(text, "/opt/s/workspace") == text
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("/workspace", "/opt/s/workspace"),
+        ("/workspace/a.png", "/opt/s/workspace/a.png"),
+        ("'/workspace/a'", "'/opt/s/workspace/a'"),
+        ("--out=/workspace/a", "--out=/opt/s/workspace/a"),
+        ("cp a /workspace/", "cp a /opt/s/workspace/"),
+        ("PATH=/bin:/workspace/bin", "PATH=/bin:/opt/s/workspace/bin"),
+    ],
+)
+def test_the_absolute_workspace_token_points_at_the_real_directory(text, expected):
+    assert translate_workspace_paths(text, "/opt/s/workspace") == expected
+
+
+def test_the_translation_runs_once():
+    once = translate_workspace_paths("python3 /workspace/a.py", "/opt/s/workspace")
+
+    assert translate_workspace_paths(once, "/opt/s/workspace") == once
+
+
+@pytest.mark.parametrize("workspace_dir", [None, "", "/workspace"])
+def test_no_translation_where_slash_workspace_is_real_or_unknown(workspace_dir):
+    text = "python3 /workspace/a.py"
+
+    assert translate_workspace_paths(text, workspace_dir) == text
 
 
 @pytest.mark.parametrize(
@@ -138,8 +280,8 @@ def test_the_instruction_says_how_to_run_a_written_file():
         "grep -c '^workspace/a' data.txt",
         "sed -n 's#workspace/a#HIT#p' data.txt",
         "python3 -c \"import re; print(re.findall(r'workspace/(\\w+)', open('data.txt').read()))\"",
-        "echo 'Saved to workspace/out.png' /workspace/x @workspace/foo",
-        "cat <<'EOF'\nworkspace/a /workspace/b ./workspace/c $HOME `x`\nEOF",
+        "echo 'Saved to workspace/out.png' @workspace/foo",
+        "cat <<'EOF'\nworkspace/a ./workspace/c $HOME `x`\nEOF",
         "X=7; printf '%s\\n' \"a'b\" 'c\"d' '$X' \"$X\" \"it's \\\"quoted\\\"\"",
         "python3 -c \"d = [1, 2]; print(f'Dice: {d[0]}, {d[1]}')\"",
     ],
@@ -160,7 +302,7 @@ def test_the_command_text_reaches_the_shell_unchanged(agentcore, tmp_path, comma
 
 def test_a_quoted_heredoc_body_is_written_byte_for_byte(agentcore):
     inner, backend = agentcore
-    body = "path = 'workspace/a'\nroot = \"/workspace\"\ncd workspace\n"
+    body = "path = 'workspace/a'\nroot = \"$HOME\"\ncd workspace\n"
 
     backend.execute(f"cat > out.txt <<'EOF'\n{body}EOF")
 
@@ -232,6 +374,16 @@ def test_opensandbox_runs_in_the_absolute_workspace():
     argv = shlex.split(inner.commands[-1])
     assert argv[:6] == ["mkdir", "-p", "/workspace", "&&", "cd", "/workspace"]
     assert argv[-4:] == ["exec", "sh", "-c", command]
+
+
+def test_opensandbox_commands_keep_the_absolute_workspace():
+    inner = _RecordingOpenSandbox()
+    backend = prepare_workspace_layout(inner)
+    command = "python3 /workspace/count.py"
+
+    backend.execute(command)
+
+    assert shlex.split(inner.commands[-1])[-1] == command
 
 
 def test_internal_listing_commands_run_from_the_root():

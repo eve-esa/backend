@@ -840,6 +840,78 @@ def place_in_workspace(path: str, session_cwd: str = "") -> str:
     return "/workspace/" + raw.lstrip("./")
 
 
+# The file tools name the workspace ``/workspace``. Where the session root is
+# not ``/`` (AgentCore: uid without write access to ``/``), that path cannot
+# exist, so a command or a script that names it can only fail. There, and only
+# for that exact absolute token, it is pointed at the real workspace. A token
+# starts after a character that cannot end a path (``~/workspace``,
+# ``${HOME}/workspace``, ``$(pwd)/workspace`` and ``./workspace`` are other
+# directories) and ends at ``/`` or a character that cannot continue the name.
+# The real path ends in ``.../workspace`` after a path character, so a second
+# pass changes nothing.
+_VIRTUAL_WORKSPACE = "/workspace"
+_WORKSPACE_TOKEN = re.compile(r"(?<![\w.~/\-})])/workspace(?=/|(?![\w.\-]))")
+# Code the model writes and then runs. Data and prose keep their text.
+_CODE_SUFFIXES = frozenset(
+    {".py", ".ipynb", ".sh", ".bash", ".r", ".jl", ".js", ".mjs", ".ts"}
+)
+
+
+def translate_workspace_paths(text: str, workspace_dir: Optional[str]) -> str:
+    """Point the absolute token ``/workspace`` at *workspace_dir*.
+
+    Unchanged when *workspace_dir* is unknown or is ``/workspace`` itself
+    (OpenSandbox, where the path is real).
+    """
+    target = (workspace_dir or "").rstrip("/")
+    if not target or target == _VIRTUAL_WORKSPACE or _VIRTUAL_WORKSPACE not in text:
+        return text
+    return _WORKSPACE_TOKEN.sub(lambda _match: target, text)
+
+
+def _is_code(path: Any) -> bool:
+    return os.path.splitext(str(path or ""))[1].lower() in _CODE_SUFFIXES
+
+
+def _wrap_code_paths(backend: Any, workspace_dir: str) -> None:
+    """Translate ``/workspace`` in code that ``write`` and ``edit`` store.
+
+    ``edit`` translates both strings, so a search written with the virtual
+    path matches a file stored with the real one. A file saved before this
+    translation still holds ``/workspace``; when the translated search finds
+    nothing, the search is tried as written.
+    """
+    write = getattr(backend, "write", None)
+    if write is not None:
+
+        def write_code(file_path: str, content: str, *args: Any, **kwargs: Any):
+            if _is_code(file_path) and isinstance(content, str):
+                content = translate_workspace_paths(content, workspace_dir)
+            return write(file_path, content, *args, **kwargs)
+
+        backend.write = write_code
+    edit = getattr(backend, "edit", None)
+    if edit is not None:
+
+        def edit_code(
+            file_path: str, old_string: str, new_string: str, *args: Any, **kwargs: Any
+        ):
+            if not (
+                _is_code(file_path)
+                and isinstance(old_string, str)
+                and isinstance(new_string, str)
+            ):
+                return edit(file_path, old_string, new_string, *args, **kwargs)
+            old = translate_workspace_paths(old_string, workspace_dir)
+            new = translate_workspace_paths(new_string, workspace_dir)
+            result = edit(file_path, old, new, *args, **kwargs)
+            if old != old_string and getattr(result, "error", None):
+                return edit(file_path, old_string, new, *args, **kwargs)
+            return result
+
+        backend.edit = edit_code
+
+
 def _wrap_leading_path(
     method: Any, session_cwd: str, index: int, keyword: str
 ) -> Any:
@@ -863,7 +935,8 @@ def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
     where it starts. The command is one quoted argument to ``sh -c`` and is
     passed byte for byte, so its quotes, ``$``, comments and heredocs reach
     that shell unchanged. A file written as ``x`` or ``workspace/x`` runs as
-    ``x`` from there; the agent instruction says so.
+    ``x`` from there; the agent instruction says so. The caller translates
+    ``/workspace`` first (``translate_workspace_paths``).
     """
     target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
     return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
@@ -903,7 +976,9 @@ def prepare_workspace_layout(backend: Any) -> Any:
     The session root is the provider cwd when it reports one (AgentCore) and
     ``/`` otherwise (OpenSandbox stores ``/workspace/x`` as an absolute path).
     Internal commands (workspace listing, process baseline) keep running from
-    that root through ``_eve_raw_execute``.
+    that root through ``_eve_raw_execute``. Where the root is not ``/``, the
+    absolute token ``/workspace`` in a model command and in code it writes
+    names the real workspace (``translate_workspace_paths``).
     """
     if backend is None or getattr(backend, "_eve_workspace_ready", False):
         return backend
@@ -952,6 +1027,7 @@ def prepare_workspace_layout(backend: Any) -> Any:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
         def execute_in_workspace(command: str, *args: Any, **kwargs: Any):
+            command = translate_workspace_paths(command, workspace_dir)
             return execute(
                 workspace_shell_command(command, workspace_dir),
                 *args,
@@ -974,6 +1050,8 @@ def prepare_workspace_layout(backend: Any) -> Any:
                 name,
                 _wrap_leading_path(method, session_cwd, index, keyword),
             )
+    if workspace_dir and workspace_dir != _VIRTUAL_WORKSPACE:
+        _wrap_code_paths(backend, workspace_dir)
     upload = getattr(backend, "upload_files", None)
     if upload is not None:
 
