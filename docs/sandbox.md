@@ -19,6 +19,8 @@ AgentCore `sessionTimeoutSeconds` is an absolute cap. Activity does not extend i
 
 OpenSandbox `renew` sets the expiry to now plus the duration given. `destroy` kills the remote sandbox. `close` only drops the local HTTP client. A connect error whose `status_code` is 404 or 410 means the sandbox is gone. Anything else fails the turn and leaves the record.
 
+![Sandbox lifetime](assets/sandbox/lifetime.svg)
+
 ### Idle timer and replacement
 
 | Setting | Default | Meaning |
@@ -62,11 +64,17 @@ The reaper reads the deadline again under the lock. A turn that reattached betwe
 
 ### Skills and the graph backend
 
+![Skills at turn start](assets/sandbox/skills.svg)
+
+The names on the request are resolved before the sandbox is acquired. An empty list loads the packaged skills only. A packaged skill of the same name replaces the one from the database.
+
 The skills digest is the sha256 of the uploaded `(path, bytes)` list, in upload order. The same digest skips the upload. A changed digest runs `rm -rf /skills` and uploads again. AgentCore stores `/skills/...` under the session working directory, because the process cannot create a real `/skills`. The shell rewrite points `/skills` at `{cwd}/skills`.
 
-The backend passed to `compile` is a `CompositeBackend` whose default is the sandbox. `/large_tool_results/` and `/conversation_history/` stay on `StateBackend`, so those paths survive after the sandbox is destroyed. `/skills/` is not routed: the file tools and the shell both read the tree that was uploaded into the sandbox.
+The backend passed to `compile` is a `CompositeBackend` whose default is the sandbox. `/conversation_history/` stays on `StateBackend`. It is not the memory of the chat: the model searches stored messages with `search_history` and `read_history`, under the summarization limits in [Tools and limits](context-management.md#tools-and-limits). `/large_tool_results/` is an S3 route when the turn has a conversation, and a copy is mirrored into the sandbox. With no conversation that prefix stays on the sandbox. `/skills/` is not routed: the file tools and the shell both read the tree that was uploaded into the sandbox.
 
 ### Workspace
+
+![Sandbox filesystem](assets/sandbox/filesystem.svg)
 
 The session root has four sibling directories: `workspace/`, `skills/`, `artifacts/`, and `large_tool_results/`. The shell starts in `workspace/`. A file the model creates belongs there. `skills/`, `artifacts/`, and `large_tool_results/` stay beside it.
 

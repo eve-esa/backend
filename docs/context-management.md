@@ -12,6 +12,8 @@ The loop in the box runs once per model call, so all three mechanisms also apply
 
 ### The prompt the model receives
 
+![How the prompt is built](assets/memory/prompt.svg)
+
 Every model call sends a system message, an optional summary message, the kept messages of the thread, and the new message. Tool schemas travel beside the messages, not inside them. Placeholders are in braces; `…` marks text cut for this page.
 
 ```text
@@ -127,7 +129,7 @@ The user attached the following files:
 | `PINNED_CONTEXT` | Backend setting | Never during a conversation |
 | EVE prompt | `system` in `agents/graphs/react/prompts.yaml` | Never |
 | Deep addendum (files, sandbox, long conversations) | `addendum` in `agents/graphs/deep/prompts.yaml` | Never |
-| Artifact rule | `_ARTIFACT_MARKDOWN_INSTRUCTION` in `runner.py` | Never |
+| Artifact rule | Deep addendum. `runner.py` adds `_ARTIFACT_MARKDOWN_INSTRUCTION` only on a non-deep first turn | Never during a conversation |
 | Attached files block | `attached_files_block` in `runner.py`, on the human message ([Attached files](sandbox.md#attached-files)) | Each message with attachments |
 | Summary message | Mechanism 1 | Each new summary |
 | Offload stub | Mechanism 2 | Once, when the tool returns |
@@ -137,6 +139,8 @@ A summary never touches the system message. A rule that must survive goes there,
 
 ### 1. Summary + trim
 
+![When the history is summarized](assets/memory/summarization.svg)
+
 `EveSummarizationMiddleware` (agents) runs before every model call. Under the trigger it sends the thread unchanged. Over it, cheapest step first:
 
 1. Cut long `write_file` and `edit_file` arguments in the older messages to their first 20 characters plus `...(argument truncated)`.
@@ -145,6 +149,8 @@ A summary never touches the system message. A rule that must survive goes there,
 4. From now on send the summary message, then the messages from `cutoff_index` onward.
 
 ![What the deep agent's model sees](assets/memory/model-view.svg)
+
+On a deep turn the file rule is already in the deep addendum. `runner.py` adds a separate system message only on a non-deep first turn.
 
 The summarizer prompt is `summary` in `agents/graphs/deep/prompts.yaml`. Its parts:
 
@@ -177,6 +183,8 @@ While the summarizer runs, the client gets `{"type": "summarizing", "phase": "st
 
 ### 2. Large tool output
 
+![Large tool result](assets/memory/dump.svg)
+
 `EveFilesystemMiddleware` (agents) counts each tool result with tiktoken. Over the limit:
 
 - The full text is written to `/large_tool_results/{tool_call_id}`. The backend routes that prefix to S3, under `users/{user_id}/conversations/{conversation_id}/large_tool_results/`, and copies it into the sandbox so shell code can open the same path.
@@ -194,6 +202,8 @@ File tools (`ls`, `glob`, `grep`, `read_file`, `edit_file`, `write_file`, `delet
 
 ### 3. Memory search
 
+![History tools](assets/memory/history.svg)
+
 The message router stores every turn in `messages`, with the tool trace, before the agent sees it. The agent gets two tools bound to the current conversation:
 
 - `search_history(query, roles=["user", "assistant"], start, end, limit=5)` ranks the stored messages with BM25 and returns hits with `message_id`, role, timestamp and a snippet. The top hit includes the 5 messages on each side. `roles=["tool"]` searches tool results.
@@ -210,12 +220,40 @@ No model sits between the store and the agent; the tools return stored text. The
 | `ENTRY_CHARS` | 4,000 | One message is cut at this length |
 | `RESULT_CHARS` | 12,000 | Whole tool result is cut at this length, below the offload limit |
 
+### Tools and limits
+
+The model recovers what left the prompt with these tools. `/conversation_history/` is not one of them. That prefix is a Deep Agents offload on `StateBackend`, in the checkpoint `files` channel, and the shell cannot open it. The memory of this chat is the tools below. The route is described in [Sandbox](sandbox.md#skills-and-the-graph-backend).
+
+| Tool | Call it for | Limit |
+| --- | --- | --- |
+| `search_history` | A fact, number, name, or decision the summary or the recent messages dropped | 5 hits, at most 20. Snippet 300 characters. The first hit includes 5 messages on each side. `roles` defaults to `user` and `assistant`; `["tool"]` searches tool results |
+| `read_history` | The raw messages around a `message_id` from a search or an earlier read | 5 messages on each side, at most 20. One message is cut at 4,000 characters. The whole result is cut at 12,000 characters, under the offload limit, so a read is not offloaded again |
+| `read_file` | A page of `/large_tool_results/{tool_call_id}` | One page is at most `TOOL_RESULT_MAX_TOKENS` (20,000). Pass `offset` and `limit` |
+| `grep` | A search inside that file | File tools are never offloaded, so a read cannot offload again |
+
+`ls`, `glob`, `write_file`, `edit_file`, and `delete` are the other file tools. Writes, edits, and deletes under `/large_tool_results/` are refused.
+
+At the default window of 128,000 tokens the fractions are:
+
+| Limit | Setting | Default | Tokens at the default window |
+| --- | --- | --- | --- |
+| Summarize when the prompt reaches this share | `SUMMARY_TRIGGER_FRACTION` | 0.85 | 108,800 |
+| Recent tail kept verbatim | `SUMMARY_KEEP_FRACTION` | 0.10 | 12,800 |
+| Window the fractions apply to | `AGENT_CONTEXT_WINDOW_TOKENS` | `MODEL_CONTEXT_SIZE` | 128,000 |
+| Cap on the summary call | `SUMMARY_MAX_TOKENS` | 2,000 | 2,000 |
+| Older `write_file` and `edit_file` arguments longer than this are cut to their first 20 characters | `TRUNCATE_ARGS_MAX_CHARS` | 2,000 | — |
+| Tool result written to `/large_tool_results/`, and the cap on one `read_file` page | `TOOL_RESULT_MAX_TOKENS` | 20,000 | 20,000 |
+
+Under the trigger the thread is sent unchanged. Over it, the argument cut runs first. A prompt that is still over the trigger is summarized. The summary call is also told to stay within 1,500 words. `PINNED_CONTEXT` is empty unless set, and no summary rewrites it.
+
 ### Where it is stored
+
+![Where a turn is kept](assets/memory/stores.svg)
 
 | Store | Holds | Lifetime |
 | --- | --- | --- |
 | `messages` | Every turn: input, output, tool trace | Until the conversation is deleted |
-| `checkpointing_db` | The thread: messages, `_summarization_event`, files | `CHECKPOINT_RETENTION_DAYS` (30) |
+| `checkpointing_db` | The thread: messages, `_summarization_event`, files. `/conversation_history/` is in this `files` channel, not on the sandbox disk | `CHECKPOINT_RETENTION_DAYS` (30) |
 | S3 `/large_tool_results/` | Offloaded tool results | Per user and conversation prefix |
 | S3 `conversations/{id}/artifacts/` | One copy of each MCP file and each attached upload. `Artifact.key` points here. The sandbox path is `/artifacts/{id}/{filename}` | Per user and conversation. A new sandbox loads the prefix |
 | S3 `workspace/` | Files in the sandbox working directory, except `skills/`, `large_tool_results/`, and `artifacts/` | Kept for the conversation. A new sandbox loads the prefix |

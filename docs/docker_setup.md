@@ -7,7 +7,7 @@ Using Docker is useful when you want:
 - A reproducible runtime environment
 - To avoid installing Python and dependencies directly on your host
 
-You still need access to external services like **MongoDB**, **Qdrant**, and **LLM providers**, either as containers or managed services.
+Compose starts MongoDB, Redis, Keycloak, MinIO, and Mailcatcher with the backend. Qdrant and the LLM endpoints stay remote, on the URLs in `.env`. See [Environments](environments.md).
 
 ### 1. Install Docker and Docker Compose
 
@@ -139,11 +139,11 @@ docker compose ps
 
 ### 5. Access the API
 
-By default the backend should be available at:
+The published API is:
 
-- `http://localhost:8000/docs`
+- `http://localhost:8001/docs`
 
-(If you have customized ports in `docker-compose.yml` and .env, adjust the URL accordingly.)
+The process inside the container listens on port 8000. Compose maps that to **8001** on the host. A backend started with `./start.sh` on the host uses 8000 instead. See [Environments](environments.md).
 
 ### 6. Stopping and restarting
 
