@@ -3,29 +3,29 @@ uvicorn==0.54.0
 # Picked up by the UvicornWorker auto loop and HTTP parser. They used to arrive only through
 # runpod (fastapi-cli, uvicorn[standard]); without them production falls back to asyncio and h11.
 uvloop==0.23.0
-httptools==0.8.0
-fastapi==0.142.2
+httptools==0.9.0
+fastapi==0.163.1
 # AG-UI 1.0 event models and SSE encoder for the agentic stream (src/services/agui).
 ag-ui-protocol==1.0.0
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 # Hugging Face tokenizers, used to count EVE-Instruct tokens. The tokenizer
 # file is copied in by the Dockerfile; nothing downloads it at runtime.
 tokenizers==0.23.3
-langchain==1.4.9
+langchain==1.5.0
 langchain-community==0.4.2
-langchain-openai==1.6.7
+langchain-openai==1.8.0
 langchain-mcp-adapters==0.3.2
-langchain-text-splitters==1.1.2
+langchain-text-splitters==1.1.3
 langchain-classic==1.0.8
-langgraph==1.2.14
+langgraph==1.2.22
 # Deep graph dependency of eve-esa-agents[deep]. 0.7.35 needs langchain>=1.4.9
 # and langchain-core>=1.7. Provider packages stay transitive.
-deepagents==0.7.35
+deepagents==0.7.39
 # Sandbox providers. Imported only when SANDBOX_PROVIDER selects one.
 # langchain-agentcore-codeinterpreter pulls bedrock-agentcore, which needs
 # boto3>=1.43.115 (the floor further down). langchain-sandbox-opensandbox
 # 0.1.2 needs deepagents>=0.7,<0.8.
-langchain-agentcore-codeinterpreter==0.0.6
+langchain-agentcore-codeinterpreter==0.0.7
 langchain-sandbox-opensandbox==0.1.2
 # eve-esa-agents is not listed here. The image installs it from the AGENTS_REF
 # build-arg (see the Dockerfile). A dev build resolves agents main to a commit
@@ -47,21 +47,21 @@ opentelemetry-instrumentation-logging==0.66b2
 # bump (Dependabot included) merges only with tests/test_trace_tree.py green,
 # that test is the canary. opentelemetry-instrumentation-mcp stays out (issues
 # 4463 and 4447, PR 4441): the MCP client span is ours, in tool_loader.py.
-opentelemetry-instrumentation-langchain==0.62.4
+opentelemetry-instrumentation-langchain==0.63.1
 opentelemetry-semantic-conventions-ai==0.5.1
 openai>=2.53.0,<3.0.0
-langgraph-checkpoint==4.2.0
+langgraph-checkpoint==4.3.2
 langgraph-checkpoint-mongodb==0.5.1
 httpx==0.28.1
 # Imported directly (rerankers, crawler) but only ever arrived transitively, so its version floated.
 requests==2.34.2
-python-multipart==0.0.32
+python-multipart==0.0.34
 rich==13.9.4
 aiodns==4.0.4
-pycares==5.0.1
+pycares==5.2.1
 pyyaml==6.0.3
 pypdf==6.21.4
-pymongo==4.18.3
+pymongo==4.20.0
 motor==3.7.1
 PyJWT[crypto]==2.15.1
 cryptography>=43.0.0
