@@ -443,15 +443,20 @@ async def test_the_invented_host_stays_when_the_turn_captured_nothing():
 @pytest.mark.no_db
 def test_the_instruction_forbids_guessing_an_image_the_model_cannot_view():
     # U8 on dev, 2026-11-18: the read notice said the image was not attached and
-    # the model still described it from the file name.
+    # the model still described it from the file name. Dev, 2026-11-19
+    # (conversation 6afeb0196ad76994fa4768aa): with a tool on, the model never
+    # read the upload and described it from its name, so the rule no longer
+    # waits for a read notice.
     assert (
-        "tell the user you cannot see images with the current model."
+        "You see an image only when it reaches you as image content."
         in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
     assert (
-        "Do not describe the image and do not guess its content from its name "
-        "or path." in _ARTIFACT_MARKDOWN_INSTRUCTION
+        "Never describe an image you have not seen and never infer its content "
+        "from its file name, its path or the user's words: say you cannot see it "
+        "with the current model." in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
+    assert "reading it returns a notice" not in _ARTIFACT_MARKDOWN_INSTRUCTION
 
 
 @pytest.mark.no_db
@@ -476,11 +481,13 @@ def test_the_instruction_shows_made_images_without_reading_them():
 
 @pytest.mark.no_db
 def test_the_u8_sentences_are_kept_word_for_word():
+    # Updated on purpose on 2026-11-19: the rule is unconditional now.
     assert (
-        "When a file is an image and reading it returns a notice that this model "
-        "cannot view images, tell the user you cannot see images with the current "
-        "model. Do not describe the image and do not guess its content from its "
-        "name or path." in _ARTIFACT_MARKDOWN_INSTRUCTION
+        "You see an image only when it reaches you as image content. A file "
+        "name, a path, a listing, a tool result or the user's words are not the "
+        "image. Never describe an image you have not seen and never infer its "
+        "content from its file name, its path or the user's words: say you "
+        "cannot see it with the current model." in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
 
 

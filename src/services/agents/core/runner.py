@@ -1500,10 +1500,11 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "returned, do not read it: write `![ndvi.png](ndvi.png)` and the chat "
     "draws it. Never say you cannot display an image you made or a tool "
     "returned. "
-    "When a file is an image and reading it returns a notice that this model "
-    "cannot view images, tell the user you cannot see images with the current "
-    "model. Do not describe the image and do not guess its content from its "
-    "name or path."
+    "You see an image only when it reaches you as image content. A file "
+    "name, a path, a listing, a tool result or the user's words are not the "
+    "image. Never describe an image you have not seen and never infer its "
+    "content from its file name, its path or the user's words: say you "
+    "cannot see it with the current model."
 )
 
 
@@ -1910,8 +1911,11 @@ def _build_react_graph(
         except (TypeError, ValueError):
             pass
     policy_cb = on_policy if on_policy is not None else _graph_on_policy(graph_name)
+    from src.services.agents.core.image_notice import install_image_read_notice
     from src.services.agents.core.tool_args import ensure_tool_args_are_json
 
+    # A model without vision reads what an image file is and how to show it.
+    install_image_read_notice()
     llm = ensure_tool_args_are_json(llm)
     fallback_llm = ensure_tool_args_are_json(fallback_llm)
     compile_kwargs: Dict[str, Any] = {

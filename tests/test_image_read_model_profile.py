@@ -11,7 +11,7 @@ deep agent read through a fake model to see what the model receives.
 
 import struct
 import zlib
-from typing import Any, List
+from typing import Any, List, Optional
 
 import pytest
 from langchain_core.language_models import BaseChatModel
@@ -71,14 +71,16 @@ class _ReadingModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-def _read_through_deep_agent(tmp_path, path: str, profile: Any) -> ToolMessage:
+def _read_through_deep_agent(
+    tmp_path, path: str, profile: Any, data: Optional[bytes] = None
+) -> ToolMessage:
     """Run a deep agent whose model reads ``path``; return the read as the model saw it."""
     from deepagents import create_deep_agent
     from deepagents.backends.filesystem import FilesystemBackend
 
     (tmp_path / path.lstrip("/")).parent.mkdir(parents=True, exist_ok=True)
     if path.endswith(".png"):
-        (tmp_path / path.lstrip("/")).write_bytes(_png())
+        (tmp_path / path.lstrip("/")).write_bytes(data if data is not None else _png())
     else:
         (tmp_path / path.lstrip("/")).write_text("line one\nline two\n")
 
@@ -99,14 +101,17 @@ def _block_types(message: ToolMessage) -> List[str]:
 
 
 def test_an_image_read_by_a_text_only_model_names_the_image_it_cannot_see(tmp_path):
+    # The notice text itself is pinned in tests/test_image_read_notice.py.
+    from src.services.agents.core.image_notice import install_image_read_notice
+
+    install_image_read_notice()
     read = _read_through_deep_agent(
         tmp_path, IMAGE_PATH, platform_model_profile("20 - EVE-Instruct")
     )
 
     assert "image" not in _block_types(read)
-    assert read.text.startswith("[read_file: ")
-    assert IMAGE_PATH in read.text
-    assert "does not support image content (image/png)" in read.text
+    assert read.text.startswith(f"[read_file: {IMAGE_PATH}] This is an image file")
+    assert "This model cannot see image content" in read.text
 
 
 def test_a_text_read_by_a_text_only_model_is_unchanged(tmp_path):
