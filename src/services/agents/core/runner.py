@@ -1500,11 +1500,10 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "returned, do not read it: write `![ndvi.png](ndvi.png)` and the chat "
     "draws it. Never say you cannot display an image you made or a tool "
     "returned. "
-    "You see an image only when it reaches you as image content. A file "
-    "name, a path, a listing, a tool result or the user's words are not the "
-    "image. Never describe an image you have not seen and never infer its "
-    "content from its file name, its path or the user's words: say you "
-    "cannot see it with the current model."
+    "To answer about what an image shows, read the file first. If no image "
+    "content comes back, say you cannot see it with the current model. "
+    "Never describe an image from its file name, its path, a listing or the "
+    "user's words."
 )
 
 

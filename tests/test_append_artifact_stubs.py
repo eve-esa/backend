@@ -447,16 +447,19 @@ def test_the_instruction_forbids_guessing_an_image_the_model_cannot_view():
     # (conversation 6afeb0196ad76994fa4768aa): with a tool on, the model never
     # read the upload and described it from its name, so the rule no longer
     # waits for a read notice.
+    # Review of #399: a vision model must read the file first, so "cannot see"
+    # only follows a read that brought no image content back.
     assert (
-        "You see an image only when it reaches you as image content."
+        "To answer about what an image shows, read the file first. If no image "
+        "content comes back, say you cannot see it with the current model."
         in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
     assert (
-        "Never describe an image you have not seen and never infer its content "
-        "from its file name, its path or the user's words: say you cannot see it "
-        "with the current model." in _ARTIFACT_MARKDOWN_INSTRUCTION
+        "Never describe an image from its file name, its path, a listing or the "
+        "user's words." in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
     assert "reading it returns a notice" not in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "is not the image" not in _ARTIFACT_MARKDOWN_INSTRUCTION
 
 
 @pytest.mark.no_db
@@ -481,13 +484,13 @@ def test_the_instruction_shows_made_images_without_reading_them():
 
 @pytest.mark.no_db
 def test_the_u8_sentences_are_kept_word_for_word():
-    # Updated on purpose on 2026-11-19: the rule is unconditional now.
+    # Updated on purpose on 2026-11-19: read first, "cannot see" only when no
+    # image content comes back (a text-only model reads the notice: U8 kept).
     assert (
-        "You see an image only when it reaches you as image content. A file "
-        "name, a path, a listing, a tool result or the user's words are not the "
-        "image. Never describe an image you have not seen and never infer its "
-        "content from its file name, its path or the user's words: say you "
-        "cannot see it with the current model." in _ARTIFACT_MARKDOWN_INSTRUCTION
+        "To answer about what an image shows, read the file first. If no image "
+        "content comes back, say you cannot see it with the current model. "
+        "Never describe an image from its file name, its path, a listing or the "
+        "user's words." in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
 
 

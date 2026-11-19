@@ -100,10 +100,18 @@ def _block_types(message: ToolMessage) -> List[str]:
     return [block["type"] for block in message.content_blocks]
 
 
-def test_an_image_read_by_a_text_only_model_names_the_image_it_cannot_see(tmp_path):
+def test_an_image_read_by_a_text_only_model_names_the_image_it_cannot_see(
+    tmp_path, monkeypatch
+):
     # The notice text itself is pinned in tests/test_image_read_notice.py.
+    from deepagents.middleware.unsupported_content import UnsupportedContentMiddleware
+
     from src.services.agents.core.image_notice import install_image_read_notice
 
+    # Through monkeypatch, so the class is restored after the test.
+    monkeypatch.setattr(
+        UnsupportedContentMiddleware, "_replace", UnsupportedContentMiddleware._replace
+    )
     install_image_read_notice()
     read = _read_through_deep_agent(
         tmp_path, IMAGE_PATH, platform_model_profile("20 - EVE-Instruct")
