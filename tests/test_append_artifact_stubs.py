@@ -340,7 +340,7 @@ async def test_links_inside_code_are_left_as_written(turn_context):
 
 
 @pytest.mark.asyncio
-async def test_citation_offsets_survive_the_three_rewrite_passes(turn_context):
+async def test_citation_offsets_survive_every_rewrite_pass(turn_context):
     from src.services.sources.citations import (
         CitationRewriter,
         SourceRegistry,
@@ -352,6 +352,7 @@ async def test_citation_offsets_survive_the_three_rewrite_passes(turn_context):
     rewriter = CitationRewriter(registry)
     streamed = (
         "Map [S1]. "
+        f"![k.png(/artifacts/{_TURN_ARTIFACT_ID}/k.png) open [S1]. "
         "![m](https://storage.googleapis.com/b/artifacts/"
         f"{_TURN_ARTIFACT_ID}/m.png) fact [S1]. "
         "`![x](ndvi.png)` [S1] "
@@ -359,14 +360,14 @@ async def test_citation_offsets_survive_the_three_rewrite_passes(turn_context):
         "![n](ndvi.png) last [S1]."
     )
     text = rewriter.feed(streamed) + rewriter.flush()
-    assert text.count("[1]") == 5
+    assert text.count("[1]") == 6
 
     passes: list = []
     answer = await rewrite_answer_file_links(text, passes)
 
-    assert len(passes) == 3 and all(passes)
+    assert len(passes) == 4 and all(passes)
     assert rewriter.remap(answer, passes) == 0
-    assert marker_spans(answer, rewriter.citations()) == ["[1]"] * 5
+    assert marker_spans(answer, rewriter.citations()) == ["[1]"] * 6
 
 
 # U7 on dev, 2026-11-18 20:45 UTC (dummy_image): the model wrapped the id of
@@ -837,3 +838,99 @@ def test_nothing_is_appended_without_a_turn():
     from src.services.agents.core.runner import append_unreferenced_turn_images
 
     assert append_unreferenced_turn_images(_DUMMY_IMAGE_ANSWER) == _DUMMY_IMAGE_ANSWER
+
+
+# Blablador streams Mistral Large with every ``]`` removed when tools are
+# bound. Dev, 2026-11-19, conversation 6afec2ca39a0d773c45aa7b7.
+
+_SEVERITY_ID = "6afec33639a0d773c45aa7c1"
+_CSV_ID = "6afec33739a0d773c45aa7c4"
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_link_that_lost_its_bracket_is_repaired(caplog):
+    caplog.set_level(logging.INFO)
+
+    answer = await rewrite_answer_file_links(
+        f"- ![severity_map.png(/artifacts/{_SEVERITY_ID}/severity_map.png)\n"
+        f"- Full data: [recovery_2018-07-23.csv(/artifacts/{_CSV_ID}/recovery_2018-07-23.csv)"
+    )
+
+    assert answer == (
+        f"- ![severity_map.png](/artifacts/{_SEVERITY_ID})\n"
+        f"- Full data: [recovery_2018-07-23.csv](/artifacts/{_CSV_ID})"
+    )
+    assert "markdown.label_closed count=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_image_that_lost_its_bracket_is_published(
+    dummy_image_turn,
+):
+    dummy_image_turn.sandbox_backend = _WorkspaceSandbox(
+        {"recovery_crop_center.png": b"\x89PNG\r\n\x1a\ncrop"}
+    )
+
+    answer = await rewrite_answer_file_links(
+        "**Center crop:**\n![recovery_crop_center.png(recovery_crop_center.png)"
+    )
+
+    assert answer == (
+        "**Center crop:**\n"
+        "![recovery_crop_center.png](/conversations/c1/workspace/recovery_crop_center.png)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_title_stays_when_the_bracket_is_repaired():
+    answer = await rewrite_answer_file_links(
+        f'![pic.png(/artifacts/{_SEVERITY_ID} "MCP: effis/compute_metrics")'
+    )
+
+    assert answer == f'![pic.png](/artifacts/{_SEVERITY_ID} "MCP: effis/compute_metrics")'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "written",
+    [
+        "Use items[0 and the next one.",
+        "As in [see note (a) above.",
+        "Ratio [x (y) per pixel.",
+        "Run `![x.png(x.png)` to embed it.",
+        "```\n![x.png(x.png)\n```",
+    ],
+)
+async def test_prose_and_code_without_a_link_stay_as_written(written, caplog):
+    caplog.set_level(logging.INFO)
+
+    assert await rewrite_answer_file_links(written) == written
+    assert "markdown.label_closed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_whole_link_is_not_touched_by_the_bracket_repair(caplog):
+    caplog.set_level(logging.INFO)
+    written = "[guide](https://example.com) and ![chart](https://example.com/c.png)"
+
+    assert await rewrite_answer_file_links(written) == written
+    assert "markdown.label_closed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_offsets_after_a_repaired_link_follow_every_pass():
+    from src.services.sources.citations import shift_offset
+
+    written = (
+        f"![severity_map.png(/artifacts/{_SEVERITY_ID}/severity_map.png) "
+        "shows the burn [1]."
+    )
+    passes: list = []
+
+    answer = await rewrite_answer_file_links(written, passes)
+
+    at = written.index("[1]")
+    for edits in passes:
+        at = shift_offset(at, edits)
+    assert answer[at : at + 3] == "[1]"
+    assert answer.startswith(f"![severity_map.png](/artifacts/{_SEVERITY_ID})")
