@@ -49,6 +49,7 @@ async def ensure_indexes() -> None:
     user_custom_models = get_collection("user_custom_models")
     catalog_platform_models = get_collection("catalog_platform_models")
     catalog_providers = get_collection("catalog_providers")
+    model_context_windows = get_collection("model_context_windows")
     users = get_collection("users")
     external_identities = get_collection("external_identities")
     messages = get_collection("messages")
@@ -196,6 +197,12 @@ async def ensure_indexes() -> None:
         catalog_providers,
         [("enabled", 1), ("sort_order", 1)],
         name="catalog_providers_enabled_sort",
+    )
+    await _create_index(
+        model_context_windows,
+        [("base_url", 1), ("model_name", 1)],
+        name="model_context_windows_endpoint_model",
+        unique=True,
     )
 
     # Identity provider accounts. The unique compound index is not an

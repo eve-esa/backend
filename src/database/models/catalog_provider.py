@@ -1,4 +1,4 @@
-from typing import ClassVar, List
+from typing import ClassVar, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,10 @@ class CatalogProviderModelEntry(BaseModel):
     display_name: str = Field(..., description="User-facing model label")
     model_name: str = Field(
         ..., description="Provider API model identifier sent to the upstream API"
+    )
+    context_window: Optional[int] = Field(
+        default=None,
+        description="Token window when the provider's /models does not report one",
     )
     enabled: bool = Field(default=True, description="Whether the model is selectable")
 

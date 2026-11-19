@@ -136,6 +136,7 @@ async def ensure_provider_catalog_seeded() -> None:
                     catalog_model_id=model["id"],
                     display_name=model["display_name"],
                     model_name=model["model_name"],
+                    context_window=model.get("context_window"),
                     enabled=True,
                 )
                 for model in item.get("models", [])

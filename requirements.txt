@@ -8,6 +8,9 @@ fastapi==0.142.2
 # AG-UI 1.0 event models and SSE encoder for the agentic stream (src/services/agui).
 ag-ui-protocol==1.0.0
 python-dotenv==1.2.3
+# Hugging Face tokenizers, used to count EVE-Instruct tokens. The tokenizer
+# file is copied in by the Dockerfile; nothing downloads it at runtime.
+tokenizers==0.23.3
 langchain==1.4.9
 langchain-community==0.4.2
 langchain-openai==1.6.7
