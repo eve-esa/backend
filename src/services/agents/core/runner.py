@@ -93,6 +93,12 @@ from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
 )
+from src.services.agents.core.repeat_guard import (
+    END_NOTE as REPEAT_END_NOTE,
+    install_builtin_tool_guard,
+    reset_tool_repeat_context,
+    set_tool_repeat_context,
+)
 from src.services.mcp.retrieval_context import (
     get_retrieval_context,
     reset_retrieval_context,
@@ -233,6 +239,19 @@ def _final_answer_text(
                 _strip_text_tool_calls(_content_text(msg.content)), handles
             )
     return ""
+
+
+def _update_has_tool_result(update: Any) -> bool:
+    """Whether a graph ``updates`` payload carries a tool result (a tools step)."""
+    if not isinstance(update, dict):
+        return False
+    for node_output in update.values():
+        msgs = node_output.get("messages", []) if isinstance(node_output, dict) else []
+        if not isinstance(msgs, list):
+            msgs = [msgs]
+        if any(getattr(m, "type", None) == "tool" for m in msgs):
+            return True
+    return False
 
 
 def _mark_empty_answer(span: Any) -> None:
@@ -1915,6 +1934,8 @@ def _build_react_graph(
 
     # A model without vision reads what an image file is and how to show it.
     install_image_read_notice()
+    # The deep graph's built-in tools refuse a call repeated in the turn.
+    install_builtin_tool_guard()
     llm = ensure_tool_args_are_json(llm)
     fallback_llm = ensure_tool_args_are_json(fallback_llm)
     compile_kwargs: Dict[str, Any] = {
@@ -2827,6 +2848,8 @@ async def generate_answer_agentic(
         user_id=user_id, conversation_id=conversation_id
     )
     _retrieval_ctx, retrieval_token = set_retrieval_context()
+    # Identical tool calls are counted per turn, from zero.
+    _repeat_guard, repeat_token = set_tool_repeat_context()
     endpoint_metadata: Optional[Dict[str, Any]] = None
     agent_graph_type: Optional[str] = None
     sandbox_session: Any = None
@@ -3029,6 +3052,12 @@ async def generate_answer_agentic(
                                 raw_msgs.append(msg)
                             if latency_key is not None:
                                 latency_map[latency_key] = step_latency_s
+                        if _repeat_guard.end_requested and _update_has_tool_result(
+                            update
+                        ):
+                            # Refused tools called again after the stop text:
+                            # the turn ends with the answer so far and a note.
+                            break
                 except Exception as exc:
                     graph_exc = exc
                 # While the root is open: a turn that ends with nothing to show
@@ -3087,6 +3116,17 @@ async def generate_answer_agentic(
                 _final_answer_text(all_messages, handle_registry)
             )
         )
+        if _repeat_guard.end_requested:
+            logger.warning(
+                "tool.repeat_turn_ended graph=%s hard_refusals=%d",
+                agent_graph_type,
+                _repeat_guard.hard_refusals,
+            )
+            final_answer = (
+                f"{final_answer.rstrip()}\n\n{REPEAT_END_NOTE}"
+                if final_answer.strip()
+                else REPEAT_END_NOTE
+            )
         if is_empty_answer(final_answer, artifact_ctx.collected_artifact_ids):
             # The router persists the empty_answer marker from the same check.
             final_answer = ""
@@ -3162,6 +3202,7 @@ async def generate_answer_agentic(
             sandbox_lease.session.start_workspace_sync(user_id, conversation_id or "")
         await release_sandbox(sandbox_lease)
         await close_sandbox(sandbox_session)
+        reset_tool_repeat_context(repeat_token)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 
@@ -3229,6 +3270,8 @@ async def generate_answer_agentic_stream_helper(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
     _retrieval_ctx, retrieval_token = set_retrieval_context()
+    # Identical tool calls are counted per turn, from zero.
+    _repeat_guard, repeat_token = set_tool_repeat_context()
     # The invoke_agent root span opens around the graph run below. Until then
     # the request's own trace (same trace id) answers; None with telemetry off.
     root_span: Any = None
@@ -3700,6 +3743,7 @@ async def generate_answer_agentic_stream_helper(
             return events
 
         graph_exc: Optional[Exception] = None
+        repeat_loop_ended = False
         try:
             with agent_span(
                 "agentic_generation_stream",
@@ -3843,6 +3887,13 @@ async def generate_answer_agentic_stream_helper(
                                     step_frames.annotate_trace_calls(agent_entry)
                                     for event in call_events:
                                         yield event
+                            if _repeat_guard.end_requested and _update_has_tool_result(
+                                payload
+                            ):
+                                # The model kept calling refused tools after the
+                                # stop text: the turn ends here, answered below.
+                                repeat_loop_ended = True
+                                break
                             continue
 
                         chunk, metadata = payload
@@ -3918,6 +3969,18 @@ async def generate_answer_agentic_stream_helper(
                         )
                 for event in _flush_turn_buffer_to_events():
                     yield event
+                if repeat_loop_ended:
+                    # The answer so far plus a short note, through the normal
+                    # end: never an empty answer and never an error row.
+                    logger.warning(
+                        "tool.repeat_turn_ended graph=%s hard_refusals=%d",
+                        agent_graph_type,
+                        _repeat_guard.hard_refusals,
+                    )
+                    paragraph_pending = True
+                    turn_buffer.append(REPEAT_END_NOTE)
+                    for event in _flush_turn_buffer_to_events():
+                        yield event
                 # Still inside the root: the held text goes out first, so the
                 # check reads the answer the user saw and the row stores (the
                 # file link rewrite below never empties it). A
@@ -4167,6 +4230,7 @@ async def generate_answer_agentic_stream_helper(
         if sandbox_lease is not None:
             sandbox_lease.session.start_workspace_sync(user_id, conversation_id)
         await release_sandbox(sandbox_lease)
+        reset_tool_repeat_context(repeat_token)
         reset_retrieval_context(retrieval_token)
         reset_artifact_context(artifact_token)
 

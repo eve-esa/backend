@@ -17,6 +17,11 @@ import re
 import time
 from typing import Any, Optional, Tuple
 
+from src.services.agents.core.repeat_guard import (
+    begin_tool_call,
+    finish_tool_call,
+    mark_refused_span,
+)
 from src.utils.error_logger import get_error_logger, redact_secrets
 
 try:
@@ -231,6 +236,45 @@ class ErrorLoggingInterceptor:
                 "tool": tool_name,
                 "server": server_name,
             },
+        )
+
+
+class RepeatGuardInterceptor:
+    """Refuses an MCP tool call that keeps returning the same result in this turn.
+
+    Counts through :func:`~src.services.agents.core.repeat_guard.begin_tool_call`,
+    keyed by the graph facing name (``<server>_<tool>``) and the arguments,
+    and records each result (an error or a raised exception included), so a
+    call whose result changes is never refused. A refused call never reaches
+    the server: the model reads the refusal as a plain text result (not
+    ``isError``, which the adapter would raise). Outside an agentic turn
+    there is no guard and every call runs.
+    """
+
+    async def __call__(
+        self,
+        request: "MCPToolCallRequest",
+        handler: Any,
+    ) -> "MCPToolCallResult":
+        tool_name = getattr(request, "name", "unknown")
+        server_name = getattr(request, "server_name", None)
+        graph_name = f"{server_name}_{tool_name}" if server_name else tool_name
+        refusal, ticket = begin_tool_call(
+            graph_name, getattr(request, "args", None) or {}
+        )
+        if refusal is None:
+            try:
+                result = await handler(request)
+            except Exception as exc:
+                finish_tool_call(ticket, exc)
+                raise
+            finish_tool_call(ticket, result)
+            return result
+        mark_refused_span(graph_name)
+        from mcp.types import CallToolResult, TextContent
+
+        return CallToolResult(
+            content=[TextContent(type="text", text=refusal)], isError=False
         )
 
 
