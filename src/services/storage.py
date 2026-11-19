@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Chunk size used when proxy-streaming an object back to the client.
 STREAM_CHUNK_SIZE = 64 * 1024
 
+# Each parallel GetObject holds one pooled connection; botocore's default of 10
+# discards connections ("Connection pool is full") at 24 parallel artifact reads.
+S3_MAX_POOL_CONNECTIONS = 50
+
 # Error codes S3 and MinIO use for "the key isn't there". S3 answers GetObject
 # with NoSuchKey, but a bucket the credentials can't enumerate answers 403-as-404
 # (AccessDenied is deliberately not treated as missing), and HeadObject-style
@@ -167,26 +171,6 @@ def sniff_artifact_type(
     return None
 
 
-def _tag_set(tagging: str) -> list[dict[str, str]]:
-    """Turn a PutObject ``Tagging`` query string into a TagSet.
-
-    ``kind=tool-result`` becomes ``[{"Key": "kind", "Value": "tool-result"}]``.
-    Empty parts are dropped. The object write does not depend on this parse.
-    """
-    from urllib.parse import unquote_plus
-
-    tags: list[dict[str, str]] = []
-    for part in tagging.split("&"):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        key = unquote_plus(key).strip()
-        if not key:
-            continue
-        tags.append({"Key": key, "Value": unquote_plus(value)})
-    return tags
-
-
 def guess_extension_from_content_type(content_type: Optional[str]) -> str:
     """Guess a filename extension (without the leading dot) from a MIME type.
 
@@ -224,6 +208,7 @@ class StorageService:
                     connect_timeout=S3_CONNECT_TIMEOUT_S,
                     read_timeout=S3_READ_TIMEOUT_S,
                     retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
+                    max_pool_connections=S3_MAX_POOL_CONNECTIONS,
                 ),
             )
         return self._s3
@@ -242,54 +227,18 @@ class StorageService:
         base = f"users/{user_id}/{clean_prefix}" if clean_prefix else f"users/{user_id}"
         return f"{base}/{uuid.uuid4().hex}.{clean_ext}"
 
-    def put_object_sync(
-        self,
-        key: str,
-        body: bytes,
-        content_type: str,
-        tagging: Optional[str] = None,
-    ) -> None:
-        """Store an object. ``tagging`` is an S3 ``Tagging`` query string.
-
-        The bytes go up first, with no ``Tagging`` argument. Tags are a second
-        call. A bucket policy that rejects ``PutObjectTagging`` must not fail
-        the write: the warning is logged and the object stays.
-        """
+    def put_object_sync(self, key: str, body: bytes, content_type: str) -> None:
+        """Store an object."""
         self._client().put_object(
             Bucket=S3_BUCKET_NAME,
             Key=key,
             Body=body,
             ContentType=content_type,
         )
-        if not tagging:
-            return
-        try:
-            tag_set = _tag_set(tagging)
-            if not tag_set:
-                return
-            self._client().put_object_tagging(
-                Bucket=S3_BUCKET_NAME,
-                Key=key,
-                Tagging={"TagSet": tag_set},
-            )
-        except Exception:
-            logger.warning("storage.tagging_failed key=%s", key, exc_info=True)
 
-    async def put_object(
-        self,
-        key: str,
-        body: bytes,
-        content_type: str,
-        tagging: Optional[str] = None,
-    ) -> None:
-        """Store an object in the bucket.
-
-        Tagging uses the sync path: a rejected tag call logs a warning and
-        this write still succeeds.
-        """
-        await run_in_threadpool(
-            self.put_object_sync, key, body, content_type, tagging
-        )
+    async def put_object(self, key: str, body: bytes, content_type: str) -> None:
+        """Store an object in the bucket."""
+        await run_in_threadpool(self.put_object_sync, key, body, content_type)
 
     def exists_sync(self, key: str) -> bool:
         """True when ``HeadObject`` finds ``key``.
