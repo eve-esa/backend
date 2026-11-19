@@ -8,10 +8,13 @@ reads the chart it just saved concludes from that text that it cannot show
 the chart, and says so next to the rendered image (dev, 2026-11-19).
 
 The notice built here says what is true and what to do: the model cannot see
-the image, must not describe it, and can still show it with markdown the
-answer link rewrite turns into a link the chat loads (a workspace file
-relative to the workspace, an artifact by its ``/artifacts/{id}/{name}``
-path). Only image blocks of a ``read_file`` result change; every other block
+the image and must not describe it. For an image the agent wrote in its
+workspace it adds how to show it, with markdown the answer link rewrite turns
+into a link the chat loads (relative to the workspace). An upload or an
+artifact (anything under an ``artifacts`` directory) is never offered back:
+the user already has it, tool images are appended by the answer net, and a
+model told it may show an upload answered with the upload alone (U8, dev,
+2026-11-19). Only image blocks of a ``read_file`` result change; every other block
 keeps the deepagents placeholder. A model whose profile takes images never
 reaches this code. The thread keeps the image block, so the notice is built
 again on every model call and nothing is stored.
@@ -42,9 +45,10 @@ _EXPECTED_PARAMETERS = ("self", "block", "message")
 # One warning per process when the install skips.
 _SKIP_LOGGED = False
 
-# ``/artifacts/{id}/{name}``: the only artifact path the answer rewrite
-# (``_ARTIFACT_MARKDOWN`` in runner.py) turns into a chat link.
-_ARTIFACT_PATH = re.compile(r"/artifacts/[0-9a-fA-F]{24}/[^/]+")
+# An ``artifacts`` directory anywhere in the path: the uploads and artifacts
+# tree beside the workspace (``/artifacts``, ``<root>/artifacts``), the same
+# tree as the model may name it (``artifacts/...``, ``workspace/artifacts/...``).
+_ARTIFACTS_DIR = re.compile(r"(?:^|/)artifacts(?:/|$)")
 # A file name is user or model text inside an instruction: no line breaks,
 # no markdown or tag syntax, bounded length.
 _LABEL_DROP = re.compile(r"[`\[\]()<>]")
@@ -88,15 +92,12 @@ def markdown_target(path: str) -> Optional[str]:
     ``_workspace_file``). deepagents passes a bare ``ndvi.png`` as
     ``/ndvi.png`` and the sandbox reads it from the workspace
     (``place_in_workspace``), so that path is read the same way. A target is
-    kept only when publishing it links the same file. An artifact is
-    linked only as ``/artifacts/{24 hex id}/{name}``. Anything else: ``None``.
+    kept only when publishing it links the same file. A path under an
+    ``artifacts`` directory (an upload or an artifact) is never a target.
+    Anything else: ``None``.
     """
     raw = str(path or "").strip()
-    if not raw or ".." in raw.split("/"):
-        return None
-    if raw.startswith("/artifacts/"):
-        if _ARTIFACT_PATH.fullmatch(raw):
-            return urllib.parse.quote(raw, safe="/")
+    if not raw or ".." in raw.split("/") or _ARTIFACTS_DIR.search(raw):
         return None
     # What the sandbox read first, then the path as written (a real session
     # path whose root this process has not seen).
