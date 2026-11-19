@@ -1496,6 +1496,10 @@ _ARTIFACT_MARKDOWN_INSTRUCTION = (
     "`/workspace/ndvi.png`. "
     "Never put a scheme or a host in front of a path. "
     "There is no display tool. Do not call display. "
+    "Showing an image needs no vision. To show an image you made or a tool "
+    "returned, do not read it: write `![ndvi.png](ndvi.png)` and the chat "
+    "draws it. Never say you cannot display an image you made or a tool "
+    "returned. "
     "When a file is an image and reading it returns a notice that this model "
     "cannot view images, tell the user you cannot see images with the current "
     "model. Do not describe the image and do not guess its content from its "
@@ -1560,6 +1564,40 @@ _ARTIFACT_MARKDOWN = re.compile(
 )
 
 
+def _turn_artifact_name(artifact_id: str) -> Optional[str]:
+    """Filename of an artifact a tool returned in this turn, if any."""
+    from src.services.mcp.artifact_context import get_artifact_context
+
+    ctx = get_artifact_context()
+    files = getattr(ctx, "collected_artifact_files", None) or {}
+    wanted = artifact_id.lower()
+    return next((n for n, i in files.items() if str(i).lower() == wanted), None)
+
+
+def _turn_artifact_type(artifact_id: str) -> Optional[str]:
+    """Stored content type of an artifact of this turn, if the turn has it."""
+    from src.services.mcp.artifact_context import get_artifact_context
+
+    ctx = get_artifact_context()
+    types = getattr(ctx, "collected_artifact_types", None) or {}
+    wanted = artifact_id.lower()
+    return next((t for i, t in types.items() if str(i).lower() == wanted), None)
+
+
+def _turn_artifact_label(label: str, artifact_id: str) -> str:
+    """``label`` with the ``!`` when this turn stored the artifact as an image.
+
+    Only the stored type decides, never the name the model typed after the
+    id. An id this turn did not store keeps the label as written.
+    """
+    from src.services.agents.core.workspace import image_label
+
+    content_type = _turn_artifact_type(artifact_id)
+    if content_type is None:
+        return label
+    return image_label(label, None, content_type)
+
+
 def _markdown_paths_to_artifact_urls(
     answer: str, edits: Optional[List[Edit]] = None
 ) -> str:
@@ -1572,7 +1610,8 @@ def _markdown_paths_to_artifact_urls(
 
     def replace(match: re.Match) -> str:
         artifact_id = match.group(2)
-        repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        label = _turn_artifact_label(match.group(1), artifact_id)
+        repaired = f"{label}(/artifacts/{artifact_id})"
         original = match.group(0)
         if original != repaired:
             logger.info(
@@ -1646,7 +1685,8 @@ def _links_to_turn_artifact_urls(
             artifact_id = files.get(name) if name else None
         if artifact_id is None:
             return match.group(0)
-        repaired = f"{match.group(1)}(/artifacts/{artifact_id})"
+        label = _turn_artifact_label(match.group(1), artifact_id)
+        repaired = f"{label}(/artifacts/{artifact_id})"
         if repaired == match.group(0):
             return repaired
         # The id only: the original link is model text.
@@ -1695,8 +1735,11 @@ async def rewrite_answer_file_links(
     rewritten before the answer is stored. A host wrapped around the same id,
     such as ``storage.googleapis.com/.../artifacts/{id}/file``, is rewritten
     in place, and so is any host around the id of an artifact this turn
-    stored. A workspace path is published the same way. An artifact the
-    answer never mentions stays out of the answer.
+    stored. A workspace path is published the same way. A plain link this
+    rewrite points at an image file gains the ``!`` so the chat draws it.
+    An artifact the answer never mentions stays out of the answer here; the
+    normal completion path adds a tool image through
+    :func:`append_unreferenced_turn_images`.
 
     A link inside inline code or a fenced block is an example the model
     quotes and stays as written: the passes run on a copy where code is
@@ -1726,6 +1769,86 @@ async def rewrite_answer_file_links(
     if passes is not None:
         passes.extend(rewrite_passes)
     return text
+
+
+# At most this many tool images are appended to one answer.
+_MAX_APPENDED_IMAGES = 4
+
+# An image embed in markdown, read on text with code blanked.
+_IMAGE_EMBED = re.compile(r"!\[[^\]]*]\(")
+
+
+def _close_open_fence(text: str) -> str:
+    """``text`` with a closing fence when it ends inside a fenced code block."""
+    last = None
+    for last in _FENCED_CODE.finditer(text):
+        pass
+    if last is None or last.end() != len(text):
+        return text
+    fence = last.group(1)
+    closing = re.compile(rf" {{0,3}}{re.escape(fence)}[`~]*[ \t]*")
+    lines = last.group(0).split("\n")
+    if len(lines) > 1 and closing.fullmatch(lines[-1]):
+        return text
+    return f"{text}\n{fence}"
+
+
+def append_unreferenced_turn_images(answer: str) -> str:
+    """Append the images a tool returned to show when the answer shows none.
+
+    A model may announce "Here is the image:" and leave the markdown out, so
+    nothing renders although the turn holds the artifact. The rule is narrow
+    on purpose, so only pictures the turn produced for the user are added:
+
+    - only an artifact whose stub reached the model as a markdown line, that
+      is, a tool returned it to show; a file folded into the tool's JSON
+      ``path`` is data for the next step and never appended;
+    - only the raster types the chat draws, by the stored content type,
+      never by the name;
+    - nothing when the answer, outside code, already embeds an image: the
+      model chose what to show (a chart drawn from fetched tiles, or a tool
+      image copied to the workspace), so inputs and copies stay out;
+    - nothing whose id the answer already names outside code;
+    - at most ``_MAX_APPENDED_IMAGES``, in the order the tools returned them.
+
+    A blank answer gets the images too. Called on the normal completion path
+    only, after :func:`rewrite_answer_file_links`, so every link it repaired
+    already names its id. Stop, timeout and error keep the answer as streamed.
+    """
+    from src.services.mcp.artifact_context import get_artifact_context
+    from src.services.mcp.artifact_ingestion import artifact_markdown_line
+    from src.services.storage import INLINE_IMAGE_CONTENT_TYPES
+
+    ctx = get_artifact_context()
+    shown = list(getattr(ctx, "shown_artifact_ids", None) or [])
+    if not shown:
+        return answer
+    prose = _blank(answer or "", _code_regions(answer or "")).lower()
+    if _IMAGE_EMBED.search(prose):
+        return answer
+    lines: List[str] = []
+    for artifact_id in dict.fromkeys(str(i) for i in shown):
+        if len(lines) >= _MAX_APPENDED_IMAGES:
+            break
+        if artifact_id.lower() in prose:
+            continue
+        content_type = _turn_artifact_type(artifact_id)
+        if content_type not in INLINE_IMAGE_CONTENT_TYPES:
+            continue
+        lines.append(
+            artifact_markdown_line(
+                artifact_id=artifact_id,
+                filename=_turn_artifact_name(artifact_id),
+                content_type=content_type,
+                provenance=False,
+            )
+        )
+    if not lines:
+        return answer
+    logger.info("artifact.image_appended count=%d", len(lines))
+    body = _close_open_fence((answer or "").rstrip())
+    images = "\n\n".join(lines)
+    return f"{body}\n\n{images}" if body else images
 
 
 # ─── Graph compile helpers ────────────────────────────────────────────────────
@@ -2956,8 +3079,10 @@ async def generate_answer_agentic(
             fallback,
         ) = await _run_graph(graph)
 
-        final_answer = await rewrite_answer_file_links(
-            _final_answer_text(all_messages, handle_registry)
+        final_answer = append_unreferenced_turn_images(
+            await rewrite_answer_file_links(
+                _final_answer_text(all_messages, handle_registry)
+            )
         )
         if is_empty_answer(final_answer, artifact_ctx.collected_artifact_ids):
             # The router persists the empty_answer marker from the same check.
@@ -3825,7 +3950,7 @@ async def generate_answer_agentic_stream_helper(
 
         stream_end = time.perf_counter()
         gen_latency = stream_end - gen_start
-        answer = await _rewrite_file_links()
+        answer = append_unreferenced_turn_images(await _rewrite_file_links())
         # Whitespace, or a text tool call the turn buffer dropped, and no
         # artifact: the user got nothing, so the turn is a failed one.
         empty_answer = is_empty_answer(answer, _collected_artifact_ids())

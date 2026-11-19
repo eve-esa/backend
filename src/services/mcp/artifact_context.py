@@ -37,6 +37,13 @@ class ArtifactRequestContext:
     # rewrites that link to ``/artifacts/{id}``. Names are unique within the
     # turn: the interceptor gives a repeated name a ``-2`` suffix.
     collected_artifact_files: Dict[str, str] = field(default_factory=dict)
+    # Stored content type of each artifact of this turn, by id. The runner
+    # draws a link as an image only for the raster types the chat embeds.
+    collected_artifact_types: Dict[str, str] = field(default_factory=dict)
+    # Ids whose stub reached the model as a markdown line: files a tool
+    # returned to show. A file folded into the tool's JSON ``path`` is data
+    # for the next step and is not listed.
+    shown_artifact_ids: List[str] = field(default_factory=list)
     # The live sandbox, set by the runner once the turn has one. The
     # interceptor uploads each new MCP file there. None when the turn has
     # no sandbox. Not set in ``set_artifact_context``: the sandbox is

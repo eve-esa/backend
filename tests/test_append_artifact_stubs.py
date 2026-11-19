@@ -187,6 +187,7 @@ def turn_context(monkeypatch):
     try:
         ctx.collected_artifact_ids.append(_TURN_ARTIFACT_ID)
         ctx.collected_artifact_files["get_sample_image-1.png"] = _TURN_ARTIFACT_ID
+        ctx.collected_artifact_types[_TURN_ARTIFACT_ID] = "image/png"
         ctx.sandbox_backend = _WorkspaceSandbox(
             {"ndvi.png": b"\x89PNG\r\n\x1a\nndvi"}
         )
@@ -223,7 +224,8 @@ async def test_an_artifacts_path_without_the_id_becomes_its_artifact_url(
     )
 
     assert answer == (
-        f"![img](/artifacts/{_TURN_ARTIFACT_ID}) [img](/artifacts/{_TURN_ARTIFACT_ID})"
+        # A plain link to a tool image is drawn as an image.
+        f"![img](/artifacts/{_TURN_ARTIFACT_ID}) ![img](/artifacts/{_TURN_ARTIFACT_ID})"
     )
 
 
@@ -371,6 +373,7 @@ def u7_turn(turn_context):
     ctx, store = turn_context
     ctx.collected_artifact_ids.append(_U7_ARTIFACT_ID)
     ctx.collected_artifact_files["get_sample_image-1.png"] = _U7_ARTIFACT_ID
+    ctx.collected_artifact_types[_U7_ARTIFACT_ID] = "image/png"
     return ctx, store
 
 
@@ -402,7 +405,8 @@ async def test_any_scheme_and_host_around_a_turn_artifact_id_is_rewritten(
 ):
     answer = await rewrite_answer_file_links(f"see [file]({target}) here")
 
-    assert answer == f"see [file](/artifacts/{_U7_ARTIFACT_ID}) here"
+    # The artifact is an image, so the plain link is drawn as one.
+    assert answer == f"see ![file](/artifacts/{_U7_ARTIFACT_ID}) here"
 
 
 @pytest.mark.asyncio
@@ -438,3 +442,378 @@ def test_the_instruction_forbids_guessing_an_image_the_model_cannot_view():
         "Do not describe the image and do not guess its content from its name "
         "or path." in _ARTIFACT_MARKDOWN_INSTRUCTION
     )
+
+
+@pytest.mark.no_db
+def test_the_instruction_shows_made_images_without_reading_them():
+    # Dev, 2026-11-19: after #393 the model read ndvi.png, got the cannot-view
+    # notice and answered with a plain link and "I cannot display the image".
+    assert "Showing an image needs no vision." in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert (
+        "To show an image you made or a tool returned, do not read it: write "
+        "`![ndvi.png](ndvi.png)`" in _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
+    # Scoped: a blanket "never say you cannot display a file" next to the U8
+    # rule may lead the model to show a user's upload back and caption it.
+    assert (
+        "Never say you cannot display an image you made or a tool returned."
+        in _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
+    assert "Never say you cannot display a file." not in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "you can still show the image" not in _ARTIFACT_MARKDOWN_INSTRUCTION
+    assert "\u2014" not in _ARTIFACT_MARKDOWN_INSTRUCTION
+
+
+@pytest.mark.no_db
+def test_the_u8_sentences_are_kept_word_for_word():
+    assert (
+        "When a file is an image and reading it returns a notice that this model "
+        "cannot view images, tell the user you cannot see images with the current "
+        "model. Do not describe the image and do not guess its content from its "
+        "name or path." in _ARTIFACT_MARKDOWN_INSTRUCTION
+    )
+
+
+# Dev, 2026-11-19 (conversations 6afea68dfaf70660d4dad8e1 and two more): the
+# chart was saved, but a plain link draws nothing.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    ["/conversations/c1/workspace/ndvi.png", "ndvi.png", "/workspace/ndvi.png"],
+)
+async def test_a_plain_link_to_a_workspace_image_becomes_an_image(
+    turn_context, target
+):
+    answer = await rewrite_answer_file_links(
+        f"See [Download the NDVI plot]({target}) [S1]."
+    )
+
+    assert answer == (
+        "See ![Download the NDVI plot](/conversations/c1/workspace/ndvi.png) [S1]."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_image_without_an_extension_is_typed_by_its_bytes(
+    turn_context,
+):
+    ctx, _ = turn_context
+    ctx.sandbox_backend.files["plot"] = b"\x89PNG\r\n\x1a\nplot"
+
+    answer = await rewrite_answer_file_links("[plot](plot)")
+
+    assert answer == "![plot](/conversations/c1/workspace/plot)"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_link_to_a_workspace_csv_stays_a_link(turn_context):
+    ctx, _ = turn_context
+    ctx.sandbox_backend.files["ndvi.csv"] = b"nir,ndvi\n0.1,0.0\n"
+
+    answer = await rewrite_answer_file_links("[ndvi.csv](ndvi.csv)")
+
+    assert answer == "[ndvi.csv](/conversations/c1/workspace/ndvi.csv)"
+
+
+@pytest.mark.asyncio
+async def test_an_external_image_link_is_untouched(turn_context):
+    original = "[chart](https://example.org/chart.png) and [c](https://x.org/a/b.jpg)"
+
+    assert await rewrite_answer_file_links(original) == original
+
+
+@pytest.mark.asyncio
+async def test_a_plain_link_to_an_artifact_image_becomes_an_image(turn_context):
+    # Only a stored type decides: an id this turn did not store keeps the
+    # label the model wrote, whatever name it typed after the id.
+    other = "6afe0e94f584dfa22d6ed15f"
+    answer = await rewrite_answer_file_links(
+        f"[map](/artifacts/{other}/map.png) [data](/artifacts/{other}/data.csv) "
+        f"[tool](get_sample_image-1.png) [kept](/artifacts/{other}) "
+        f"[file](/tool_artifacts/{_TURN_ARTIFACT_ID}/file)"
+    )
+
+    assert answer == (
+        f"[map](/artifacts/{other}) [data](/artifacts/{other}) "
+        f"![tool](/artifacts/{_TURN_ARTIFACT_ID}) [kept](/artifacts/{other}) "
+        f"![file](/artifacts/{_TURN_ARTIFACT_ID})"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "content_type"),
+    [
+        # Served as an octet-stream download: the chat cannot draw it.
+        ("chart.svg", "image/svg+xml"),
+        # A .png name over bytes the sniffer could not classify.
+        ("fake.png", "application/octet-stream"),
+    ],
+)
+async def test_a_turn_artifact_that_is_no_raster_image_stays_a_link(
+    turn_context, name, content_type
+):
+    ctx, _ = turn_context
+    other = "6afe0e94f584dfa22d6ed160"
+    ctx.collected_artifact_ids.append(other)
+    ctx.collected_artifact_files[name] = other
+    ctx.collected_artifact_types[other] = content_type
+
+    answer = await rewrite_answer_file_links(
+        f"[a]({name}) [b](/artifacts/{other}/x.png)"
+    )
+
+    assert answer == f"[a](/artifacts/{other}) [b](/artifacts/{other})"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("chart.svg", b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+        ("fake.png", b"not an image at all"),
+    ],
+)
+async def test_a_workspace_file_that_is_no_raster_image_stays_a_link(
+    turn_context, name, data
+):
+    ctx, _ = turn_context
+    ctx.sandbox_backend.files[name] = data
+
+    answer = await rewrite_answer_file_links(f"[c]({name})")
+
+    assert answer == f"[c](/conversations/c1/workspace/{name})"
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("a.png", True),
+        ("a.JPG", True),
+        ("a.webp", True),
+        ("a.svg", False),
+        ("a.csv", False),
+        ("noext", False),
+    ],
+)
+def test_without_a_stored_type_the_extension_decides(name, expected):
+    from src.services.agents.core.workspace import is_image_file
+
+    assert is_image_file(name) is expected
+
+
+@pytest.mark.no_db
+def test_a_stored_type_wins_over_the_extension():
+    from src.services.agents.core.workspace import is_image_file
+
+    assert is_image_file("a.png", "application/octet-stream") is False
+    assert is_image_file("a.svg", "image/svg+xml") is False
+    assert is_image_file("plot", "image/png") is True
+    assert is_image_file("a.png", "") is False
+
+
+@pytest.mark.asyncio
+async def test_citation_offsets_survive_a_link_turned_into_an_image(turn_context):
+    from src.services.sources.citations import (
+        CitationRewriter,
+        SourceRegistry,
+        marker_spans,
+    )
+
+    registry = SourceRegistry()
+    registry.register({"id": "src_a", "document_key": "doi:a", "title": "A"})
+    rewriter = CitationRewriter(registry)
+    streamed = (
+        "Plot [S1]. [n](ndvi.png) fact [S1]. "
+        f"[m](/artifacts/{_TURN_ARTIFACT_ID}/m.png) again [S1]. "
+        "[s](get_sample_image-1.png) last [S1]."
+    )
+    text = rewriter.feed(streamed) + rewriter.flush()
+
+    passes: list = []
+    answer = await rewrite_answer_file_links(text, passes)
+
+    assert answer.count("![") == 3
+    assert rewriter.remap(answer, passes) == 0
+    assert marker_spans(answer, rewriter.citations()) == ["[1]"] * 4
+
+
+# Dev, 2026-11-19 (conversation 6afea7a9ac79eb8afdbaf7fe, dummy_image only): the
+# tool returned the stub below, the answer announced the image and left the
+# markdown out, so nothing rendered.
+_DUMMY_IMAGE_ID = "6afea7ccac79eb8afdbaf804"
+_DUMMY_IMAGE_TOOL_RESULT = (
+    f'![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID} '
+    '"MCP: dummy_image/get_sample_image")\n'
+    '{"width": 512, "height": 512, "color": "blue"}'
+)
+_DUMMY_IMAGE_ANSWER = "Here is the sample blue image with a size of 512x512 pixels:"
+_ID_B, _ID_C, _ID_D, _ID_E, _ID_F = (
+    f"6afea7ccac79eb8afdbaf8{n:02x}" for n in range(5, 10)
+)
+
+
+def _record_turn_image(
+    ctx, artifact_id, name, content_type="image/png", shown=True
+):
+    ctx.collected_artifact_ids.append(artifact_id)
+    ctx.collected_artifact_files[name] = artifact_id
+    ctx.collected_artifact_types[artifact_id] = content_type
+    if shown:
+        ctx.shown_artifact_ids.append(artifact_id)
+
+
+@pytest.fixture
+def dummy_image_turn(monkeypatch):
+    from src.services.agents.core import workspace
+    from src.services.mcp.artifact_context import (
+        reset_artifact_context,
+        set_artifact_context,
+    )
+
+    monkeypatch.setattr(workspace, "storage_service", _Store())
+    ctx, token = set_artifact_context("u1", "c1")
+    try:
+        # What the interceptor records for the stub above; the interceptor
+        # side is pinned in test_artifact_ingestion.py.
+        _record_turn_image(ctx, _DUMMY_IMAGE_ID, "get_sample_image-1.png")
+        yield ctx
+    finally:
+        reset_artifact_context(token)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_image_the_answer_leaves_out_is_appended(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    answer = append_unreferenced_turn_images(
+        await rewrite_answer_file_links(_DUMMY_IMAGE_ANSWER)
+    )
+
+    assert answer == (
+        f"{_DUMMY_IMAGE_ANSWER}\n\n"
+        f"![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "written",
+    [
+        "Here: ![img](get_sample_image-1.png)",
+        f"Here: [img](https://cdn.example.org/{_DUMMY_IMAGE_ID}.png)",
+        f"Here: ![img](/artifacts/{_DUMMY_IMAGE_ID})",
+    ],
+)
+async def test_a_tool_image_the_answer_links_is_not_appended_again(
+    dummy_image_turn, written
+):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    answer = append_unreferenced_turn_images(await rewrite_answer_file_links(written))
+
+    assert answer.count(f"/artifacts/{_DUMMY_IMAGE_ID}") == 1
+
+
+@pytest.mark.no_db
+def test_only_raster_images_are_appended(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    _record_turn_image(dummy_image_turn, _ID_B, "table.csv", "text/csv")
+    _record_turn_image(dummy_image_turn, _ID_C, "chart.svg", "image/svg+xml")
+    # A .png name the sniffer stored opaque.
+    _record_turn_image(dummy_image_turn, _ID_D, "x.png", "application/octet-stream")
+
+    answer = append_unreferenced_turn_images("Done.")
+
+    assert answer == (
+        f"Done.\n\n![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_a_blank_answer_gets_the_tool_image(dummy_image_turn, blank):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    assert append_unreferenced_turn_images(blank) == (
+        f"![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+
+
+@pytest.mark.no_db
+def test_an_image_folded_into_the_tool_json_is_not_appended(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    dummy_image_turn.shown_artifact_ids.clear()
+
+    assert append_unreferenced_turn_images("Done.") == "Done."
+
+
+@pytest.mark.asyncio
+async def test_tool_inputs_stay_out_when_the_answer_shows_its_own_image(
+    dummy_image_turn,
+):
+    # Tiles fetched as input, then a chart drawn from them and embedded: the
+    # model chose what to show.
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    dummy_image_turn.sandbox_backend = _WorkspaceSandbox(
+        {"chart.png": b"\x89PNG\r\n\x1a\nchart"}
+    )
+    _record_turn_image(dummy_image_turn, _ID_B, "tile-2.png")
+
+    answer = append_unreferenced_turn_images(
+        await rewrite_answer_file_links("NDVI chart: ![chart](chart.png)")
+    )
+
+    assert answer == "NDVI chart: ![chart](/conversations/c1/workspace/chart.png)"
+
+
+@pytest.mark.no_db
+def test_at_most_four_images_are_appended(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    for n, artifact_id in enumerate((_ID_B, _ID_C, _ID_D, _ID_E, _ID_F), start=2):
+        _record_turn_image(dummy_image_turn, artifact_id, f"tile-{n}.png")
+
+    answer = append_unreferenced_turn_images("Done.")
+
+    assert answer.count("![") == 4
+    assert _DUMMY_IMAGE_ID in answer and _ID_D in answer
+    assert _ID_E not in answer and _ID_F not in answer
+
+
+@pytest.mark.no_db
+def test_an_id_quoted_in_code_does_not_count_as_shown(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    written = f"Artifact `{_DUMMY_IMAGE_ID}` is ready."
+
+    assert append_unreferenced_turn_images(written) == (
+        f"{written}\n\n![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+
+
+@pytest.mark.no_db
+def test_an_open_code_block_is_closed_before_the_image(dummy_image_turn):
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    written = "Code:\n```python\nprint(1)\n"
+
+    assert append_unreferenced_turn_images(written) == (
+        "Code:\n```python\nprint(1)\n```\n\n"
+        f"![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+    closed = "Code:\n```\nx\n```"
+    assert append_unreferenced_turn_images(closed) == (
+        f"{closed}\n\n![get_sample_image-1.png](/artifacts/{_DUMMY_IMAGE_ID})"
+    )
+
+
+@pytest.mark.no_db
+def test_nothing_is_appended_without_a_turn():
+    from src.services.agents.core.runner import append_unreferenced_turn_images
+
+    assert append_unreferenced_turn_images(_DUMMY_IMAGE_ANSWER) == _DUMMY_IMAGE_ANSWER

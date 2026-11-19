@@ -270,6 +270,20 @@ def _stub_output_path(block: Any) -> Optional[str]:
     return record["path"]
 
 
+_STUB_ID = re.compile(r"^/artifacts/([0-9a-fA-F]{24})/")
+
+
+def _shown_stub_ids(blocks: List[Any]) -> List[str]:
+    """Artifact ids of the stubs left in a tool result after folding."""
+    ids = []
+    for block in blocks:
+        record = _stub_record(block)
+        match = _STUB_ID.match(record["path"]) if record else None
+        if match:
+            ids.append(match.group(1))
+    return ids
+
+
 def _eve_source_paths(block: Any) -> list[str]:
     """Exact path strings the MCP middleware loaded for this block."""
     meta = getattr(block, "meta", None)
@@ -758,6 +772,7 @@ class ArtifactInterceptor:
             new_content, getattr(result, "structuredContent", None), replacements
         )
         content, structured = _fold_output_paths(content, structured)
+        ctx.shown_artifact_ids.extend(_shown_stub_ids(content))
         update: dict[str, Any] = {"content": content}
         if structured is not None:
             update["structuredContent"] = structured
@@ -824,6 +839,7 @@ class ArtifactInterceptor:
                 )
             raise
         ctx.collected_artifact_ids.append(artifact.id)
+        ctx.collected_artifact_types[artifact.id] = content_type
         path = sandbox_path(relative)
         await upload_artifact(ctx.sandbox_backend, path, data)
         return artifact, path

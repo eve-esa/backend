@@ -40,7 +40,11 @@ from src.services.agents.core.tool_results import (
     RESTORE_MAX_BYTES,
     RESTORE_MAX_OBJECTS,
 )
-from src.services.storage import ObjectNotFoundError, storage_service
+from src.services.storage import (
+    INLINE_IMAGE_CONTENT_TYPES,
+    ObjectNotFoundError,
+    storage_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -905,19 +909,54 @@ def _workspace_file(path: Optional[str]) -> Optional[str]:
     return _markdown_relative(path[len("workspace/") :])
 
 
+# The extensions of the raster types the chat embeds
+# (``INLINE_IMAGE_CONTENT_TYPES``). No SVG: the server sends it as a
+# download, so an image tag cannot draw it.
+_IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
+
+
+def is_image_file(name: Optional[str], content_type: Optional[str] = None) -> bool:
+    """True when the chat can draw the file as an image.
+
+    A known stored type decides (the bytes were sniffed); the extension
+    decides only when there is no stored type to read.
+    """
+    if content_type is not None:
+        return content_type.lower() in INLINE_IMAGE_CONTENT_TYPES
+    raw = urllib.parse.unquote(str(name or "")).split("?", 1)[0].split("#", 1)[0]
+    base = raw.rstrip("/").rsplit("/", 1)[-1]
+    if "." not in base:
+        return False
+    return base.rsplit(".", 1)[-1].lower() in _IMAGE_EXTENSIONS
+
+
+def image_label(label: str, name: Optional[str], content_type: Optional[str] = None) -> str:
+    """``label`` with the leading ``!`` when the linked file is an image.
+
+    A model that writes ``[plot](ndvi.png)`` for a chart it made gets a link
+    the chat does not draw. Only links this module or the artifact rewrite
+    point at a stored file go through here, never an external URL.
+    """
+    if label.startswith("!") or not is_image_file(name, content_type):
+        return label
+    return f"!{label}"
+
+
 async def _link_workspace_file(
     original: str, label: str, session_path: str, relative: str, ctx: Any
 ) -> str:
     key = f"{workspace_prefix(ctx.user_id, ctx.conversation_id)}{relative}"
     data = await _download_first(ctx.sandbox_backend, _read_candidates(session_path))
+    content_type: Optional[str] = None
     if data:
-        await storage_service.put_object(key, data, _content_type(data, relative))
+        content_type = _content_type(data, relative)
+        await storage_service.put_object(key, data, content_type)
     elif not await _workspace_object_exists(key):
         logger.warning("workspace.markdown_unreadable url=%s", original)
         return original
     url = workspace_file_url(ctx.conversation_id, relative)
     logger.info("workspace.markdown_repaired url=%s to=%s", original, url)
-    return f"{label}({url})"
+    return f"{image_label(label, relative, content_type)}({url})"
 
 
 async def _workspace_object_exists(key: str) -> bool:
