@@ -1,4 +1,8 @@
-"""A sandbox shell command runs from the workspace with its text unchanged."""
+"""A sandbox shell command runs from the workspace.
+
+Its text reaches the shell unchanged except for the absolute ``/workspace``
+token, which names the real workspace where the session root is not ``/``.
+"""
 
 import logging
 import shlex
@@ -47,6 +51,7 @@ class _LocalAgentCore:
         self.failing_probes = failing_probes
         self.pwd_broken = pwd_broken
         self.commands: list[str] = []
+        self.edits: list[str] = []
 
     def _get_cwd(self) -> str:
         if self._cwd is None:
@@ -71,13 +76,31 @@ class _LocalAgentCore:
         return SimpleNamespace(path=real, error=None)
 
     def edit(self, file_path, old_string, new_string, replace_all=False):
+        self.edits.append(old_string)
         cwd = self._get_cwd()
         real = file_path if file_path.startswith(cwd + "/") else f"{cwd}/{file_path.lstrip('/')}"
         text = Path(real).read_text()
-        if old_string not in text:
-            return SimpleNamespace(path=None, error=f"String not found in file: {old_string}")
-        Path(real).write_text(text.replace(old_string, new_string, 1))
-        return SimpleNamespace(path=real, error=None, occurrences=1)
+        count = text.count(old_string)
+        # Same messages as deepagents' _map_edit_error.
+        if not count:
+            return SimpleNamespace(path=None, error=f"Error: String not found in file: '{old_string}'")
+        if count > 1 and not replace_all:
+            return SimpleNamespace(
+                path=None,
+                error=f"Error: String '{old_string}' appears {count} times in file.",
+            )
+        Path(real).write_text(text.replace(old_string, new_string, -1 if replace_all else 1))
+        return SimpleNamespace(path=real, error=None, occurrences=count)
+
+    def grep(self, pattern, path=None, glob=None):
+        # Like BaseSandbox.grep: the pattern is plain text in the command and
+        # the command goes through self.execute. Paths resolve like write.
+        cwd = self._get_cwd()
+        target = path or cwd
+        if not target.startswith(cwd + "/"):
+            target = f"{cwd}/{target.lstrip('/')}"
+        result = self.execute(f"grep -rHnF {shlex.quote(pattern)} {shlex.quote(target)}")
+        return SimpleNamespace(matches=result.output.splitlines(), error=None)
 
 
 class _RecordingOpenSandbox:
@@ -193,13 +216,29 @@ def test_code_in_the_command_saves_to_slash_workspace(agentcore):
     assert (inner.root / "workspace" / "out" / "a.txt").read_text() == "ok"
 
 
-def test_a_data_file_keeps_its_text(agentcore):
+@pytest.mark.parametrize(
+    "name", ["config.json", "params.yaml", "paths.txt", "notes.md", "Makefile", "run"]
+)
+def test_a_text_file_names_the_real_workspace_like_a_heredoc(agentcore, name):
     inner, backend = agentcore
-    text = "WORKDIR /workspace\nsee /workspace/x\n"
+    text = "out: /workspace/x\n"
 
-    backend.write("notes.md", text)
+    backend.write(name, text)
+    backend.execute(f"cat > heredoc-{name} <<'EOF'\n{text}EOF")
 
-    assert (inner.root / "workspace" / "notes.md").read_text() == text
+    real = f"out: {inner.root}/workspace/x\n"
+    assert (inner.root / "workspace" / name).read_text() == real
+    assert (inner.root / "workspace" / f"heredoc-{name}").read_text() == real
+
+
+@pytest.mark.parametrize("name", ["a.png", "b.PDF", "c.parquet", "d.zip"])
+def test_a_binary_file_is_never_translated(agentcore, name):
+    inner, backend = agentcore
+    text = "/workspace/x"
+
+    backend.write(name, text)
+
+    assert (inner.root / "workspace" / name).read_text() == text
 
 
 def test_an_edit_matches_the_path_the_model_wrote(agentcore):
@@ -227,6 +266,79 @@ def test_an_edit_still_matches_a_file_saved_with_the_virtual_path(agentcore):
     )
 
 
+def test_an_edit_tries_the_quoted_string_first(agentcore):
+    # A restored legacy line and a later translated line: the model quoted the
+    # legacy one, so that one changes.
+    inner, backend = agentcore
+    path = inner.root / "workspace" / "mixed.py"
+    path.parent.mkdir(exist_ok=True)
+    real = f"{inner.root}/workspace"
+    path.write_text(f"a = '/workspace/a.png'\na = '{real}/a.png'\n")
+
+    result = backend.edit("mixed.py", "a = '/workspace/a.png'", "a = '/workspace/c.png'")
+
+    assert result.error is None
+    assert path.read_text() == f"a = '{real}/c.png'\na = '{real}/a.png'\n"
+    assert inner.edits == ["a = '/workspace/a.png'"]
+
+
+def test_an_edit_retries_only_when_the_string_is_not_found(agentcore):
+    inner, backend = agentcore
+    path = inner.root / "workspace" / "twice.py"
+    path.parent.mkdir(exist_ok=True)
+    real = f"{inner.root}/workspace"
+    text = f"a = '/workspace/a.png'\na = '/workspace/a.png'\nb = '{real}/a.png'\n"
+    path.write_text(text)
+
+    result = backend.edit("twice.py", "'/workspace/a.png'", "'/workspace/c.png'")
+
+    assert "appears 2 times" in result.error
+    assert path.read_text() == text
+    assert inner.edits == ["'/workspace/a.png'"]
+
+
+def test_the_grep_tool_searches_for_the_pattern_as_written(agentcore):
+    inner, backend = agentcore
+    (inner.root / "workspace").mkdir(exist_ok=True)
+    (inner.root / "workspace" / "notes.md").write_text("see /workspace/x\n")
+
+    result = backend.grep("/workspace/x", "notes.md")
+
+    assert any("see /workspace/x" in line for line in result.matches), result.matches
+
+
+def test_a_model_shell_command_names_the_real_workspace(agentcore):
+    inner, backend = agentcore
+    backend.write("count.py", "print(1)\n")
+
+    result = backend.execute("ls /workspace/count.py")
+
+    assert result.exit_code == 0, result.output
+    assert f"{inner.root}/workspace/count.py" in result.output
+
+
+def test_a_translation_is_logged_with_the_count_only(agentcore, caplog):
+    _, backend = agentcore
+    caplog.set_level(logging.INFO, logger="src.services.agents.core.sandbox")
+
+    backend.execute("echo secret-text /workspace/a /workspace/b")
+
+    lines = [r.getMessage() for r in caplog.records if "path_translated" in r.getMessage()]
+    assert lines == ["sandbox.path_translated count=2 tool=execute"]
+
+
+def test_an_escaped_sed_on_a_legacy_script_still_runs(agentcore):
+    inner, backend = agentcore
+    path = inner.root / "workspace" / "old.py"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("out = '/workspace/a.png'\n")
+
+    result = backend.execute("sed -i 's/\\/workspace\\//.\\//g' old.py")
+
+    assert result.exit_code == 0, result.output
+    assert path.read_text() == "out = './a.png'\n"
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -240,6 +352,15 @@ def test_an_edit_still_matches_a_file_saved_with_the_virtual_path(agentcore):
         "/data/workspace/a",
         "https://host/workspace/a",
         "@workspace/a",
+        "\\/workspace\\/a",
+        "s/\\/workspace\\//.\\//g",
+        '"$HOME"/workspace',
+        "`pwd`/workspace",
+        '"$(pwd)"/workspace',
+        '$ROOT"/workspace"',
+        "root + '/workspace'",
+        'root+"/workspace/a"',
+        "$DIR'/workspace'",
     ],
 )
 def test_only_the_absolute_workspace_token_is_translated(text):
@@ -255,6 +376,15 @@ def test_only_the_absolute_workspace_token_is_translated(text):
         ("--out=/workspace/a", "--out=/opt/s/workspace/a"),
         ("cp a /workspace/", "cp a /opt/s/workspace/"),
         ("PATH=/bin:/workspace/bin", "PATH=/bin:/opt/s/workspace/bin"),
+        ("echo hi >/workspace/a", "echo hi >/opt/s/workspace/a"),
+        ("open('/workspace/a')", "open('/opt/s/workspace/a')"),
+        ("f'/workspace/{n}.png'", "f'/opt/s/workspace/{n}.png'"),
+        ('rb"/workspace/a"', 'rb"/opt/s/workspace/a"'),
+        ('{"out": "/workspace/a"}', '{"out": "/opt/s/workspace/a"}'),
+        ('["/workspace/a", "/workspace/b"]', '["/opt/s/workspace/a", "/opt/s/workspace/b"]'),
+        ("x=1\n/workspace/a", "x=1\n/opt/s/workspace/a"),
+        ("cat '/workspace/a'", "cat '/opt/s/workspace/a'"),
+        ("chmod +x /workspace/a.sh", "chmod +x /opt/s/workspace/a.sh"),
     ],
 )
 def test_the_absolute_workspace_token_points_at_the_real_directory(text, expected):
@@ -286,7 +416,7 @@ def test_no_translation_where_slash_workspace_is_real_or_unknown(workspace_dir):
         "python3 -c \"d = [1, 2]; print(f'Dice: {d[0]}, {d[1]}')\"",
     ],
 )
-def test_the_command_text_reaches_the_shell_unchanged(agentcore, tmp_path, command):
+def test_a_command_without_the_workspace_token_reaches_the_shell_unchanged(agentcore, tmp_path, command):
     _, backend = agentcore
     data = "workspace/a\nworkspace/b\n/workspace/c\n"
     backend.write("data.txt", data)
@@ -300,13 +430,24 @@ def test_the_command_text_reaches_the_shell_unchanged(agentcore, tmp_path, comma
     assert result.output == _sh(command, plain).output
 
 
-def test_a_quoted_heredoc_body_is_written_byte_for_byte(agentcore):
+def test_a_quoted_heredoc_body_keeps_its_quotes_and_dollars(agentcore):
     inner, backend = agentcore
     body = "path = 'workspace/a'\nroot = \"$HOME\"\ncd workspace\n"
 
     backend.execute(f"cat > out.txt <<'EOF'\n{body}EOF")
 
     assert (inner.root / "workspace" / "out.txt").read_text() == body
+
+
+def test_a_quoted_heredoc_body_names_the_real_workspace(agentcore):
+    inner, backend = agentcore
+    body = "root = \"/workspace\"\nout = '$HOME'\n"
+
+    backend.execute(f"cat > out.txt <<'EOF'\n{body}EOF")
+
+    assert (inner.root / "workspace" / "out.txt").read_text() == (
+        f"root = \"{inner.root}/workspace\"\nout = '$HOME'\n"
+    )
 
 
 def test_a_command_is_its_own_script(agentcore):

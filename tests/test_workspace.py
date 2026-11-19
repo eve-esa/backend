@@ -279,6 +279,10 @@ def test_a_model_file_goes_to_workspace_and_siblings_stay_put():
 def test_markdown_paths_map_onto_the_sibling_directories():
     assert session_path_for_markdown("./ndvi.png") == "workspace/ndvi.png"
     assert session_path_for_markdown("/workspace/ndvi.png") == "workspace/ndvi.png"
+    assert (
+        session_path_for_markdown("/opt/amazon/genesis1p-tools/var/workspace/x.png")
+        == "workspace/x.png"
+    )
     assert session_path_for_markdown("/skills/roll/SKILL.md") == "skills/roll/SKILL.md"
     assert session_path_for_markdown("/artifacts/abc/a.png") is None
     assert session_path_for_markdown("https://storage.googleapis.com/a.png") is None

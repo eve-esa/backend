@@ -842,19 +842,93 @@ def place_in_workspace(path: str, session_cwd: str = "") -> str:
 
 # The file tools name the workspace ``/workspace``. Where the session root is
 # not ``/`` (AgentCore: uid without write access to ``/``), that path cannot
-# exist, so a command or a script that names it can only fail. There, and only
-# for that exact absolute token, it is pointed at the real workspace. A token
-# starts after a character that cannot end a path (``~/workspace``,
-# ``${HOME}/workspace``, ``$(pwd)/workspace`` and ``./workspace`` are other
-# directories) and ends at ``/`` or a character that cannot continue the name.
-# The real path ends in ``.../workspace`` after a path character, so a second
-# pass changes nothing.
+# exist, so a command or a file that names it can only fail. There, and only
+# for that exact absolute token, it is pointed at the real workspace.
+#
+# The token ends at ``/`` or at a character that cannot continue the name. It
+# starts a path only after the start of the text, whitespace (not after a
+# ``+`` concatenation), a shell or list separator (``= ( [ { , : ; | & < >``),
+# or an opening quote (with an optional ``r f b u`` string prefix) that itself
+# stands at such a start. So ``~/workspace``, ``${HOME}/workspace``,
+# ``"$HOME"/workspace``, `` `pwd`/workspace ``, ``$ROOT"/workspace"``,
+# ``root + '/workspace'``, ``./workspace`` and ``\/workspace\/`` (sed, regex)
+# keep their text. The real path ends in ``.../workspace`` after a path
+# character, so a second pass changes nothing.
+#
+# One rule for text the model writes: a model shell command (the ``execute``
+# tool, heredoc bodies included) and every text file written or edited through
+# the file tools are translated, whatever their suffix, because code, config
+# and data the sandbox reads at run time fail on ``/workspace`` alike. Binary
+# suffixes are never touched. Text a script generates at run time inherits the
+# real path; the answer publisher maps it back (``session_path_for_markdown``).
+# Commands the file tools build themselves (grep, glob, ls, read, edit) are not
+# translated: their pattern is the model's search text. Files restored from S3
+# for an older conversation keep the text they were stored with.
 _VIRTUAL_WORKSPACE = "/workspace"
-_WORKSPACE_TOKEN = re.compile(r"(?<![\w.~/\-})])/workspace(?=/|(?![\w.\-]))")
-# Code the model writes and then runs. Data and prose keep their text.
-_CODE_SUFFIXES = frozenset(
-    {".py", ".ipynb", ".sh", ".bash", ".r", ".jl", ".js", ".mjs", ".ts"}
+_WORKSPACE_TOKEN = re.compile(r"/workspace(?=/|(?![\w.\-]))")
+_TOKEN_SEPARATORS = frozenset("=([{,:;|&<>")
+_QUOTES = frozenset("'\"`")
+_STRING_PREFIX = frozenset("rRfFbBuU")
+_BINARY_SUFFIXES = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif",
+        ".tiff", ".pdf", ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".tar",
+        ".parquet", ".feather", ".npy", ".npz", ".pkl", ".pickle", ".h5",
+        ".hdf5", ".nc", ".mat", ".so", ".whl", ".pyc", ".mp3", ".mp4",
+        ".wav", ".xlsx", ".xls", ".docx", ".pptx",
+    }
 )
+# Set while a file tool runs its own command through ``execute``.
+_tool_command: ContextVar[bool] = ContextVar("sandbox_tool_command", default=False)
+
+
+def _at_token_start(text: str, index: int) -> bool:
+    """True when position *index* can begin a path token."""
+    if index == 0:
+        return True
+    before = text[index - 1]
+    if before in _TOKEN_SEPARATORS:
+        return True
+    if before.isspace():
+        rest = text[: index - 1].rstrip()
+        return not rest.endswith("+")
+    return False
+
+
+def _starts_a_path(text: str, index: int) -> bool:
+    if _at_token_start(text, index):
+        return True
+    if text[index - 1] not in _QUOTES:
+        return False
+    quote = index - 1
+    if _at_token_start(text, quote):
+        return True
+    # f'/workspace/...', rb"/workspace/..."
+    start = quote
+    while start > 0 and quote - start < 2 and text[start - 1] in _STRING_PREFIX:
+        start -= 1
+        if _at_token_start(text, start):
+            return True
+    return False
+
+
+def _translate(text: str, workspace_dir: Optional[str]) -> tuple[str, int]:
+    target = (workspace_dir or "").rstrip("/")
+    if not target or target == _VIRTUAL_WORKSPACE or _VIRTUAL_WORKSPACE not in text:
+        return text, 0
+    parts: list[str] = []
+    last = count = 0
+    for match in _WORKSPACE_TOKEN.finditer(text):
+        if not _starts_a_path(text, match.start()):
+            continue
+        parts.append(text[last : match.start()])
+        parts.append(target)
+        last = match.end()
+        count += 1
+    if not count:
+        return text, 0
+    parts.append(text[last:])
+    return "".join(parts), count
 
 
 def translate_workspace_paths(text: str, workspace_dir: Optional[str]) -> str:
@@ -863,53 +937,79 @@ def translate_workspace_paths(text: str, workspace_dir: Optional[str]) -> str:
     Unchanged when *workspace_dir* is unknown or is ``/workspace`` itself
     (OpenSandbox, where the path is real).
     """
-    target = (workspace_dir or "").rstrip("/")
-    if not target or target == _VIRTUAL_WORKSPACE or _VIRTUAL_WORKSPACE not in text:
-        return text
-    return _WORKSPACE_TOKEN.sub(lambda _match: target, text)
+    return _translate(text, workspace_dir)[0]
 
 
-def _is_code(path: Any) -> bool:
-    return os.path.splitext(str(path or ""))[1].lower() in _CODE_SUFFIXES
+def _translate_logged(text: str, workspace_dir: Optional[str], tool: str) -> str:
+    translated, count = _translate(text, workspace_dir)
+    if count:
+        logger.info("sandbox.path_translated count=%d tool=%s", count, tool)
+    return translated
 
 
-def _wrap_code_paths(backend: Any, workspace_dir: str) -> None:
-    """Translate ``/workspace`` in code that ``write`` and ``edit`` store.
+def _is_text(path: Any) -> bool:
+    return os.path.splitext(str(path or ""))[1].lower() not in _BINARY_SUFFIXES
 
-    ``edit`` translates both strings, so a search written with the virtual
-    path matches a file stored with the real one. A file saved before this
-    translation still holds ``/workspace``; when the translated search finds
-    nothing, the search is tried as written.
+
+def _is_not_found(result: Any) -> bool:
+    return "string not found" in str(getattr(result, "error", "") or "").lower()
+
+
+def _mark_tool_commands(backend: Any) -> None:
+    """Keep the commands a file tool builds out of the translation."""
+    for name in ("grep", "glob", "ls", "read", "write", "edit", "delete"):
+        method = getattr(backend, name, None)
+        if method is None:
+            continue
+
+        def marked(*args: Any, _method: Any = method, **kwargs: Any):
+            token = _tool_command.set(True)
+            try:
+                return _method(*args, **kwargs)
+            finally:
+                _tool_command.reset(token)
+
+        setattr(backend, name, marked)
+
+
+def _wrap_text_paths(backend: Any, workspace_dir: str) -> None:
+    """Translate ``/workspace`` in text that ``write`` and ``edit`` store.
+
+    ``edit`` searches for ``old_string`` as the model wrote it first, so a
+    line it quoted from a file stored with ``/workspace`` (an older
+    conversation) is the line that changes. Only when that search reports
+    the string is not found, the translated search is tried, which matches
+    a file stored with the real path. ``new_string`` is always translated.
     """
     write = getattr(backend, "write", None)
     if write is not None:
 
-        def write_code(file_path: str, content: str, *args: Any, **kwargs: Any):
-            if _is_code(file_path) and isinstance(content, str):
-                content = translate_workspace_paths(content, workspace_dir)
+        def write_text(file_path: str, content: str, *args: Any, **kwargs: Any):
+            if _is_text(file_path) and isinstance(content, str):
+                content = _translate_logged(content, workspace_dir, "write")
             return write(file_path, content, *args, **kwargs)
 
-        backend.write = write_code
+        backend.write = write_text
     edit = getattr(backend, "edit", None)
     if edit is not None:
 
-        def edit_code(
+        def edit_text(
             file_path: str, old_string: str, new_string: str, *args: Any, **kwargs: Any
         ):
             if not (
-                _is_code(file_path)
+                _is_text(file_path)
                 and isinstance(old_string, str)
                 and isinstance(new_string, str)
             ):
                 return edit(file_path, old_string, new_string, *args, **kwargs)
+            new = _translate_logged(new_string, workspace_dir, "edit")
+            result = edit(file_path, old_string, new, *args, **kwargs)
             old = translate_workspace_paths(old_string, workspace_dir)
-            new = translate_workspace_paths(new_string, workspace_dir)
-            result = edit(file_path, old, new, *args, **kwargs)
-            if old != old_string and getattr(result, "error", None):
-                return edit(file_path, old_string, new, *args, **kwargs)
+            if old != old_string and _is_not_found(result):
+                return edit(file_path, old, new, *args, **kwargs)
             return result
 
-        backend.edit = edit_code
+        backend.edit = edit_text
 
 
 def _wrap_leading_path(
@@ -933,10 +1033,11 @@ def workspace_shell_command(command: str, workspace_dir: Optional[str]) -> str:
     ``workspace_dir`` is the real directory where the file tools store a
     relative path; without it the shell enters ``workspace`` relative to
     where it starts. The command is one quoted argument to ``sh -c`` and is
-    passed byte for byte, so its quotes, ``$``, comments and heredocs reach
-    that shell unchanged. A file written as ``x`` or ``workspace/x`` runs as
-    ``x`` from there; the agent instruction says so. The caller translates
-    ``/workspace`` first (``translate_workspace_paths``).
+    passed unchanged, so its quotes, ``$``, comments and heredocs reach that
+    shell as written. A file written as ``x`` or ``workspace/x`` runs as
+    ``x`` from there; the agent instruction says so. The caller has already
+    pointed the ``/workspace`` token at the real directory
+    (``translate_workspace_paths``), the only change to the text.
     """
     target = shlex.quote(workspace_dir) if workspace_dir else "workspace"
     return f"mkdir -p {target} && cd {target} && exec sh -c {shlex.quote(command)}"
@@ -977,7 +1078,7 @@ def prepare_workspace_layout(backend: Any) -> Any:
     ``/`` otherwise (OpenSandbox stores ``/workspace/x`` as an absolute path).
     Internal commands (workspace listing, process baseline) keep running from
     that root through ``_eve_raw_execute``. Where the root is not ``/``, the
-    absolute token ``/workspace`` in a model command and in code it writes
+    absolute token ``/workspace`` in a model command and in text it writes
     names the real workspace (``translate_workspace_paths``).
     """
     if backend is None or getattr(backend, "_eve_workspace_ready", False):
@@ -1027,7 +1128,8 @@ def prepare_workspace_layout(backend: Any) -> Any:
             logger.warning("workspace.mkdir_failed", exc_info=True)
 
         def execute_in_workspace(command: str, *args: Any, **kwargs: Any):
-            command = translate_workspace_paths(command, workspace_dir)
+            if not _tool_command.get():
+                command = _translate_logged(command, workspace_dir, "execute")
             return execute(
                 workspace_shell_command(command, workspace_dir),
                 *args,
@@ -1051,7 +1153,8 @@ def prepare_workspace_layout(backend: Any) -> Any:
                 _wrap_leading_path(method, session_cwd, index, keyword),
             )
     if workspace_dir and workspace_dir != _VIRTUAL_WORKSPACE:
-        _wrap_code_paths(backend, workspace_dir)
+        _wrap_text_paths(backend, workspace_dir)
+        _mark_tool_commands(backend)
     upload = getattr(backend, "upload_files", None)
     if upload is not None:
 

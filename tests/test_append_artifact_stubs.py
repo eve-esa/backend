@@ -243,6 +243,16 @@ async def test_a_workspace_file_link_still_points_at_the_workspace(
 
 
 @pytest.mark.asyncio
+async def test_the_real_agentcore_workspace_path_points_at_the_workspace(turn_context):
+    # Tracebacks and print output show the model the real AgentCore path.
+    answer = await rewrite_answer_file_links(
+        "![x](/opt/amazon/genesis1p-tools/var/workspace/ndvi.png)"
+    )
+
+    assert answer == "![x](/conversations/c1/workspace/ndvi.png)"
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_workspace_path_is_not_taken_for_the_tool_image(
     turn_context,
 ):
