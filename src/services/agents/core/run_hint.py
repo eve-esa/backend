@@ -2,10 +2,10 @@
 
 The file tools accept ``/workspace/count.py`` and store it in the workspace.
 The shell starts in that workspace (``prepare_workspace_layout``), where the
-file is ``count.py``: ``python3 /workspace/count.py`` fails there. The prompt
-says so, and some models still reuse the virtual path. So the tool result the
-model reads after a successful ``write_file`` or ``edit_file`` ends with one
-line naming the shell form.
+file is ``count.py``; ``workspace/count.py`` fails there, and
+``/workspace/count.py`` works only because the shell translates it. So the
+tool result the model reads after a successful ``write_file`` or
+``edit_file`` ends with one line naming the short shell form.
 
 The line is added to the request payload, when the model call is built. The
 stored tool message, the stream and the UI keep the original text. A request
