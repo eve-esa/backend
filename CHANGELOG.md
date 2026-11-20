@@ -11,6 +11,13 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.8.1](https://github.com/eve-esa/backend/compare/v1.8.0...v1.8.1) (2026-11-20)
+
+
+### Fixed
+
+* **users:** read the caller from the primary on /users/me ([#407](https://github.com/eve-esa/backend/issues/407)) ([e03ca9a](https://github.com/eve-esa/backend/commit/e03ca9a746498632ed356fdc7a4c796a5407668e))
+
 ## [1.8.0](https://github.com/eve-esa/backend/compare/v1.7.0...v1.8.0) (2026-11-20)
 
 
