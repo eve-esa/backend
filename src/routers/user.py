@@ -1,7 +1,9 @@
+import asyncio
 import logging
 
 from bson import ObjectId
-from fastapi import APIRouter, Body, Depends, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from pymongo import ReturnDocument
 
 from src.config import API_KEY_MAX_ACTIVE_PER_USER
 from src.database.models.user import User
@@ -14,6 +16,11 @@ from src.services.token_rate_limiter import get_token_usage_summary
 router = APIRouter(prefix="/users")
 logger = logging.getLogger(__name__)
 
+# Upper bound on the primary read in ``me``. ``MONGO_PARAMS`` sets no
+# ``serverSelectionTimeoutMS``, so during a failover the driver would wait its
+# 30 s default for a primary. Past this the auth row is served instead.
+PRIMARY_READ_TIMEOUT_S = 2.0
+
 
 @router.get("/me", response_model=UserPublic)
 async def me(user: User = Depends(get_current_user)) -> UserPublic:
@@ -25,9 +32,10 @@ async def me(user: User = Depends(get_current_user)) -> UserPublic:
     the caller sees what they saved. Only this route pays the primary read, the
     auth dependency stays on the secondary for every other request.
 
-    If the primary has no row or the read fails, the dependency's row is
-    returned: the caller is already authenticated and that row is valid, at
-    worst a moment old, which beats failing a profile read.
+    If the primary has no row, the read fails or it takes longer than
+    ``PRIMARY_READ_TIMEOUT_S``, the dependency's row is returned: the caller is
+    already authenticated and that row is valid, at worst a moment old, which
+    beats failing a profile read.
 
     Args:
         user (User): Authenticated user injected by dependency.
@@ -36,8 +44,10 @@ async def me(user: User = Depends(get_current_user)) -> UserPublic:
         The public subset of the current user's profile.
     """
     try:
-        fresh = await User.find_by_id_on_primary(user.id)
-    except Exception as exc:
+        fresh = await asyncio.wait_for(
+            User.find_by_id_on_primary(user.id), timeout=PRIMARY_READ_TIMEOUT_S
+        )
+    except Exception as exc:  # TimeoutError included
         # Class name only: the exception text may carry the row or the address.
         logger.warning("users.me primary read failed, serving the auth row: %s", type(exc).__name__)
         fresh = None
@@ -64,20 +74,31 @@ async def update_user(
     full-document replace, so a concurrent token-budget update on the same row
     is never clobbered.
 
+    The answer is the row as stored after the write, returned by the same
+    atomic update on the primary, so every field reflects the database and not
+    the auth row, which may have been read from a lagging secondary.
+
     Args:
         request (UpdateUserRequest): New names and, optionally, country and institution.
         user (User): Authenticated user injected by dependency.
 
     Returns:
         The public subset of the updated user's profile.
+
+    Raises:
+        HTTPException: 404 if the row is gone.
     """
     fields = request.model_dump(
         include={"first_name", "last_name"} | (request.model_fields_set & {"country", "institution"})
     )
-    await User.get_collection().update_one({"_id": ObjectId(user.id)}, {"$set": fields})
-    for name, value in fields.items():
-        setattr(user, name, value)
-    return to_user_public(user)
+    stored = await User.get_collection().find_one_and_update(
+        {"_id": ObjectId(user.id)},
+        {"$set": fields},
+        return_document=ReturnDocument.AFTER,
+    )
+    if stored is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return to_user_public(User.from_dict(stored))
 
 
 @router.post("/api-keys", response_model=CreateApiKeyResponse, status_code=201)
