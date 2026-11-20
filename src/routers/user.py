@@ -20,13 +20,28 @@ async def me(user: User = Depends(get_current_user)) -> UserPublic:
     """
     Return the authenticated user's profile.
 
+    The dependency may have read the row from a secondary, which can lag behind a
+    ``PATCH /users`` sent just before. The profile is re-read on the primary so
+    the caller sees what they saved. Only this route pays the primary read, the
+    auth dependency stays on the secondary for every other request.
+
+    If the primary has no row or the read fails, the dependency's row is
+    returned: the caller is already authenticated and that row is valid, at
+    worst a moment old, which beats failing a profile read.
+
     Args:
         user (User): Authenticated user injected by dependency.
 
     Returns:
         The public subset of the current user's profile.
     """
-    return to_user_public(user)
+    try:
+        fresh = await User.find_by_id_on_primary(user.id)
+    except Exception as exc:
+        # Class name only: the exception text may carry the row or the address.
+        logger.warning("users.me primary read failed, serving the auth row: %s", type(exc).__name__)
+        fresh = None
+    return to_user_public(fresh or user)
 
 
 @router.get("/me/token-usage", response_model=TokenUsageResponse)
