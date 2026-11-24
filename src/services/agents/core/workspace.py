@@ -807,7 +807,9 @@ def _log_upload_errors(responses: Any) -> None:
             logger.warning("workspace.upload_failed error=%s", error)
 
 
-_MD_TARGET = re.compile(r"(!?\[[^\]]*])\(([^)\s]+)\)")
+# A label stays on one line. ``[^\]\n]`` stops a ``[`` that lost its ``]`` from
+# taking the next image's ``](`` as its own.
+_MD_TARGET = re.compile(r"(!?\[[^\]\n]*])\(([^)\s]+)\)")
 
 
 def session_path_for_markdown(url: str) -> Optional[str]:

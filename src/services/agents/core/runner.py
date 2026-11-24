@@ -1579,7 +1579,7 @@ def _build_initial_messages(
 # ``/tool_artifacts/{id}/file``. A model may keep the id and put a host in
 # front, such as ``storage.googleapis.com/.../artifacts/{id}/file``.
 _ARTIFACT_MARKDOWN = re.compile(
-    r"(!?\[[^\]]*])\([^)\s]*?/(?:tool_)?artifacts/([0-9a-fA-F]{24})(?:/[^)\s]*)?\)"
+    r"(!?\[[^\]\n]*])\([^)\s]*?/(?:tool_)?artifacts/([0-9a-fA-F]{24})(?:/[^)\s]*)?\)"
 )
 
 
@@ -1646,7 +1646,7 @@ def _markdown_paths_to_artifact_urls(
 
 
 # A markdown link with any target.
-_MARKDOWN_LINK = re.compile(r"(!?\[[^\]]*])\(([^)\s]+)\)")
+_MARKDOWN_LINK = re.compile(r"(!?\[[^\]\n]*])\(([^)\s]+)\)")
 # A 24 hex run that is not part of a longer one: a candidate artifact id.
 _HEX_ID = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{24}(?![0-9a-fA-F])")
 
@@ -1744,18 +1744,130 @@ def _code_regions(text: str) -> List[Tuple[int, int]]:
     return sorted(fenced + inline)
 
 
-# A markdown link whose label lost its ``]``: ``![name(target)``, with an
-# optional quoted title.
-_UNCLOSED_LABEL = re.compile(
-    r"(!?)\[([^\[\]()\n]{1,200})\(([^()\s]+)((?:[ \t]+\"[^\"\n]*\")?)\)"
+# One ``(target)`` or ``(target "title")`` on a single line.
+_LINK_DESTINATION = re.compile(
+    r"\((?P<target>[^()\s]+)(?P<title>[ \t]+\"[^\"\n]*\")?\)"
+)
+_LABEL_LIMIT = 200
+# A later target with one of these extensions is a file name, not a
+# parenthetical such as ``(final)`` or ``(v1.2)``.
+_FILE_EXTENSIONS = frozenset(
+    {"png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "csv", "json", "txt", "md", "pdf"}
 )
 
 
 def _names_a_link_target(label: str, target: str) -> bool:
-    """True when ``target`` can only be where a plain link points."""
+    """True when ``target`` can only be where a plain link points.
+
+    A bare file name counts. ``[click here(ndvi.png)`` is a link. ``[see note (a)``
+    is prose: ``a`` has no file extension.
+    """
     if target.startswith(("/", "./", "../", "http://", "https://")):
         return True
+    if _file_extension(target) in _FILE_EXTENSIONS:
+        return True
     return target.rsplit("/", 1)[-1] == label.strip()
+
+
+def _structural_target(target: str) -> bool:
+    """True when ``target`` is a path or an http(s) URL, not a bare word."""
+    return target.startswith(("/", "./", "../", "http://", "https://"))
+
+
+def _file_extension(target: str) -> str:
+    base = target.rsplit("/", 1)[-1]
+    if "." not in base:
+        return ""
+    return base.rsplit(".", 1)[-1].lower()
+
+
+def _choose_destination(
+    candidates: List[Tuple[str, str, str, int]], bang: bool
+) -> Optional[Tuple[str, str, str, int]]:
+    """The ``(label, target, title, end)`` that is the link destination.
+
+    A path, an http(s) URL, or a file name wins, even when the label holds
+    an earlier parenthesis. Otherwise the first parenthesis whose label has
+    none is kept when it is an image, or a plain target that is a path, a
+    URL, a file name, or the label itself. A first parenthesis that is not a
+    file, such as ``(final)`` or ``(v1.2)``, gives way to a later file name,
+    so ``[Plot (final)(ndvi.png)`` does not become ``[Plot ](final)``.
+    """
+    for candidate in candidates:
+        if _structural_target(candidate[1]):
+            return candidate
+    plain = next(
+        (
+            candidate
+            for candidate in candidates
+            if "(" not in candidate[0]
+            and (bang or _names_a_link_target(candidate[0], candidate[1]))
+        ),
+        None,
+    )
+    if plain is None or _file_extension(plain[1]) not in _FILE_EXTENSIONS:
+        later = [
+            candidate
+            for candidate in candidates
+            if "(" in candidate[0] and _file_extension(candidate[1]) in _FILE_EXTENSIONS
+        ]
+        if later:
+            return later[-1]
+    return plain
+
+
+def _repair_unclosed_link(text: str, bracket: int) -> Optional[Tuple[int, int, str]]:
+    """``(start, end, repaired)`` for a ``[`` whose ``]`` was dropped.
+
+    ``bracket`` is the index of ``[``. CommonMark ends the link text at ``]``
+    and puts the destination in the parentheses that follow. The link text may
+    itself contain parentheses
+    (https://spec.commonmark.org/0.31.2/#link-text). With the ``]`` gone,
+    ``![Name (file.jpg)](/workspace/file.jpg)`` arrives as
+    ``![Name (file.jpg)(/workspace/file.jpg)``. Prose such as ``[see note (a)``
+    stays.
+    """
+    bang = bracket > 0 and text[bracket - 1] == "!"
+    start_label = bracket + 1
+    limit = text.find("\n", start_label)
+    if limit < 0:
+        limit = len(text)
+    candidates: List[Tuple[str, str, str, int]] = []
+    i = start_label
+    while i < limit:
+        if text[i] == "[":
+            break
+        # ``](`` is a link that still has its bracket. A parenthesis earlier
+        # in the label is not a destination.
+        if text[i] == "]":
+            if i + 1 < len(text) and text[i + 1] == "(":
+                return None
+            break
+        if text[i] == "(":
+            match = _LINK_DESTINATION.match(text, i)
+            if match is not None and match.end() <= limit:
+                label = text[start_label:i]
+                if len(label) > _LABEL_LIMIT:
+                    break
+                if label or bang:
+                    candidates.append(
+                        (
+                            label,
+                            match.group("target"),
+                            match.group("title") or "",
+                            match.end(),
+                        )
+                    )
+        i += 1
+    chosen = _choose_destination(candidates, bang)
+    if chosen is None:
+        return None
+    label, target, title, end = chosen
+    if not label and not bang:
+        return None
+    start = bracket - 1 if bang else bracket
+    repaired = f"{'!' if bang else ''}[{label}]({target}{title})"
+    return start, end, repaired
 
 
 def _close_link_labels(text: str, edits: Optional[List[Edit]] = None) -> str:
@@ -1763,28 +1875,32 @@ def _close_link_labels(text: str, edits: Optional[List[Edit]] = None) -> str:
 
     Blablador streams Mistral Large with every ``]`` removed when tools are
     bound (sgl-project/sglang#44219), so ``![name](path)`` arrives as
-    ``![name(path)``. An image always gets its bracket back. A plain link
-    gets it only when the target is a path, an http(s) URL or ends in the
-    label, so prose such as ``[see note (a)`` stays as written. Each repair
-    is appended to ``edits``.
+    ``![name(path)``. Each repair is appended to ``edits``.
     """
+    pieces: List[str] = []
+    cursor = 0
     closed = 0
-
-    def replace(match: re.Match) -> str:
-        nonlocal closed
-        bang, label, target, title = match.groups()
-        if not bang and not _names_a_link_target(label, target):
-            return match.group(0)
-        closed += 1
-        repaired = f"{bang}[{label}]({target}{title})"
+    i = 0
+    while i < len(text):
+        if text[i] != "[":
+            i += 1
+            continue
+        found = _repair_unclosed_link(text, i)
+        if found is None:
+            i += 1
+            continue
+        start, end, repaired = found
+        pieces.append(text[cursor:start])
+        pieces.append(repaired)
         if edits is not None:
-            edits.append((match.start(), match.end(), len(repaired)))
-        return repaired
-
-    text = _UNCLOSED_LABEL.sub(replace, text)
+            edits.append((start, end, len(repaired)))
+        closed += 1
+        cursor = end
+        i = end
+    pieces.append(text[cursor:])
     if closed:
         logger.info("markdown.label_closed count=%d", closed)
-    return text
+    return "".join(pieces)
 
 
 async def rewrite_answer_file_links(
@@ -1841,7 +1957,7 @@ async def rewrite_answer_file_links(
 _MAX_APPENDED_IMAGES = 4
 
 # An image embed in markdown, read on text with code blanked.
-_IMAGE_EMBED = re.compile(r"!\[[^\]]*]\(")
+_IMAGE_EMBED = re.compile(r"!\[[^\]\n]*]\(")
 
 
 def _close_open_fence(text: str) -> str:
