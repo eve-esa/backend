@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.database.models.mcp_server import ToolType
 
@@ -106,6 +106,46 @@ class MCPServerAttribution(BaseModel):
     )
 
 
+class MCPServerCredentialFieldPublic(BaseModel):
+    """One value the user fills for a toolkit. The upstream header stays in the backend."""
+
+    name: str = Field(..., description="Field key, used in the request body")
+    label: str = Field(..., description="Label to show next to the input")
+    secret: bool = Field(..., description="Whether the input should be masked")
+    help_text: Optional[str] = Field(default=None, description="Short help under the input")
+
+
+class MCPServerUserCredentialsPublic(BaseModel):
+    """What a toolkit asks the user for and whether this user has provided it.
+
+    Never carries a stored value, a header name or the check configuration.
+    """
+
+    fields: List[MCPServerCredentialFieldPublic] = Field(..., description="Values to fill")
+    required: bool = Field(
+        default=False, description="Whether the toolkit cannot work without them"
+    )
+    help_url: Optional[str] = Field(default=None, description="Where to get the values")
+    configured: bool = Field(..., description="Whether this user has saved values")
+    hints: Dict[str, str] = Field(
+        default_factory=dict, description="Masked hints for the non-secret fields"
+    )
+    verified_at: Optional[datetime] = Field(
+        default=None, description="Last time the provider accepted the values"
+    )
+    updated_at: Optional[datetime] = Field(
+        default=None, description="Last time the user saved the values"
+    )
+
+
+class ToolkitCredentialsRequest(BaseModel):
+    """The user's values for a toolkit, keyed by field name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    values: Dict[str, str] = Field(..., max_length=5, description="Field values by name")
+
+
 class MCPServerPublic(BaseModel):
     """Sanitized MCP server payload that never exposes internal URLs or headers."""
 
@@ -130,6 +170,10 @@ class MCPServerPublic(BaseModel):
     updated_at: datetime = Field(description="Last update timestamp")
     deleted_at: Optional[datetime] = Field(
         default=None, description="Soft delete timestamp"
+    )
+    user_credentials: Optional[MCPServerUserCredentialsPublic] = Field(
+        default=None,
+        description="Values the user may provide for this toolkit, or null when it asks for none",
     )
 
 
