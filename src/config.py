@@ -678,6 +678,12 @@ FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "tru
 # opts in (dev). Off answers 404 and the routes are left out of the schema.
 FEATURE_SANDBOX_API = getenv_or("FEATURE_SANDBOX_API").lower() == "true"
 
+# Per-user credentials for toolkits whose global row declares `user_credentials`.
+# Off hides the routes and sends no user header upstream.
+FEATURE_TOOLKIT_CREDENTIALS = (
+    getenv_or("FEATURE_TOOLKIT_CREDENTIALS").lower() == "true"
+)
+
 # Curated image catalog (demo). When enabled, a small static catalog of images
 # is offered to the answer-generation prompt so the model can embed them as
 # markdown. Disabled -> the composed generation prompts are byte-identical to

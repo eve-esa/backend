@@ -55,6 +55,10 @@ class AsyncMongoDBManager:
         await self.database["collections"].create_index(
             [("user_id", 1), ("conversation_id", 1)]
         )
+        # One credential row per user and toolkit.
+        await self.database["mcp_server_credentials"].create_index(
+            [("user_id", 1), ("server_id", 1)], unique=True
+        )
 
     def get_collection(self, collection_name: str) -> AsyncIOMotorCollection:
         """Get a collection from the database."""
