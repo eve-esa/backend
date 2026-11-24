@@ -7,6 +7,7 @@ required credential or an unreadable one answers the caller with an MCP tool
 error and never calls upstream. No value ever reaches a log or a usage row.
 """
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -75,11 +76,15 @@ def _rpc(method: str, request_id=7) -> bytes:
     return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
 
 
-async def _call(row, *, method="tools/call", headers_for=None, user_id=_USER_A, request_id=7):
+async def _call(
+    row, *, method="tools/call", headers_for=None, user_id=_USER_A, request_id=7, echo=False
+):
     """Drive one request through the dispatcher.
 
     Returns (sent messages, upstream requests seen by the real auth flow, track mock,
-    headers_for mock). Each upstream entry holds the outgoing httpx headers.
+    headers_for mock). Each upstream entry holds the outgoing httpx headers. With
+    ``echo`` the upstream answers an error that repeats every header it received,
+    raw in the text and inside a nested JSON string, as serpapi does with its key.
     """
     upstream: list[dict] = []
 
@@ -92,7 +97,13 @@ async def _call(row, *, method="tools/call", headers_for=None, user_id=_USER_A, 
         request = await flow.asend(None)
         upstream.append({k.lower(): v for k, v in request.headers.items()})
         await send({"type": "http.response.start", "status": 200, "headers": []})
-        body = {"jsonrpc": "2.0", "id": request_id, "result": {"content": [], "isError": False}}
+        if echo:
+            seen = upstream[-1]
+            text = f"upstream refused key={seen.get('x-client-secret')} " + json.dumps(seen)
+            result = {"content": [{"type": "text", "text": text}], "isError": True}
+        else:
+            result = {"content": [], "isError": False}
+        body = {"jsonrpc": "2.0", "id": request_id, "result": result}
         await send({"type": "http.response.body", "body": json.dumps(body).encode()})
 
     collection = MagicMock()
@@ -206,7 +217,7 @@ async def test_required_and_missing_answers_a_tool_error_without_calling_upstrea
     usage = track.await_args.kwargs
     assert usage["outcome"] == "error" and usage["is_error"] is True
     assert usage["operation"] == "tools/call" and usage["tool_name"] == "search"
-    assert usage["credential_source"] == "user"
+    assert usage["credential_source"] == "none"
 
 
 async def test_optional_and_missing_forwards_on_the_platform_credentials():
@@ -225,6 +236,7 @@ async def test_unreadable_credentials_answer_their_tool_error(caplog):
     assert body["id"] == "abc"
     assert body["result"] == {"content": [{"type": "text", "text": _UNREADABLE}], "isError": True}
     assert track.await_args.kwargs["outcome"] == "error"
+    assert track.await_args.kwargs["credential_source"] == "none"
 
 
 async def test_a_kms_outage_answers_try_again_and_logs_the_class_only(caplog):
@@ -239,6 +251,7 @@ async def test_a_kms_outage_answers_try_again_and_logs_the_class_only(caplog):
     rendered = " ".join(r.getMessage() for r in caplog.records)
     assert _SECRET not in rendered
     assert track.await_args.kwargs["outcome"] == "error"
+    assert track.await_args.kwargs["credential_source"] == "none"
 
 
 async def test_no_leak_into_the_next_request():
@@ -260,13 +273,125 @@ async def test_flag_off_injects_nothing(monkeypatch):
     assert track.await_args.kwargs["credential_source"] is None
 
 
-async def test_a_user_owned_row_with_the_same_name_injects_nothing():
+async def test_a_user_owned_row_with_a_spec_injects_nothing():
+    # Shadowing by a same-name user row runs against the real store in
+    # test_mcp_proxy_row_precedence.py, so the sort and the $or are exercised.
     row = _row(user_id=_USER_A, spec=_spec(required=True))
     sent, upstream, track, hf = await _call(row)
     assert sent[0]["status"] == 200
     assert "x-client-secret" not in upstream[0]
     hf.assert_not_awaited()
     assert track.await_args.kwargs["credential_source"] is None
+
+
+async def test_the_lookup_skips_soft_deleted_rows():
+    collection = MagicMock()
+    collection.find_one = AsyncMock(return_value=_row())
+    principal = Principal(_USER_A, AUTH_TYPE_API_KEY, "key-1")
+    scope = {"headers": [(b"authorization", f"Bearer {_TOKEN}".encode())]}
+    with patch(
+        f"{_PROXY}.resolve_principal_from_bearer_token", AsyncMock(return_value=principal)
+    ), patch(f"{_PROXY}.get_collection", return_value=collection), patch(
+        f"{_PROXY}.get_cognito_token_provider", return_value=MagicMock()
+    ), patch(f"{_PROXY}.build_proxy_app", AsyncMock(return_value=object())):
+        await MCPProxyDispatcher(main_app=None)._resolve_proxy(scope, "toolkit")
+    assert collection.find_one.await_args.args[0]["deleted_at"] is None
+
+
+async def test_an_echoed_credential_is_redacted_in_the_usage_row_only():
+    sent, upstream, track, _ = await _call(_row(), echo=True)
+    assert upstream[0]["x-client-secret"] == _SECRET
+    # The caller still reads what upstream answered.
+    assert _SECRET in sent[1]["body"].decode()
+    stored = track.await_args.kwargs["response_payload"]
+    rendered = json.dumps(stored)
+    assert _SECRET not in rendered and _CLIENT not in rendered
+    text = stored["result"]["content"][0]["text"]
+    assert text.startswith("upstream refused key=[redacted] ")
+    assert json.loads(text.split(" ", 3)[3])["x-client-id"] == "[redacted]"
+    assert track.await_args.kwargs["request_payload"] == {"q": "x"}
+
+
+def test_redaction_reaches_nested_json_strings_and_keeps_other_text():
+    inner = json.dumps({"key": f'a"{_SECRET}'})
+    payload = {"outer": json.dumps({"inner": inner}), "plain": f"x {_SECRET} y", "n": 3}
+    redacted = mcp_proxy._redact_values(payload, {"X-Client-Secret": _SECRET, "X-Empty": ""})
+    assert _SECRET not in json.dumps(redacted)
+    assert redacted["plain"] == "x [redacted] y" and redacted["n"] == 3
+    assert json.loads(json.loads(redacted["outer"])["inner"])["key"] == 'a"[redacted]'
+    assert mcp_proxy._redact_values(payload, None) is payload
+    special = 'p"w\\d'
+    escaped = {"t": json.dumps({"k": special}), "raw": special}
+    out = mcp_proxy._redact_values(escaped, {"X-Client-Secret": special})
+    assert out == {"t": json.dumps({"k": "[redacted]"}), "raw": "[redacted]"}
+
+
+async def test_concurrent_calls_of_two_users_each_send_only_their_own_headers():
+    """A enters upstream first and answers last, B runs its whole call in between."""
+    secrets = {_USER_A: "secret-of-user-a", _USER_B: "secret-of-user-b"}
+    tokens = {f"eve_token-{u}": u for u in secrets}
+    a_entered, b_done = asyncio.Event(), asyncio.Event()
+    upstream: dict[str, dict] = {}
+
+    async def proxy_app(scope, receive, send):
+        user = tokens[dict(scope["headers"])[b"authorization"].decode().split(" ", 1)[1]]
+        if user == _USER_A:
+            a_entered.set()
+            await b_done.wait()
+        else:
+            await a_entered.wait()
+        provider = MagicMock()
+        provider.get_token = AsyncMock(return_value="cognito-m2m")
+        flow = _DynamicBearerAuth(provider).async_auth_flow(
+            httpx.Request("POST", "https://agentcore.example/mcp")
+        )
+        request = await flow.asend(None)
+        upstream[user] = {k.lower(): v for k, v in request.headers.items()}
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        body = {"jsonrpc": "2.0", "id": 7, "result": {"content": [], "isError": False}}
+        await send({"type": "http.response.body", "body": json.dumps(body).encode()})
+        if user == _USER_B:
+            b_done.set()
+
+    async def headers_for(*, user_id, server_id, spec):
+        await asyncio.sleep(0)
+        return {"X-Client-Secret": secrets[user_id]}
+
+    async def principal_for(token):
+        return Principal(tokens[token], AUTH_TYPE_API_KEY, "key-1")
+
+    collection = MagicMock()
+    collection.find_one = AsyncMock(return_value=_row())
+
+    async def one(user):
+        body = _rpc("tools/call")
+
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(_message):
+            return None
+
+        token = next(t for t, u in tokens.items() if u == user)
+        scope = {
+            "type": "http", "method": "POST", "path": "/mcp/toolkit/mcp",
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+        }
+        await MCPProxyDispatcher(main_app=None)(scope, receive, send)
+
+    with patch(f"{_PROXY}.resolve_principal_from_bearer_token", principal_for), patch(
+        f"{_PROXY}.get_collection", return_value=collection
+    ), patch(f"{_PROXY}.get_cognito_token_provider", return_value=MagicMock()), patch(
+        f"{_PROXY}.build_proxy_app", AsyncMock(return_value=proxy_app)
+    ), patch(f"{_PROXY}.check_or_raise", AsyncMock()), patch(
+        f"{_PROXY}.headers_for", headers_for
+    ), patch(f"{_PROXY}.track_usage", new_callable=AsyncMock):
+        await asyncio.wait_for(asyncio.gather(one(_USER_A), one(_USER_B)), timeout=5)
+
+    assert list(upstream) == [_USER_B, _USER_A]
+    assert upstream[_USER_A]["x-client-secret"] == "secret-of-user-a"
+    assert upstream[_USER_B]["x-client-secret"] == "secret-of-user-b"
+    assert _upstream_credential_headers_var.get() is None
 
 
 async def test_the_spec_survives_the_url_cache():

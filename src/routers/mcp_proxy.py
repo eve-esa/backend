@@ -23,6 +23,7 @@ from fastmcp.server.middleware.caching import ResponseCachingMiddleware
 from fastmcp.server.providers.proxy import ProxyClient
 from mcp.client.streamable_http import streamable_http_client
 from src.config import MCP_TOOLS_CACHE_TTL
+from src.database.models.mcp_server import RESERVED_CREDENTIAL_HEADERS
 from src.database.mongo import get_collection
 from src.middlewares.auth import (
     Principal,
@@ -88,8 +89,7 @@ _upstream_credential_headers_var: ContextVar[dict[str, str] | None] = ContextVar
     "mcp_proxy_upstream_credential_headers", default=None
 )
 
-# Headers a credential spec can never set: they authenticate the proxy and the user.
-_PROTECTED_UPSTREAM_HEADERS = frozenset({"authorization", "x-eve-token"})
+_REDACTED = "[redacted]"
 
 _CREDENTIALS_MISSING_TEXT = (
     "This toolkit needs your own credentials. Add them in Settings, Toolkits, then try again."
@@ -123,10 +123,17 @@ class _ResolvedProxy(NamedTuple):
     credential_row: dict | None
 
 
+class _ToolCall(NamedTuple):
+    request_id: Any
+    name: str | None
+    arguments: Any
+
+
 class _UpstreamCredentials(NamedTuple):
     headers: dict[str, str] | None
-    # ``user`` when the call needs or uses the caller's own credentials,
-    # ``platform`` when an optional spec found none, None when the row has no spec.
+    # ``user`` when the caller's own values are sent, ``platform`` when an
+    # optional spec found none, ``none`` when the call is refused and nothing is
+    # sent, None when the row has no spec.
     source: str | None
     # Text of the tool error to answer instead of calling upstream, or None.
     refusal: str | None
@@ -191,7 +198,7 @@ class _DynamicBearerAuth(httpx.Auth):
         credential_headers = _upstream_credential_headers_var.get()
         if credential_headers:
             for name, value in credential_headers.items():
-                if name.lower() not in _PROTECTED_UPSTREAM_HEADERS:
+                if name.lower() not in RESERVED_CREDENTIAL_HEADERS:
                     request.headers[name] = value
 
         # Yield the request; httpx sends it and feeds the response back via send().
@@ -381,8 +388,8 @@ async def shutdown_mcp_proxy_lifespans() -> None:
             )
 
 
-def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
-    """Return ``(tool_name, arguments)`` for a JSON-RPC ``tools/call`` request.
+def _extract_tool_call(body: bytes) -> _ToolCall | None:
+    """Return the id, tool name and arguments of a JSON-RPC ``tools/call`` request.
 
     MCP messages are JSON-RPC 2.0 over the Streamable HTTP transport: a request
     object (or a batch array) carrying ``method`` and ``params``; ``tools/call``
@@ -392,17 +399,8 @@ def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
 
     Returns ``None`` for anything that is not a ``tools/call`` (``initialize``,
     ``tools/list``, notifications, ``ping``, GET/SSE opens with no body, …) so
-    those housekeeping hops are not logged — only real tool invocations are.
+    those housekeeping hops are not logged, only real tool invocations are.
     """
-    msg = _find_tool_call_message(body)
-    if msg is None:
-        return None
-    params = msg.get("params") or {}
-    return params.get("name"), params.get("arguments")
-
-
-def _find_tool_call_message(body: bytes) -> dict | None:
-    """The first JSON-RPC ``tools/call`` message in ``body``, or None."""
     if not body:
         return None
     try:
@@ -413,8 +411,35 @@ def _find_tool_call_message(body: bytes) -> dict | None:
     messages = parsed if isinstance(parsed, list) else [parsed]
     for msg in messages:
         if isinstance(msg, dict) and msg.get("method") == "tools/call":
-            return msg
+            params = msg.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            return _ToolCall(msg.get("id"), params.get("name"), params.get("arguments"))
     return None
+
+
+def _redact_values(payload: Any, values: Mapping[str, str] | None) -> Any:
+    """``payload`` with every sent credential value replaced by ``[redacted]``.
+
+    An upstream can echo a credential in an error, so the stored usage payload
+    must never hold one. The payload is serialised and each value is replaced
+    raw, JSON-escaped once and twice (a JSON document inside a JSON string), then
+    parsed back. Only stored data is touched, never what streams to the caller.
+    """
+    secrets = sorted({v for v in (values or {}).values() if v}, key=len, reverse=True)
+    if payload is None or not secrets:
+        return payload
+    text = json.dumps(payload, default=str)
+    for secret in secrets:
+        once = json.dumps(secret)[1:-1]
+        twice = json.dumps(once)[1:-1]
+        for variant in dict.fromkeys((twice, once, secret)):
+            text = text.replace(variant, _REDACTED)
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # A value that spans JSON syntax broke the document: keep the redacted text.
+        return text
 
 
 def _tool_error_body(request_id: Any, text: str) -> dict:
@@ -444,7 +469,7 @@ async def _upstream_credentials(
     except CredentialsUnreadable:
         # headers_for already logged the row at ERROR.
         logger.warning("mcp.user_credentials.refused server=%s reason=unreadable", server_name)
-        return _UpstreamCredentials(None, "user", _CREDENTIALS_UNREADABLE_TEXT)
+        return _UpstreamCredentials(None, "none", _CREDENTIALS_UNREADABLE_TEXT)
     except Exception as exc:
         # KMS outage or missing key config: the class only, the message may hold data.
         logger.error(
@@ -452,12 +477,12 @@ async def _upstream_credentials(
             server_name,
             type(exc).__name__,
         )
-        return _UpstreamCredentials(None, "user", _CREDENTIALS_UNAVAILABLE_TEXT)
+        return _UpstreamCredentials(None, "none", _CREDENTIALS_UNAVAILABLE_TEXT)
     if headers:
         return _UpstreamCredentials(headers, "user", None)
     if spec.required:
         logger.info("mcp.user_credentials.refused server=%s reason=missing", server_name)
-        return _UpstreamCredentials(None, "user", _CREDENTIALS_MISSING_TEXT)
+        return _UpstreamCredentials(None, "none", _CREDENTIALS_MISSING_TEXT)
     return _UpstreamCredentials(None, "platform", None)
 
 
@@ -655,7 +680,7 @@ class MCPProxyDispatcher:
                 await proxy_app(scope, downstream_receive, send)
                 return
 
-            tool_name, arguments = tool_call
+            tool_name, arguments = tool_call.name, tool_call.arguments
             # Per-user request rate limit on tools/call only (it is what bills
             # AgentCore), before forwarding: a refusal records no usage row.
             try:
@@ -683,8 +708,7 @@ class MCPProxyDispatcher:
             )
             if credentials.refusal is not None:
                 started = time.monotonic()
-                call = _find_tool_call_message(body) or {}
-                error_body = _tool_error_body(call.get("id"), credentials.refusal)
+                error_body = _tool_error_body(tool_call.request_id, credentials.refusal)
                 await self._send_json(send, 200, error_body)
                 await track_usage(
                     user_id=principal.user_id,
@@ -754,8 +778,8 @@ class MCPProxyDispatcher:
                     is_error=is_error,
                     outcome=outcome,
                     latency_ms=latency_ms,
-                    request_payload=arguments,
-                    response_payload=response_payload,
+                    request_payload=_redact_values(arguments, credentials.headers),
+                    response_payload=_redact_values(response_payload, credentials.headers),
                     credential_source=credentials.source,
                 )
         finally:
@@ -794,6 +818,7 @@ class MCPProxyDispatcher:
                         {
                             "name": server_name,
                             "enabled": True,
+                            "deleted_at": None,
                             "$or": [{"user_id": user_id}, {"user_id": None}],
                         },
                         {

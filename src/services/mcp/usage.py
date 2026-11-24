@@ -55,9 +55,10 @@ async def track_usage(
     (tool arguments and the raw upstream response) are offloaded to
     ``mcp_usage_payloads`` under the same ``_id``.
 
-    ``credential_source`` is ``user`` when the call needed or used the caller's
-    own toolkit credentials, ``platform`` when an optional spec found none, and
-    None when the toolkit declares no credentials. Never a value.
+    ``credential_source`` is ``user`` when the caller's own toolkit credentials
+    were sent, ``platform`` when an optional spec found none, ``none`` when the
+    call was refused and nothing was sent, and None when the toolkit declares no
+    credentials. Never a value. Callers redact any sent value from the payloads.
     """
     try:
         collection = get_collection("mcp_usage")
