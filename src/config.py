@@ -521,6 +521,8 @@ DEFAULT_REQUEST_RATE_LIMITS: Dict[str, Dict[str, int]] = {
     "mcp": {"rate": 120, "burst": 40},
     "upload": {"rate": 10, "burst": 10},
     "errlog": {"rate": 30, "burst": 30},
+    # Enforced whatever REQUEST_RATE_LIMIT_MODE says (see the limiter).
+    "credentials": {"rate": 10, "burst": 5},
 }
 
 
@@ -679,7 +681,8 @@ FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "tru
 FEATURE_SANDBOX_API = getenv_or("FEATURE_SANDBOX_API").lower() == "true"
 
 # Per-user credentials for toolkits whose global row declares `user_credentials`.
-# Off hides the routes and sends no user header upstream.
+# Off leaves the routes out of the schema, answers 404 (except a delete of a row
+# the user already stored) and sends no user header upstream.
 FEATURE_TOOLKIT_CREDENTIALS = (
     getenv_or("FEATURE_TOOLKIT_CREDENTIALS").lower() == "true"
 )

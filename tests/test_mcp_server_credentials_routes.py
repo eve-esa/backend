@@ -10,12 +10,19 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
+from bson import ObjectId
+from fastapi import FastAPI
+from pymongo.errors import ServerSelectionTimeoutError
 
+from src import config
 from src.database.models.mcp_server import MCPServer, ToolConfig, ToolTransport
 from src.database.models.mcp_server_credential import MCPServerCredential
 from src.services.custom_model_cipher import CipherConfigError
+from src.routers import mcp_server as mcp_server_router
+from src.services import request_rate_limiter as rrl
 from src.services.mcp import user_credentials as uc
+from src.services.request_rate_limiter import RequestRateLimiter
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
 
@@ -235,6 +242,13 @@ async def test_save_happy_path(async_client, world, flag_on, caplog):
             503,
             "credentials_storage_unavailable",
         ),
+        (
+            EndpointConnectionError(endpoint_url="https://kms.example.test"),
+            503,
+            "credentials_storage_unavailable",
+        ),
+        (ServerSelectionTimeoutError("no primary"), 503, "credentials_storage_unavailable"),
+        (uc.CredentialsConflict("changed"), 409, "credentials_conflict"),
     ],
 )
 async def test_save_error_mapping(async_client, world, flag_on, caplog, error, status, code):
@@ -255,6 +269,10 @@ async def test_save_error_mapping(async_client, world, flag_on, caplog, error, s
         )
     if code == "credentials_storage_unavailable":
         assert type(error).__name__ in caplog.text
+        assert "kms.example.test" not in caplog.text
+        assert "no primary" not in caplog.text
+    if code == "credentials_conflict":
+        assert detail["message"] == "The credentials changed while saving. Try again."
     _no_secret_anywhere(response.text)
     assert CLIENT_SECRET not in caplog.text
 
@@ -337,3 +355,194 @@ async def test_delete_does_not_touch_another_users_row(async_client, world, flag
     assert response.status_code == 204
     theirs = await _list_item(async_client, world["other_token"], "creds-toolkit")
     assert theirs["user_credentials"]["configured"] is True
+
+
+# Body size
+
+
+@pytest.mark.asyncio
+async def test_body_over_8_kib_with_content_length_is_refused(async_client, world, flag_on):
+    body = {"values": {"client_id": CLIENT_ID, "client_secret": "x" * 9000}}
+    with patch(_SAVE, new=AsyncMock()) as save:
+        response = await _put(async_client, world["token"], world["server"].id, body)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "credentials_invalid"
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_body_over_8_kib_without_content_length_is_refused(async_client, world, flag_on):
+    async def chunks():
+        yield b'{"values": {"client_secret": "'
+        for _ in range(10):
+            yield b"x" * 1024
+        yield b'"}}'
+
+    with patch(_SAVE, new=AsyncMock()) as save:
+        response = await async_client.put(
+            f"/mcp-servers/{world['server'].id}/credentials",
+            headers={**_auth(world["token"]), "Content-Type": "application/json"},
+            content=chunks(),
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "credentials_invalid"
+    save.assert_not_awaited()
+
+
+# Configured means complete
+
+
+async def _insert_row(user_id: str, server_id: str, field_names=None) -> None:
+    row = {"user_id": user_id, "server_id": server_id, "encrypted_values": "opaque", "hints": {}}
+    if field_names is not None:
+        row["field_names"] = field_names
+    await MCPServerCredential.get_collection().insert_one(row)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_names", [None, [], ["client_id"]])
+async def test_incomplete_row_is_not_configured(async_client, world, flag_on, field_names):
+    await _insert_row(world["me"].id, str(world["server"].id), field_names)
+    item = await _list_item(async_client, world["token"], "creds-toolkit")
+    assert item["user_credentials"]["configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_complete_row_is_configured(async_client, world, flag_on):
+    await _insert_row(world["me"].id, str(world["server"].id), ["client_id", "client_secret"])
+    item = await _list_item(async_client, world["token"], "creds-toolkit")
+    assert item["user_credentials"]["configured"] is True
+
+
+# Delete always removes the caller's own row
+
+
+async def _my_rows(world) -> int:
+    return await MCPServerCredential.get_collection().count_documents(
+        {"user_id": world["me"].id}
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_a_stored_row_with_the_flag_off(async_client, world, flag_off):
+    await _insert_row(world["me"].id, str(world["server"].id), ["client_id", "client_secret"])
+    response = await async_client.delete(
+        f"/mcp-servers/{world['server'].id}/credentials", headers=_auth(world["token"])
+    )
+    assert response.status_code == 204
+    assert await _my_rows(world) == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_a_stored_row_after_the_spec_is_removed(
+    async_client, world, flag_on
+):
+    await _insert_row(world["me"].id, str(world["server"].id), ["client_id"])
+    await MCPServer.get_collection().update_one(
+        {"_id": ObjectId(world["server"].id)}, {"$set": {"user_credentials": None}}
+    )
+    response = await async_client.delete(
+        f"/mcp-servers/{world['server'].id}/credentials", headers=_auth(world["token"])
+    )
+    assert response.status_code == 204
+    assert await _my_rows(world) == 0
+    again = await async_client.delete(
+        f"/mcp-servers/{world['server'].id}/credentials", headers=_auth(world["token"])
+    )
+    assert again.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_a_stored_row_after_the_toolkit_is_soft_deleted(
+    async_client, world, flag_on
+):
+    await _insert_row(world["me"].id, str(world["server"].id), ["client_id"])
+    await world["server"].delete()
+    response = await async_client.delete(
+        f"/mcp-servers/{world['server'].id}/credentials", headers=_auth(world["token"])
+    )
+    assert response.status_code == 204
+    assert await _my_rows(world) == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_with_an_invalid_id_answers_404(async_client, world, flag_on):
+    with patch("src.services.mcp.user_credentials.delete", new=AsyncMock()) as delete:
+        response = await async_client.delete(
+            "/mcp-servers/not-an-id/credentials", headers=_auth(world["token"])
+        )
+    assert response.status_code == 404
+    delete.assert_not_awaited()
+
+
+# Rate limit
+
+
+class _RefusingStore:
+    """Every bucket is empty: the next token is 5 s away."""
+
+    def register_script(self, _source):
+        return self._script
+
+    async def _script(self, keys, args):
+        return [0, 5000]
+
+    async def aclose(self):
+        pass
+
+
+@pytest.fixture
+def refusing_limiter(monkeypatch):
+    def _install(mode: str):
+        limiter = RequestRateLimiter(
+            limits={cls: {"rate": 60, "burst": 1} for cls in rrl.KNOWN_CLASSES},
+            mode=mode,
+            client=_RefusingStore(),
+        )
+        monkeypatch.setattr(rrl, "FEATURE_REQUEST_RATE_LIMIT", True)
+        monkeypatch.setattr(rrl, "_limiter", limiter)
+
+    return _install
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+async def test_save_is_rate_limited_in_every_mode(
+    async_client, world, flag_on, refusing_limiter, mode
+):
+    refusing_limiter(mode)
+    with patch(_SAVE, new=AsyncMock()) as save:
+        response = await _put(async_client, world["token"], world["server"].id, {"values": _values()})
+    assert response.status_code == 429, response.text
+    assert response.json()["detail"]["code"] == "rate_limited"
+    assert int(response.headers["Retry-After"]) >= 1
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_still_lets_other_classes_through(
+    async_client, world, flag_on, refusing_limiter
+):
+    refusing_limiter("shadow")
+    assert await rrl.check_or_raise(rrl.Principal(world["me"].id, "oidc"), "mcp") is not None
+
+
+def test_credentials_class_default_and_override():
+    assert config.DEFAULT_REQUEST_RATE_LIMITS["credentials"] == {"rate": 10, "burst": 5}
+    limits = config.parse_request_rate_limits('{"credentials": {"rate": 3, "burst": 2}}')
+    assert limits["credentials"] == {"rate": 3, "burst": 2}
+    assert "credentials" in rrl.ALWAYS_ENFORCED_CLASSES
+
+
+# OpenAPI
+
+
+def test_routes_follow_the_flag_in_the_schema():
+    routes = [r for r in mcp_server_router.router.routes if r.path.endswith("/credentials")]
+    assert len(routes) == 2
+    assert all(r.include_in_schema == config.FEATURE_TOOLKIT_CREDENTIALS for r in routes)
+    probe = FastAPI()
+    probe.include_router(mcp_server_router.router)
+    paths = probe.openapi()["paths"]
+    assert ("/mcp-servers/{server_id}/credentials" in paths) == config.FEATURE_TOOLKIT_CREDENTIALS
+    assert "/mcp-servers" in paths

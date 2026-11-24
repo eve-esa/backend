@@ -3,11 +3,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from bson import ObjectId
 from bson.errors import InvalidId
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import ValidationError
+from pymongo.errors import PyMongoError
 
 from src import config
 from src.database.models.mcp_server import (
@@ -55,7 +56,7 @@ def _credentials_public(
         ],
         required=spec.required,
         help_url=spec.help_url,
-        configured=credential is not None,
+        configured=credential is not None and user_credentials.is_complete(credential, spec),
         hints=dict(credential.hints) if credential else {},
         verified_at=credential.verified_at if credential else None,
         updated_at=credential.updated_at if credential else None,
@@ -398,6 +399,10 @@ async def _get_credential_target(
     return mcp_server, spec
 
 
+# At most 5 values of a few hundred characters each fit well under this.
+CREDENTIALS_BODY_MAX_BYTES = 8 * 1024
+
+
 def _credentials_error(status_code: int, code: str, message: str, **extra: Any) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message, **extra})
 
@@ -406,15 +411,29 @@ async def _read_credentials_body(request: Request) -> ToolkitCredentialsRequest:
     """Parse the body by hand so a malformed one is refused without echoing it.
 
     FastAPI's default 422 copies the offending ``input`` into the response, and
-    here the input is a secret.
+    here the input is a secret. A body over ``CREDENTIALS_BODY_MAX_BYTES`` is
+    refused from its ``Content-Length`` when sent, else as soon as the read
+    passes the cap, so it is never held in memory whole.
     """
     malformed = _credentials_error(
         422,
         "credentials_invalid",
         "The body must be a JSON object with a values map of at most 5 strings.",
     )
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > CREDENTIALS_BODY_MAX_BYTES:
+                raise malformed
+        except ValueError:
+            raise malformed from None
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > CREDENTIALS_BODY_MAX_BYTES:
+            raise malformed
     try:
-        payload = json.loads(await request.body())
+        payload = json.loads(bytes(raw))
     except ValueError:
         raise malformed from None
     try:
@@ -426,6 +445,7 @@ async def _read_credentials_body(request: Request) -> ToolkitCredentialsRequest:
 @router.put(
     "/mcp-servers/{server_id}/credentials",
     response_model=MCPServerUserCredentialsPublic,
+    include_in_schema=config.FEATURE_TOOLKIT_CREDENTIALS,
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -439,7 +459,7 @@ async def save_mcp_server_credentials(
     server_id: str,
     request: Request,
     requesting_user: User = Depends(get_current_user),
-    _rate: None = Depends(enforce_request_rate("mcp")),
+    _rate: None = Depends(enforce_request_rate("credentials")),
 ):
     """
     Save the current user's own credentials for a toolkit.
@@ -458,8 +478,11 @@ async def save_mcp_server_credentials(
     :rtype: MCPServerUserCredentialsPublic\n
     :raises HTTPException:\n
         - 404: Feature off, MCP server not found, or it asks for no credentials.
-        - 422: ``credentials_invalid`` (with ``field`` when known) or ``credentials_rejected``.
-        - 429: Rate limited (MCP bucket).
+        - 409: ``credentials_conflict``: the row changed during the save.
+        - 422: ``credentials_invalid`` (with ``field`` when known, also for a body over 8 KiB)
+          or ``credentials_rejected``.
+        - 429: Rate limited (``credentials`` bucket, enforced in every mode: each save
+          may send a token request to the provider).
         - 503: ``credentials_check_unavailable`` or ``credentials_storage_unavailable``.
     """
     mcp_server, spec = await _get_credential_target(server_id, requesting_user)
@@ -484,7 +507,13 @@ async def save_mcp_server_credentials(
             "credentials_check_unavailable",
             "The provider could not be reached to check these credentials.",
         ) from None
-    except (CipherConfigError, ClientError) as exc:
+    except user_credentials.CredentialsConflict:
+        raise _credentials_error(
+            409,
+            "credentials_conflict",
+            "The credentials changed while saving. Try again.",
+        ) from None
+    except (CipherConfigError, ClientError, BotoCoreError, PyMongoError) as exc:
         logger.error(
             "mcp.user_credentials.storage_unavailable server=%s error=%s",
             mcp_server.id,
@@ -501,14 +530,21 @@ async def save_mcp_server_credentials(
     return _credentials_public(spec, credential)
 
 
-@router.delete("/mcp-servers/{server_id}/credentials", status_code=204)
+@router.delete(
+    "/mcp-servers/{server_id}/credentials",
+    status_code=204,
+    include_in_schema=config.FEATURE_TOOLKIT_CREDENTIALS,
+)
 async def delete_mcp_server_credentials(
     server_id: str, requesting_user: User = Depends(get_current_user)
 ):
     """
     Remove the current user's own credentials for a toolkit.
 
-    Idempotent: answers 204 whether or not values were stored.
+    A stored row is always removed, even with the feature off, the spec gone or
+    the toolkit deleted, so a user can take back their secret. Without a row the
+    route answers like the save: 204 for a toolkit that asks for credentials,
+    else 404.
 
     :param server_id: MCP server identifier.\n
     :type server_id: str\n
@@ -517,15 +553,16 @@ async def delete_mcp_server_credentials(
     :return: Empty response.\n
     :rtype: Response\n
     :raises HTTPException:\n
-        - 404: Feature off, MCP server not found, or it asks for no credentials.
+        - 404: No stored row and the feature is off, the MCP server is not found,
+          or it asks for no credentials.
     """
-    mcp_server, _spec = await _get_credential_target(server_id, requesting_user)
-    removed = await user_credentials.delete(
-        user_id=requesting_user.id, server_id=str(mcp_server.id)
-    )
+    oid = _object_id_or_404(server_id)
+    removed = await user_credentials.delete(user_id=requesting_user.id, server_id=str(oid))
+    if not removed:
+        await _get_credential_target(str(oid), requesting_user)
     logger.info(
         "mcp.user_credentials.deleted server=%s user=%s removed=%s",
-        mcp_server.id,
+        oid,
         requesting_user.id,
         removed,
     )
