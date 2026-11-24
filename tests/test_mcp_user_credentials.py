@@ -20,6 +20,7 @@ from pymongo.errors import DuplicateKeyError
 from src.database.models.mcp_server import MCPServer, UserCredentialSpec
 from src.database.models.mcp_server_credential import MCPServerCredential
 from src.services.mcp import user_credentials as uc
+from src.services import custom_model_cipher
 from src.services.mcp.user_credentials import (
     CredentialsCheckUnavailable,
     CredentialsConflict,
@@ -27,6 +28,14 @@ from src.services.mcp.user_credentials import (
     CredentialsRejected,
     CredentialsUnreadable,
 )
+
+
+@pytest.fixture(autouse=True)
+def _local_kek(monkeypatch):
+    """CI configures no BYOK backend: wrap with a static local KEK, as the custom model tests do."""
+    monkeypatch.setattr(custom_model_cipher, "BYOK_LOCAL_KEK", base64.b64encode(b"\x01" * 32).decode())
+    monkeypatch.setattr(custom_model_cipher, "CUSTOM_MODEL_KMS_KEY_ID", None)
+
 
 # Captured at import, before any test patches httpx.AsyncClient.
 REAL_ASYNC_CLIENT = httpx.AsyncClient

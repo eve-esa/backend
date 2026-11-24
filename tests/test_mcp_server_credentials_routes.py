@@ -4,6 +4,7 @@ The provider check is mocked at ``verify_values``. Storage runs against the real
 test database and the local KEK the gate sets.
 """
 
+import base64
 import logging
 from typing import Optional
 from unittest.mock import AsyncMock, patch
@@ -22,9 +23,18 @@ from src.services.custom_model_cipher import CipherConfigError
 from src.routers import mcp_server as mcp_server_router
 from src.services import request_rate_limiter as rrl
 from src.services.mcp import user_credentials as uc
+from src.services import custom_model_cipher
 from src.services.request_rate_limiter import RequestRateLimiter
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
+
+
+@pytest.fixture(autouse=True)
+def _local_kek(monkeypatch):
+    """CI configures no BYOK backend: wrap with a static local KEK, as the custom model tests do."""
+    monkeypatch.setattr(custom_model_cipher, "BYOK_LOCAL_KEK", base64.b64encode(b"\x01" * 32).decode())
+    monkeypatch.setattr(custom_model_cipher, "CUSTOM_MODEL_KMS_KEY_ID", None)
+
 
 CLIENT_ID = "client-id-plain-1234"
 CLIENT_SECRET = "s3cr3t-value-never-logged-9876"
