@@ -6,6 +6,7 @@ and the local KEK the gate sets, so the encryption path is the one production
 uses minus KMS.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -14,12 +15,14 @@ import httpx
 import pytest
 import pytest_asyncio
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from src.database.models.mcp_server import MCPServer, UserCredentialSpec
 from src.database.models.mcp_server_credential import MCPServerCredential
 from src.services.mcp import user_credentials as uc
 from src.services.mcp.user_credentials import (
     CredentialsCheckUnavailable,
+    CredentialsConflict,
     CredentialsInvalid,
     CredentialsRejected,
     CredentialsUnreadable,
@@ -92,7 +95,14 @@ def token_endpoint(monkeypatch):
         state["client_kwargs"].append(kwargs)
         return REAL_ASYNC_CLIENT(*args, transport=httpx.MockTransport(handler), **kwargs)
 
+    async def resolve(host, port):
+        state["resolved"].append(host)
+        return state["addresses"]
+
+    state["addresses"] = ["93.184.215.14"]
+    state["resolved"] = []
     monkeypatch.setattr(uc.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(uc, "_resolve_addresses", resolve)
     return state
 
 
@@ -414,7 +424,13 @@ async def test_blob_copied_to_another_users_row_fails(clean_credentials):
     spec = _spec(SPEC_NO_CHECK_RAW)
     saved = await uc.save(user_id=USER, server_id=SERVER, spec=spec, values={"api_key": "k" * 20})
     await clean_credentials.insert_one(
-        {"user_id": OTHER_USER, "server_id": SERVER, "encrypted_values": saved.encrypted_values, "hints": {}}
+        {
+            "user_id": OTHER_USER,
+            "server_id": SERVER,
+            "encrypted_values": saved.encrypted_values,
+            "hints": {},
+            "field_names": ["api_key"],
+        }
     )
     with pytest.raises(CredentialsUnreadable):
         await uc.headers_for(user_id=OTHER_USER, server_id=SERVER, spec=spec)
@@ -442,3 +458,145 @@ async def test_no_submitted_value_reaches_any_log(clean_credentials, token_endpo
     await uc.headers_for(user_id=USER, server_id=SERVER, spec=_spec())
     assert CLIENT_SECRET not in caplog.text
     assert CLIENT_ID not in caplog.text
+
+
+# Hardening
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_verify_bounds_the_whole_request_with_one_deadline(token_endpoint, monkeypatch):
+    monkeypatch.setattr(uc, "CHECK_TIMEOUT_S", 0.05)
+
+    async def slow(request):
+        await asyncio.sleep(1)
+        return httpx.Response(200, json={"access_token": "tok"})
+
+    token_endpoint["handler"] = slow
+    with pytest.raises(CredentialsCheckUnavailable) as info:
+        await uc.verify_values(_spec(), _values())
+    assert info.value.__cause__ is None
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_url", ["https://exa\x00mple.test/token", "https://[::1/token", "https:///token"])
+async def test_verify_invalid_url_is_unavailable(token_endpoint, token_url):
+    spec = _spec({**SPEC_RAW, "check": {**SPEC_RAW["check"], "token_url": token_url}})
+    with pytest.raises(CredentialsCheckUnavailable):
+        await uc.verify_values(spec, _values())
+    assert token_endpoint["requests"] == []
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "addresses",
+    [["127.0.0.1"], ["10.0.0.5"], ["169.254.169.254"], ["93.184.215.14", "192.168.1.1"], ["::1"], []],
+)
+async def test_verify_refuses_a_token_host_that_is_not_public(token_endpoint, addresses, caplog):
+    caplog.set_level(logging.WARNING, logger=uc.__name__)
+    token_endpoint["addresses"] = addresses
+    token_endpoint["handler"] = lambda r: httpx.Response(200, json={"access_token": "tok"})
+    with pytest.raises(CredentialsCheckUnavailable):
+        await uc.verify_values(_spec(), _values())
+    assert token_endpoint["requests"] == []
+    assert "mcp.user_credentials.check_non_public host=auth.example.test" in caplog.text
+    assert CLIENT_SECRET not in caplog.text
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_verify_refuses_a_literal_private_ip_through_the_real_resolver(monkeypatch):
+    calls = []
+    monkeypatch.setattr(uc.httpx, "AsyncClient", lambda *a, **k: calls.append(k))
+    spec = _spec({**SPEC_RAW, "check": {**SPEC_RAW["check"], "token_url": "https://127.0.0.1/token"}})
+    with pytest.raises(CredentialsCheckUnavailable):
+        await uc.verify_values(spec, _values())
+    assert calls == []
+
+
+class _CollideOnce:
+    """Delegates to the real collection, the first update_one raises DuplicateKeyError."""
+
+    def __init__(self, real):
+        self.real = real
+        self.updates = 0
+
+    async def update_one(self, *args, **kwargs):
+        self.updates += 1
+        if self.updates == 1:
+            raise DuplicateKeyError("E11000 duplicate key")
+        return await self.real.update_one(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+@pytest.mark.asyncio
+async def test_save_retries_once_on_a_duplicate_key(clean_credentials, monkeypatch):
+    wrapper = _CollideOnce(MCPServerCredential.get_collection())
+    monkeypatch.setattr(MCPServerCredential, "get_collection", classmethod(lambda cls: wrapper))
+    saved = await uc.save(user_id=USER, server_id=SERVER, spec=_spec(SPEC_NO_CHECK_RAW), values={"api_key": "k" * 20})
+    assert wrapper.updates == 2
+    assert saved.field_names == ["api_key"]
+
+
+@pytest.mark.asyncio
+async def test_save_raises_conflict_when_the_row_is_gone_before_the_read_back(clean_credentials, monkeypatch):
+    class _Gone:
+        async def find_one(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(MCPServerCredential, "get_primary_collection", classmethod(lambda cls: _Gone()))
+    with pytest.raises(CredentialsConflict):
+        await uc.save(user_id=USER, server_id=SERVER, spec=_spec(SPEC_NO_CHECK_RAW), values={"api_key": "k" * 20})
+
+
+@pytest.mark.asyncio
+async def test_status_and_headers_read_the_primary(clean_credentials, monkeypatch):
+    spec = _spec(SPEC_NO_CHECK_RAW)
+    await uc.save(user_id=USER, server_id=SERVER, spec=spec, values={"api_key": "k" * 20})
+    real = MCPServerCredential.get_primary_collection.__func__
+    calls = []
+
+    def spy(cls):
+        calls.append(cls)
+        return real(cls)
+
+    monkeypatch.setattr(MCPServerCredential, "get_primary_collection", classmethod(spy))
+    assert set(await uc.status_for(user_id=USER, server_ids=[SERVER])) == {SERVER}
+    assert len(calls) == 1
+    assert await uc.headers_for(user_id=USER, server_id=SERVER, spec=spec) == {"X-Api-Key": "k" * 20}
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_save_stores_sorted_field_names(clean_credentials, token_endpoint):
+    token_endpoint["handler"] = lambda r: httpx.Response(200, json={"access_token": "tok"})
+    saved = await uc.save(user_id=USER, server_id=SERVER, spec=_spec(), values=_values())
+    assert saved.field_names == ["client_id", "client_secret"]
+    raw = await clean_credentials.find_one({"user_id": USER, "server_id": SERVER})
+    assert raw["field_names"] == ["client_id", "client_secret"]
+
+
+@pytest.mark.no_db
+def test_is_complete():
+    spec = _spec()
+    row = {"field_names": ["client_id", "client_secret"]}
+    assert uc.is_complete(row, spec) is True
+    assert uc.is_complete({"field_names": ["client_id"]}, spec) is False
+    assert uc.is_complete({}, spec) is False
+    model = MCPServerCredential(user_id=USER, server_id=SERVER, encrypted_values="x", field_names=["client_id", "client_secret"])
+    assert uc.is_complete(model, spec) is True
+    assert uc.is_complete(MCPServerCredential(user_id=USER, server_id=SERVER, encrypted_values="x"), spec) is False
+
+
+@pytest.mark.asyncio
+async def test_headers_for_is_none_for_a_row_saved_before_field_names(clean_credentials, caplog):
+    spec = _spec(SPEC_NO_CHECK_RAW)
+    await uc.save(user_id=USER, server_id=SERVER, spec=spec, values={"api_key": "k" * 20})
+    await clean_credentials.update_one({"user_id": USER, "server_id": SERVER}, {"$unset": {"field_names": ""}})
+    caplog.set_level(logging.WARNING, logger=uc.__name__)
+    assert await uc.headers_for(user_id=USER, server_id=SERVER, spec=spec) is None
+    assert f"mcp.user_credentials.stale server_id={SERVER}" in caplog.text

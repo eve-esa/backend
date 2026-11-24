@@ -83,8 +83,27 @@ RESERVED_CREDENTIAL_HEADERS = frozenset(
         "tracestate",
         "mcp-session-id",
         "mcp-protocol-version",
+        "accept",
+        "proxy-authorization",
     }
 )
+
+# Prefixes denied the same way: proxy and AWS signing or routing headers.
+RESERVED_CREDENTIAL_HEADER_PREFIXES = ("x-forwarded-", "x-amz-", "x-amzn-")
+
+# AgentCore forwards only Authorization and headers with this prefix to a
+# runtime, so it stays allowed even though it starts with ``x-amzn-``.
+AGENTCORE_PASSTHROUGH_PREFIX = "x-amzn-bedrock-agentcore-runtime-custom-"
+
+
+def is_reserved_credential_header(header: str) -> bool:
+    """True when a user credential may not travel in ``header``."""
+    lowered = header.lower()
+    if lowered in RESERVED_CREDENTIAL_HEADERS:
+        return True
+    if lowered.startswith(AGENTCORE_PASSTHROUGH_PREFIX):
+        return False
+    return lowered.startswith(RESERVED_CREDENTIAL_HEADER_PREFIXES)
 
 
 def _require_https(value: Optional[str]) -> Optional[str]:
@@ -106,7 +125,7 @@ class UserCredentialField(BaseModel):
     @field_validator("header")
     @classmethod
     def _header_not_reserved(cls, value: str) -> str:
-        if value.lower() in RESERVED_CREDENTIAL_HEADERS:
+        if is_reserved_credential_header(value):
             raise ValueError(f"header {value!r} is reserved")
         return value
 

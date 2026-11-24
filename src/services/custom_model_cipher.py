@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from typing import Mapping, Optional
 
 import boto3
@@ -87,11 +88,27 @@ def _select_backend() -> str:
     )
 
 
+_kms_client_lock = threading.Lock()
+_kms_client_instance = None
+
+
 def _kms_client():
-    kwargs = {"region_name": AWS_REGION}
-    if AWS_ENDPOINT_URL:
-        kwargs["endpoint_url"] = AWS_ENDPOINT_URL
-    return boto3.client("kms", **kwargs)
+    """One KMS client per process, built once and shared by the worker threads.
+
+    A boto3 client is thread safe, the default session that ``boto3.client``
+    uses is not, so the client is built once on its own session under a lock.
+    """
+    global _kms_client_instance
+    client = _kms_client_instance
+    if client is None:
+        with _kms_client_lock:
+            if _kms_client_instance is None:
+                kwargs = {"region_name": AWS_REGION}
+                if AWS_ENDPOINT_URL:
+                    kwargs["endpoint_url"] = AWS_ENDPOINT_URL
+                _kms_client_instance = boto3.session.Session().client("kms", **kwargs)
+            client = _kms_client_instance
+    return client
 
 
 def _decode_local_kek() -> bytes:

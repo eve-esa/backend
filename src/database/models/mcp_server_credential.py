@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
@@ -21,6 +21,10 @@ class MCPServerCredential(MongoModel):
     hints: Dict[str, str] = Field(
         default_factory=dict,
         description="Masked hints for the non-secret fields, safe to show back",
+    )
+    field_names: List[str] = Field(
+        default_factory=list,
+        description="Sorted names of the saved values, empty on rows saved before it existed",
     )
     verified_at: Optional[datetime] = Field(
         default=None, description="Last time the declared check passed"

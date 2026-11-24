@@ -121,6 +121,37 @@ def kms_backend(monkeypatch):
 
 
 @pytest.mark.no_db
+def test_kms_client_is_built_once_and_shared_across_threads(monkeypatch):
+    import threading
+
+    built = []
+    lock = threading.Lock()
+
+    class FakeSession:
+        def client(self, service, **kwargs):
+            with lock:
+                built.append((service, kwargs))
+            return object()
+
+    monkeypatch.setattr(custom_model_cipher, "_kms_client_instance", None)
+    monkeypatch.setattr(custom_model_cipher.boto3.session, "Session", FakeSession)
+    results = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        results.append(custom_model_cipher._kms_client())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(built) == 1 and built[0][0] == "kms"
+    assert len({id(client) for client in results}) == 1
+    assert custom_model_cipher._kms_client() is results[0]
+
+
 def test_local_backend_round_trip(local_backend):
     cipher = SecretCipher()
     blob = cipher.encrypt("sk-super-secret", CONTEXT_A)

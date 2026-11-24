@@ -66,6 +66,33 @@ def test_denied_or_malformed_header_is_rejected(header):
         )
 
 
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Accept",
+        "Proxy-Authorization",
+        "X-Forwarded-For",
+        "x-forwarded-host",
+        "X-Amz-Security-Token",
+        "X-Amz-Date",
+        "X-Amzn-Trace-Id",
+        "x-amzn-bedrock-agentcore-runtime-session-id",
+    ],
+)
+def test_proxy_and_aws_headers_are_rejected(header):
+    with pytest.raises(ValidationError):
+        UserCredentialSpec.model_validate(spec(fields=[field(header=header)], check=None))
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["X-Amzn-Bedrock-AgentCore-Runtime-Custom-Api-Key", "x-amzn-bedrock-agentcore-runtime-custom-token", "X-Amzlike"],
+)
+def test_agentcore_custom_prefix_is_allowed(header):
+    parsed = UserCredentialSpec.model_validate(spec(fields=[field(header=header)], check=None))
+    assert parsed.fields[0].header == header
+
+
 def test_duplicate_header_in_other_case_is_rejected():
     fields = [field(name="a", header="X-Key"), field(name="b", header="x-key")]
     with pytest.raises(ValidationError):

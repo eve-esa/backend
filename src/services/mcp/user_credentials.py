@@ -11,13 +11,16 @@ other use, so isolation does not depend on a separate secret per user.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
+import socket
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 import httpx
 from pydantic import ValidationError
+from pymongo.errors import DuplicateKeyError
 
 from src import config
 from src.database.models.mcp_server import MCPServer, UserCredentialSpec
@@ -62,6 +65,10 @@ class CredentialsCheckUnavailable(CredentialsError):
 
 class CredentialsUnreadable(CredentialsError):
     """A stored row no longer decrypts or parses."""
+
+
+class CredentialsConflict(CredentialsError):
+    """The row changed under a save, for example a delete landed in between."""
 
 
 def effective_spec(server: MCPServer | Mapping[str, Any]) -> Optional[UserCredentialSpec]:
@@ -132,6 +139,34 @@ def validate_values(spec: UserCredentialSpec, values: Any) -> dict[str, str]:
     return clean
 
 
+async def _resolve_addresses(host: str, port: int) -> list[str]:
+    """Every address ``host`` resolves to, through the event loop resolver."""
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+def _is_public(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_global
+    except ValueError:
+        return False
+
+
+async def _require_public_host(url: httpx.URL) -> None:
+    """Refuse a token URL that points inside the network, so the check is no SSRF probe."""
+    host = url.host
+    if not host:
+        raise CredentialsCheckUnavailable("the credential check has no usable token URL")
+    try:
+        addresses = await _resolve_addresses(host, url.port or 443)
+    except OSError:
+        logger.warning("mcp.user_credentials.check_unresolved host=%s", host)
+        raise CredentialsCheckUnavailable("the credential check could not reach the provider") from None
+    if not addresses or not all(_is_public(address) for address in addresses):
+        logger.warning("mcp.user_credentials.check_non_public host=%s", host)
+        raise CredentialsCheckUnavailable("the credential check could not reach the provider")
+
+
 async def verify_values(spec: UserCredentialSpec, values: Mapping[str, str]) -> bool:
     """Run the declared check on validated values. True when a check ran and passed.
 
@@ -147,12 +182,21 @@ async def verify_values(spec: UserCredentialSpec, values: Mapping[str, str]) -> 
         "client_secret": values[check.client_secret_field],
     }
     try:
-        # No redirects: a 3xx could carry the form to a host the operator never named.
-        async with httpx.AsyncClient(timeout=CHECK_TIMEOUT_S, follow_redirects=False) as client:
-            response = await client.post(
-                check.token_url, data=form, headers={"Accept": "application/json"}
-            )
-    except httpx.HTTPError as exc:
+        url = httpx.URL(check.token_url)
+    except httpx.InvalidURL:
+        logger.warning("mcp.user_credentials.check_invalid_url")
+        raise CredentialsCheckUnavailable("the credential check has no usable token URL") from None
+    try:
+        # One deadline for the whole check: the client timeout bounds each phase only.
+        async with asyncio.timeout(CHECK_TIMEOUT_S):
+            await _require_public_host(url)
+            # No redirects: a 3xx could carry the form to a host the operator never named.
+            async with httpx.AsyncClient(timeout=CHECK_TIMEOUT_S, follow_redirects=False) as client:
+                response = await client.post(url, data=form, headers={"Accept": "application/json"})
+    except TimeoutError:
+        logger.warning("mcp.user_credentials.check_failed error=TimeoutError")
+        raise CredentialsCheckUnavailable("the credential check could not reach the provider") from None
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
         logger.warning("mcp.user_credentials.check_failed error=%s", type(exc).__name__)
         # from None: the httpx exception holds the request, and the request holds the form.
         raise CredentialsCheckUnavailable("the credential check could not reach the provider") from None
@@ -196,21 +240,32 @@ async def save(
     now = datetime.now(timezone.utc)
     key = {"user_id": user_id, "server_id": server_id}
     # Update operators only: DocumentDB rejects pipeline updates.
-    await MCPServerCredential.get_collection().update_one(
-        key,
-        {
-            "$set": {
-                "encrypted_values": blob,
-                "hints": hints,
-                "verified_at": now if checked else None,
-                "updated_at": now,
-            },
-            "$setOnInsert": {"created_at": now, "timestamp": now},
+    update = {
+        "$set": {
+            "encrypted_values": blob,
+            "hints": hints,
+            "field_names": sorted(clean),
+            "verified_at": now if checked else None,
+            "updated_at": now,
         },
-        upsert=True,
-    )
+        "$setOnInsert": {"created_at": now, "timestamp": now},
+    }
+    collection = MCPServerCredential.get_collection()
+    for attempt in (1, 2):
+        try:
+            await collection.update_one(key, update, upsert=True)
+            break
+        except DuplicateKeyError:
+            # Two first saves raced on the unique key. MongoDB retries the loser
+            # server side, DocumentDB does not, so retry once: the row now exists.
+            if attempt == 2:
+                raise
+            logger.info("mcp.user_credentials.save_collided server_id=%s", server_id)
     # Primary: on a replica set a secondary may not have the write yet.
     row = await MCPServerCredential.get_primary_collection().find_one(key)
+    if row is None:
+        logger.warning("mcp.user_credentials.save_conflict server_id=%s", server_id)
+        raise CredentialsConflict("the credentials changed during the save, try again")
     return MCPServerCredential.from_dict(row)
 
 
@@ -222,6 +277,22 @@ async def delete(*, user_id: str, server_id: str) -> bool:
     return result.deleted_count > 0
 
 
+def is_complete(
+    credential: MCPServerCredential | Mapping[str, Any], spec: UserCredentialSpec
+) -> bool:
+    """True when the stored row holds a value for every field the spec declares.
+
+    False for rows saved before ``field_names`` existed: their names are unknown
+    without a decrypt, so the user is asked to save again.
+    """
+    if isinstance(credential, MCPServerCredential):
+        names = credential.field_names
+    else:
+        names = credential.get("field_names") or []
+    saved = set(names)
+    return bool(saved) and all(f.name in saved for f in spec.fields)
+
+
 async def status_for(
     *, user_id: str, server_ids: Iterable[str]
 ) -> dict[str, MCPServerCredential]:
@@ -229,7 +300,8 @@ async def status_for(
     ids = list(dict.fromkeys(server_ids))
     if not ids:
         return {}
-    cursor = MCPServerCredential.get_collection().find(
+    # Primary: the status follows a save the user just made.
+    cursor = MCPServerCredential.get_primary_collection().find(
         {"user_id": user_id, "server_id": {"$in": ids}}
     )
     rows = await cursor.to_list(length=len(ids))
@@ -243,10 +315,16 @@ async def headers_for(
 
     Decrypted per call on purpose: no plaintext cache outlives the request.
     """
-    row = await MCPServerCredential.get_collection().find_one(
+    # Primary: the first turn after a save must see it.
+    row = await MCPServerCredential.get_primary_collection().find_one(
         {"user_id": user_id, "server_id": server_id}
     )
     if row is None:
+        return None
+    if not is_complete(row, spec):
+        # The operator added a field after the user saved, or the row predates
+        # field_names: ask again rather than call the toolkit with a partial set.
+        logger.warning("mcp.user_credentials.stale server_id=%s", server_id)
         return None
     try:
         plaintext = await asyncio.to_thread(
@@ -266,8 +344,6 @@ async def headers_for(
         )
         raise CredentialsUnreadable("stored credentials could not be read") from None
     if any(f.name not in values for f in spec.fields):
-        # The operator added a field after the user saved: ask again rather than
-        # call the toolkit with a partial set.
         logger.warning("mcp.user_credentials.stale server_id=%s", server_id)
         return None
     return {f.header: values[f.name] for f in spec.fields}
