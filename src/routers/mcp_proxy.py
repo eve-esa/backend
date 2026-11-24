@@ -10,9 +10,9 @@ import functools
 import json
 import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, NamedTuple
 
 import fastmcp.client.transports.http as fastmcp_http_transport
 import httpx
@@ -32,6 +32,11 @@ from src.middlewares.auth import (
 from src.services.approval import PENDING_APPROVAL_DETAIL, ApprovalPending
 from src.services.mcp.auth import CognitoTokenProvider, get_cognito_token_provider
 from src.services.mcp.usage import track_usage
+from src.services.mcp.user_credentials import (
+    CredentialsUnreadable,
+    effective_spec,
+    headers_for,
+)
 from src.services.mcp.user_token_scope import (
     announce_user_token_forwarded,
     forwards_user_token,
@@ -75,11 +80,63 @@ _user_eve_token_var: ContextVar[str | None] = ContextVar(
     "mcp_proxy_user_eve_token", default=None
 )
 
-# Cache of (server_name, user_id) → (agentcore_url, forward_user_token, expiry_monotonic).
+# Per-request headers built from the caller's own toolkit credentials, set only
+# around a ``tools/call`` to an operator row that declares a credential spec.
+# Read by ``_DynamicBearerAuth``. The proxy app is shared across users, so the
+# value lives for one proxied call and is reset when it ends.
+_upstream_credential_headers_var: ContextVar[dict[str, str] | None] = ContextVar(
+    "mcp_proxy_upstream_credential_headers", default=None
+)
+
+# Headers a credential spec can never set: they authenticate the proxy and the user.
+_PROTECTED_UPSTREAM_HEADERS = frozenset({"authorization", "x-eve-token"})
+
+_CREDENTIALS_MISSING_TEXT = (
+    "This toolkit needs your own credentials. Add them in Settings, Toolkits, then try again."
+)
+_CREDENTIALS_UNREADABLE_TEXT = (
+    "Your saved credentials for this toolkit could not be read. "
+    "Add them again in Settings, Toolkits."
+)
+_CREDENTIALS_UNAVAILABLE_TEXT = (
+    "Your saved credentials for this toolkit could not be read right now. "
+    "Try again in a moment."
+)
+
+
+class _CachedServer(NamedTuple):
+    url: str
+    forward_token: bool
+    server_id: str | None
+    # ``name``, ``user_id`` and ``user_credentials`` of the row, or None when the
+    # row declares no credentials. ``effective_spec`` reads it per call, so the
+    # feature flag is honoured without waiting for the cache to expire.
+    credential_row: dict | None
+    expires_at: float
+
+
+class _ResolvedProxy(NamedTuple):
+    proxy_app: Any
+    principal: Principal
+    user_token: str | None
+    server_id: str | None
+    credential_row: dict | None
+
+
+class _UpstreamCredentials(NamedTuple):
+    headers: dict[str, str] | None
+    # ``user`` when the call needs or uses the caller's own credentials,
+    # ``platform`` when an optional spec found none, None when the row has no spec.
+    source: str | None
+    # Text of the tool error to answer instead of calling upstream, or None.
+    refusal: str | None
+
+
+# Cache of (server_name, user_id) to the resolved row (see ``_CachedServer``).
 # Avoids a MongoDB round-trip on every proxy request when the result is stable.
 # TTL matches MCP_TOOLS_CACHE_TTL so both caches expire together.
 # Per-server_name locks ensure at most one concurrent cold-miss fetch.
-_server_url_cache: dict[tuple[str, str], tuple[str, bool, float]] = {}
+_server_url_cache: dict[tuple[str, str], _CachedServer] = {}
 _server_url_locks: dict[str, asyncio.Lock] = {}
 _server_url_registry_lock = asyncio.Lock()
 
@@ -127,6 +184,15 @@ class _DynamicBearerAuth(httpx.Auth):
         user_eve_token = _user_eve_token_var.get()
         if user_eve_token:
             request.headers["X-EVE-Token"] = user_eve_token
+
+        # The caller's own toolkit credentials, set only on a tools/call to a
+        # row that declares a spec. Added after the two headers above and never
+        # over them, whatever the spec says.
+        credential_headers = _upstream_credential_headers_var.get()
+        if credential_headers:
+            for name, value in credential_headers.items():
+                if name.lower() not in _PROTECTED_UPSTREAM_HEADERS:
+                    request.headers[name] = value
 
         # Yield the request; httpx sends it and feeds the response back via send().
         response = yield request
@@ -328,6 +394,15 @@ def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
     ``tools/list``, notifications, ``ping``, GET/SSE opens with no body, …) so
     those housekeeping hops are not logged — only real tool invocations are.
     """
+    msg = _find_tool_call_message(body)
+    if msg is None:
+        return None
+    params = msg.get("params") or {}
+    return params.get("name"), params.get("arguments")
+
+
+def _find_tool_call_message(body: bytes) -> dict | None:
+    """The first JSON-RPC ``tools/call`` message in ``body``, or None."""
     if not body:
         return None
     try:
@@ -337,11 +412,53 @@ def _extract_tool_call(body: bytes) -> tuple[str, Any] | None:
 
     messages = parsed if isinstance(parsed, list) else [parsed]
     for msg in messages:
-        if not isinstance(msg, dict) or msg.get("method") != "tools/call":
-            continue
-        params = msg.get("params") or {}
-        return params.get("name"), params.get("arguments")
+        if isinstance(msg, dict) and msg.get("method") == "tools/call":
+            return msg
     return None
+
+
+def _tool_error_body(request_id: Any, text: str) -> dict:
+    """An MCP tool result that reports failure, so the model reads ``text``."""
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {"content": [{"type": "text", "text": text}], "isError": True},
+    }
+
+
+async def _upstream_credentials(
+    *, user_id: str, server_id: str | None, credential_row: Mapping | None, server_name: str
+) -> _UpstreamCredentials:
+    """Decide what a tools/call sends upstream from the caller's own credentials.
+
+    Never raises for a credential problem: the caller gets a tool error instead
+    of a failed transport. No value is ever logged.
+    """
+    if credential_row is None or server_id is None:
+        return _UpstreamCredentials(None, None, None)
+    spec = effective_spec(credential_row)
+    if spec is None:
+        return _UpstreamCredentials(None, None, None)
+    try:
+        headers = await headers_for(user_id=user_id, server_id=server_id, spec=spec)
+    except CredentialsUnreadable:
+        # headers_for already logged the row at ERROR.
+        logger.warning("mcp.user_credentials.refused server=%s reason=unreadable", server_name)
+        return _UpstreamCredentials(None, "user", _CREDENTIALS_UNREADABLE_TEXT)
+    except Exception as exc:
+        # KMS outage or missing key config: the class only, the message may hold data.
+        logger.error(
+            "mcp.user_credentials.read_failed server=%s error=%s",
+            server_name,
+            type(exc).__name__,
+        )
+        return _UpstreamCredentials(None, "user", _CREDENTIALS_UNAVAILABLE_TEXT)
+    if headers:
+        return _UpstreamCredentials(headers, "user", None)
+    if spec.required:
+        logger.info("mcp.user_credentials.refused server=%s reason=missing", server_name)
+        return _UpstreamCredentials(None, "user", _CREDENTIALS_MISSING_TEXT)
+    return _UpstreamCredentials(None, "platform", None)
 
 
 def _parse_mcp_messages(raw: bytes) -> list[dict] | None:
@@ -454,9 +571,7 @@ class MCPProxyDispatcher:
                     tail = "/".join(parts[3:]) if len(parts) > 3 else ""
                     remaining = f"{mcp_path}/{tail}".rstrip("/") if tail else mcp_path
                     try:
-                        proxy_app, principal, user_token = await self._resolve_proxy(
-                            scope, server_name
-                        )
+                        resolved = await self._resolve_proxy(scope, server_name)
                     except PermissionError as exc:
                         await self._send_error(send, 401, str(exc))
                         return
@@ -485,8 +600,10 @@ class MCPProxyDispatcher:
 
                     scope = {**scope, "path": remaining, "raw_path": remaining.encode()}
                     await self._dispatch_and_track(
-                        scope, receive, send, proxy_app, principal, server_name,
-                        user_token,
+                        scope, receive, send, resolved.proxy_app, resolved.principal,
+                        server_name, resolved.user_token,
+                        server_id=resolved.server_id,
+                        credential_row=resolved.credential_row,
                     )
                     return
 
@@ -494,7 +611,8 @@ class MCPProxyDispatcher:
 
     async def _dispatch_and_track(
         self, scope, receive, send, proxy_app, principal: Principal,
-        server_name: str, user_token: str | None = None,
+        server_name: str, user_token: str | None = None, *,
+        server_id: str | None = None, credential_row: Mapping | None = None,
     ):
         """Forward to the proxy sub-app and record one usage event per tool call.
 
@@ -508,11 +626,16 @@ class MCPProxyDispatcher:
         can forward it as ``X-EVE-Token`` to the upstream MCP server (see the
         docstring there for why user-scoped retrieval depends on it). It is
         ``None`` for servers not allowed to receive it (``_resolve_proxy``).
+
+        On a ``tools/call`` to a row with a credential spec, the caller's own
+        credentials go into ``_upstream_credential_headers_var`` for the same
+        lifetime, or the caller gets a tool error and upstream is not called.
         """
         # Publish the caller's token for the lifetime of this proxied call only:
         # the proxy app is shared across users, so the contextvar must not leak
         # past this request.
         token_reset = _user_eve_token_var.set(user_token)
+        credentials_reset = _upstream_credential_headers_var.set(None)
         try:
             # Buffer the request body once so we can both inspect it and replay it
             # downstream (ASGI bodies are single-consumption streams).
@@ -551,6 +674,36 @@ class MCPProxyDispatcher:
                 await self._send_json(send, 503, {"detail": LIMITER_UNAVAILABLE_DETAIL})
                 return
             caller_type = principal.caller_type()
+
+            credentials = await _upstream_credentials(
+                user_id=principal.user_id,
+                server_id=server_id,
+                credential_row=credential_row,
+                server_name=server_name,
+            )
+            if credentials.refusal is not None:
+                started = time.monotonic()
+                call = _find_tool_call_message(body) or {}
+                error_body = _tool_error_body(call.get("id"), credentials.refusal)
+                await self._send_json(send, 200, error_body)
+                await track_usage(
+                    user_id=principal.user_id,
+                    caller_type=caller_type,
+                    api_key_id=principal.api_key_id,
+                    server_name=server_name,
+                    operation="tools/call",
+                    tool_name=tool_name,
+                    status_code=200,
+                    is_error=True,
+                    outcome="error",
+                    latency_ms=(time.monotonic() - started) * 1000,
+                    request_payload=arguments,
+                    response_payload=error_body,
+                    credential_source=credentials.source,
+                )
+                return
+            if credentials.headers:
+                _upstream_credential_headers_var.set(credentials.headers)
 
             status_holder: dict[str, int] = {}
             resp_chunks: list[bytes] = []
@@ -603,8 +756,10 @@ class MCPProxyDispatcher:
                     latency_ms=latency_ms,
                     request_payload=arguments,
                     response_payload=response_payload,
+                    credential_source=credentials.source,
                 )
         finally:
+            _upstream_credential_headers_var.reset(credentials_reset)
             _user_eve_token_var.reset(token_reset)
 
     async def _resolve_proxy(self, scope, server_name: str):
@@ -620,16 +775,16 @@ class MCPProxyDispatcher:
         now = time.monotonic()
         cached = _server_url_cache.get(cache_key)
 
-        if cached and now < cached[2]:
-            agentcore_url, forward_token = cached[0], cached[1]
+        if cached and now < cached.expires_at:
+            entry = cached
         else:
             lock = await _get_server_url_lock(server_name)
             async with lock:
                 # Re-check after acquiring lock — another coroutine may have
                 # already refreshed the entry while we were waiting.
                 cached = _server_url_cache.get(cache_key)
-                if cached and time.monotonic() < cached[2]:
-                    agentcore_url, forward_token = cached[0], cached[1]
+                if cached and time.monotonic() < cached.expires_at:
+                    entry = cached
                 else:
                     mcp_servers = get_collection("mcp_servers")
                     # A user row and a global row can share a name. The
@@ -641,7 +796,13 @@ class MCPProxyDispatcher:
                             "enabled": True,
                             "$or": [{"user_id": user_id}, {"user_id": None}],
                         },
-                        {"config.url": 1, "name": 1, "user_id": 1, "forward_user_token": 1},
+                        {
+                            "config.url": 1,
+                            "name": 1,
+                            "user_id": 1,
+                            "forward_user_token": 1,
+                            "user_credentials": 1,
+                        },
                         sort=[("user_id", -1)],
                     )
                     if (
@@ -652,17 +813,26 @@ class MCPProxyDispatcher:
                         raise LookupError(
                             f"MCP server '{server_name}' not found or not accessible"
                         )
-                    agentcore_url = server["config"]["url"]
                     forward_token = forwards_user_token(
                         name=server.get("name", server_name),
                         user_id=server.get("user_id"),
                         forward_user_token=server.get("forward_user_token"),
                     )
-                    _server_url_cache[cache_key] = (
-                        agentcore_url,
-                        forward_token,
-                        time.monotonic() + MCP_TOOLS_CACHE_TTL,
+                    raw_spec = server.get("user_credentials")
+                    entry = _CachedServer(
+                        url=server["config"]["url"],
+                        forward_token=forward_token,
+                        server_id=str(server["_id"]) if server.get("_id") is not None else None,
+                        credential_row=None
+                        if raw_spec is None
+                        else {
+                            "name": server.get("name", server_name),
+                            "user_id": server.get("user_id"),
+                            "user_credentials": raw_spec,
+                        },
+                        expires_at=time.monotonic() + MCP_TOOLS_CACHE_TTL,
                     )
+                    _server_url_cache[cache_key] = entry
                     logger.debug(
                         "[MCP proxy] cached URL for server=%r user=%s (TTL=%.0fs)",
                         server_name,
@@ -674,14 +844,17 @@ class MCPProxyDispatcher:
         if provider is None:
             raise RuntimeError("AgentCore authentication is not configured")
 
-        proxy_app = await build_proxy_app(agentcore_url, provider)
+        proxy_app = await build_proxy_app(entry.url, provider)
         # The caller's token goes upstream only to a server allowed to receive
         # it (``user_token_scope``). The Cognito client-credentials bearer is
         # sent by ``_DynamicBearerAuth`` on every proxied call, whatever the row.
-        if not forward_token:
-            return proxy_app, principal, None
-        announce_user_token_forwarded(server_name)
-        return proxy_app, principal, token
+        user_token = None
+        if entry.forward_token:
+            announce_user_token_forwarded(server_name)
+            user_token = token
+        return _ResolvedProxy(
+            proxy_app, principal, user_token, entry.server_id, entry.credential_row
+        )
 
     @staticmethod
     async def _send_error(send, status: int, detail: str):

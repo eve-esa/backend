@@ -47,12 +47,17 @@ async def track_usage(
     latency_ms: Optional[float] = None,
     request_payload: Optional[Any] = None,
     response_payload: Optional[Any] = None,
+    credential_source: Optional[str] = None,
 ) -> None:
     """Persist one MCP proxy usage event without affecting request flow.
 
     The lean event goes to ``mcp_usage``; ``request_payload``/``response_payload``
     (tool arguments and the raw upstream response) are offloaded to
     ``mcp_usage_payloads`` under the same ``_id``.
+
+    ``credential_source`` is ``user`` when the call needed or used the caller's
+    own toolkit credentials, ``platform`` when an optional spec found none, and
+    None when the toolkit declares no credentials. Never a value.
     """
     try:
         collection = get_collection("mcp_usage")
@@ -68,6 +73,7 @@ async def track_usage(
                 "is_error": is_error,
                 "outcome": outcome,
                 "latency_ms": latency_ms,
+                "credential_source": credential_source,
                 "timestamp": datetime.now(timezone.utc),
             }
         )
