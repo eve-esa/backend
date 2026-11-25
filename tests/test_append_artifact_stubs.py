@@ -934,3 +934,71 @@ async def test_offsets_after_a_repaired_link_follow_every_pass():
         at = shift_offset(at, edits)
     assert answer[at : at + 3] == "[1]"
     assert answer.startswith(f"![severity_map.png](/artifacts/{_SEVERITY_ID})")
+
+
+# Staging, 2026-11-23, conversation 6b0449a298c0509f35a02337. The label holds
+# its own parentheses, so the destination is the later ``(/workspace/...)``.
+
+_JPEG = b"\xff\xd8\xff"
+_PNG = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.asyncio
+async def test_a_parenthetical_label_keeps_the_workspace_path():
+    written = "![Sentinel-2 BEFORE (s2_pre.jpg)(/workspace/flood/s2_pre.jpg)"
+
+    assert await rewrite_answer_file_links(written) == (
+        "![Sentinel-2 BEFORE (s2_pre.jpg)](/workspace/flood/s2_pre.jpg)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_spaced_parenthetical_label_keeps_the_workspace_path():
+    written = "![Pre-flood SAR (Oct 2026)(/workspace/flood/pre_flood_sar.jpg)"
+
+    assert await rewrite_answer_file_links(written) == (
+        "![Pre-flood SAR (Oct 2026)](/workspace/flood/pre_flood_sar.jpg)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_parenthetical_file_lines_do_not_swallow_the_next_image(
+    dummy_image_turn,
+):
+    dummy_image_turn.sandbox_backend = _WorkspaceSandbox(
+        {
+            "flood/s2_pre.jpg": _JPEG,
+            "flood/s2_post.jpg": _JPEG,
+            "flood/s3_pre.jpg": _JPEG,
+            "flood/s3_before_after.png": _PNG,
+        }
+    )
+    base = "/conversations/c1/workspace/flood"
+    written = (
+        "- ![Sentinel-2 BEFORE (s2_pre.jpg)(/workspace/flood/s2_pre.jpg)\n"
+        "- [Sentinel-2 AFTER (s2_post.jpg)(/workspace/flood/s2_post.jpg)\n"
+        "\n"
+        "![Sentinel-3 OLCI before and after flood](/workspace/flood/s3_before_after.png)\n"
+        "- [Sentinel-3 BEFORE (s3_pre.jpg)(/workspace/flood/s3_pre.jpg)\n"
+    )
+
+    assert await rewrite_answer_file_links(written) == (
+        f"- ![Sentinel-2 BEFORE (s2_pre.jpg)]({base}/s2_pre.jpg)\n"
+        f"- ![Sentinel-2 AFTER (s2_post.jpg)]({base}/s2_post.jpg)\n"
+        "\n"
+        f"![Sentinel-3 OLCI before and after flood]({base}/s3_before_after.png)\n"
+        f"- ![Sentinel-3 BEFORE (s3_pre.jpg)]({base}/s3_pre.jpg)\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_note_in_parentheses_does_not_swallow_the_next_image(
+    dummy_image_turn,
+):
+    dummy_image_turn.sandbox_backend = _WorkspaceSandbox({"flood/chart.png": _PNG})
+    written = "As in [see note (a) above.\n\n![chart](/workspace/flood/chart.png)"
+
+    assert await rewrite_answer_file_links(written) == (
+        "As in [see note (a) above.\n\n"
+        "![chart](/conversations/c1/workspace/flood/chart.png)"
+    )
