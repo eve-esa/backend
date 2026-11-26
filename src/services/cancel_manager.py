@@ -260,16 +260,20 @@ class CancelManager:
         return None
 
     async def get_message_for_conversation_async(
-        self, conversation_id: str
+        self, conversation_id: str, raise_errors: bool = False
     ) -> Optional[str]:
+        """The message id mapped to the conversation, else None.
+
+        A store error answers None unless ``raise_errors`` is set: a caller
+        that must tell "no turn" from "store down" asks for the exception.
+        """
         local = self._conv_to_msg.get(conversation_id)
         if local:
             return local
         if self._is_redis_enabled():
-            try:
-                return await self._hget_mapping(conversation_id)
-            except Exception:
-                return None
+            return await self._hget_mapping(
+                conversation_id, raise_errors=raise_errors
+            )
         return None
 
     async def wait_until_finished(
@@ -337,16 +341,23 @@ class CancelManager:
         except Exception as e:
             self._logger.warning("cancel_manager.redis_hset_error: %s", str(e))
 
-    async def _hget_mapping(self, conversation_id: str) -> Optional[str]:
+    async def _hget_mapping(
+        self, conversation_id: str, raise_errors: bool = False
+    ) -> Optional[str]:
         try:
             await self._ensure_redis()
             if self._redis is None:
+                if raise_errors:
+                    raise ConnectionError("redis client unavailable")
                 return None
             val = await self._redis.hget("conv_to_msg", conversation_id)
             if isinstance(val, bytes):
                 return val.decode("utf-8", errors="ignore")
             return str(val) if val is not None else None
         except Exception as e:
+            if raise_errors:
+                # The caller logs it once, with its own context.
+                raise
             self._logger.warning("cancel_manager.redis_hget_error: %s", str(e))
             return None
 

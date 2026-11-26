@@ -147,7 +147,7 @@
 - **name**: string
 - **timestamp**: datetime
 - **messages**: list[Message]
-- **active_message_id**: string | null (the assistant message still being generated, null when no turn runs or the turn is past its deadline)
+- **active_message_id**: string | null (the assistant message still being generated, null when no turn runs or the turn is past its deadline. When the running-turn store does not answer, the last message if it is still empty and recent, see `GET /conversations/{conversation_id}`)
 
 ### Conversation (response model)
 
