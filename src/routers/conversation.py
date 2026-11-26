@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -51,15 +51,18 @@ DELETE_PREEMPT_TIMEOUT_S = 10.0
 # How long GET /conversations/{id} waits for the running-turn lookup. Every
 # Redis client built from redis_client_kwargs() has socket_timeout=None, the
 # cancel manager's shared client included, so a hung store would otherwise
-# hold the page load.
-ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S = 0.25
+# hold the page load. Measured on dev Valkey: the read has a p50 under 1 ms,
+# but spikes to 180 to 210 ms almost every minute, a worker's first (cold)
+# read took 257 ms and one spike 305 ms, so 0.25 s timed out on normal
+# behaviour. 0.5 s covers those, and the rarer 1 to 2.4 s spikes fall back
+# to the stored rows (below) while the page load waits at most half a second.
+ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S = 0.5
 
-# After a lookup times out or fails, this worker answers null without asking
-# the store for this many seconds. Each timed-out read drops one connection of
-# the shared client that also carries Stop, so without the window a latency
-# spike would turn every page load into a reconnect. Same idea as the request
-# rate limiter's REQUEST_RATE_LIMIT_SKIP_S, shorter: a null here shows a
-# running turn as ended.
+# After a lookup times out or fails, this worker skips the store for this many
+# seconds and answers from the stored rows instead. Each timed-out read drops
+# one connection of the shared client that also carries Stop, so without the
+# window a latency spike would turn every page load into a reconnect. Same
+# idea as the request rate limiter's REQUEST_RATE_LIMIT_SKIP_S, shorter.
 ACTIVE_MESSAGE_SKIP_S = 10.0
 _lookup_skip_until = 0.0
 _clock = time.monotonic
@@ -118,14 +121,15 @@ def _is_unsaved(message: Message) -> bool:
     return not message.output and not message.stopped and not metadata.get("error")
 
 
-async def _active_message_id(conversation_id: str) -> Optional[str]:
-    """The message id of the turn still running on the conversation, else None.
+async def _active_message_id(conversation_id: str) -> Tuple[bool, Optional[str]]:
+    """Ask the store for the turn still running on the conversation.
 
-    Read only: the cancel manager's conversation to message mapping, written
-    when a stream starts and cleared when the turn ends. A store error, a
-    slow store, or a mapping past the turn deadline answers None: the
-    conversation still loads. After a slow or failed lookup the store is
-    not asked again for ACTIVE_MESSAGE_SKIP_S.
+    Returns ``(answered, message_id)``. When the store answers, ``message_id``
+    is the running turn's message, or None for no turn (no mapping, or a
+    mapping past the turn deadline). When it cannot answer (timeout, error,
+    or the skip window after one), ``answered`` is False and the caller falls
+    back to the stored rows. After a slow or failed lookup the store is not
+    asked again for ACTIVE_MESSAGE_SKIP_S.
     """
     global _lookup_skip_until
     if _clock() < _lookup_skip_until:
@@ -133,15 +137,17 @@ async def _active_message_id(conversation_id: str) -> Optional[str]:
             "conversation.active_message.skipped conversation_id=%s",
             conversation_id,
         )
-        return None
+        return False, None
     try:
         message_id = await asyncio.wait_for(
-            get_cancel_manager().get_message_for_conversation_async(conversation_id),
+            get_cancel_manager().get_message_for_conversation_async(
+                conversation_id, raise_errors=True
+            ),
             timeout=ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S,
         )
         if message_id and _is_live_turn(conversation_id, message_id):
-            return message_id
-        return None
+            return True, message_id
+        return True, None
     except asyncio.TimeoutError:
         _lookup_skip_until = _clock() + ACTIVE_MESSAGE_SKIP_S
         logger.warning(
@@ -155,6 +161,28 @@ async def _active_message_id(conversation_id: str) -> Optional[str]:
             conversation_id,
             type(e).__name__,
         )
+    return False, None
+
+
+def _active_message_from_rows(
+    conversation_id: str, messages: List[Message]
+) -> Optional[str]:
+    """The last row's id when it looks like a running turn, else None.
+
+    Used only when the store cannot answer: an unsaved last row younger than
+    the longest turn deadline may still be generating, so the client keeps
+    polling instead of showing it as failed. A dead turn's row is reported
+    at most until it passes ACTIVE_MESSAGE_MAX_AGE_S.
+    """
+    if not messages or not _is_unsaved(messages[-1]):
+        return None
+    message_id = messages[-1].id
+    if message_id and _is_live_turn(conversation_id, message_id):
+        logger.debug(
+            "conversation.active_message.from_rows conversation_id=%s",
+            conversation_id,
+        )
+        return message_id
     return None
 
 
@@ -225,16 +253,21 @@ async def get_conversation(
 
         # Read the running turn before the messages: when it reports none,
         # the turn had already ended and saved its answer on the primary.
-        active_message_id = await _active_message_id(conversation_id)
+        answered, active_message_id = await _active_message_id(conversation_id)
 
         message_filter = {"conversation_id": conversation_id}
         messages = await Message.find_all(
             filter_dict=message_filter, sort=[("timestamp", 1)]
         )
+        # The store could not answer: "no turn" would show a running turn's
+        # empty row as failed, so judge from the rows already read.
+        if not answered:
+            active_message_id = _active_message_from_rows(conversation_id, messages)
         # A secondary can still hold the turn's empty row right after the
         # save, and the client stops polling on a null. Only then read the
-        # messages once more on the primary. While a turn runs the client
-        # polls again, so a secondary read is fine.
+        # messages once more on the primary. While a turn runs, or may run
+        # (an id from the rows), the client polls again, so a secondary read
+        # is fine.
         if active_message_id is None and messages and _is_unsaved(messages[-1]):
             messages = await Message.find_all(
                 filter_dict=message_filter, sort=[("timestamp", 1)], primary=True

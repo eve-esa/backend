@@ -136,9 +136,9 @@ async def test_another_conversation_running_is_not_reported(async_client):
 
 
 @pytest.mark.asyncio
-async def test_a_store_error_swallowed_by_the_cancel_manager_answers_null(async_client):
-    """The cancel manager logs and swallows a Valkey error itself: the route
-    sees no mapping and answers null."""
+async def test_a_store_error_with_no_messages_answers_null(async_client):
+    """A Valkey error reaches the route as a failed lookup: with no stored
+    row to fall back on, the answer is null."""
     user, token = await create_test_user_and_token()
     try:
         conversation_id = await _create_conversation(async_client, token)
@@ -602,3 +602,202 @@ async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
             await reader._redis.aclose()
         await admin.aclose()
         await cleanup_models([user])
+
+
+# When the lookup cannot answer (timeout, raised error, skip window), the
+# route does not report "no turn": a slow store during a running turn would
+# show the empty row as failed. It falls back to the stored rows instead.
+
+
+async def _add_message_aged(conversation_id: str, output: str, age_s: float = 0.0, **fields) -> str:
+    """A message row whose id was generated ``age_s`` seconds ago."""
+    message = Message(
+        conversation_id=conversation_id, input="question", output=output, **fields
+    )
+    born = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    # from_datetime zeroes the random part: two rows born in the same second
+    # would collide, so keep the timestamp and randomise the rest.
+    message_id = str(ObjectId(int(born.timestamp()).to_bytes(4, "big") + os.urandom(8)))
+    await Message.get_collection().insert_one(
+        {**message.to_dict(), "_id": ObjectId(message_id)}
+    )
+    return message_id
+
+
+def _timeout_manager():
+    return _redis_manager(_HangingRedis())
+
+
+def _raising_lookup_manager():
+    mgr = _local_manager()
+    mgr.get_message_for_conversation_async = _raise_down  # type: ignore[method-assign]
+    return mgr
+
+
+async def _raise_down(*_args, **_kwargs):
+    raise RuntimeError("down")
+
+
+def _swallowing_store_manager():
+    return _redis_manager(_RaisingRedis())
+
+
+_UNAVAILABLE_CASES = [
+    pytest.param(_timeout_manager, False, id="timeout"),
+    pytest.param(_raising_lookup_manager, False, id="raised"),
+    pytest.param(_swallowing_store_manager, False, id="store_error"),
+    pytest.param(_local_manager, True, id="skip_window"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_manager, skip_window", _UNAVAILABLE_CASES)
+async def test_unavailable_lookup_reports_a_young_unsaved_last_row(
+    async_client, make_manager, skip_window
+):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(conversation_id, "an earlier answer", age_s=30)
+        running = await _add_message_aged(conversation_id, "", age_s=5)
+        if skip_window:
+            conversation_router._lookup_skip_until = float("inf")
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=make_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] == running
+        # A fallback id means the turn may still run: no primary re-read.
+        assert _primary_flags(find_all) == [False]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_manager, skip_window", _UNAVAILABLE_CASES)
+async def test_unavailable_lookup_with_a_saved_last_row_is_null(
+    async_client, make_manager, skip_window
+):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(conversation_id, "the saved answer", age_s=5)
+        if skip_window:
+            conversation_router._lookup_skip_until = float("inf")
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=make_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert _primary_flags(find_all) == [False]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_manager, skip_window", _UNAVAILABLE_CASES)
+@pytest.mark.parametrize(
+    "fields",
+    [{"stopped": True}, {"metadata": {"error": {"code": "upstream_error"}}}],
+    ids=["stopped", "error"],
+)
+async def test_unavailable_lookup_with_an_ended_empty_row_is_null(
+    async_client, make_manager, skip_window, fields
+):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(conversation_id, "", age_s=5, **fields)
+        if skip_window:
+            conversation_router._lookup_skip_until = float("inf")
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=make_manager()
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_manager, skip_window", _UNAVAILABLE_CASES)
+async def test_unavailable_lookup_with_an_unsaved_row_past_the_max_age_is_null(
+    async_client, make_manager, skip_window
+):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(
+            conversation_id, "", age_s=conversation_router.ACTIVE_MESSAGE_MAX_AGE_S + 60
+        )
+        if skip_window:
+            conversation_router._lookup_skip_until = float("inf")
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=make_manager()
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_unavailable_lookup_with_no_messages_is_null(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_timeout_manager()
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_answers_no_turn_still_wins_over_an_unsaved_row(async_client):
+    """When the store answers, its null is the truth: the empty row is read
+    again on the primary and no fallback id is reported."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(conversation_id, "", age_s=5)
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_local_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert _primary_flags(find_all) == [False, True]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_store_error_opens_the_skip_window(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        now = [1000.0]
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_swallowing_store_manager()
+        ), patch.object(conversation_router, "_clock", lambda: now[0]):
+            await _get(async_client, token, conversation_id)
+        assert conversation_router._lookup_skip_until == 1000.0 + conversation_router.ACTIVE_MESSAGE_SKIP_S
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_the_cancel_manager_still_swallows_store_errors_by_default():
+    """Other callers (Stop, retry preempt) keep the old contract: None on error."""
+    mgr = _swallowing_store_manager()
+    assert await mgr.get_message_for_conversation_async("c1") is None
+    with pytest.raises(ConnectionError):
+        await mgr.get_message_for_conversation_async("c1", raise_errors=True)
