@@ -259,30 +259,87 @@ async def test_an_invalid_conversation_id_is_404_without_a_lookup(async_client):
         await cleanup_models([user])
 
 
+async def _add_message(conversation_id: str, output: str, **fields) -> None:
+    await Message.create(
+        conversation_id=conversation_id, input="question", output=output, **fields
+    )
+
+
+def _primary_flags(find_all) -> list:
+    return [c.kwargs.get("primary", False) for c in find_all.call_args_list]
+
+
 @pytest.mark.asyncio
-async def test_with_no_running_turn_the_messages_are_read_on_the_primary(async_client):
-    """A turn that just ended saved its answer on the primary: a secondary can
-    still hold the empty row, and the client stops polling on this answer."""
+async def test_a_normal_load_does_no_primary_read(async_client):
     user, token = await create_test_user_and_token()
     try:
         conversation_id = await _create_conversation(async_client, token)
+        await _add_message(conversation_id, "a saved answer")
         with patch.object(
             conversation_router, "get_cancel_manager", return_value=_local_manager()
         ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
         assert resp.json()["active_message_id"] is None
-        find_all.assert_called_once()
-        assert find_all.call_args.kwargs["primary"] is True
+        assert _primary_flags(find_all) == [False]
     finally:
         await cleanup_models([user])
 
 
 @pytest.mark.asyncio
-async def test_while_a_turn_runs_the_messages_may_come_from_a_secondary(async_client):
+@pytest.mark.parametrize(
+    "fields",
+    [{"stopped": True}, {"metadata": {"error": {"code": "upstream_error"}}}],
+    ids=["stopped", "error"],
+)
+async def test_an_ended_empty_row_does_no_primary_read(async_client, fields):
     user, token = await create_test_user_and_token()
     try:
         conversation_id = await _create_conversation(async_client, token)
+        await _add_message(conversation_id, "", **fields)
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_local_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert _primary_flags(find_all) == [False]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_an_empty_last_row_with_no_turn_is_read_again_on_the_primary(async_client):
+    """A turn that just ended saved its answer on the primary: a secondary can
+    still hold the empty row, and the client stops polling on this answer.
+    The primary result is the one returned."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message(conversation_id, "")
+        stale = await Message.find_all(filter_dict={"conversation_id": conversation_id})
+        saved = [m.model_copy(update={"output": "the saved answer"}) for m in stale]
+
+        async def fake_find_all(*_args, primary=False, **_kwargs):
+            return saved if primary else stale
+
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_local_manager()
+        ), patch.object(Message, "find_all", side_effect=fake_find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert _primary_flags(find_all) == [False, True]
+        assert resp.json()["messages"][-1]["output"] == "the saved answer"
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_running_turn_does_no_primary_read(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message(conversation_id, "")
         mgr = _local_manager()
         mgr.link_conversation(conversation_id, _message_id())
         with patch.object(
@@ -291,8 +348,7 @@ async def test_while_a_turn_runs_the_messages_may_come_from_a_secondary(async_cl
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
         assert resp.json()["active_message_id"] is not None
-        find_all.assert_called_once()
-        assert find_all.call_args.kwargs["primary"] is False
+        assert _primary_flags(find_all) == [False]
     finally:
         await cleanup_models([user])
 

@@ -111,6 +111,13 @@ def _is_live_turn(conversation_id: str, message_id: str) -> bool:
     return True
 
 
+def _is_unsaved(message: Message) -> bool:
+    """True for a row with no output, not stopped and with no error: a turn
+    still running, or one whose save this read has not seen yet."""
+    metadata = message.metadata or {}
+    return not message.output and not message.stopped and not metadata.get("error")
+
+
 async def _active_message_id(conversation_id: str) -> Optional[str]:
     """The message id of the turn still running on the conversation, else None.
 
@@ -217,17 +224,21 @@ async def get_conversation(
             )
 
         # Read the running turn before the messages: when it reports none,
-        # the turn had already ended and saved its answer on the primary, so
-        # the messages are read there too (a secondary can still hold the
-        # empty row). While a turn runs the client polls again, so any
-        # member will do.
+        # the turn had already ended and saved its answer on the primary.
         active_message_id = await _active_message_id(conversation_id)
 
+        message_filter = {"conversation_id": conversation_id}
         messages = await Message.find_all(
-            filter_dict={"conversation_id": conversation_id},
-            sort=[("timestamp", 1)],
-            primary=active_message_id is None,
+            filter_dict=message_filter, sort=[("timestamp", 1)]
         )
+        # A secondary can still hold the turn's empty row right after the
+        # save, and the client stops polling on a null. Only then read the
+        # messages once more on the primary. While a turn runs the client
+        # polls again, so a secondary read is fine.
+        if active_message_id is None and messages and _is_unsaved(messages[-1]):
+            messages = await Message.find_all(
+                filter_dict=message_filter, sort=[("timestamp", 1)], primary=True
+            )
 
         return ConversationDetail(
             id=conversation.id,
