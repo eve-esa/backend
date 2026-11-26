@@ -96,7 +96,7 @@ print(detail["name"], len(detail["messages"]))
 
 ### Explanation
 
-Returns conversation metadata with stored messages, and `active_message_id`: the id of the assistant message still being generated on this conversation, or `null` when no turn is running.
+Returns conversation metadata with stored messages, and `active_message_id`: the id of the assistant message still being generated on this conversation, or `null` when no turn runs or the turn is past its deadline.
 
 ### Notes
 

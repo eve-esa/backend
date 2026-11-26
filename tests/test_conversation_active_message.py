@@ -12,15 +12,22 @@ import asyncio
 import logging
 import os
 import time
-import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+from bson import ObjectId
 
 from src.routers import conversation as conversation_router
 from src.services.cancel_manager import CancelManager
 from tests.utils.cleaner import cleanup_models
 from tests.utils.utils import create_test_user_and_token
+
+
+def _message_id(age_s: float = 0.0) -> str:
+    """An ObjectId string generated ``age_s`` seconds ago."""
+    born = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    return str(ObjectId.from_datetime(born))
 
 
 def _local_manager() -> CancelManager:
@@ -72,11 +79,12 @@ async def test_a_running_turn_is_reported(async_client):
     try:
         conversation_id = await _create_conversation(async_client, token)
         mgr = _local_manager()
-        mgr.link_conversation(conversation_id, "msg-running")
+        message_id = _message_id()
+        mgr.link_conversation(conversation_id, message_id)
         with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
-        assert resp.json()["active_message_id"] == "msg-running"
+        assert resp.json()["active_message_id"] == message_id
     finally:
         await cleanup_models([user])
 
@@ -88,8 +96,9 @@ async def test_no_running_turn_reports_null(async_client):
         conversation_id = await _create_conversation(async_client, token)
         mgr = _local_manager()
         # A turn that ran and ended clears its mapping.
-        mgr.link_conversation(conversation_id, "msg-done")
-        mgr.clear_mapping_for(conversation_id, "msg-done")
+        done = _message_id()
+        mgr.link_conversation(conversation_id, done)
+        mgr.clear_mapping_for(conversation_id, done)
         with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
@@ -104,7 +113,7 @@ async def test_another_conversation_running_is_not_reported(async_client):
     try:
         conversation_id = await _create_conversation(async_client, token)
         mgr = _local_manager()
-        mgr.link_conversation("some-other-conversation", "msg-elsewhere")
+        mgr.link_conversation("some-other-conversation", _message_id())
         with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
@@ -176,7 +185,8 @@ async def test_a_non_owner_still_gets_403_and_no_lookup(async_client):
     try:
         conversation_id = await _create_conversation(async_client, owner_token)
         mgr = _local_manager()
-        mgr.link_conversation(conversation_id, "msg-running")
+        message_id = _message_id()
+        mgr.link_conversation(conversation_id, message_id)
         with patch.object(
             conversation_router, "get_cancel_manager", return_value=mgr
         ), patch.object(
@@ -184,7 +194,7 @@ async def test_a_non_owner_still_gets_403_and_no_lookup(async_client):
         ) as lookup:
             resp = await _get(async_client, other_token, conversation_id)
         assert resp.status_code == 403
-        assert "msg-running" not in resp.text
+        assert message_id not in resp.text
         lookup.assert_not_called()
     finally:
         await cleanup_models([owner, other])
@@ -198,6 +208,81 @@ async def test_a_missing_conversation_is_still_404(async_client):
         assert resp.status_code == 404
     finally:
         await cleanup_models([user])
+
+
+class _NoWriteRedis:
+    """Answers the mapping read, fails the test on any write."""
+
+    def __init__(self, value: str):
+        self.value = value
+
+    async def hget(self, *_args, **_kwargs):
+        return self.value.encode()
+
+    def __getattr__(self, name):
+        raise AssertionError(f"unexpected Valkey call {name}")
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_past_the_turn_deadline_is_null(async_client, caplog):
+    """A worker that died mid-turn leaves its mapping behind: a message older
+    than the turn deadline cannot still be generating."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        stale = _message_id(age_s=600)
+        mgr = _redis_manager(_NoWriteRedis(stale))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=conversation_router.logger.name), patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        mine = [r for r in caplog.records if r.name == conversation_router.logger.name]
+        assert [r.levelno for r in mine] == [logging.DEBUG], [r.getMessage() for r in mine]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_inside_the_turn_deadline_is_reported(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        young = _message_id(age_s=conversation_router.AGENTIC_TURN_DEADLINE - 5)
+        mgr = _redis_manager(_NoWriteRedis(young))
+        with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] == young
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_that_is_not_an_object_id_is_null(async_client, caplog):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        mgr = _redis_manager(_NoWriteRedis("not-an-object-id"))
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger=conversation_router.logger.name), patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        mine = [r for r in caplog.records if r.name == conversation_router.logger.name]
+        assert [r.levelno for r in mine] == [logging.DEBUG], [r.getMessage() for r in mine]
+    finally:
+        await cleanup_models([user])
+
+
+def test_the_staleness_window_is_the_turn_deadline_plus_a_margin():
+    assert conversation_router.ACTIVE_MESSAGE_MAX_AGE_S == (
+        conversation_router.AGENTIC_TURN_DEADLINE + 60
+    )
 
 
 def _real_redis_url() -> str:
@@ -227,7 +312,7 @@ async def test_a_turn_owned_by_another_worker_is_reported_through_valkey(async_c
         if not owner._is_redis_enabled():
             pytest.skip("redis client not available")
         conversation_id = await _create_conversation(async_client, token)
-        message_id = f"msg-{uuid.uuid4().hex}"
+        message_id = _message_id()
         # The owning worker's mapping write, awaited here instead of fired.
         await owner._hset_mapping(conversation_id, message_id)
         with patch.object(conversation_router, "get_cancel_manager", return_value=reader):

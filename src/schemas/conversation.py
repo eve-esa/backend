@@ -10,7 +10,8 @@ class ConversationDetail(BaseModel):
     name: str
     timestamp: datetime
     messages: List[Message] = []
-    # The assistant message still being generated, null when no turn runs.
+    # The assistant message still being generated, null when no turn runs or
+    # the turn is past its deadline.
     active_message_id: Optional[str] = None
 
 

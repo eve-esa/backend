@@ -1,12 +1,17 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional
+
+from bson import ObjectId
+from bson.errors import InvalidId
 
 from src.schemas.conversation import (
     ConversationDetail,
     ConversationCreate,
     ConversationNameUpdate,
 )
+from src.config import AGENTIC_TURN_DEADLINE
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 
@@ -47,19 +52,50 @@ DELETE_PREEMPT_TIMEOUT_S = 10.0
 # pub/sub reads), so a hung store would otherwise hold the page load.
 ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S = 0.25
 
+# The mapping has no expiry: a worker that dies mid-turn leaves it behind. No
+# turn outlives AGENTIC_TURN_DEADLINE (the classic deadline is shorter), so a
+# mapped message older than that plus a margin is a dead turn, not a running
+# one. The age comes from the ObjectId, so the check costs no read.
+ACTIVE_MESSAGE_MAX_AGE_S = AGENTIC_TURN_DEADLINE + 60
+
+
+def _is_live_turn(conversation_id: str, message_id: str) -> bool:
+    """True when ``message_id`` is an ObjectId generated within the deadline."""
+    try:
+        born = ObjectId(message_id).generation_time
+    except (InvalidId, TypeError):
+        logger.debug(
+            "conversation.active_message.invalid_id conversation_id=%s",
+            conversation_id,
+        )
+        return False
+    age_s = (datetime.now(timezone.utc) - born).total_seconds()
+    if age_s > ACTIVE_MESSAGE_MAX_AGE_S:
+        logger.debug(
+            "conversation.active_message.stale conversation_id=%s age_s=%d",
+            conversation_id,
+            int(age_s),
+        )
+        return False
+    return True
+
 
 async def _active_message_id(conversation_id: str) -> Optional[str]:
     """The message id of the turn still running on the conversation, else None.
 
     Read only: the cancel manager's conversation to message mapping, written
-    when a stream starts and cleared when the turn ends. A store error or a
-    slow store answers None: the conversation still loads.
+    when a stream starts and cleared when the turn ends. A store error, a
+    slow store, or a mapping past the turn deadline answers None: the
+    conversation still loads.
     """
     try:
-        return await asyncio.wait_for(
+        message_id = await asyncio.wait_for(
             get_cancel_manager().get_message_for_conversation_async(conversation_id),
             timeout=ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S,
         )
+        if message_id and _is_live_turn(conversation_id, message_id):
+            return message_id
+        return None
     except asyncio.TimeoutError:
         logger.warning(
             "conversation.active_message.lookup_timeout conversation_id=%s",
@@ -122,7 +158,8 @@ async def get_conversation(
     Returns:
         Conversation with messages and metadata. ``active_message_id`` is the
         id of the assistant message still being generated (for example after
-        a reload closed its stream), or null when no turn is running.
+        a reload closed its stream), or null when no turn runs or the turn is
+        past its deadline.
 
     Raises:
         HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.
