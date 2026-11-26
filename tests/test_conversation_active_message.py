@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from bson import ObjectId
 
+from src.database.models.message import Message
 from src.routers import conversation as conversation_router
 from src.services.cancel_manager import CancelManager
 from tests.utils.cleaner import cleanup_models
@@ -28,6 +29,14 @@ def _message_id(age_s: float = 0.0) -> str:
     """An ObjectId string generated ``age_s`` seconds ago."""
     born = datetime.now(timezone.utc) - timedelta(seconds=age_s)
     return str(ObjectId.from_datetime(born))
+
+
+@pytest.fixture(autouse=True)
+def _no_skip_window():
+    """Each test starts and ends outside the lookup skip window."""
+    conversation_router._lookup_skip_until = 0.0
+    yield
+    conversation_router._lookup_skip_until = 0.0
 
 
 def _local_manager() -> CancelManager:
@@ -43,7 +52,11 @@ class _RaisingRedis:
 
 
 class _HangingRedis:
+    def __init__(self):
+        self.calls = 0
+
     async def hget(self, *_args, **_kwargs):
+        self.calls += 1
         await asyncio.sleep(30)
 
 
@@ -123,21 +136,47 @@ async def test_another_conversation_running_is_not_reported(async_client):
 
 
 @pytest.mark.asyncio
-async def test_valkey_error_answers_null_with_one_warning(async_client, caplog):
+async def test_a_store_error_swallowed_by_the_cancel_manager_answers_null(async_client):
+    """The cancel manager logs and swallows a Valkey error itself: the route
+    sees no mapping and answers null."""
     user, token = await create_test_user_and_token()
     try:
         conversation_id = await _create_conversation(async_client, token)
         mgr = _redis_manager(_RaisingRedis())
+        with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_raises_answers_null_with_one_warning(async_client, caplog):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        mgr = _local_manager()
+        secret = "redis://:hunter2@valkey:6379"
         caplog.clear()
         with caplog.at_level(logging.WARNING), patch.object(
             conversation_router, "get_cancel_manager", return_value=mgr
+        ), patch.object(
+            mgr,
+            "get_message_for_conversation_async",
+            side_effect=RuntimeError(f"cannot reach {secret}"),
         ):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
         assert resp.json()["active_message_id"] is None
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1, [r.getMessage() for r in warnings]
+        assert warnings[0].name == conversation_router.logger.name
         line = warnings[0].getMessage()
+        assert "conversation.active_message.lookup_failed" in line
+        assert conversation_id in line
+        assert "RuntimeError" in line
+        assert secret not in line
         assert "Active turn" not in line
         assert user.id not in line
         assert user.email not in line
@@ -160,10 +199,7 @@ async def test_valkey_hang_is_bounded(async_client, caplog):
             elapsed = time.monotonic() - started
         assert resp.status_code == 200
         assert resp.json()["active_message_id"] is None
-        assert (
-            elapsed
-            < conversation_router.ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S + 1.0
-        ), elapsed
+        assert elapsed < 3.0, elapsed
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1, [r.getMessage() for r in warnings]
         line = warnings[0].getMessage()
@@ -172,10 +208,6 @@ async def test_valkey_hang_is_bounded(async_client, caplog):
         assert "Active turn" not in line
     finally:
         await cleanup_models([user])
-
-
-def test_the_lookup_deadline_is_short():
-    assert 0 < conversation_router.ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S <= 0.5
 
 
 @pytest.mark.asyncio
@@ -206,6 +238,156 @@ async def test_a_missing_conversation_is_still_404(async_client):
     try:
         resp = await _get(async_client, token, "64b7f0c2a1b2c3d4e5f60718")
         assert resp.status_code == 404
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_conversation_id_is_404_without_a_lookup(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        mgr = _local_manager()
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ), patch.object(
+            mgr, "get_message_for_conversation_async", wraps=mgr.get_message_for_conversation_async
+        ) as lookup:
+            resp = await _get(async_client, token, "not-an-id")
+        assert resp.status_code == 404
+        lookup.assert_not_called()
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_with_no_running_turn_the_messages_are_read_on_the_primary(async_client):
+    """A turn that just ended saved its answer on the primary: a secondary can
+    still hold the empty row, and the client stops polling on this answer."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_local_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        find_all.assert_called_once()
+        assert find_all.call_args.kwargs["primary"] is True
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_while_a_turn_runs_the_messages_may_come_from_a_secondary(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        mgr = _local_manager()
+        mgr.link_conversation(conversation_id, _message_id())
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is not None
+        find_all.assert_called_once()
+        assert find_all.call_args.kwargs["primary"] is False
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_after_a_timeout_the_store_is_skipped_for_a_window(async_client, caplog):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        hanging = _HangingRedis()
+        mgr = _redis_manager(hanging)
+        now = [1000.0]
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ), patch.object(conversation_router, "_clock", lambda: now[0]):
+            first = await _get(async_client, token, conversation_id)
+            assert first.json()["active_message_id"] is None
+            assert hanging.calls == 1
+
+            # Inside the window: null without asking the store, no warning.
+            now[0] += conversation_router.ACTIVE_MESSAGE_SKIP_S - 1
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                second = await _get(async_client, token, conversation_id)
+            assert second.status_code == 200
+            assert second.json()["active_message_id"] is None
+            assert hanging.calls == 1
+            assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+            # Past the window the store is asked again.
+            now[0] += 2
+            third = await _get(async_client, token, conversation_id)
+            assert third.status_code == 200
+            assert hanging.calls == 2
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_after_a_failed_lookup_the_store_is_skipped_for_a_window(async_client):
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        mgr = _local_manager()
+        now = [1000.0]
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=mgr
+        ), patch.object(conversation_router, "_clock", lambda: now[0]), patch.object(
+            mgr, "get_message_for_conversation_async", side_effect=RuntimeError("down")
+        ) as lookup:
+            await _get(async_client, token, conversation_id)
+            assert lookup.call_count == 1
+            now[0] += conversation_router.ACTIVE_MESSAGE_SKIP_S - 1
+            await _get(async_client, token, conversation_id)
+            assert lookup.call_count == 1
+            now[0] += 2
+            await _get(async_client, token, conversation_id)
+            assert lookup.call_count == 2
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.parametrize(
+    "agentic, classic, expected_longest",
+    [
+        (480, 300, 480),  # agentic longer
+        (480, 900, 900),  # classic longer
+        (480, 0, 480),  # classic unbounded: the agentic deadline bounds it
+        (480, -1, 480),
+    ],
+)
+def test_the_age_cap_follows_the_longer_turn_deadline(agentic, classic, expected_longest):
+    assert conversation_router._max_turn_age_s(agentic, classic) == (
+        expected_longest + conversation_router.ACTIVE_MESSAGE_AGE_MARGIN_S
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_classic_turn_past_the_agentic_deadline_is_still_reported(async_client):
+    """With CLASSIC_GENERATION_TIMEOUT above AGENTIC_TURN_DEADLINE a classic
+    turn can run longer than the agentic deadline and is still live."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        agentic, classic = 480, 900
+        running = _message_id(age_s=agentic + 200)
+        mgr = _redis_manager(_NoWriteRedis(running))
+        with patch.object(conversation_router, "get_cancel_manager", return_value=mgr), patch.object(
+            conversation_router,
+            "ACTIVE_MESSAGE_MAX_AGE_S",
+            conversation_router._max_turn_age_s(agentic, classic),
+        ):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] == running
     finally:
         await cleanup_models([user])
 
@@ -279,12 +461,6 @@ async def test_a_mapping_that_is_not_an_object_id_is_null(async_client, caplog):
         await cleanup_models([user])
 
 
-def test_the_staleness_window_is_the_turn_deadline_plus_a_margin():
-    assert conversation_router.ACTIVE_MESSAGE_MAX_AGE_S == (
-        conversation_router.AGENTIC_TURN_DEADLINE + 60
-    )
-
-
 def _real_redis_url() -> str:
     url = os.getenv("REDIS_URL", "")
     if not url:
@@ -325,4 +501,48 @@ async def test_a_turn_owned_by_another_worker_is_reported_through_valkey(async_c
         for mgr in (owner, reader):
             if mgr._redis is not None:
                 await mgr._redis.aclose()
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
+    """A store that stalls past the lookup deadline: the route answers null,
+    and the cancel manager's shared client still reads the mapping and
+    publishes a Stop afterwards (no desynced reply, no leaked connection)."""
+    url = _real_redis_url()
+    import redis.asyncio as aioredis
+
+    user, token = await create_test_user_and_token()
+    reader = CancelManager()
+    admin = aioredis.Redis.from_url(url)
+    conversation_id = None
+    try:
+        if not reader._is_redis_enabled():
+            pytest.skip("redis client not available")
+        conversation_id = await _create_conversation(async_client, token)
+        message_id = _message_id()
+        await reader._hset_mapping(conversation_id, message_id)
+
+        pause_ms = 1500
+        await admin.execute_command("CLIENT", "PAUSE", pause_ms, "ALL")
+        paused_at = time.monotonic()
+        with patch.object(conversation_router, "get_cancel_manager", return_value=reader):
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert time.monotonic() - paused_at < pause_ms / 1000
+
+        await asyncio.sleep(max(0.0, pause_ms / 1000 - (time.monotonic() - paused_at)) + 0.3)
+
+        assert await reader.get_message_for_conversation_async(conversation_id) == message_id
+        assert isinstance(await reader._redis.publish(f"cancel:{message_id}", "1"), int)
+        assert await reader.get_message_for_conversation_async(conversation_id) == message_id
+        assert not reader._redis.connection_pool._in_use_connections
+    finally:
+        await admin.execute_command("CLIENT", "UNPAUSE")
+        if conversation_id:
+            await reader._hdel_mapping(conversation_id)
+        if reader._redis is not None:
+            await reader._redis.aclose()
+        await admin.aclose()
         await cleanup_models([user])
