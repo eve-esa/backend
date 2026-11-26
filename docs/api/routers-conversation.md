@@ -96,11 +96,13 @@ print(detail["name"], len(detail["messages"]))
 
 ### Explanation
 
-Returns conversation metadata with stored messages.
+Returns conversation metadata with stored messages, and `active_message_id`: the id of the assistant message still being generated on this conversation, or `null` when no turn is running.
 
 ### Notes
 
 - Useful for restoring previous chat context.
+- After a reload during a turn, the assistant message can be stored with no output and no error while the backend keeps generating. When `active_message_id` names that message, the turn is still running: poll this route until it turns `null`, then read the saved answer. `POST /conversations/{conversation_id}/stop` stops it.
+- The value is best effort: when the shared store does not answer within a fraction of a second the route returns `null` rather than wait or fail.
 
 ## Rename conversation
 

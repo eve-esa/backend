@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from typing import Optional
 
 from src.schemas.conversation import (
     ConversationDetail,
@@ -20,6 +22,7 @@ from src.services.artifact_cleanup import (
     ArtifactCascadeIncomplete,
     delete_conversation_artifacts,
 )
+from src.services.cancel_manager import get_cancel_manager
 from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
 from src.services.agents.core.sandbox_pool import discard_conversation_sandbox
@@ -38,6 +41,37 @@ logger = logging.getLogger(__name__)
 # unwind. The turn persists its partial answer as it ends, so the delete
 # waits for that write before it removes the messages and the files.
 DELETE_PREEMPT_TIMEOUT_S = 10.0
+
+# How long GET /conversations/{id} waits for the running-turn lookup. The
+# cancel manager's Valkey client has no read timeout (it serves blocking
+# pub/sub reads), so a hung store would otherwise hold the page load.
+ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S = 0.25
+
+
+async def _active_message_id(conversation_id: str) -> Optional[str]:
+    """The message id of the turn still running on the conversation, else None.
+
+    Read only: the cancel manager's conversation to message mapping, written
+    when a stream starts and cleared when the turn ends. A store error or a
+    slow store answers None: the conversation still loads.
+    """
+    try:
+        return await asyncio.wait_for(
+            get_cancel_manager().get_message_for_conversation_async(conversation_id),
+            timeout=ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "conversation.active_message.lookup_timeout conversation_id=%s",
+            conversation_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "conversation.active_message.lookup_failed conversation_id=%s err=%s",
+            conversation_id,
+            type(e).__name__,
+        )
+    return None
 
 
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
@@ -86,7 +120,9 @@ async def get_conversation(
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
-        Conversation with messages and metadata.
+        Conversation with messages and metadata. ``active_message_id`` is the
+        id of the assistant message still being generated (for example after
+        a reload closed its stream), or null when no turn is running.
 
     Raises:
         HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.
@@ -102,6 +138,10 @@ async def get_conversation(
                 detail="You are not allowed to get this conversation",
             )
 
+        # Read the running turn before the messages: when it reports none,
+        # the turn had already ended, so the messages read next hold its save.
+        active_message_id = await _active_message_id(conversation_id)
+
         # Fetch messages for this conversation
         messages = await Message.find_all(
             filter_dict={"conversation_id": conversation_id}, sort=[("timestamp", 1)]
@@ -113,6 +153,7 @@ async def get_conversation(
             name=conversation.name,
             timestamp=conversation.timestamp,
             messages=messages,
+            active_message_id=active_message_id,
         )
 
     except HTTPException as e:
