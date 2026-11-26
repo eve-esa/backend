@@ -136,18 +136,32 @@ async def test_another_conversation_running_is_not_reported(async_client):
 
 
 @pytest.mark.asyncio
-async def test_a_store_error_with_no_messages_answers_null(async_client):
-    """A Valkey error reaches the route as a failed lookup: with no stored
-    row to fall back on, the answer is null."""
+async def test_a_refused_valkey_connection_falls_back_to_the_rows(async_client):
+    """A real redis-py client on a port nobody listens on: the connection
+    error reaches the route, which reports the young unsaved row and opens
+    the skip window."""
+    import redis.asyncio as aioredis
+
     user, token = await create_test_user_and_token()
+    client = aioredis.Redis.from_url(
+        "redis://127.0.0.1:1/0", socket_connect_timeout=0.2
+    )
     try:
         conversation_id = await _create_conversation(async_client, token)
-        mgr = _redis_manager(_RaisingRedis())
-        with patch.object(conversation_router, "get_cancel_manager", return_value=mgr):
+        running = await _add_message_aged(conversation_id, "", age_s=5)
+        now = [1000.0]
+        with patch.object(
+            conversation_router, "get_cancel_manager",
+            return_value=_redis_manager(client),
+        ), patch.object(conversation_router, "_clock", lambda: now[0]):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
-        assert resp.json()["active_message_id"] is None
+        assert resp.json()["active_message_id"] == running
+        assert conversation_router._lookup_skip_until == (
+            1000.0 + conversation_router.ACTIVE_MESSAGE_SKIP_S
+        )
     finally:
+        await client.aclose()
         await cleanup_models([user])
 
 
@@ -562,9 +576,10 @@ async def test_a_turn_owned_by_another_worker_is_reported_through_valkey(async_c
 
 @pytest.mark.asyncio
 async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
-    """A store that stalls past the lookup deadline: the route answers null,
-    and the cancel manager's shared client still reads the mapping and
-    publishes a Stop afterwards (no desynced reply, no leaked connection)."""
+    """A store that stalls past the lookup deadline: the route answers from
+    the stored rows (the young unsaved row), opens the skip window, and the
+    cancel manager's shared client still reads the mapping and publishes a
+    Stop afterwards (no desynced reply, no leaked connection)."""
     url = _real_redis_url()
     import redis.asyncio as aioredis
 
@@ -576,7 +591,7 @@ async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
         if not reader._is_redis_enabled():
             pytest.skip("redis client not available")
         conversation_id = await _create_conversation(async_client, token)
-        message_id = _message_id()
+        message_id = await _add_message_aged(conversation_id, "", age_s=1)
         await reader._hset_mapping(conversation_id, message_id)
 
         pause_ms = 1500
@@ -585,7 +600,10 @@ async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
         with patch.object(conversation_router, "get_cancel_manager", return_value=reader):
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
-        assert resp.json()["active_message_id"] is None
+        # The id comes from the rows: the lookup timed out (skip window open)
+        # before the pause ended.
+        assert resp.json()["active_message_id"] == message_id
+        assert conversation_router._lookup_skip_until > 0.0
         assert time.monotonic() - paused_at < pause_ms / 1000
 
         await asyncio.sleep(max(0.0, pause_ms / 1000 - (time.monotonic() - paused_at)) + 0.3)
@@ -609,19 +627,23 @@ async def test_a_timed_out_read_leaves_the_shared_client_working(async_client):
 # show the empty row as failed. It falls back to the stored rows instead.
 
 
-async def _add_message_aged(conversation_id: str, output: str, age_s: float = 0.0, **fields) -> str:
-    """A message row whose id was generated ``age_s`` seconds ago."""
-    message = Message(
-        conversation_id=conversation_id, input="question", output=output, **fields
-    )
+async def _add_message_aged(
+    conversation_id: str, output: str, age_s: float = 0.0, **fields
+) -> str:
+    """A message row whose id and timestamp were generated ``age_s`` seconds ago."""
     born = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    message = Message(
+        conversation_id=conversation_id,
+        input="question",
+        output=output,
+        timestamp=born,
+        **fields,
+    )
     # from_datetime zeroes the random part: two rows born in the same second
     # would collide, so keep the timestamp and randomise the rest.
-    message_id = str(ObjectId(int(born.timestamp()).to_bytes(4, "big") + os.urandom(8)))
-    await Message.get_collection().insert_one(
-        {**message.to_dict(), "_id": ObjectId(message_id)}
-    )
-    return message_id
+    oid = ObjectId(int(born.timestamp()).to_bytes(4, "big") + os.urandom(8))
+    await Message.get_collection().insert_one({**message.to_dict(), "_id": oid})
+    return str(oid)
 
 
 def _timeout_manager():
@@ -687,6 +709,53 @@ async def test_unavailable_lookup_with_a_saved_last_row_is_null(
             conversation_router._lookup_skip_until = float("inf")
         with patch.object(
             conversation_router, "get_cancel_manager", return_value=make_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert _primary_flags(find_all) == [False]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_manager, skip_window", _UNAVAILABLE_CASES)
+async def test_unavailable_lookup_with_an_artifact_only_answer_is_null(
+    async_client, make_manager, skip_window
+):
+    """An answer with no text but an artifact (a tool saved an image) is a
+    finished turn, as is_empty_answer counts it: not reported as running."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(
+            conversation_id, "", age_s=5, artifact_ids=["6a0000000000000000000001"]
+        )
+        if skip_window:
+            conversation_router._lookup_skip_until = float("inf")
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=make_manager()
+        ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
+            resp = await _get(async_client, token, conversation_id)
+        assert resp.status_code == 200
+        assert resp.json()["active_message_id"] is None
+        assert _primary_flags(find_all) == [False]
+    finally:
+        await cleanup_models([user])
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_only_answer_with_no_turn_does_no_primary_read(async_client):
+    """The store answers no turn and the last row is a saved artifact-only
+    answer: it is not empty, so the primary is not read again."""
+    user, token = await create_test_user_and_token()
+    try:
+        conversation_id = await _create_conversation(async_client, token)
+        await _add_message_aged(
+            conversation_id, "", age_s=5, artifact_ids=["6a0000000000000000000001"]
+        )
+        with patch.object(
+            conversation_router, "get_cancel_manager", return_value=_local_manager()
         ), patch.object(Message, "find_all", wraps=Message.find_all) as find_all:
             resp = await _get(async_client, token, conversation_id)
         assert resp.status_code == 200
@@ -786,10 +855,14 @@ async def test_a_store_error_opens_the_skip_window(async_client):
         conversation_id = await _create_conversation(async_client, token)
         now = [1000.0]
         with patch.object(
-            conversation_router, "get_cancel_manager", return_value=_swallowing_store_manager()
+            conversation_router,
+            "get_cancel_manager",
+            return_value=_swallowing_store_manager(),
         ), patch.object(conversation_router, "_clock", lambda: now[0]):
             await _get(async_client, token, conversation_id)
-        assert conversation_router._lookup_skip_until == 1000.0 + conversation_router.ACTIVE_MESSAGE_SKIP_S
+        assert conversation_router._lookup_skip_until == (
+            1000.0 + conversation_router.ACTIVE_MESSAGE_SKIP_S
+        )
     finally:
         await cleanup_models([user])
 

@@ -271,12 +271,9 @@ class CancelManager:
         if local:
             return local
         if self._is_redis_enabled():
-            if raise_errors:
-                return await self._hget_mapping(conversation_id, raise_errors=True)
-            try:
-                return await self._hget_mapping(conversation_id)
-            except Exception:
-                return None
+            return await self._hget_mapping(
+                conversation_id, raise_errors=raise_errors
+            )
         return None
 
     async def wait_until_finished(
