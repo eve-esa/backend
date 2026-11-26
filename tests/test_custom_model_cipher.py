@@ -121,6 +121,37 @@ def kms_backend(monkeypatch):
 
 
 @pytest.mark.no_db
+def test_kms_client_is_built_once_and_shared_across_threads(monkeypatch):
+    import threading
+
+    built = []
+    lock = threading.Lock()
+
+    class FakeSession:
+        def client(self, service, **kwargs):
+            with lock:
+                built.append((service, kwargs))
+            return object()
+
+    monkeypatch.setattr(custom_model_cipher, "_kms_client_instance", None)
+    monkeypatch.setattr(custom_model_cipher.boto3.session, "Session", FakeSession)
+    results = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        results.append(custom_model_cipher._kms_client())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(built) == 1 and built[0][0] == "kms"
+    assert len({id(client) for client in results}) == 1
+    assert custom_model_cipher._kms_client() is results[0]
+
+
 def test_local_backend_round_trip(local_backend):
     cipher = SecretCipher()
     blob = cipher.encrypt("sk-super-secret", CONTEXT_A)
@@ -175,6 +206,39 @@ def test_encrypt_rejects_incomplete_context(local_backend):
     cipher = SecretCipher()
     with pytest.raises(ValueError):
         cipher.encrypt("sk-super-secret", {"user_id": "u1", "provider_id": "openai"})
+
+
+TOOLKIT_KEYS = ("purpose", "user_id", "server_id")
+TOOLKIT_CONTEXT = {"purpose": "toolkit", "user_id": "user-a", "server_id": "server-1"}
+
+
+@pytest.mark.no_db
+def test_custom_context_keys_round_trip(local_backend):
+    cipher = SecretCipher(context_keys=TOOLKIT_KEYS)
+    blob = cipher.encrypt("sk-super-secret", TOOLKIT_CONTEXT)
+    assert cipher.decrypt(blob, TOOLKIT_CONTEXT) == "sk-super-secret"
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize("key", ["server_id", "user_id"])
+def test_custom_context_keys_wrong_value_fails_closed(local_backend, key):
+    cipher = SecretCipher(context_keys=TOOLKIT_KEYS)
+    blob = cipher.encrypt("sk-super-secret", TOOLKIT_CONTEXT)
+    with pytest.raises(CipherContextError):
+        cipher.decrypt(blob, {**TOOLKIT_CONTEXT, key: "other"})
+
+
+@pytest.mark.no_db
+def test_default_blob_does_not_decrypt_under_toolkit_cipher(local_backend):
+    blob = SecretCipher().encrypt("sk-super-secret", CONTEXT_A)
+    toolkit = SecretCipher(context_keys=TOOLKIT_KEYS)
+    # Missing keys are rejected by context validation, before any decrypt.
+    with pytest.raises(ValueError) as missing:
+        toolkit.decrypt(blob, CONTEXT_A)
+    assert missing.type is ValueError
+    # With every key present the AAD differs, so the decrypt fails closed.
+    with pytest.raises(CipherContextError):
+        toolkit.decrypt(blob, TOOLKIT_CONTEXT)
 
 
 @pytest.mark.asyncio

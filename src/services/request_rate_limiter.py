@@ -111,7 +111,11 @@ STORE_DOWN_AFTER_FAILURES = 3
 LIMITED_LOG_WINDOW_S = 60
 # Bound on the remembered subjects; expired entries go first.
 LIMITED_LOG_MAX_SUBJECTS = 4096
-KNOWN_CLASSES = ("chat", "retrieve", "proxy", "mcp", "upload", "errlog")
+KNOWN_CLASSES = ("chat", "retrieve", "proxy", "mcp", "upload", "errlog", "credentials")
+# Refused in shadow mode too. ``credentials``: each toolkit credential save may
+# send a token request to a third party from EVE's address, so an unlimited
+# route would let anyone test stolen credentials through us.
+ALWAYS_ENFORCED_CLASSES = frozenset({"credentials"})
 
 ALLOWED = "allowed"
 LIMITED = "limited"
@@ -604,8 +608,9 @@ async def check_or_raise(principal: Principal, route_class: str) -> Optional[Dec
     """Spend one ``route_class`` token for the principal's user, or raise.
 
     Returns None when the feature is off. Raises :class:`RequestRateLimited`
-    (429) or :class:`RateLimiterUnavailable` (503) in enforce mode only; shadow
-    mode logs and counts the refusal and lets the request through. For the two
+    (429) or :class:`RateLimiterUnavailable` (503) in enforce mode only, shadow
+    mode logs and counts the refusal and lets the request through. A class in
+    ``ALWAYS_ENFORCED_CLASSES`` is checked as in enforce mode. For the two
     ASGI dispatchers, which catch the exceptions and answer themselves.
     """
     limiter = get_request_rate_limiter()
@@ -616,7 +621,7 @@ async def check_or_raise(principal: Principal, route_class: str) -> Optional[Dec
     if decision.reason == UNLIMITED:
         return decision
     kind = _subject_kind(principal)
-    mode = limiter.mode
+    mode = "enforce" if route_class in ALWAYS_ENFORCED_CLASSES else limiter.mode
     record_rate_limit_decision(route_class, decision.reason, mode, kind)
     _mark_span(decision.reason)
     if decision.reason == LIMITED and limiter.should_log_limited(subject, route_class):

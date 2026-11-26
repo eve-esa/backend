@@ -24,6 +24,9 @@ Both backends additionally authenticate the *data* ciphertext with the same
 context, passed as AES-GCM associated data (AAD), so a blob from one
 user/provider/model row can never be decrypted under another's context, even
 if an attacker could swap ciphertexts between rows in the database.
+
+The context keys are chosen per use, so blobs from different uses never
+decrypt under each other.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from typing import Mapping, Optional
 
 import boto3
@@ -47,7 +51,6 @@ logger = logging.getLogger(__name__)
 _BLOB_VERSION = 1
 _ALG = "AES-256-GCM"
 _NONCE_BYTES = 12
-_CONTEXT_KEYS = ("user_id", "provider_id", "model_id")
 
 
 class CipherConfigError(RuntimeError):
@@ -58,11 +61,11 @@ class CipherContextError(ValueError):
     """A blob failed to decrypt: tampered, wrong context, or malformed."""
 
 
-def _normalize_context(context: Mapping[str, str]) -> dict:
-    missing = [key for key in _CONTEXT_KEYS if not context.get(key)]
+def _normalize_context(context: Mapping[str, str], keys: tuple[str, ...]) -> dict:
+    missing = [key for key in keys if not context.get(key)]
     if missing:
         raise ValueError(f"Cipher context missing required keys: {missing}")
-    return {key: str(context[key]) for key in _CONTEXT_KEYS}
+    return {key: str(context[key]) for key in keys}
 
 
 def _context_aad(normalized_context: dict) -> bytes:
@@ -85,11 +88,27 @@ def _select_backend() -> str:
     )
 
 
+_kms_client_lock = threading.Lock()
+_kms_client_instance = None
+
+
 def _kms_client():
-    kwargs = {"region_name": AWS_REGION}
-    if AWS_ENDPOINT_URL:
-        kwargs["endpoint_url"] = AWS_ENDPOINT_URL
-    return boto3.client("kms", **kwargs)
+    """One KMS client per process, built once and shared by the worker threads.
+
+    A boto3 client is thread safe, the default session that ``boto3.client``
+    uses is not, so the client is built once on its own session under a lock.
+    """
+    global _kms_client_instance
+    client = _kms_client_instance
+    if client is None:
+        with _kms_client_lock:
+            if _kms_client_instance is None:
+                kwargs = {"region_name": AWS_REGION}
+                if AWS_ENDPOINT_URL:
+                    kwargs["endpoint_url"] = AWS_ENDPOINT_URL
+                _kms_client_instance = boto3.session.Session().client("kms", **kwargs)
+            client = _kms_client_instance
+    return client
 
 
 def _decode_local_kek() -> bytes:
@@ -120,7 +139,7 @@ def _kms_wrap(dek: bytes, encryption_context: dict) -> tuple[bytes, str]:
             EncryptionContext=encryption_context,
         )
     except ClientError:
-        logger.exception("KMS Encrypt failed while wrapping a custom model DEK")
+        logger.exception("KMS Encrypt failed while wrapping a DEK")
         raise
     return response["CiphertextBlob"], response.get("KeyId", key_id)
 
@@ -139,9 +158,9 @@ def _kms_unwrap(
         code = exc.response.get("Error", {}).get("Code")
         if code == "InvalidCiphertextException":
             raise CipherContextError(
-                "Custom model secret failed to decrypt under the given context"
+                "Secret failed to decrypt under the given context"
             ) from exc
-        logger.exception("KMS Decrypt failed while unwrapping a custom model DEK")
+        logger.exception("KMS Decrypt failed while unwrapping a DEK")
         raise
     return response["Plaintext"]
 
@@ -164,19 +183,24 @@ def _local_unwrap(wrapped_dek: bytes, aad: bytes) -> bytes:
         return AESGCM(kek).decrypt(nonce, ciphertext, aad)
     except InvalidTag as exc:
         raise CipherContextError(
-            "Custom model secret failed to decrypt under the given context"
+            "Secret failed to decrypt under the given context"
         ) from exc
 
 
 class SecretCipher:
     """Envelope-encrypts/decrypts a single API key string at a time."""
 
+    def __init__(
+        self, context_keys: tuple[str, ...] = ("user_id", "provider_id", "model_id")
+    ) -> None:
+        self._context_keys = context_keys
+
     def encrypt(self, plaintext: str, context: Mapping[str, str]) -> str:
         """Encrypt ``plaintext``, bound to ``context``. Returns a storable blob."""
         if not plaintext:
             raise ValueError("Cannot encrypt an empty API key")
 
-        normalized = _normalize_context(context)
+        normalized = _normalize_context(context, self._context_keys)
         aad = _context_aad(normalized)
         backend = _select_backend()
 
@@ -209,7 +233,7 @@ class SecretCipher:
 
     def decrypt(self, blob: str, context: Mapping[str, str]) -> str:
         """Decrypt a blob produced by :meth:`encrypt`. Fails closed on wrong context."""
-        normalized = _normalize_context(context)
+        normalized = _normalize_context(context, self._context_keys)
         aad = _context_aad(normalized)
 
         try:
@@ -222,11 +246,11 @@ class SecretCipher:
             wrapped_dek = base64.b64decode(parsed["wrapped_dek"])
             key_ref = parsed.get("key_ref")
         except Exception as exc:
-            raise CipherContextError("Malformed custom model secret blob") from exc
+            raise CipherContextError("Malformed secret blob") from exc
 
         if version != _BLOB_VERSION or alg != _ALG:
             raise CipherContextError(
-                f"Unsupported custom model secret blob (v={version!r}, alg={alg!r})"
+                f"Unsupported secret blob (v={version!r}, alg={alg!r})"
             )
 
         dek = bytearray(32)
@@ -242,7 +266,7 @@ class SecretCipher:
                 plaintext = AESGCM(bytes(dek)).decrypt(data_nonce, ciphertext, aad)
             except InvalidTag as exc:
                 raise CipherContextError(
-                    "Custom model secret failed to decrypt under the given context"
+                    "Secret failed to decrypt under the given context"
                 ) from exc
             return plaintext.decode("utf-8")
         finally:
