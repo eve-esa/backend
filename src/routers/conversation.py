@@ -1,10 +1,18 @@
+import asyncio
 import logging
+import time
+from datetime import datetime, timezone
+from typing import Optional
+
+from bson import ObjectId
+from bson.errors import InvalidId
 
 from src.schemas.conversation import (
     ConversationDetail,
     ConversationCreate,
     ConversationNameUpdate,
 )
+from src.config import AGENTIC_TURN_DEADLINE, CLASSIC_GENERATION_TIMEOUT
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 
@@ -20,6 +28,7 @@ from src.services.artifact_cleanup import (
     ArtifactCascadeIncomplete,
     delete_conversation_artifacts,
 )
+from src.services.cancel_manager import get_cancel_manager
 from src.services.checkpoint_retention import delete_thread_checkpoints
 from src.services.conversation_documents import delete_conversation_documents
 from src.services.agents.core.sandbox_pool import discard_conversation_sandbox
@@ -38,6 +47,115 @@ logger = logging.getLogger(__name__)
 # unwind. The turn persists its partial answer as it ends, so the delete
 # waits for that write before it removes the messages and the files.
 DELETE_PREEMPT_TIMEOUT_S = 10.0
+
+# How long GET /conversations/{id} waits for the running-turn lookup. Every
+# Redis client built from redis_client_kwargs() has socket_timeout=None, the
+# cancel manager's shared client included, so a hung store would otherwise
+# hold the page load.
+ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S = 0.25
+
+# After a lookup times out or fails, this worker answers null without asking
+# the store for this many seconds. Each timed-out read drops one connection of
+# the shared client that also carries Stop, so without the window a latency
+# spike would turn every page load into a reconnect. Same idea as the request
+# rate limiter's REQUEST_RATE_LIMIT_SKIP_S, shorter: a null here shows a
+# running turn as ended.
+ACTIVE_MESSAGE_SKIP_S = 10.0
+_lookup_skip_until = 0.0
+_clock = time.monotonic
+
+# Added to the longest turn deadline: the turn clock starts after the stream
+# subscriber attaches and the mapping is cleared after the final save.
+ACTIVE_MESSAGE_AGE_MARGIN_S = 60
+
+
+def _max_turn_age_s(agentic_deadline_s: int, classic_timeout_s: int) -> int:
+    """Oldest age a running turn's message can have, in seconds.
+
+    The longer of the two turn deadlines plus the margin. A classic timeout
+    of 0 or less means no classic deadline: the agentic one bounds the check.
+    """
+    longest = agentic_deadline_s
+    if classic_timeout_s > 0:
+        longest = max(longest, classic_timeout_s)
+    return longest + ACTIVE_MESSAGE_AGE_MARGIN_S
+
+
+# The mapping has no expiry: a worker that dies mid-turn leaves it behind. A
+# mapped message older than the longest turn deadline plus a margin is a dead
+# turn, not a running one. The age comes from the ObjectId, so the check costs
+# no read.
+ACTIVE_MESSAGE_MAX_AGE_S = _max_turn_age_s(
+    AGENTIC_TURN_DEADLINE, CLASSIC_GENERATION_TIMEOUT
+)
+
+
+def _is_live_turn(conversation_id: str, message_id: str) -> bool:
+    """True when ``message_id`` is an ObjectId younger than ACTIVE_MESSAGE_MAX_AGE_S."""
+    try:
+        born = ObjectId(message_id).generation_time
+    except (InvalidId, TypeError):
+        logger.debug(
+            "conversation.active_message.invalid_id conversation_id=%s",
+            conversation_id,
+        )
+        return False
+    age_s = (datetime.now(timezone.utc) - born).total_seconds()
+    if age_s > ACTIVE_MESSAGE_MAX_AGE_S:
+        logger.debug(
+            "conversation.active_message.stale conversation_id=%s age_s=%d",
+            conversation_id,
+            int(age_s),
+        )
+        return False
+    return True
+
+
+def _is_unsaved(message: Message) -> bool:
+    """True for a row with no output, not stopped and with no error: a turn
+    still running, or one whose save this read has not seen yet."""
+    metadata = message.metadata or {}
+    return not message.output and not message.stopped and not metadata.get("error")
+
+
+async def _active_message_id(conversation_id: str) -> Optional[str]:
+    """The message id of the turn still running on the conversation, else None.
+
+    Read only: the cancel manager's conversation to message mapping, written
+    when a stream starts and cleared when the turn ends. A store error, a
+    slow store, or a mapping past the turn deadline answers None: the
+    conversation still loads. After a slow or failed lookup the store is
+    not asked again for ACTIVE_MESSAGE_SKIP_S.
+    """
+    global _lookup_skip_until
+    if _clock() < _lookup_skip_until:
+        logger.debug(
+            "conversation.active_message.skipped conversation_id=%s",
+            conversation_id,
+        )
+        return None
+    try:
+        message_id = await asyncio.wait_for(
+            get_cancel_manager().get_message_for_conversation_async(conversation_id),
+            timeout=ACTIVE_MESSAGE_LOOKUP_TIMEOUT_S,
+        )
+        if message_id and _is_live_turn(conversation_id, message_id):
+            return message_id
+        return None
+    except asyncio.TimeoutError:
+        _lookup_skip_until = _clock() + ACTIVE_MESSAGE_SKIP_S
+        logger.warning(
+            "conversation.active_message.lookup_timeout conversation_id=%s",
+            conversation_id,
+        )
+    except Exception as e:
+        _lookup_skip_until = _clock() + ACTIVE_MESSAGE_SKIP_S
+        logger.warning(
+            "conversation.active_message.lookup_failed conversation_id=%s err=%s",
+            conversation_id,
+            type(e).__name__,
+        )
+    return None
 
 
 @router.get("/conversations", response_model=PaginatedResponse[Conversation])
@@ -86,7 +204,10 @@ async def get_conversation(
         requesting_user (User): Authenticated user injected by dependency.
 
     Returns:
-        Conversation with messages and metadata.
+        Conversation with messages and metadata. ``active_message_id`` is the
+        id of the assistant message still being generated (for example after
+        a reload closed its stream), or null when no turn runs or the turn is
+        past its deadline.
 
     Raises:
         HTTPException: 404 if not found; 403 if access is forbidden; 500 for server errors.
@@ -102,10 +223,22 @@ async def get_conversation(
                 detail="You are not allowed to get this conversation",
             )
 
-        # Fetch messages for this conversation
+        # Read the running turn before the messages: when it reports none,
+        # the turn had already ended and saved its answer on the primary.
+        active_message_id = await _active_message_id(conversation_id)
+
+        message_filter = {"conversation_id": conversation_id}
         messages = await Message.find_all(
-            filter_dict={"conversation_id": conversation_id}, sort=[("timestamp", 1)]
+            filter_dict=message_filter, sort=[("timestamp", 1)]
         )
+        # A secondary can still hold the turn's empty row right after the
+        # save, and the client stops polling on a null. Only then read the
+        # messages once more on the primary. While a turn runs the client
+        # polls again, so a secondary read is fine.
+        if active_message_id is None and messages and _is_unsaved(messages[-1]):
+            messages = await Message.find_all(
+                filter_dict=message_filter, sort=[("timestamp", 1)], primary=True
+            )
 
         return ConversationDetail(
             id=conversation.id,
@@ -113,6 +246,7 @@ async def get_conversation(
             name=conversation.name,
             timestamp=conversation.timestamp,
             messages=messages,
+            active_message_id=active_message_id,
         )
 
     except HTTPException as e:

@@ -147,6 +147,7 @@
 - **name**: string
 - **timestamp**: datetime
 - **messages**: list[Message]
+- **active_message_id**: string | null (the assistant message still being generated, null when no turn runs or the turn is past its deadline)
 
 ### Conversation (response model)
 
