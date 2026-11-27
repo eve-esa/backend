@@ -2901,3 +2901,162 @@ class TestFirstAnswerBudgetRestarts:
         )
         assert not any(event["type"] == "error" for event in events)
 
+    async def test_reasoning_resets_the_budget(self):
+        """A think longer than AGENTIC_TIMEOUT is progress, not a timeout."""
+        events = await _stream_on_clock(
+            [
+                _stream_step(
+                    self._PAST,
+                    "messages",
+                    (
+                        AIMessage(
+                            content="",
+                            additional_kwargs={"reasoning_content": "working"},
+                        ),
+                        {"langgraph_node": "agent"},
+                    ),
+                ),
+                _stream_step(1, "messages", self._answer()),
+            ]
+        )
+
+        assert any(
+            event["type"] == "reasoning" and event["content"] == "working"
+            for event in events
+        )
+        assert any(
+            event["type"] == "token" and event["content"] == "done" for event in events
+        )
+        assert not any(event["type"] == "error" for event in events)
+
+    async def test_a_stall_after_reasoning_still_times_out(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(
+                    0,
+                    "messages",
+                    (
+                        AIMessage(
+                            content="",
+                            additional_kwargs={"reasoning_content": "working"},
+                        ),
+                        {"langgraph_node": "agent"},
+                    ),
+                ),
+                _stream_step(self._PAST, "messages", self._answer()),
+            ]
+        )
+
+        assert [event["type"] for event in events if event["type"] == "token"] == []
+        assert any(event["type"] == "error" for event in events)
+
+    async def test_think_tags_stream_as_reasoning_and_not_as_the_answer(self):
+        events = await _stream_on_clock(
+            [
+                _stream_step(
+                    0,
+                    "messages",
+                    (
+                        AIMessage(content="<think>hmm</think>done"),
+                        {"langgraph_node": "agent"},
+                    ),
+                ),
+            ]
+        )
+
+        assert any(
+            event["type"] == "reasoning" and event["content"] == "hmm"
+            for event in events
+        )
+        assert any(
+            event["type"] == "token" and event["content"] == "done" for event in events
+        )
+        assert not any(
+            event["type"] == "token" and "<think>" in str(event.get("content", ""))
+            for event in events
+        )
+
+
+class TestReasoningTrace:
+    """Reasoning is stored on the trace and kept out of the answer."""
+
+    async def test_answer_trace_keeps_reasoning_out_of_the_output(self):
+        graph = _FakeStreamGraph(
+            messages=[
+                (
+                    AIMessage(content="<think>hmm</think>done"),
+                    {"langgraph_node": "agent"},
+                )
+            ]
+        )
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)) as patched:
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+        saved = patched["persist_message_state"].await_args.kwargs
+        assert saved["output"] == "done"
+        assert "<think>" not in saved["output"]
+        final = saved["trace"][-1]
+        assert final["role"] == "assistant"
+        assert final["content"] == "done"
+        assert final["reasoning_content"] == "hmm"
+
+    async def test_tool_step_trace_carries_the_reasoning(self):
+        call = {
+            "name": "dummy_search",
+            "args": {"query": "sea ice"},
+            "id": "call-1",
+        }
+        graph = _FakeStreamGraph(
+            events=[
+                (
+                    "messages",
+                    (
+                        AIMessage(
+                            content="",
+                            tool_calls=[call],
+                            additional_kwargs={"reasoning_content": "look it up"},
+                        ),
+                        {"langgraph_node": "agent"},
+                    ),
+                ),
+                (
+                    "updates",
+                    {
+                        "agent": {
+                            "messages": [
+                                AIMessage(
+                                    content="",
+                                    tool_calls=[call],
+                                    additional_kwargs={"reasoning_content": "look it up"},
+                                )
+                            ]
+                        }
+                    },
+                ),
+                (
+                    "messages",
+                    (AIMessage(content="done"), {"langgraph_node": "agent"}),
+                ),
+            ]
+        )
+        request = GenerationRequest(query="hi", llm_type="main", agent="react")
+        with _patched_runner(_build_react_graph=MagicMock(return_value=graph)) as patched:
+            async for _event in generate_answer_agentic_stream_helper(
+                request,
+                conversation_id="c1",
+                message_id="m1",
+                user_id="test-user",
+            ):
+                pass
+        trace = patched["persist_message_state"].await_args.kwargs["trace"]
+        agent = next(entry for entry in trace if entry.get("tool_calls"))
+        assert agent["reasoning_content"] == "look it up"
+        assert trace[-1]["content"] == "done"
+        assert "reasoning_content" not in trace[-1]
+

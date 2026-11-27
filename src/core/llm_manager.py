@@ -6,7 +6,7 @@ import contextlib
 import contextvars
 import logging
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, Iterator, Optional
+from typing import Any, AsyncGenerator, Dict, Iterator, Mapping, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -154,7 +154,11 @@ def _has_output(message: Any) -> bool:
     if getattr(message, "tool_calls", None) or getattr(message, "tool_call_chunks", None):
         return True
     extra = getattr(message, "additional_kwargs", None) or {}
-    return bool(extra.get("tool_calls") or extra.get("function_call"))
+    return bool(
+        extra.get("tool_calls")
+        or extra.get("function_call")
+        or extra.get("reasoning_content")
+    )
 
 
 def _result_has_output(result: Any) -> bool:
@@ -173,7 +177,202 @@ _CURRENT_CALL: contextvars.ContextVar[Optional[_GuardedCall]] = contextvars.Cont
 )
 
 
-class BreakerAwareChatOpenAI(ChatOpenAI):
+# Mistral puts reasoning in content parts of these types. The text lives under
+# ``thinking`` (Mistral) or ``reasoning``; ``text`` is the odd server.
+_THINKING_PART_TYPES = frozenset({"thinking", "reasoning"})
+
+
+def _reasoning_field(payload: Mapping[str, Any]) -> str:
+    """vLLM ``reasoning_content``, else the newer ``reasoning`` field.
+
+    ChatDeepSeek reads the same two keys. An empty or non-string value is
+    not reasoning: servers send ``null`` on ordinary chunks.
+    https://github.com/langchain-ai/langchain/blob/master/libs/partners/deepseek/langchain_deepseek/chat_models.py
+    """
+    text = payload.get("reasoning_content")
+    if isinstance(text, str) and text:
+        return text
+    text = payload.get("reasoning")
+    return text if isinstance(text, str) and text else ""
+
+
+def _text_of(value: Any) -> str:
+    """A string, or the text fields of a nested chunk list.
+
+    Mistral's ThinkChunk stores the trace as ``thinking: [{"type": "text",
+    "text": "..."}]``, not as a string.
+    https://docs.mistral.ai/inference/conversations/reasoning/
+    """
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "".join(parts)
+
+
+def _thinking_part_text(part: Any) -> Optional[str]:
+    """Text of a thinking part, or None when ``part`` is not one.
+
+    ``""`` means the part is thinking but carries no text, so it still leaves
+    the answer content.
+    """
+    if not isinstance(part, dict) or part.get("type") not in _THINKING_PART_TYPES:
+        return None
+    for key in ("thinking", "reasoning", "text"):
+        if key not in part:
+            continue
+        text = _text_of(part.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _without_thinking_parts(content: Any) -> tuple[Any, str]:
+    """Drop thinking parts from a content list. Other content stays.
+
+    A list that is only text afterwards becomes one string, which is what
+    ``_convert_delta_to_message_chunk`` and the stream expect. A list that
+    still holds a non-text part (an image) stays a list.
+    """
+    if not isinstance(content, list):
+        return content, ""
+    kept: list[Any] = []
+    thinking: list[str] = []
+    found = False
+    for part in content:
+        text = _thinking_part_text(part)
+        if text is None:
+            kept.append(part)
+            continue
+        found = True
+        if text:
+            thinking.append(text)
+    if not found:
+        return content, ""
+    joined = "".join(thinking)
+    texts: list[str] = []
+    for part in kept:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if (
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+            and set(part) <= {"type", "text"}
+        ):
+            texts.append(part["text"])
+            continue
+        return kept, joined
+    return "".join(texts), joined
+
+
+def _delta_of(chunk: Mapping[str, Any]) -> Optional[dict]:
+    """The first choice delta, or None when this chunk has none."""
+    choices = chunk.get("choices") or (chunk.get("chunk") or {}).get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return None
+    delta = choices[0].get("delta")
+    return delta if isinstance(delta, dict) else None
+
+
+def _with_delta_content(chunk: dict, content: Any) -> dict:
+    """Copy of ``chunk`` whose first delta content is ``content``."""
+    patched = dict(chunk)
+    key = "choices" if chunk.get("choices") else "chunk"
+    if key == "chunk":
+        inner = dict(chunk.get("chunk") or {})
+        choices = list(inner.get("choices") or [])
+    else:
+        inner = None
+        choices = list(chunk.get("choices") or [])
+    if not choices or not isinstance(choices[0], dict):
+        return chunk
+    choice = dict(choices[0])
+    delta = dict(choice.get("delta") or {})
+    delta["content"] = content
+    choice["delta"] = delta
+    choices[0] = choice
+    if inner is None:
+        patched["choices"] = choices
+    else:
+        inner["choices"] = choices
+        patched["chunk"] = inner
+    return patched
+
+
+class ReasoningChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that keeps the reasoning the stock client drops.
+
+    langchain-openai 1.6.7 extracts only official OpenAI fields. Its module
+    docstring says ``reasoning_content`` and ``reasoning`` are not preserved.
+    vLLM and OpenRouter send one of those on the delta. Mistral sends
+    ``thinking`` content parts. Both land on
+    ``additional_kwargs["reasoning_content"]`` and leave the answer content,
+    which is what the agent stream reads.
+
+    Field copy follows ChatDeepSeek._convert_chunk_to_generation_chunk:
+    https://github.com/langchain-ai/langchain/blob/master/libs/partners/deepseek/langchain_deepseek/chat_models.py
+    """
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> Any:
+        delta = _delta_of(chunk)
+        patched = chunk
+        reasoning = ""
+        if delta is not None:
+            reasoning = _reasoning_field(delta)
+            content, from_parts = _without_thinking_parts(delta.get("content"))
+            if not reasoning:
+                reasoning = from_parts
+            if content is not delta.get("content"):
+                patched = _with_delta_content(chunk, content)
+        generation = super()._convert_chunk_to_generation_chunk(
+            patched, default_chunk_class, base_generation_info
+        )
+        if generation is not None and reasoning:
+            generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation
+
+    def _create_chat_result(
+        self,
+        response: dict | Any,
+        generation_info: dict | None = None,
+    ) -> Any:
+        result = super()._create_chat_result(response, generation_info)
+        if isinstance(response, dict):
+            payload = response
+        else:
+            payload = response.model_dump(warnings=False)
+        choices = payload.get("choices") or []
+        for generation, choice in zip(result.generations, choices):
+            message = choice.get("message") if isinstance(choice, dict) else None
+            if not isinstance(message, dict):
+                continue
+            reasoning = _reasoning_field(message)
+            original = message.get("content")
+            content, from_parts = _without_thinking_parts(original)
+            if not reasoning:
+                reasoning = from_parts
+            if content is not original:
+                generation.message.content = content
+            if reasoning:
+                generation.message.additional_kwargs["reasoning_content"] = reasoning
+        return result
+
+
+class BreakerAwareChatOpenAI(ReasoningChatOpenAI):
     """ChatOpenAI that keeps its endpoint out of a rate limit window.
 
     Every call asks the breaker first (:meth:`EndpointHealth.admit`): inside a
@@ -186,7 +385,7 @@ class BreakerAwareChatOpenAI(ChatOpenAI):
     untouched. The probe's window closes only on output: the first chunk
     with text or a tool call, or a non-streaming reply that holds one. A
     stream that ends with no such chunk, or an error, closes nothing. Without
-    :meth:`guard` it is a plain ChatOpenAI.
+    :meth:`guard` it is a :class:`ReasoningChatOpenAI`.
     """
 
     _eve_health: Any = PrivateAttr(default=None)
@@ -397,7 +596,7 @@ class LLMManager:
                 raise RuntimeError(
                     "MAIN_MODEL_API_KEY (or RUNPOD_API_KEY) is not set (required for main model)"
                 )
-            self._main_chat_openai = ChatOpenAI(
+            self._main_chat_openai = ReasoningChatOpenAI(
                 api_key=MAIN_MODEL_API_KEY,
                 base_url=self._main_base_url,
                 model=self._main_model_name,
@@ -419,7 +618,7 @@ class LLMManager:
                 raise RuntimeError(
                     "FALLBACK_MODEL_API_KEY is not set (required for fallback model)"
                 )
-            self._fallback_chat = ChatOpenAI(
+            self._fallback_chat = ReasoningChatOpenAI(
                 api_key=FALLBACK_MODEL_API_KEY,
                 base_url=self._fallback_base_url,
                 model=self._fallback_model_name,
@@ -437,7 +636,7 @@ class LLMManager:
                 raise RuntimeError("Satcom small base URL is not configured")
             if not SATCOM_RUNPOD_API_KEY:
                 raise RuntimeError("SATCOM_API_KEY is not set")
-            self._satcom_small_chat_openai = ChatOpenAI(
+            self._satcom_small_chat_openai = ReasoningChatOpenAI(
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_small_base_url,
                 model=self._satcom_small_model_name,
@@ -455,7 +654,7 @@ class LLMManager:
                 raise RuntimeError("Satcom large base URL is not configured")
             if not SATCOM_RUNPOD_API_KEY:
                 raise RuntimeError("SATCOM_API_KEY is not set")
-            self._satcom_large_chat_openai = ChatOpenAI(
+            self._satcom_large_chat_openai = ReasoningChatOpenAI(
                 api_key=SATCOM_RUNPOD_API_KEY,
                 base_url=self._satcom_large_base_url,
                 model=self._satcom_large_model_name,
@@ -510,7 +709,7 @@ class LLMManager:
         self, *, base_url: str, model_name: str, api_key: str
     ) -> ChatOpenAI:
         """Build a one-off ChatOpenAI client for a user-owned custom model."""
-        return ChatOpenAI(
+        return ReasoningChatOpenAI(
             api_key=api_key,
             base_url=base_url.rstrip("/"),
             model=model_name,

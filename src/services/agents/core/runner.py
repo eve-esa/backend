@@ -75,6 +75,7 @@ from src.services.agents.core.history_search import (
     note_searchable_history,
 )
 from src.services.agents.core.registry import get_agent_graph
+from src.services.agents.core.reasoning import ReasoningSplitter, split_complete
 from src.services.agents.core.sandbox import (
     backend_for_compile,
     close_sandbox,
@@ -240,9 +241,8 @@ def _final_answer_text(
             and msg.content
             and not getattr(msg, "tool_calls", None)
         ):
-            return strip_handles(
-                _strip_text_tool_calls(_content_text(msg.content)), handles
-            )
+            _, answer = split_complete(_content_text(msg.content))
+            return strip_handles(_strip_text_tool_calls(answer), handles)
     return ""
 
 
@@ -697,7 +697,16 @@ def _serialise_trace_entry(
 
     if AIMessage and isinstance(msg, AIMessage):
         entry["role"] = "assistant"
-        entry["content"] = stringify_message_content(msg.content)
+        # Tags in the content are reasoning, not the step text. Provider
+        # reasoning arrives on additional_kwargs and wins when both are set.
+        extra = getattr(msg, "additional_kwargs", None) or {}
+        field = extra.get("reasoning_content")
+        field = field if isinstance(field, str) else ""
+        tagged, answer = split_complete(stringify_message_content(msg.content))
+        entry["content"] = answer
+        reasoning = field or tagged
+        if reasoning:
+            entry["reasoning_content"] = reasoning
         tc = getattr(msg, "tool_calls", None)
         if tc:
             tool_calls: List[Dict[str, Any]] = []
@@ -1411,11 +1420,13 @@ async def _resolve_agentic_llm_client(
 
 
 class _AgenticBudgetTimeout(TimeoutError):
-    """No final-answer token within AGENTIC_TIMEOUT (default 120s).
+    """No progress within AGENTIC_TIMEOUT (default 120s).
 
-    The clock starts at generation and restarts on each announced tool call
-    and each tool result. At 480s AGENTIC_TURN_DEADLINE cuts the turn. Must
-    not open the LLM circuit: non-answer chunks mean the endpoint is up.
+    The clock starts at generation and restarts on each announced tool call,
+    each tool result, and each reasoning chunk. A model that is thinking
+    resets it, so a long think does not time out before the answer. At 480s
+    AGENTIC_TURN_DEADLINE cuts the turn. Must not open the LLM circuit:
+    non-answer chunks mean the endpoint is up.
     """
 
 
@@ -3808,7 +3819,8 @@ async def generate_answer_agentic_stream_helper(
 
         gen_start = time.perf_counter()
         # First-answer budget. gen_start stays put: generation_latency uses it.
-        # This clock restarts on each announced tool call and each tool result.
+        # This clock restarts on each announced tool call, each tool result
+        # and each reasoning chunk. Silence is what it measures, not thinking.
         answer_budget_started_at = gen_start
         first_token_latency: Optional[float] = None
         tokens_yielded = 0
@@ -3822,6 +3834,17 @@ async def generate_answer_agentic_stream_helper(
         step_frames = _StepFrames(tools)
 
         turn_buffer: List[str] = []
+        reasoning_splitter = ReasoningSplitter()
+        # Reasoning of the model call in progress, in the order it streamed.
+        reasoning_parts: List[str] = []
+        # Set once the call asks for a tool, so that reasoning is stored on
+        # the agent step and not again on the final answer.
+        current_call_has_tools = False
+        # Tool-call reasoning waiting for its trace entry. The node update
+        # can arrive after the next model call has already started.
+        pending_tool_reasoning: List[str] = []
+        # Reasoning of the latest model call that did not ask for a tool.
+        answer_reasoning = ""
         # A model call ended (its node update, the node changed, or the chunk
         # id changed): the next answer text starts a new paragraph. The break rides that text, so a
         # Stop or an end before it stores none.
@@ -3881,12 +3904,63 @@ async def generate_answer_agentic_stream_helper(
             result_frame.update(result_fields)
             return result_frame
 
+        def _note_reasoning(text: str) -> Optional[str]:
+            """Record one reasoning fragment and reset the answer clock.
+
+            The frame is JSON-only: the text format has no slot for it. The
+            clock resets either way, so a long think does not time out.
+            """
+            nonlocal answer_budget_started_at
+            if not text:
+                return None
+            reasoning_parts.append(text)
+            answer_budget_started_at = time.perf_counter()
+            if output_format != "json":
+                return None
+            return f"data: {json.dumps({'type': 'reasoning', 'content': text})}\n\n"
+
+        def _take_streamed_reasoning() -> str:
+            """Reasoning of the call being traced. It is not used again."""
+            if reasoning_parts:
+                text = "".join(reasoning_parts)
+                reasoning_parts.clear()
+                return text
+            if pending_tool_reasoning:
+                return pending_tool_reasoning.pop(0)
+            return ""
+
+        def _end_reasoning_call() -> List[str]:
+            """Close the model call. A held tag tail is released first."""
+            nonlocal current_call_has_tools, answer_reasoning
+            reasoning, answer = reasoning_splitter.flush()
+            events: List[str] = []
+            frame = _note_reasoning(reasoning)
+            if frame is not None:
+                events.append(frame)
+            if answer:
+                turn_buffer.append(answer)
+            text = "".join(reasoning_parts)
+            if text:
+                if current_call_has_tools:
+                    pending_tool_reasoning.append(text)
+                elif answer_reasoning:
+                    # A later model call in the same turn thinks again. Both
+                    # belong on the final answer; the first must not be dropped.
+                    answer_reasoning = f"{answer_reasoning}\n{text}"
+                else:
+                    answer_reasoning = text
+            reasoning_parts.clear()
+            current_call_has_tools = False
+            reasoning_splitter.reset()
+            return events
+
         def _tool_call_events(
             tool_calls: List[Any],
             model: Optional[str] = None,
             model_name: Optional[str] = None,
         ) -> List[str]:
-            nonlocal answer_budget_started_at
+            nonlocal answer_budget_started_at, current_call_has_tools
+            current_call_has_tools = True
             events: List[str] = []
             for tc in tool_calls:
                 if isinstance(tc, dict):
@@ -4166,6 +4240,13 @@ async def generate_answer_agentic_stream_helper(
                                         latency_s=entry_latency_s,
                                         started_at_s=started_at_s,
                                     )
+                                    # The streamed text, when we have it: it is
+                                    # what the user saw, tags already removed.
+                                    streamed_reasoning = _take_streamed_reasoning()
+                                    if streamed_reasoning:
+                                        agent_entry["reasoning_content"] = (
+                                            streamed_reasoning
+                                        )
                                     trace_entries.append(agent_entry)
                                     # The update carries the complete arguments,
                                     # so the tool call is announced from here.
@@ -4197,6 +4278,8 @@ async def generate_answer_agentic_stream_helper(
                                     node_latencies[latency_key] = (
                                         node_latencies.get(latency_key, 0.0) + elapsed_s
                                     )
+                            for event in _end_reasoning_call():
+                                yield event
                             for event in _flush_turn_buffer_to_events():
                                 yield event
                             # One model call never spans two nodes.
@@ -4221,11 +4304,26 @@ async def generate_answer_agentic_stream_helper(
                             chunk_id = getattr(chunk, "id", None)
                             if chunk_id:
                                 if model_call_id and chunk_id != model_call_id:
+                                    for event in _end_reasoning_call():
+                                        yield event
                                     for event in _flush_turn_buffer_to_events():
                                         yield event
                                     paragraph_pending = True
                                 model_call_id = chunk_id
-                            if getattr(chunk, "tool_calls", None):
+                            # A tool-call chunk's content is partial arguments,
+                            # not prose. Only provider reasoning is taken from it.
+                            has_tools = bool(getattr(chunk, "tool_calls", None))
+                            extra = getattr(chunk, "additional_kwargs", None) or {}
+                            provider = extra.get("reasoning_content")
+                            provider = provider if isinstance(provider, str) else ""
+                            reasoning, answer_text = reasoning_splitter.feed(
+                                "" if has_tools else _content_text(chunk.content),
+                                provider,
+                            )
+                            frame = _note_reasoning(reasoning)
+                            if frame is not None:
+                                yield frame
+                            if has_tools:
                                 # Kept only so a ToolMessage without a name can be
                                 # traced back to the tool it answered.
                                 graph_messages.append(chunk)
@@ -4243,11 +4341,10 @@ async def generate_answer_agentic_stream_helper(
                                         yield event
                                 continue
 
-                            content = _content_text(chunk.content)
-                            if not content:
+                            if not answer_text:
                                 continue
 
-                            turn_buffer.append(content)
+                            turn_buffer.append(answer_text)
                             joined = "".join(turn_buffer)
                             if might_be_incomplete_text_tool_call and (
                                 might_be_incomplete_text_tool_call(joined)
@@ -4263,6 +4360,8 @@ async def generate_answer_agentic_stream_helper(
                         node_latencies[latency_key] = (
                             node_latencies.get(latency_key, 0.0) + elapsed_s
                         )
+                for event in _end_reasoning_call():
+                    yield event
                 for event in _flush_turn_buffer_to_events():
                     yield event
                 if repeat_loop_ended:
@@ -4342,15 +4441,21 @@ async def generate_answer_agentic_stream_helper(
             started_at_s, entry_latency_s = trace_timeline.agent_step(
                 None, at=stream_end
             )
-            trace_entries.append(
-                {
-                    "role": "assistant",
-                    "node": answer_node,
-                    "content": answer,
-                    "started_at_s": started_at_s,
-                    "latency_s": entry_latency_s,
-                }
+            final_entry: Dict[str, Any] = {
+                "role": "assistant",
+                "node": answer_node,
+                "content": answer,
+                "started_at_s": started_at_s,
+                "latency_s": entry_latency_s,
+            }
+            # A text tool call never gets an agent trace entry, so its
+            # reasoning would have nowhere to go. The queue holds it.
+            leftover = answer_reasoning or (
+                pending_tool_reasoning[-1] if pending_tool_reasoning else ""
             )
+            if leftover:
+                final_entry["reasoning_content"] = leftover
+            trace_entries.append(final_entry)
 
         if graph_exc is not None:
             await persist_policy_event(

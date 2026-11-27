@@ -35,7 +35,7 @@ def test_build_custom_client_does_not_change_selected_llm_type(monkeypatch):
     manager.set_selected_llm_type(LLMType.Main.value)
 
     monkeypatch.setattr(
-        "src.core.llm_manager.ChatOpenAI",
+        "src.core.llm_manager.ReasoningChatOpenAI",
         lambda **kwargs: object(),
     )
 
@@ -172,7 +172,7 @@ def test_each_endpoint_carries_its_own_first_token_budget(
             return self
 
     # The JSC clients are the rate-limit aware subclass.
-    for name in ("ChatOpenAI", "BreakerAwareChatOpenAI"):
+    for name in ("ReasoningChatOpenAI", "BreakerAwareChatOpenAI"):
         monkeypatch.setattr(f"src.core.llm_manager.{name}", _Client)
     monkeypatch.setattr(f"src.core.llm_manager.{api_key_name}", "test-key")
     manager = LLMManager()
