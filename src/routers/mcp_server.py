@@ -36,6 +36,7 @@ from src.services.custom_model_cipher import CipherConfigError
 from src.services.generate_answer_agentic import _load_mcp_tools_for_servers
 from src.services.mcp import user_credentials
 from src.services.mcp.attribution import attribution_from_citation
+from src.services.mcp.user_environment import public_accounts
 from src.services.mcp.proxy_url import resolve_public_mcp_url
 from src.services.request_rate_limiter import enforce_request_rate
 
@@ -92,6 +93,7 @@ def _to_public_mcp_server(
         updated_at=mcp_server.updated_at,
         deleted_at=mcp_server.deleted_at,
         user_credentials=_credentials_public(spec, credential) if spec else None,
+        accounts=public_accounts(mcp_server),
     )
 
 

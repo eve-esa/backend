@@ -282,6 +282,22 @@
 - **created_at**: datetime
 - **updated_at**: datetime
 - **deleted_at**: datetime | null
+- **user_credentials**: object | null — the credential form for this toolkit, when the feature flag is on
+- **accounts**: list[MCPServerAccount] | null — upstream accounts from the server's `environment.yaml`
+
+### MCPServerAccount (`accounts` on `GET /mcp-servers` and `GET /mcp-servers/{id}`)
+
+Derived from `user_environment`, the parsed `servers/<name>/environment.yaml` from [eve-esa/mcp-tool-registry](https://github.com/eve-esa/mcp-tool-registry). Written by the backoffice, never by the write routes. Null when the row has no file, the file is malformed, the row belongs to a user, or `FEATURE_TOOLKIT_CREDENTIALS` is off. Header and variable names are never returned. Only `https` links are returned.
+
+- **id**: string
+- **label**: string
+- **provider**: string | null
+- **url**: string | null
+- **tools**: list[string] — MCP tool names that need this account
+- **credentials**: list of **name**, **label**, **secret**, **help_text**, **url**, **via** (`header` or `variable`)
+- **services**: nested accounts, same shape
+
+A file that names headers also fills `user_credentials` when the row has no explicit spec, so the existing form can save them. A file that only names variables is shown in `accounts` and does not open that form.
 
 ### MCPServerMetadata (stored on the `mcp_servers` row)
 

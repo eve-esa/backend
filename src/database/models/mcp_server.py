@@ -207,6 +207,17 @@ class MCPServer(MongoModel):
         description="Operator-declared credential fields each user may fill",
     )
 
+    # Parsed ``environment.yaml`` from eve-esa/mcp-tool-registry
+    # (``servers/<name>/environment.yaml``). Written by the backoffice or Mongo,
+    # never by the user API, and effective on global rows only. Any, not a parsed
+    # model: a malformed file must not make the row fail to load.
+    # ``src/services/mcp/user_environment.py`` turns it into the public accounts
+    # and, when the file names headers, into the credential spec.
+    user_environment: Optional[Any] = Field(
+        default=None,
+        description="Parsed environment.yaml: accounts and the credentials each one asks for",
+    )
+
     # Timestamps
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

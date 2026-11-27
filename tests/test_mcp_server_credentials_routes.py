@@ -208,6 +208,74 @@ async def test_list_and_detail_describe_fields_without_internals(async_client, w
     assert detail.json()["user_credentials"]["configured"] is False
 
 
+_ENV_FILE = {
+    "services": [
+        {
+            "id": "cdse",
+            "label": "Copernicus Data Space",
+            "provider": "Sentinel Hub",
+            "url": "https://dataspace.copernicus.eu/",
+            "tools": ["compute_metrics"],
+            "credentials": [
+                {
+                    "header": "X-CDSE-Client-Id",
+                    "label": "Copernicus client ID",
+                    "help": "OAuth client id from the Sentinel Hub dashboard.",
+                    "url": "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings",
+                    "secret": False,
+                },
+                {
+                    "header": "X-CDSE-Client-Secret",
+                    "label": "Copernicus client secret",
+                    "help": "OAuth client secret from the Sentinel Hub dashboard.",
+                    "url": "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings",
+                    "secret": True,
+                },
+            ],
+        }
+    ]
+}
+
+
+@pytest.mark.asyncio
+async def test_environment_file_is_what_the_list_shows(async_client, world, flag_on):
+    """A stored environment.yaml is the form and the account the settings page loads."""
+    server = MCPServer(
+        name="effis-env",
+        config=ToolConfig(url="https://example.com/mcp", transport=ToolTransport.STREAMABLE_HTTP),
+        user_environment=_ENV_FILE,
+    )
+    await server.save()
+    try:
+        item = await _list_item(async_client, world["token"], "effis-env")
+        assert item["accounts"][0]["label"] == "Copernicus Data Space"
+        assert item["accounts"][0]["provider"] == "Sentinel Hub"
+        assert item["accounts"][0]["tools"] == ["compute_metrics"]
+        assert item["accounts"][0]["credentials"][0]["name"] == "x_cdse_client_id"
+        assert item["accounts"][0]["credentials"][0]["via"] == "header"
+        assert item["user_credentials"]["fields"][0]["name"] == "x_cdse_client_id"
+        assert item["user_credentials"]["configured"] is False
+        assert "X-CDSE-Client" not in str(item)
+        put = await _put(
+            async_client,
+            world["token"],
+            server.id,
+            {
+                "values": {
+                    "x_cdse_client_id": CLIENT_ID,
+                    "x_cdse_client_secret": CLIENT_SECRET,
+                }
+            },
+        )
+        assert put.status_code == 200, put.text
+        _no_secret_anywhere(put.text)
+        saved = await _list_item(async_client, world["token"], "effis-env")
+        assert saved["user_credentials"]["configured"] is True
+        assert saved["user_credentials"]["hints"] == {"x_cdse_client_id": "…1234"}
+    finally:
+        await cleanup_models([server])
+
+
 # Save
 
 
