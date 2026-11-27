@@ -26,10 +26,17 @@ from src.database.models.artifact import Artifact
 from src.database.models.conversation import Conversation
 from src.database.models.message import Message
 from src.services.agents.core.tool_results import tool_result_prefix
-from src.services.agents.core.workspace import workspace_prefix, workspace_state_key
+from src.services.agents.core.workspace import workspace_prefix
+from src.services.artifact_move import move_to_conversation
 from src.services.storage import storage_service
+from src.services.storage_quota import release_storage
 
 logger = logging.getLogger(__name__)
+
+
+def _conversation_prefix(user_id: str, conversation_id: str) -> str:
+    """Every object the conversation owns, including ones no row names."""
+    return f"users/{user_id}/conversations/{conversation_id}/"
 
 # Each part of the cascade (artifacts, tool results, workspace) has its own
 # deadline, so a hung S3 call cannot hold a conversation delete. The
@@ -90,6 +97,14 @@ async def delete_artifact(artifact: Artifact) -> None:
     await storage_service.delete_object(artifact.key)
     await artifact.delete()
     try:
+        await release_storage(artifact.user_id, int(artifact.size_bytes or 0))
+    except Exception as exc:  # noqa: BLE001 - the file is gone; the fill corrects the counter
+        logger.warning(
+            "storage.release_failed artifact=%s error=%s",
+            artifact.id,
+            type(exc).__name__,
+        )
+    try:
         await pull_message_references(artifact.id)
     except Exception as exc:  # noqa: BLE001 - the erasure itself succeeded
         logger.warning(
@@ -122,6 +137,15 @@ async def delete_conversation_artifacts(user_id: str, conversation_id: str) -> N
     failed = [kind for kind, ok in results if not ok]
     if failed:
         raise ArtifactCascadeIncomplete(failed)
+    # Whatever the three parts did not name: the workspace state file, and an
+    # object whose row insert failed. Shared artifacts were moved out first.
+    swept, sweep_bytes = await storage_service.delete_prefix(
+        _conversation_prefix(user_id, conversation_id),
+        max_keys=PREFIX_DELETE_MAX_KEYS,
+    )
+    await _release(user_id, sweep_bytes)
+    if swept >= PREFIX_DELETE_MAX_KEYS:
+        raise ArtifactCascadeIncomplete(["conversation"])
 
 
 async def _bounded(kind: str, step, user_id: str, conversation_id: str) -> tuple[str, bool]:
@@ -174,13 +198,10 @@ async def _delete_artifacts(user_id: str, conversation_id: str) -> bool:
             other = shown_elsewhere.get(artifact.id)
             try:
                 if other:
-                    # Only the conversation, and only while the row is still
-                    # here: a full save would write back a key an attach just
-                    # moved, and the row would point at a deleted object.
-                    await Artifact.get_collection().update_one(
-                        {"_id": ObjectId(artifact.id), "conversation_id": conversation_id},
-                        {"$set": {"conversation_id": other}},
-                    )
+                    # The object has to leave this conversation's folder too.
+                    # A row-only update would leave the bytes where the sweep
+                    # below deletes everything that is still here.
+                    await move_to_conversation(artifact, other)
                 else:
                     await _delete_unless_moved(artifact, conversation_id)
             except Exception as exc:  # noqa: BLE001 - reported, logged
@@ -221,6 +242,7 @@ async def _delete_unless_moved(artifact: Artifact, conversation_id: str) -> None
     except Exception:
         await collection.insert_one(row)
         raise
+    await _release(artifact.user_id, int(row.get("size_bytes") or 0))
     try:
         await pull_message_references(artifact.id)
     except Exception as exc:  # noqa: BLE001 - the erasure itself succeeded
@@ -269,30 +291,40 @@ async def _other_conversations(
     return found
 
 
+async def _release(user_id: str, nbytes: int) -> None:
+    """Give deleted bytes back. A failure is logged: the objects are already gone."""
+    try:
+        await release_storage(user_id, nbytes)
+    except Exception as exc:  # noqa: BLE001 - the fill corrects a missed release
+        logger.warning(
+            "storage.release_failed user=%s error=%s", user_id, type(exc).__name__
+        )
+
+
 async def _delete_tool_results(user_id: str, conversation_id: str) -> bool:
     """Empty the conversation's tool-result prefix; False when the cap was hit.
 
     Tool results have no Mongo row: once the conversation is gone nothing
     lists them again, so a capped run reports itself incomplete.
     """
-    deleted = await storage_service.delete_prefix(
+    deleted, nbytes = await storage_service.delete_prefix(
         tool_result_prefix(user_id, conversation_id),
         max_keys=PREFIX_DELETE_MAX_KEYS,
     )
+    await _release(user_id, nbytes)
     return deleted < PREFIX_DELETE_MAX_KEYS
 
 
 async def _delete_workspace(user_id: str, conversation_id: str) -> bool:
-    """Empty the saved workspace and drop its state file; False when the cap was hit.
+    """Empty the saved workspace; False when the cap was hit.
 
-    Like tool results, the workspace has no Mongo row. The state file goes
-    only once the prefix is empty, so a capped run leaves both for the retry.
+    Like tool results, the workspace has no Mongo row. The state file sits
+    beside this prefix and is removed by the conversation-folder sweep, which
+    also gives its bytes back.
     """
-    deleted = await storage_service.delete_prefix(
+    deleted, nbytes = await storage_service.delete_prefix(
         workspace_prefix(user_id, conversation_id),
         max_keys=PREFIX_DELETE_MAX_KEYS,
     )
-    if deleted >= PREFIX_DELETE_MAX_KEYS:
-        return False
-    await storage_service.delete_object(workspace_state_key(user_id, conversation_id))
-    return True
+    await _release(user_id, nbytes)
+    return deleted < PREFIX_DELETE_MAX_KEYS

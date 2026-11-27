@@ -48,6 +48,7 @@ class _FailingDeleteStorage(FakeStorage):
 
 def _use(monkeypatch, fake):
     monkeypatch.setattr("src.routers.artifact.storage_service", fake)
+    monkeypatch.setattr("src.services.artifact_move.storage_service", fake)
     monkeypatch.setattr("src.services.artifact_cleanup.storage_service", fake)
     return fake
 
@@ -325,7 +326,10 @@ async def test_mcp_output_shown_in_another_conversation_survives(async_client, m
         kept = await Artifact.find_by_id(artifact.id)
         assert kept is not None
         assert kept.conversation_id == second.id
-        assert artifact.key in fake.objects
+        # The object moved with the row. The sweep would have deleted it in
+        # the conversation that just went away.
+        assert kept.key in fake.objects
+        assert artifact.key not in fake.objects
     finally:
         await Artifact.delete_many({"user_id": user.id})
         await cleanup_models([user, conversation, second, reuse])
@@ -373,7 +377,9 @@ async def test_upload_attached_in_two_conversations_survives_the_delete_of_one(
         assert resp.status_code == 200
         kept = await Artifact.find_by_id(artifact_id)
         assert kept is not None and kept.conversation_id == first.id
-        assert key in fake.objects
+        assert kept.key in fake.objects
+        assert key not in fake.objects
+        moved = kept.key
         got = await async_client.get(f"/artifacts/{artifact_id}", headers=_auth(token))
         assert got.status_code == 200
 
@@ -381,7 +387,7 @@ async def test_upload_attached_in_two_conversations_survives_the_delete_of_one(
         resp = await async_client.delete(f"/conversations/{first.id}", headers=_auth(token))
         assert resp.status_code == 200
         assert await Artifact.find_by_id(artifact_id) is None
-        assert key not in fake.objects
+        assert moved not in fake.objects
     finally:
         await Message.delete_many({"conversation_id": {"$in": [first.id, second.id]}})
         await Artifact.delete_many({"user_id": user.id})
@@ -631,7 +637,7 @@ async def test_a_hung_storage_thread_is_bounded(monkeypatch, caplog):
 
     def _blocking_delete_prefix_sync(prefix, max_keys=0):
         release.wait(timeout=10)
-        return 0
+        return 0, 0
 
     monkeypatch.setattr(service, "delete_prefix_sync", _blocking_delete_prefix_sync)
     monkeypatch.setattr("src.services.artifact_cleanup.storage_service", service)
@@ -778,9 +784,12 @@ def test_delete_prefix_pages_and_batches(monkeypatch):
     stub = _StubS3(keys + ["users/u1/artifacts/keep.png"])
     service = _service_with(monkeypatch, stub)
 
-    deleted = service.delete_prefix_sync("users/u1/conversations/c1/large_tool_results/")
+    deleted, total_bytes = service.delete_prefix_sync(
+        "users/u1/conversations/c1/large_tool_results/"
+    )
 
     assert deleted == 2500
+    assert total_bytes == 0
     assert sorted(stub.deleted) == sorted(keys)
     assert stub.keys == ["users/u1/artifacts/keep.png"]
 

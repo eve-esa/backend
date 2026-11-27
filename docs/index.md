@@ -16,7 +16,7 @@ For additional deployment details, you can also refer to [README.md](https://git
 - **MongoDB/DocumentDB**: Primary datastore for users, collections, documents, conversations, messages
 - **Redis**: Cancellation, and the conversation sandbox map when more than one worker can take the next message
 - **Qdrant**: Vector store for embeddings and retrieval. One cluster. The private collection name and the public `env` tag depend on [the environment](environments.md)
-- **Object storage**: S3 in AWS, MinIO in compose. Artifacts, the sandbox workspace, and large tool results
+- **Object storage**: S3 in AWS, MinIO in compose. Artifacts, the sandbox workspace, and large tool results. A per-user cap is described in [Storage quota](storage-quota.md)
 - **Identity provider**: Keycloak locally, Cognito per AWS environment. This API validates the token. It does not sign the user in
 - **Agents**: The deep-agent graph comes from `eve-esa/agents`. This repo runs it
 - **LLM providers**: Pluggable via `src/core/llm_manager.py`

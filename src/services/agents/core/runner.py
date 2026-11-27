@@ -93,6 +93,11 @@ from src.services.mcp.artifact_context import (
     reset_artifact_context,
     set_artifact_context,
 )
+from src.services.storage_quota import (
+    STORAGE_QUOTA_CODE,
+    notice_frame,
+    opening_storage_notice,
+)
 from src.services.agents.core.repeat_guard import (
     END_NOTE as REPEAT_END_NOTE,
     install_builtin_tool_guard,
@@ -3106,6 +3111,9 @@ async def generate_answer_agentic(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id
     )
+    storage_notices: List[str] = []
+    if await opening_storage_notice(user_id) is not None:
+        storage_notices.append(STORAGE_QUOTA_CODE)
     _retrieval_ctx, retrieval_token = set_retrieval_context()
     # Identical tool calls are counted per turn, from zero.
     _repeat_guard, repeat_token = set_tool_repeat_context()
@@ -3434,6 +3442,10 @@ async def generate_answer_agentic(
             # payload out into metadata.endpoint.
             **({"endpoint": endpoint_metadata} if endpoint_metadata else {}),
         }
+        if artifact_ctx.storage_quota_exceeded and STORAGE_QUOTA_CODE not in storage_notices:
+            storage_notices.append(STORAGE_QUOTA_CODE)
+        if storage_notices:
+            prompts["notices"] = list(storage_notices)
         # The router schedules the rolling summary for the other graphs: that
         # job reads the message it saves.
         if agent_graph_type == "deep" and conversation_id:
@@ -3532,6 +3544,7 @@ async def generate_answer_agentic_stream_helper(
     artifact_ctx, artifact_token = set_artifact_context(
         user_id=user_id, conversation_id=conversation_id, message_id=message_id
     )
+    storage_notices: List[str] = []
     _retrieval_ctx, retrieval_token = set_retrieval_context()
     # Identical tool calls are counted per turn, from zero.
     _repeat_guard, repeat_token = set_tool_repeat_context()
@@ -3642,6 +3655,10 @@ async def generate_answer_agentic_stream_helper(
                 # it, the AG-UI adapter maps it to RUN_ERROR. The code
                 # only: ``message`` is raw exception text.
                 final["error"] = {"code": error["code"]}
+            if artifact_ctx.storage_quota_exceeded and STORAGE_QUOTA_CODE not in storage_notices:
+                storage_notices.append(STORAGE_QUOTA_CODE)
+            if storage_notices:
+                final["notices"] = list(storage_notices)
             return [f"data: {json.dumps(final)}\n\n"]
         return ["data: [DONE]\n\n"]
 
@@ -3665,6 +3682,11 @@ async def generate_answer_agentic_stream_helper(
             return
 
         yield f"data: {json.dumps({'type': 'status', 'content': 'Thinking…'})}\n\n"
+        if output_format == "json":
+            opening = await opening_storage_notice(user_id)
+            if opening is not None:
+                storage_notices.append(STORAGE_QUOTA_CODE)
+                yield f"data: {json.dumps(opening)}\n\n"
 
         if src_config.FEATURE_INLINE_CITATIONS:
             citing = await _seed_conversation_sources(
@@ -4186,6 +4208,13 @@ async def generate_answer_agentic_stream_helper(
                             answer_budget_started_at = time.perf_counter()
                             result_frame = _record_tool_result(chunk, node)
                             yield f"data: {json.dumps(result_frame)}\n\n"
+                            if (
+                                output_format == "json"
+                                and artifact_ctx.storage_quota_exceeded
+                                and STORAGE_QUOTA_CODE not in storage_notices
+                            ):
+                                storage_notices.append(STORAGE_QUOTA_CODE)
+                                yield f"data: {json.dumps(notice_frame(artifact_ctx.storage_used_bytes, artifact_ctx.storage_max_bytes))}\n\n"
                             continue
 
                         if AIMessage and isinstance(chunk, AIMessage):

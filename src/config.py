@@ -674,6 +674,12 @@ ARTIFACT_UPLOADS_PER_DAY = int(os.getenv("ARTIFACT_UPLOADS_PER_DAY", 100))
 # reading, listing and the agent's own artifacts are not affected.
 FEATURE_ARTIFACT_UPLOADS = getenv_or("FEATURE_ARTIFACT_UPLOADS").lower() == "true"
 
+# Per-user object storage. Counting is always on. This flag only turns on
+# refusals and the storage_quota_exceeded notice. The cap for each plan is
+# FREE_STORAGE_GB, PRO_STORAGE_GB, PRO_PLUS_STORAGE_GB and ULTRA_STORAGE_GB,
+# read where the quota is checked so a test can set them without a reload.
+FEATURE_STORAGE_QUOTA = getenv_or("FEATURE_STORAGE_QUOTA").lower() == "true"
+
 # Conversation files and sandbox API (GET /conversations/{id}/files,
 # /conversations/{id}/sandbox and /sandbox/files). Read-only today. It shows
 # sandbox internals, so it is off by default and on only where an environment

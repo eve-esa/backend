@@ -9,8 +9,19 @@ from src.config import API_KEY_MAX_ACTIVE_PER_USER
 from src.database.models.user import User
 from src.middlewares.auth import AuthContext, get_auth_context, get_current_user
 from src.schemas.auth import ApiKeyItem, CreateApiKeyRequest, CreateApiKeyResponse
-from src.schemas.user import TokenUsageResponse, UpdateUserRequest, UserPublic, to_user_public
+from src.schemas.user import (
+    StorageUsageResponse,
+    TokenUsageResponse,
+    UpdateUserRequest,
+    UserPublic,
+    to_user_public,
+)
 from src.services import api_keys
+from src.services.storage_quota import (
+    apply_storage_listing_delta,
+    get_storage_usage_summary,
+    read_storage_listing,
+)
 from src.services.token_rate_limiter import get_token_usage_summary
 
 router = APIRouter(prefix="/users")
@@ -52,6 +63,33 @@ async def me(user: User = Depends(get_current_user)) -> UserPublic:
         logger.warning("users.me primary read failed, serving the auth row: %s", type(exc).__name__)
         fresh = None
     return to_user_public(fresh or user)
+
+
+@router.get("/me/storage-usage", response_model=StorageUsageResponse)
+async def get_my_storage_usage(user: User = Depends(get_current_user)) -> StorageUsageResponse:
+    """Bytes this user has stored, and the cap of their plan.
+
+    The cap follows the same plan names as the token budget. A plan with no
+    cap, including ``unlimited``, reports ``unlimited: true``.
+    """
+    return StorageUsageResponse.model_validate(await get_storage_usage_summary(user))
+
+
+@router.post("/me/storage-usage/recount", response_model=StorageUsageResponse)
+async def recount_my_storage_usage(user: User = Depends(get_current_user)) -> StorageUsageResponse:
+    """List this user's stored objects and apply the difference to the counter.
+
+    Same adjustment as ``reconcile_storage_usage --apply`` for one user. The
+    counter is not replaced, so a write during the listing is kept.
+    """
+    try:
+        counter, listed = await read_storage_listing(user.id)
+        await apply_storage_listing_delta(user.id, counter, listed)
+    except Exception as exc:
+        logger.warning("storage.recount_failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Could not list your stored files.") from exc
+    fresh = await User.find_by_id_on_primary(user.id)
+    return StorageUsageResponse.model_validate(await get_storage_usage_summary(fresh or user))
 
 
 @router.get("/me/token-usage", response_model=TokenUsageResponse)

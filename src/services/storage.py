@@ -259,6 +259,25 @@ class StorageService:
         """Async ``exists_sync``."""
         return await run_in_threadpool(self.exists_sync, key)
 
+    def object_size_sync(self, key: str) -> int:
+        """Bytes stored at ``key``, or 0 when the key is absent.
+
+        Any error other than a missing key propagates, so a denied head is
+        not treated as an empty object and then charged as a new file.
+        """
+        try:
+            head = self._client().head_object(Bucket=S3_BUCKET_NAME, Key=key)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in _MISSING_OBJECT_ERROR_CODES:
+                return 0
+            raise
+        return int(head.get("ContentLength") or 0)
+
+    async def object_size(self, key: str) -> int:
+        """Async ``object_size_sync``."""
+        return await run_in_threadpool(self.object_size_sync, key)
+
     def get_object_sync(self, key: str) -> dict:
         """Fetch an object. ``Body`` is a ``StreamingBody``.
 
@@ -395,9 +414,11 @@ class StorageService:
             lambda: self._client().delete_object(Bucket=S3_BUCKET_NAME, Key=key)
         )
 
-    def delete_prefix_sync(self, prefix: str, max_keys: int = 10_000) -> int:
-        """Delete every object under one user's ``prefix``; returns the count.
+    def delete_prefix_sync(self, prefix: str, max_keys: int = 10_000) -> tuple[int, int]:
+        """Delete every object under one user's ``prefix``.
 
+        Returns ``(count, bytes)``. The bytes are the ``Size`` of the keys
+        that were deleted, so the caller can give them back to the quota.
         Refuses a prefix that is not ``users/<id>/<something>/``, so a bug in
         the caller can never empty the bucket or another tree. Lists a page,
         deletes it in one ``DeleteObjects`` call (at most 1000 keys each) and
@@ -414,17 +435,21 @@ class StorageService:
             raise ValueError("refusing to delete outside one user's sub-prefix")
         client = self._client()
         deleted = 0
+        total_bytes = 0
         while deleted < max_keys:
             page = client.list_objects_v2(
                 Bucket=S3_BUCKET_NAME,
                 Prefix=prefix,
                 MaxKeys=min(1000, max_keys - deleted),
             )
-            keys = [
-                {"Key": item["Key"]}
-                for item in page.get("Contents") or []
-                if item.get("Key")
-            ]
+            keys = []
+            page_bytes = 0
+            for item in page.get("Contents") or []:
+                key = item.get("Key")
+                if not key:
+                    continue
+                keys.append({"Key": key})
+                page_bytes += int(item.get("Size") or 0)
             if not keys:
                 break
             result = client.delete_objects(
@@ -437,13 +462,47 @@ class StorageService:
                     f"({errors[0].get('Code', 'unknown')})"
                 )
             deleted += len(keys)
+            total_bytes += page_bytes
             if not page.get("IsTruncated"):
                 break
-        return deleted
+        return deleted, total_bytes
 
-    async def delete_prefix(self, prefix: str, max_keys: int = 10_000) -> int:
+    async def delete_prefix(self, prefix: str, max_keys: int = 10_000) -> tuple[int, int]:
         """Async ``delete_prefix_sync``: the boto calls run in the threadpool."""
         return await run_in_threadpool(self.delete_prefix_sync, prefix, max_keys)
+
+    def sum_prefix_sync(self, prefix: str) -> int:
+        """Sum the current size of every object under ``users/<id>/``.
+
+        Refuses any other prefix. Pages until the listing ends, so a user
+        with more than one page is counted in full. Noncurrent versions are
+        not listed, and they are not part of the quota.
+        """
+        parts = prefix.split("/")
+        if len(parts) != 3 or parts[0] != "users" or not parts[1] or parts[2] != "":
+            raise ValueError("refusing to sum outside one user's prefix")
+        client = self._client()
+        total = 0
+        token = None
+        while True:
+            params = {"Bucket": S3_BUCKET_NAME, "Prefix": prefix, "MaxKeys": 1000}
+            if token:
+                params["ContinuationToken"] = token
+            page = client.list_objects_v2(**params)
+            for item in page.get("Contents") or []:
+                key = item.get("Key")
+                if not key or key.endswith("/"):
+                    continue
+                total += int(item.get("Size") or 0)
+            if not page.get("IsTruncated"):
+                return total
+            token = page.get("NextContinuationToken")
+            if not token:
+                return total
+
+    async def sum_prefix(self, prefix: str) -> int:
+        """Async ``sum_prefix_sync``."""
+        return await run_in_threadpool(self.sum_prefix_sync, prefix)
 
     async def generate_presigned_get(
         self,

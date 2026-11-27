@@ -22,6 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from deepagents.backends.protocol import BackendProtocol
 
 from src.services.storage import ObjectNotFoundError, storage_service
+from src.services.storage_quota import adjust_storage_sync, count_storage, release_storage
 
 logger = logging.getLogger(__name__)
 
@@ -246,13 +247,19 @@ class S3ToolResultBackend(BackendProtocol):
         if name is None:
             return WriteResult(error=f"Error: invalid tool result path '{file_path}'")
         key = f"{self.prefix}{name}"
+        payload = content.encode("utf-8")
+        counted = False
         try:
             if _object_exists(key):
                 return WriteResult(error=_exists_error(file_path))
-            storage_service.put_object_sync(
-                key, content.encode("utf-8"), _CONTENT_TYPE
-            )
+            # Counted, never refused: a refusal makes deepagents keep the
+            # whole result in the prompt instead of the stub.
+            adjust_storage_sync(self.user_id, len(payload))
+            counted = True
+            storage_service.put_object_sync(key, payload, _CONTENT_TYPE)
         except Exception as exc:
+            if counted:
+                adjust_storage_sync(self.user_id, -len(payload))
             logger.warning("tool_results.write_failed key=%s", key, exc_info=True)
             return WriteResult(error=f"Error: could not store tool result: {exc}")
         self._cache[_cache_key(file_path)] = content
@@ -266,13 +273,18 @@ class S3ToolResultBackend(BackendProtocol):
         if name is None:
             return WriteResult(error=f"Error: invalid tool result path '{file_path}'")
         key = f"{self.prefix}{name}"
+        payload = content.encode("utf-8")
+        counted = False
         try:
             if await _aobject_exists(key):
                 return WriteResult(error=_exists_error(file_path))
-            await storage_service.put_object(
-                key, content.encode("utf-8"), _CONTENT_TYPE
-            )
+            # Counted, never refused. See ``write``.
+            await count_storage(self.user_id, len(payload))
+            counted = True
+            await storage_service.put_object(key, payload, _CONTENT_TYPE)
         except Exception as exc:
+            if counted:
+                await release_storage(self.user_id, len(payload))
             logger.warning("tool_results.write_failed key=%s", key, exc_info=True)
             return WriteResult(error=f"Error: could not store tool result: {exc}")
         self._cache[_cache_key(file_path)] = content

@@ -82,8 +82,14 @@ CUSTOM_NOTICE = "eve.notice"
 META_CITATIONS = "eve.citations"
 META_SOURCES_RETRIEVED = "eve.sourcesRetrieved"
 NOTICE_INPUT_PART_SKIPPED = "input_part_skipped"
+# Same code and copy as ``storage_quota.STORAGE_QUOTA_MESSAGE``. Kept here so
+# this module stays free of the database.
+NOTICE_STORAGE_QUOTA_EXCEEDED = "storage_quota_exceeded"
 _NOTICE_MESSAGES = {
     NOTICE_INPUT_PART_SKIPPED: "Some attachments could not be used and were left out.",
+    NOTICE_STORAGE_QUOTA_EXCEEDED: (
+        "Storage is full. Delete files or conversations to free space."
+    ),
 }
 
 # RUN_ERROR copy per code (contract 1.7). The message is fixed user copy, never
@@ -881,6 +887,19 @@ class AguiAdapter:
     def _on_error(self, frame: LegacyFrame) -> List[AguiEvent]:
         return self._run_error(normalize_error_code(frame.get("code")))
 
+    def _on_notice(self, frame: LegacyFrame) -> List[AguiEvent]:
+        """``CUSTOM eve.notice``. An unknown code is dropped, not invented."""
+        code = str(frame.get("code") or "")
+        message = _NOTICE_MESSAGES.get(code)
+        if message is None:
+            return []
+        value: Dict[str, Any] = {"code": code, "message": message}
+        if frame.get("used_bytes") is not None:
+            value["usedBytes"] = frame.get("used_bytes")
+        if frame.get("max_bytes") is not None:
+            value["maxBytes"] = frame.get("max_bytes")
+        return self._out([CustomEvent(name=CUSTOM_NOTICE, value=value)])
+
     _HANDLERS = {
         "status": _on_status,
         "token": _on_token,
@@ -891,6 +910,7 @@ class AguiAdapter:
         "final": _on_final,
         "stopped": _on_stopped,
         "error": _on_error,
+        "notice": _on_notice,
     }
 
     # ── building blocks ─────────────────────────────────────────────────────

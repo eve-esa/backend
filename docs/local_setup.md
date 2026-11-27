@@ -262,6 +262,8 @@ APP_ENVIRONMENT=dev
 | `FEATURE_BUG_REPORT_RATE_LIMIT` | No | Bug report rate limit (default `true`). `false` or `0` lets `POST /bug-reports` take any number of reports and ignores `BUG_REPORT_MAX_PER_HOUR`; local compose and dev set it to `false`. |
 | `BUG_REPORT_MAX_PER_HOUR` | No | Rolling-hour cap on bug reports per user while `FEATURE_BUG_REPORT_RATE_LIMIT` is on (default `5`); `0` or negative means unlimited. |
 | `FREE_TOKENS` / `FREE_PERIOD_MONTHS` | No | Token budget and period of the free tier, overriding `config.yaml`. The test gate sets `100` and `1`. |
+| `FEATURE_STORAGE_QUOTA` | No | `true` refuses a write that would pass the user's storage cap and sends the `storage_quota_exceeded` notice. Default off. Counting stays on either way. See [Storage quota](storage-quota.md). |
+| `FREE_STORAGE_GB` / `PRO_STORAGE_GB` / `PRO_PLUS_STORAGE_GB` / `ULTRA_STORAGE_GB` | No | Cap for that plan, in GiB (1024^3). Unset, `0`, or a bad value means no cap. `unlimited` is never capped. |
 
 ---
 
