@@ -11,6 +11,23 @@ but is not yet released is visible in the open `chore(main): release ...` pull r
 what cuts the release: merging it commits the version, creates the `vX.Y.Z` tag, publishes the GitHub
 Release and promotes staging. Production is promoted from there by an explicit dispatch.
 
+## [1.9.0](https://github.com/eve-esa/backend/compare/v1.8.1...v1.9.0) (2026-11-27)
+
+
+### Added
+
+* **conversations:** report the turn still running ([#412](https://github.com/eve-esa/backend/issues/412)) ([766b57c](https://github.com/eve-esa/backend/commit/766b57c8a55753c20d2b3c02570ffa502db2f0f6))
+* **mcp:** let users bring their own toolkit credentials ([#410](https://github.com/eve-esa/backend/issues/410)) ([94d0bb8](https://github.com/eve-esa/backend/commit/94d0bb804e09dc65ef18e60189f2594c229e456d))
+* **mcp:** store registry environments ([#416](https://github.com/eve-esa/backend/issues/416)) ([9b4100d](https://github.com/eve-esa/backend/commit/9b4100df86d54339ff5bbbcf714e5394a3fe4a97))
+* **mcp:** store registry environments ([#416](https://github.com/eve-esa/backend/issues/416)) ([c4ed06b](https://github.com/eve-esa/backend/commit/c4ed06b706ae126f0b8b37676164ce657854c268))
+* refuse writes past the storage cap ([#415](https://github.com/eve-esa/backend/issues/415)) ([30f77b2](https://github.com/eve-esa/backend/commit/30f77b29b486380d0bf78adfc90cdea88b4c1129))
+* stream agent reasoning ([#417](https://github.com/eve-esa/backend/issues/417)) ([55afc78](https://github.com/eve-esa/backend/commit/55afc78290dbfefb5c21356e794debfdadd08dbb))
+
+
+### Fixed
+
+* **agents:** close parenthetical link labels ([#409](https://github.com/eve-esa/backend/issues/409)) ([24724f8](https://github.com/eve-esa/backend/commit/24724f85fe98e76e0d328c08777233f49489e6a2))
+
 ## [1.8.1](https://github.com/eve-esa/backend/compare/v1.8.0...v1.8.1) (2026-11-20)
 
 
