@@ -26,6 +26,7 @@ from src import config
 from src.database.models.mcp_server import MCPServer, UserCredentialSpec
 from src.database.models.mcp_server_credential import MCPServerCredential
 from src.services.custom_model_cipher import CipherContextError, SecretCipher
+from src.services.mcp.user_environment import credential_spec
 
 logger = logging.getLogger(__name__)
 
@@ -78,29 +79,40 @@ def effective_spec(server: MCPServer | Mapping[str, Any]) -> Optional[UserCreden
     may ask for credentials), the row declares nothing, or the declaration is
     malformed. A malformed one must not break the toolkit for everyone, so it is
     ignored with one warning.
+
+    An explicit ``user_credentials`` spec wins. When that field is absent, a
+    stored ``environment.yaml`` that names headers supplies the spec instead.
     """
     if not config.FEATURE_TOOLKIT_CREDENTIALS:
         return None
     if isinstance(server, MCPServer):
-        owner, raw, name = server.user_id, server.user_credentials, server.name
+        owner = server.user_id
+        raw = server.user_credentials
+        environment = server.user_environment
+        name = server.name
     else:
-        owner, raw, name = server.get("user_id"), server.get("user_credentials"), server.get("name")
-    if owner or raw is None:
+        owner = server.get("user_id")
+        raw = server.get("user_credentials")
+        environment = server.get("user_environment")
+        name = server.get("name")
+    if owner:
         return None
-    if isinstance(raw, UserCredentialSpec):
-        return raw
-    try:
-        return UserCredentialSpec.model_validate(raw)
-    except ValidationError as exc:
-        key = str(name)
-        if key not in _warned_invalid_specs:
-            _warned_invalid_specs.add(key)
-            # Error types only: the messages and inputs echo operator data.
-            types = sorted({str(err.get("type")) for err in exc.errors()})
-            logger.warning(
-                "mcp.user_credentials.invalid_spec server=%s errors=%s", key, ",".join(types)
-            )
-        return None
+    if raw is not None:
+        if isinstance(raw, UserCredentialSpec):
+            return raw
+        try:
+            return UserCredentialSpec.model_validate(raw)
+        except ValidationError as exc:
+            key = str(name)
+            if key not in _warned_invalid_specs:
+                _warned_invalid_specs.add(key)
+                # Error types only: the messages and inputs echo operator data.
+                types = sorted({str(err.get("type")) for err in exc.errors()})
+                logger.warning(
+                    "mcp.user_credentials.invalid_spec server=%s errors=%s", key, ",".join(types)
+                )
+            return None
+    return credential_spec(environment, str(name))
 
 
 def _is_printable_ascii(value: str) -> bool:

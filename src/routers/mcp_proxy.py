@@ -108,9 +108,10 @@ class _CachedServer(NamedTuple):
     url: str
     forward_token: bool
     server_id: str | None
-    # ``name``, ``user_id`` and ``user_credentials`` of the row, or None when the
-    # row declares no credentials. ``effective_spec`` reads it per call, so the
-    # feature flag is honoured without waiting for the cache to expire.
+    # ``name``, ``user_id``, ``user_credentials`` and ``user_environment`` of the
+    # row, or None when the row declares no credentials. ``effective_spec`` reads
+    # it per call, so the feature flag is honoured without waiting for the cache
+    # to expire.
     credential_row: dict | None
     expires_at: float
 
@@ -827,6 +828,7 @@ class MCPProxyDispatcher:
                             "user_id": 1,
                             "forward_user_token": 1,
                             "user_credentials": 1,
+                            "user_environment": 1,
                         },
                         sort=[("user_id", -1)],
                     )
@@ -844,16 +846,18 @@ class MCPProxyDispatcher:
                         forward_user_token=server.get("forward_user_token"),
                     )
                     raw_spec = server.get("user_credentials")
+                    raw_environment = server.get("user_environment")
                     entry = _CachedServer(
                         url=server["config"]["url"],
                         forward_token=forward_token,
                         server_id=str(server["_id"]) if server.get("_id") is not None else None,
                         credential_row=None
-                        if raw_spec is None
+                        if raw_spec is None and raw_environment is None
                         else {
                             "name": server.get("name", server_name),
                             "user_id": server.get("user_id"),
                             "user_credentials": raw_spec,
+                            "user_environment": raw_environment,
                         },
                         expires_at=time.monotonic() + MCP_TOOLS_CACHE_TTL,
                     )

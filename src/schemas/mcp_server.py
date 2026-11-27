@@ -138,6 +138,41 @@ class MCPServerUserCredentialsPublic(BaseModel):
     )
 
 
+class MCPServerAccountCredentialPublic(BaseModel):
+    """One value an account asks the user for. The header or variable name stays in the backend."""
+
+    name: str = Field(..., description="Field key, the same key the credential form submits")
+    label: str = Field(..., description="Label to show next to the input")
+    secret: bool = Field(..., description="Whether the input should be masked")
+    help_text: Optional[str] = Field(default=None, description="Short help under the input")
+    url: Optional[str] = Field(default=None, description="Page where the user copies this value")
+    via: Literal["header", "variable"] = Field(
+        ...,
+        description="Header values can be saved here. Variable values are shown only",
+    )
+
+
+class MCPServerAccountPublic(BaseModel):
+    """One upstream account from the server's environment.yaml."""
+
+    id: str = Field(..., description="Stable account id")
+    label: str = Field(..., description="Account name to show")
+    provider: Optional[str] = Field(default=None, description="Who issues the account")
+    url: Optional[str] = Field(default=None, description="Account home page")
+    tools: List[str] = Field(
+        default_factory=list, description="Tool names that need this account"
+    )
+    credentials: List[MCPServerAccountCredentialPublic] = Field(
+        default_factory=list, description="Values the user fills for this account"
+    )
+    services: List["MCPServerAccountPublic"] = Field(
+        default_factory=list, description="Nested accounts that belong to this one"
+    )
+
+
+MCPServerAccountPublic.model_rebuild()
+
+
 class ToolkitCredentialsRequest(BaseModel):
     """The user's values for a toolkit, keyed by field name."""
 
@@ -174,6 +209,10 @@ class MCPServerPublic(BaseModel):
     user_credentials: Optional[MCPServerUserCredentialsPublic] = Field(
         default=None,
         description="Values the user may provide for this toolkit, or null when it asks for none",
+    )
+    accounts: Optional[List[MCPServerAccountPublic]] = Field(
+        default=None,
+        description="Accounts from the server's environment.yaml, or null when it declares none",
     )
 
 

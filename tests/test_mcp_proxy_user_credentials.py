@@ -296,6 +296,7 @@ async def test_the_lookup_skips_soft_deleted_rows():
     ), patch(f"{_PROXY}.build_proxy_app", AsyncMock(return_value=object())):
         await MCPProxyDispatcher(main_app=None)._resolve_proxy(scope, "toolkit")
     assert collection.find_one.await_args.args[0]["deleted_at"] is None
+    assert collection.find_one.await_args.args[1]["user_environment"] == 1
 
 
 async def test_an_echoed_credential_is_redacted_in_the_usage_row_only():
@@ -408,6 +409,58 @@ async def test_no_value_in_logs_or_usage_rows(caplog):
     assert _SECRET not in rendered and _CLIENT not in rendered
     stored = json.dumps(track.await_args.kwargs, default=str)
     assert _SECRET not in stored and _CLIENT not in stored
+
+
+_EFFIS_ENV = {
+    "services": [
+        {
+            "id": "cdse",
+            "label": "Copernicus Data Space",
+            "tools": ["compute_metrics"],
+            "credentials": [
+                {"header": "X-CDSE-Client-Id", "label": "Copernicus client ID", "secret": False},
+                {"header": "X-CDSE-Client-Secret", "label": "Copernicus client secret"},
+            ],
+        }
+    ]
+}
+
+_CDSE_ENV = {
+    "services": [
+        {
+            "id": "cdse",
+            "label": "Copernicus Data Space",
+            "tools": ["fetch_sentinel2"],
+            "credentials": [
+                {"variable": "CDSE_CLIENT_ID", "label": "Copernicus client ID", "secret": False},
+                {"variable": "CDSE_CLIENT_SECRET", "label": "Copernicus client secret"},
+            ],
+        }
+    ]
+}
+
+
+async def test_an_environment_file_supplies_headers_when_the_row_has_no_spec():
+    row = _row(with_spec=False)
+    row["user_environment"] = _EFFIS_ENV
+    sent, upstream, _track, hf = await _call(row)
+    assert sent[0]["status"] == 200
+    spec = hf.await_args.kwargs["spec"]
+    assert [field.header for field in spec.fields] == [
+        "X-CDSE-Client-Id",
+        "X-CDSE-Client-Secret",
+    ]
+    assert upstream[0]["x-client-secret"] == _SECRET
+
+
+async def test_a_variable_only_environment_file_injects_nothing():
+    row = _row(with_spec=False)
+    row["user_environment"] = _CDSE_ENV
+    sent, upstream, track, hf = await _call(row)
+    assert sent[0]["status"] == 200
+    assert "x-client-secret" not in upstream[0]
+    hf.assert_not_awaited()
+    assert track.await_args.kwargs["credential_source"] is None
 
 
 async def test_track_usage_stores_the_credential_source():
