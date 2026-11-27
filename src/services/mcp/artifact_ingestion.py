@@ -35,6 +35,7 @@ from src.config import (
     ARTIFACT_RESOURCE_READ_TIMEOUT_S,
 )
 from src.database.models.artifact import Artifact, ArtifactSource
+from src.database.models.user import User
 from src.services.mcp.artifact_context import (
     ArtifactRequestContext,
     get_artifact_context,
@@ -44,6 +45,12 @@ from src.services.mcp.conversation_artifacts import (
     object_key,
     sandbox_path,
     upload_artifact,
+)
+from src.services.storage_quota import (
+    STORAGE_QUOTA_MESSAGE,
+    quota_bytes_for,
+    release_storage,
+    reserve_storage,
 )
 from src.services.storage import (
     ARTIFACT_TYPE_CONTENT_TYPES,
@@ -55,6 +62,27 @@ from src.services.storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _QuotaRefused:
+    """Returned by ``_persist`` when the user's storage cap refuses the file."""
+
+
+QUOTA_REFUSED = _QuotaRefused()
+
+
+async def _load_storage_cap(ctx: ArtifactRequestContext) -> None:
+    """Read the user's cap once per turn. A non-ObjectId id is left unlimited."""
+    if ctx.storage_cap_loaded:
+        return
+    ctx.storage_cap_loaded = True
+    try:
+        ObjectId(ctx.user_id)
+    except Exception:
+        return
+    user = await User.find_by_id(ctx.user_id)
+    if user is not None:
+        ctx.storage_cap = quota_bytes_for(user)
 
 try:
     from mcp.types import (
@@ -70,6 +98,20 @@ try:
     _mcp_types_available = True
 except Exception:
     _mcp_types_available = False
+
+
+# The tools node stores a tool failure as plain text and leaves the message
+# status as success. The chat marks the step failed only when that text starts
+# with ``Tool error:``.
+QUOTA_FAILURE_TEXT = f"Tool error: {STORAGE_QUOTA_MESSAGE}"
+
+
+def _quota_failure() -> "CallToolResult":
+    """The tool call failed because storage is full. The tool output is dropped."""
+    return CallToolResult(
+        content=[TextContent(type="text", text=QUOTA_FAILURE_TEXT)],
+        isError=True,
+    )
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
@@ -669,6 +711,8 @@ class ArtifactInterceptor:
                 if stored is None:
                     new_content.append(_warning_text("not stored: no conversation"))
                     continue
+                if stored is QUOTA_REFUSED:
+                    return _quota_failure()
                 artifact, output_path = stored
                 if output_path:
                     replacements.extend(
@@ -730,6 +774,8 @@ class ArtifactInterceptor:
                 if stored is None:
                     new_content.append(_warning_text("not stored: no conversation"))
                     continue
+                if stored is QUOTA_REFUSED:
+                    return _quota_failure()
                 artifact, output_path = stored
                 if output_path:
                     replacements.extend(
@@ -757,6 +803,8 @@ class ArtifactInterceptor:
                 if resolved is None:
                     # Timeout, error, or an oversized item: leave the link untouched.
                     new_content.append(block)
+                elif resolved is QUOTA_REFUSED:
+                    return _quota_failure()
                 else:
                     # `resolved` carries the count of artifacts stored. Warning
                     # stubs in the list are not stored artifacts, so the length
@@ -786,7 +834,7 @@ class ArtifactInterceptor:
         ctx: ArtifactRequestContext,
         tool_name: str,
         server_name: str,
-    ) -> Optional[tuple[Artifact, str]]:
+    ) -> Optional[tuple[Artifact, str]] | _QuotaRefused:
         """Store one object under the conversation and insert its record.
 
         ``None`` when the turn has no conversation: nothing is written. The
@@ -795,6 +843,13 @@ class ArtifactInterceptor:
         """
         if not ctx.conversation_id:
             return None
+        await _load_storage_cap(ctx)
+        accepted, used = await reserve_storage(ctx.user_id, len(data), ctx.storage_cap)
+        if not accepted:
+            ctx.storage_quota_exceeded = True
+            ctx.storage_used_bytes = used
+            ctx.storage_max_bytes = int(ctx.storage_cap or 0)
+            return QUOTA_REFUSED
         # Unique within the turn, reserved before the first await: two calls
         # of one tool both default to ``{tool}-1.png``, and the answer links
         # a file by that name.
@@ -808,6 +863,7 @@ class ArtifactInterceptor:
             await storage_service.put_object(key, data, content_type)
         except Exception:
             ctx.collected_artifact_files.pop(turn_key, None)
+            await release_storage(ctx.user_id, len(data))
             raise
         artifact = Artifact(
             id=str(artifact_oid),
@@ -837,6 +893,7 @@ class ArtifactInterceptor:
                 logger.warning(
                     "artifacts.record_cleanup_failed key=%s", key, exc_info=True
                 )
+            await release_storage(ctx.user_id, len(data))
             raise
         ctx.collected_artifact_ids.append(artifact.id)
         ctx.collected_artifact_types[artifact.id] = content_type
@@ -852,12 +909,13 @@ class ArtifactInterceptor:
         server_name: str,
         counter: int,
         persisted_count: int,
-    ) -> Optional[tuple[List["TextContent"], int]]:
+    ) -> Optional[tuple[List["TextContent"], int] | _QuotaRefused]:
         """Fetch a ResourceLink's contents and persist them as artifacts.
 
         Returns the stub blocks to substitute in, plus the updated count of
         artifacts stored for this tool call. Limit warnings are in the list
-        and are not included in the count. None means leave the link
+        and are not included in the count. ``QUOTA_REFUSED`` means the whole
+        tool call failed and its output is dropped. None means leave the link
         untouched (fetch failure, timeout, or any returned item exceeding
         the size limit — the whole link aborts rather than partially
         persisting).
@@ -920,6 +978,8 @@ class ArtifactInterceptor:
             if stored is None:
                 stubs.append(_warning_text("not stored: no conversation"))
                 continue
+            if stored is QUOTA_REFUSED:
+                return QUOTA_REFUSED
             artifact, output_path = stored
             stubs.append(
                 _stub_text(

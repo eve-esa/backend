@@ -53,6 +53,19 @@ class User(MongoModel):
         ge=0,
         description="Number of private documents owned by the user",
     )
+    # No ``ge=0``: a delete of a file stored before the counter existed
+    # subtracts bytes that were never added, and the initial fill corrects it.
+    # Reads clamp a negative value at 0. Changed only with ``$inc`` / ``$set``,
+    # never through ``save()``, which would write a stale copy over a concurrent
+    # increment.
+    storage_bytes_used: int = Field(
+        default=0,
+        description="Bytes currently stored for this user. May be negative before the initial fill.",
+    )
+    storage_notice_pending: bool = Field(
+        default=False,
+        description="A storage write was refused while no stream was open. The next turn sends the notice and clears this.",
+    )
     # ``None`` = never gated (legacy rows, accounts adopted by linking, anything
     # an operator created), "approved" = holds a seat, "pending" = blocked until
     # somebody approves it in the back office. The default MUST stay None:

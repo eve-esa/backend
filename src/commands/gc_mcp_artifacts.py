@@ -24,6 +24,7 @@ from src.database.models.artifact import Artifact
 from src.database.models.message import Message
 from src.database.mongo import async_mongo_manager
 from src.services.storage import storage_service
+from src.services.storage_quota import release_storage
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ async def gc_mcp_artifacts(days: int = DEFAULT_RETENTION_DAYS, apply: bool = Fal
             logger.error(f"Failed to delete artifact object {artifact.key}: {e}")
             print(f"  SKIPPED (storage delete failed): {artifact.id}")
             continue
+        await release_storage(artifact.user_id, int(artifact.size_bytes or 0))
         await artifact.delete()
         deleted_ids.append(artifact.id)
 

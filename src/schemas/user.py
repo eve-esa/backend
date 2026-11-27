@@ -75,6 +75,25 @@ def to_user_public(user: "User") -> UserPublic:
     )
 
 
+class StorageUsageResponse(BaseModel):
+    """Object storage used by the current user, and the cap of their plan.
+
+    ``used_gb`` and ``max_gb`` are GiB (1024^3), rounded to 2 decimals, for
+    display. The byte fields are exact. ``unlimited`` is true when the plan
+    has no cap. ``used_bytes`` is never negative: a counter below zero, which
+    happens before the initial fill, is reported as 0.
+    """
+
+    unlimited: bool
+    rate_limit_group: str
+    used_bytes: int
+    max_bytes: int | None = None
+    remaining_bytes: int | None = None
+    used_ratio: float | None = None
+    used_gb: float
+    max_gb: float | None = None
+
+
 class TokenUsageResponse(BaseModel):
     """Token budget for the current billing period (config-driven rate limit)."""
 

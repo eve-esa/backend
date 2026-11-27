@@ -29,6 +29,8 @@ import time
 import urllib.parse
 from typing import Any, Awaitable, Callable, Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from fastapi.concurrency import run_in_threadpool
 
 from src.services.agents.core.sandbox import (
@@ -45,8 +47,21 @@ from src.services.storage import (
     ObjectNotFoundError,
     storage_service,
 )
+from src.database.models.user import User
+from src.services.storage_quota import (
+    mark_storage_notice,
+    quota_bytes_for,
+    release_storage,
+    reserve_storage,
+)
 
 logger = logging.getLogger(__name__)
+
+# One save of a conversation at a time in this process. The post-turn sync and
+# the reaper snapshot both call ``_save``. Without the lock both would read the
+# same object size and charge the growth twice. Two processes can still race;
+# the reconcile command corrects that.
+_SAVE_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
 
 # These names are sibling directories of workspace, not files inside it.
 _EXCLUDED = ("skills", "large_tool_results", "artifacts")
@@ -128,16 +143,75 @@ def _raise_if_closed(output: str, ok: bool) -> None:
         raise _SandboxClosed("session_expired")
 
 
-async def _put_checked(
-    key: str, data: bytes, content_type: str, alive: Optional[Alive]
-) -> None:
-    """Write *key*, then ask *alive* again; a sandbox gone meanwhile undoes it.
+def _save_lock(user_id: str, conversation_id: str) -> asyncio.Lock:
+    key = (user_id, conversation_id)
+    lock = _SAVE_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SAVE_LOCKS[key] = lock
+    return lock
 
-    A conversation delete drops the record before it erases the prefix, so a
-    write that lands after the erase is caught by the check that follows it.
+
+async def _current_size(key: str) -> int:
+    """Bytes at ``key``. A storage double without ``object_size`` counts as empty."""
+    size = getattr(storage_service, "object_size", None)
+    if size is None:
+        return 0
+    return int(await size(key))
+
+
+async def _cap_for(user_id: str):
+    """The user's cap, loaded once per save. ``None`` when there is no cap.
+
+    A user id that is not an ObjectId is not looked up. Production ids are
+    ObjectIds; a non-id (a unit test) must not open a database connection.
     """
-    await _check_alive(alive)
-    await storage_service.put_object(key, data, content_type)
+    try:
+        ObjectId(user_id)
+    except (InvalidId, TypeError):
+        return None
+    user = await User.find_by_id(user_id)
+    if user is None:
+        return None
+    return quota_bytes_for(user)
+
+
+async def _store_bytes(
+    key: str,
+    data: bytes,
+    content_type: str,
+    alive: Optional[Alive],
+    user_id: str,
+    cap,
+) -> bool:
+    """Write ``key``, charging only the change in size.
+
+    False when the quota refuses the growth: nothing is written. A sandbox
+    that dies after the write undoes it and gives the whole object back.
+    """
+    current = await _current_size(key)
+    new = len(data)
+    delta = new - current
+    reserved = 0
+    if delta > 0:
+        accepted, _used = await reserve_storage(user_id, delta, cap)
+        if not accepted:
+            await mark_storage_notice(user_id)
+            logger.info("workspace.save_skipped_quota size=%s", new)
+            return False
+        reserved = delta
+    try:
+        await _check_alive(alive)
+    except _SandboxClosed:
+        if reserved:
+            await release_storage(user_id, reserved)
+        raise
+    try:
+        await storage_service.put_object(key, data, content_type)
+    except Exception:
+        if reserved:
+            await release_storage(user_id, reserved)
+        raise
     try:
         await _check_alive(alive)
     except _SandboxClosed:
@@ -145,7 +219,12 @@ async def _put_checked(
             await storage_service.delete_object(key)
         except Exception:
             logger.warning("workspace.undo_failed key=%s", key, exc_info=True)
+        # The object is gone, including the bytes it held before this write.
+        await release_storage(user_id, current + reserved)
         raise
+    if delta < 0:
+        await release_storage(user_id, -delta)
+    return True
 
 
 def workspace_prefix(user_id: str, conversation_id: str) -> str:
@@ -411,12 +490,26 @@ async def _save(
 ) -> None:
     if sandbox_backend is None or not user_id or not conversation_id:
         return
+    async with _save_lock(user_id, conversation_id):
+        await _save_locked(
+            sandbox_backend, user_id, conversation_id, alive=alive
+        )
+
+
+async def _save_locked(
+    sandbox_backend: Any,
+    user_id: str,
+    conversation_id: str,
+    *,
+    alive: Optional[Alive] = None,
+) -> None:
     await _check_alive(alive)
     listed, truncated = await _list_files(sandbox_backend)
     if listed is None:
         return
     prefix = workspace_prefix(user_id, conversation_id)
     previous = await _load_state(user_id, conversation_id)
+    cap = await _cap_for(user_id)
     kept: dict[str, dict[str, Any]] = {}
     total = 0
     for relative, size, mtime in listed:
@@ -443,14 +536,23 @@ async def _save(
             continue
         digest = hashlib.sha256(data).hexdigest()
         if prior is None or prior.get("sha256") != digest:
-            await _put_checked(
-                f"{prefix}{relative}", data, _content_type(data, relative), alive
+            stored = await _store_bytes(
+                f"{prefix}{relative}",
+                data,
+                _content_type(data, relative),
+                alive,
+                user_id,
+                cap,
             )
+            if not stored:
+                if prior is not None:
+                    kept[relative] = prior
+                continue
         kept[relative] = {"size": size, "mtime": mtime, "sha256": digest}
         total += size
     await _check_alive(alive)
     if not truncated:
-        await _delete_missing(prefix, set(kept))
+        await _delete_missing(prefix, set(kept), user_id)
         state = kept
     else:
         logger.info(
@@ -458,15 +560,17 @@ async def _save(
         )
         state = dict(previous)
         state.update(kept)
-    await _put_checked(
+    await _store_bytes(
         workspace_state_key(user_id, conversation_id),
         json.dumps({"files": state}).encode("utf-8"),
         "application/json",
         alive,
+        user_id,
+        cap,
     )
 
 
-async def _delete_missing(prefix: str, kept: set[str]) -> None:
+async def _delete_missing(prefix: str, kept: set[str], user_id: str) -> None:
     records, truncated = await run_in_threadpool(
         storage_service.list_key_records, prefix, 1000
     )
@@ -484,6 +588,8 @@ async def _delete_missing(prefix: str, kept: set[str]) -> None:
             logger.warning(
                 "workspace.delete_failed key=%s", key, exc_info=True
             )
+            continue
+        await release_storage(user_id, int(record.get("size") or 0))
 
 
 async def _jobs_running(backend: Any, baseline: str) -> bool:
@@ -952,7 +1058,18 @@ async def _link_workspace_file(
     content_type: Optional[str] = None
     if data:
         content_type = _content_type(data, relative)
-        await storage_service.put_object(key, data, content_type)
+        async with _save_lock(ctx.user_id, ctx.conversation_id):
+            stored = await _store_bytes(
+                key,
+                data,
+                content_type,
+                None,
+                ctx.user_id,
+                await _cap_for(ctx.user_id),
+            )
+        if not stored and not await _workspace_object_exists(key):
+            logger.info("workspace.markdown_skipped_quota")
+            return original
     elif not await _workspace_object_exists(key):
         logger.warning("workspace.markdown_unreadable url=%s", original)
         return original

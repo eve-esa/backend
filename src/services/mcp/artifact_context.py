@@ -49,6 +49,15 @@ class ArtifactRequestContext:
     # no sandbox. Not set in ``set_artifact_context``: the sandbox is
     # acquired later.
     sandbox_backend: Any = None
+    # Storage cap for this turn, loaded once. ``storage_cap_loaded`` tells a
+    # missing cap (unlimited) apart from "not loaded yet".
+    storage_cap: Optional[int] = None
+    storage_cap_loaded: bool = False
+    # Set when a tool file was not stored because the user is over quota.
+    # The runner sends one notice from these numbers.
+    storage_quota_exceeded: bool = False
+    storage_used_bytes: int = 0
+    storage_max_bytes: int = 0
 
 
 _artifact_context: contextvars.ContextVar[Optional[ArtifactRequestContext]] = (

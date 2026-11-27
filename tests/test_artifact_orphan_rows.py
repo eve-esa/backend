@@ -26,6 +26,7 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 def _use_fake_storage(monkeypatch) -> FakeStorage:
     fake = FakeStorage()
     monkeypatch.setattr("src.routers.artifact.storage_service", fake)
+    monkeypatch.setattr("src.services.artifact_move.storage_service", fake)
     monkeypatch.setattr("src.services.artifact_cleanup.storage_service", fake)
     return fake
 
@@ -394,7 +395,7 @@ async def test_move_gives_up_with_409_after_its_attempts(async_client, monkeypat
             )
 
         monkeypatch.setattr(fake, "copy_object", copy_while_another_request_wins)
-        with caplog.at_level(logging.WARNING, logger="src.routers.artifact"):
+        with caplog.at_level(logging.WARNING, logger="src.services.artifact_move"):
             with pytest.raises(HTTPException) as raised:
                 await move_to_conversation(row, await _conversation(user.id, "Busy"))
         assert raised.value.status_code == 409

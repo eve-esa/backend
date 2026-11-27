@@ -835,6 +835,32 @@ def test_skipped_input_parts_are_one_notice_after_run_started():
     _assert_valid(events)
 
 
+def test_storage_quota_notice_is_eve_notice_and_does_not_end_the_run():
+    adapter = AguiAdapter(RunContext(thread_id=T, run_id=R, message_id=M, trace_id=TRACE, graph="react"))
+    out = list(adapter.start())
+    out.extend(adapter.adapt(f_status()))
+    out.extend(
+        adapter.adapt(
+            {
+                "type": "notice",
+                "code": "storage_quota_exceeded",
+                "used_bytes": 20,
+                "max_bytes": 20,
+            }
+        )
+    )
+    out.extend(adapter.adapt(f_final("Still going.")))
+    events = [_as_dict(e) for e in out]
+
+    notice = next(e for e in events if e.get("type") == "CUSTOM" and e.get("name") == "eve.notice")
+    assert notice["value"]["code"] == "storage_quota_exceeded"
+    assert notice["value"]["message"] == "Storage is full. Delete files or conversations to free space."
+    assert notice["value"]["usedBytes"] == 20
+    assert notice["value"]["maxBytes"] == 20
+    assert events[-1]["type"] == "RUN_FINISHED"
+    _assert_valid(events)
+
+
 def test_sources_for_an_unknown_id_attach_to_the_last_started_call():
     documents = [{"id": "d1"}]
     events = _run(

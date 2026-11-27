@@ -22,6 +22,7 @@ from src.services.agents.core.repeat_guard import (
     finish_tool_call,
     mark_refused_span,
 )
+from src.services.storage_quota import STORAGE_QUOTA_MESSAGE
 from src.utils.error_logger import get_error_logger, redact_secrets
 
 try:
@@ -117,8 +118,12 @@ def classify_mcp_tool_result(result: Any) -> Optional[Tuple[str, str]]:
 
     Signals: ``is_error`` (MCP ``isError`` / JSON-RPC error), ``structured``
     (``{error: ...}``), ``text`` (tight 401-ish heuristic). ``None`` on success.
+    A storage-quota refusal is expected, so that exact text is not a fault.
     """
     if result is None:
+        return None
+    text = _text_from_result(result).strip()
+    if text == STORAGE_QUOTA_MESSAGE or text == f"Tool error: {STORAGE_QUOTA_MESSAGE}":
         return None
 
     if isinstance(result, dict) and _is_error_payload(result.get("error")) and (

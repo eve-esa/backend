@@ -37,6 +37,7 @@ def _use_fake_storage(monkeypatch) -> FakeStorage:
     """Monkeypatch the router's storage singleton with an in-memory fake."""
     fake = FakeStorage()
     monkeypatch.setattr("src.routers.artifact.storage_service", fake)
+    monkeypatch.setattr("src.services.artifact_move.storage_service", fake)
     return fake
 
 

@@ -865,6 +865,7 @@ async def retry(
             endpoint = (
                 prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
             )
+            notices = prompts.pop("notices", None) if isinstance(prompts, dict) else None
             existing_metadata.update({"latencies": latencies, "prompts": prompts})
             if endpoint:
                 existing_metadata["endpoint"] = endpoint
@@ -903,6 +904,7 @@ async def retry(
                     "latencies": latencies,
                     "prompts": prompts,
                 },
+                **({"notices": notices} if notices else {}),
             }
 
         if message.request_input is not None:
@@ -2267,6 +2269,7 @@ async def create_agentic_message(
         # Same lift as the retry branches: metadata.endpoint is the contract
         # location, prompts is only the transport out of the generator.
         endpoint = prompts.pop("endpoint", None) if isinstance(prompts, dict) else None
+        notices = prompts.pop("notices", None) if isinstance(prompts, dict) else None
         existing_metadata.update({"latencies": latencies, "prompts": prompts})
         if endpoint:
             existing_metadata["endpoint"] = endpoint
@@ -2299,6 +2302,7 @@ async def create_agentic_message(
             "collection_ids": request.collection_ids,
             "trace": trace_entries if trace_entries else None,
             "metadata": {"latencies": latencies},
+            **({"notices": notices} if notices else {}),
         }
     except HTTPException as http_exc:
         if message and not generation_persisted:

@@ -9,6 +9,7 @@ from src.services.agents.core.interceptors import (
     ToolReturnedError,
     classify_mcp_tool_result,
 )
+from src.services.storage_quota import STORAGE_QUOTA_MESSAGE
 from src.services.agents.graphs_bundle import graphs_base_module
 from src.utils.error_logger import ErrorLogger, PolicyEvent, persist_policy_event
 
@@ -211,6 +212,17 @@ class TestClassifyMcpToolResult:
         result.structured_content = None
         block = MagicMock()
         block.text = "there was an error in the calculation"
+        result.content = [block]
+        assert classify_mcp_tool_result(result) is None
+
+    def test_storage_quota_refusal_is_not_logged(self):
+        result = MagicMock()
+        result.isError = True
+        result.is_error = True
+        result.structuredContent = None
+        result.structured_content = None
+        block = MagicMock()
+        block.text = f"Tool error: {STORAGE_QUOTA_MESSAGE}"
         result.content = [block]
         assert classify_mcp_tool_result(result) is None
 

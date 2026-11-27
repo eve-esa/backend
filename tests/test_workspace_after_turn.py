@@ -256,8 +256,8 @@ async def test_a_delete_after_the_cleanup_writes_no_state(
     backend = _AgentCoreLike({"a.txt": b"aaa"})
     real_delete_missing = workspace._delete_missing
 
-    async def _then_delete(prefix, kept):
-        await real_delete_missing(prefix, kept)
+    async def _then_delete(prefix, kept, user_id):
+        await real_delete_missing(prefix, kept, user_id)
         _erase(storage, sandbox_store)
 
     monkeypatch.setattr(workspace, "_delete_missing", _then_delete)

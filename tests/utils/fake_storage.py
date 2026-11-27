@@ -59,11 +59,27 @@ class FakeStorage:
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
+    async def object_size(self, key):
+        obj = self.objects.get(key)
+        if obj is None:
+            return 0
+        return len(obj["body"])
+
+    def list_key_records(self, prefix, max_keys, *, scan_limit=1000):
+        rows = [
+            {"key": key, "size": len(obj["body"]), "last_modified": None}
+            for key, obj in self.objects.items()
+            if key.startswith(prefix) and not key.endswith("/")
+        ]
+        return rows[:max_keys], len(rows) > max_keys
+
     async def delete_prefix(self, prefix, max_keys=10_000):
         doomed = [k for k in self.objects if k.startswith(prefix)][:max_keys]
+        total = 0
         for key in doomed:
+            total += len(self.objects[key]["body"])
             del self.objects[key]
-        return len(doomed)
+        return len(doomed), total
 
     async def generate_presigned_get(
         self,
