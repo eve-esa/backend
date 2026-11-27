@@ -6,7 +6,7 @@ from functools import partial
 from typing import List, Optional
 
 import anyio
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Path
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, Path, Response
 from bson import ObjectId
 
 from src import config
@@ -37,6 +37,8 @@ from src.services.private_document_limit import (
     release_private_document_slots,
 )
 from src.services.request_rate_limiter import enforce_request_rate
+from src.database.models.document_ingest_job import DocumentIngestJob
+from src.services.document_ingest import DOCUMENT_QUEUED, enqueue_upload
 from src.services.conversation_documents import (
     count_attached_documents,
     delete_conversation_collection_if_empty,
@@ -45,6 +47,7 @@ from src.services.conversation_documents import (
     get_or_create_conversation_collection,
     keep_conversation_collection,
     list_conversation_documents as list_attached_documents,
+    list_conversation_documents_with_pending,
 )
 
 # Setup
@@ -202,6 +205,7 @@ async def get_document(
     dependencies=[Depends(enforce_request_rate("upload"))],
 )
 async def upload_documents(
+    response: Response,
     collection_id: str = Path(..., description="Collection ID"),
     files: List[UploadFile] = File(...),
     metadata_urls: Optional[List[str] | str] = Form(default=None),
@@ -265,6 +269,7 @@ async def upload_documents(
                 filename=file.filename,
                 file_type=os.path.splitext(file.filename)[1].lstrip("."),
                 source_url=metadata_urls[i] if metadata_urls else None,
+                status=DOCUMENT_QUEUED if config.FEATURE_BACKGROUND_INGEST else None,
             )
             for i, file in enumerate(files)
         ]
@@ -272,6 +277,20 @@ async def upload_documents(
         created_docs = await DocumentModel.bulk_create(docs_data)
 
         effective_model = collection.embeddings_model or embeddings_model
+        if config.FEATURE_BACKGROUND_INGEST:
+            job = await enqueue_upload(
+                user_id=requesting_user.id,
+                collection_id=collection_id,
+                files=files,
+                documents=created_docs,
+                embeddings_model=effective_model,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                source_urls=metadata_urls if isinstance(metadata_urls, list) else None,
+            )
+            response.status_code = 202
+            return _queued_response(job, collection_id, created_docs)
+
         result = await document_service.add_documents(
             collection_id=collection_id,
             user_id=requesting_user.id,
@@ -329,6 +348,50 @@ async def upload_documents(
         )
 
 
+def _queued_response(
+    job: DocumentIngestJob, collection_id: str, documents: List[DocumentModel]
+) -> dict:
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "collection_id": collection_id,
+        "documents": [
+            {"document_id": doc.id, "name": doc.name, "status": DOCUMENT_QUEUED}
+            for doc in documents
+        ],
+    }
+
+
+@router.get("/document-ingest-jobs/{job_id}")
+async def get_document_ingest_job(
+    job_id: str = Path(..., description="Job ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> dict:
+    """
+    Progress of a background document upload.
+
+    Args:
+        job_id (str): The ``job_id`` the upload answered with.
+        requesting_user (User): Authenticated user injected by dependency.
+
+    Returns:
+        The status (queued, running, done or failed), the error code when it
+        failed, and the chunk count per document when it is done.
+
+    Raises:
+        HTTPException: 404 if the job is not found or belongs to another user.
+    """
+    job = await DocumentIngestJob.find_by_id_on_primary(job_id)
+    if not job or job.user_id != requesting_user.id:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "error_code": job.error_code,
+        "chunk_counts": job.chunk_counts,
+    }
+
+
 def _conversation_document_error(status_code: int, code: str, message: str):
     return HTTPException(
         status_code=status_code, detail={"code": code, "message": message}
@@ -363,6 +426,7 @@ async def _validate_conversation_files(files: List[UploadFile]) -> None:
     dependencies=[Depends(enforce_request_rate("upload"))],
 )
 async def upload_conversation_documents(
+    response: Response,
     conversation_id: str = Path(..., description="Conversation ID"),
     files: List[UploadFile] = File(...),
     requesting_user: User = Depends(get_current_user),
@@ -439,6 +503,7 @@ async def upload_conversation_documents(
                     filename=file.filename,
                     file_type=os.path.splitext(file.filename)[1].lstrip("."),
                     file_size=file.size,
+                    status=DOCUMENT_QUEUED if config.FEATURE_BACKGROUND_INGEST else None,
                 )
                 for file in files
             ]
@@ -447,6 +512,19 @@ async def upload_conversation_documents(
         # collection between get_or_create and the insert above: put it back,
         # or these rows would sit under a collection nothing can find.
         await keep_conversation_collection(collection)
+        if config.FEATURE_BACKGROUND_INGEST:
+            job = await enqueue_upload(
+                user_id=requesting_user.id,
+                collection_id=collection.id,
+                files=files,
+                documents=created_docs,
+                embeddings_model=collection.embeddings_model,
+                chunk_size=DEFAULT_CHUNK_SIZE,
+                chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                max_chunks=MAX_CONVERSATION_DOCUMENT_CHUNKS,
+            )
+            response.status_code = 202
+            return _queued_response(job, collection.id, created_docs)
         names = [file.filename for file in files]
         with anyio.fail_after(CONVERSATION_DOCUMENT_DEADLINE_SECONDS):
             result = await document_service.add_documents(
@@ -597,7 +675,8 @@ async def list_conversation_documents(
     List the documents attached to one conversation, oldest first.
 
     A document appears once its upload has finished, so every entry has a
-    ``chunk_count`` above 0.
+    ``chunk_count`` above 0. With background ingest, documents still being
+    processed are listed too, with ``status`` "queued" and no ``chunk_count``.
 
     Args:
         conversation_id (str): Conversation identifier.
@@ -611,7 +690,12 @@ async def list_conversation_documents(
         found or belongs to another user.
     """
     await _require_own_conversation(conversation_id, requesting_user)
-    documents = await list_attached_documents(requesting_user.id, conversation_id)
+    if config.FEATURE_BACKGROUND_INGEST:
+        documents = await list_conversation_documents_with_pending(
+            requesting_user.id, conversation_id
+        )
+    else:
+        documents = await list_attached_documents(requesting_user.id, conversation_id)
     return {
         "documents": [
             {
@@ -620,6 +704,9 @@ async def list_conversation_documents(
                 "chunk_count": doc.chunk_count,
                 "file_type": doc.file_type,
                 "file_size": doc.file_size,
+                "status": doc.status or ("ready" if doc.chunk_count else None),
+                "pages": doc.pages,
+                "parser": doc.parser,
             }
             for doc in documents
         ]
@@ -656,6 +743,45 @@ async def delete_conversation_document(
     ):
         raise HTTPException(status_code=404, detail="Document not found")
     return {"message": "Document deleted successfully"}
+
+
+@router.get("/conversations/{conversation_id}/documents/{document_id}/file")
+async def download_conversation_document(
+    conversation_id: str = Path(..., description="Conversation ID"),
+    document_id: str = Path(..., description="Document ID"),
+    requesting_user: User = Depends(get_current_user),
+) -> Response:
+    """
+    The original file of one document of a conversation, from object storage.
+
+    Raises:
+        HTTPException: 404 if the conversation, the document or its stored
+        original is not found, or belongs to another user.
+    """
+    await _require_own_conversation(conversation_id, requesting_user)
+    collection = await get_conversation_collection(requesting_user.id, conversation_id)
+    row = await DocumentModel.find_by_id(document_id) if ObjectId.is_valid(document_id) else None
+    if (
+        not collection
+        or not row
+        or row.collection_id != collection.id
+        or row.user_id != requesting_user.id
+        or not row.storage_key
+    ):
+        raise HTTPException(status_code=404, detail="Document not found")
+    from src.services.storage import ObjectNotFoundError, storage_service
+
+    try:
+        obj = await storage_service.get_object(row.storage_key)
+    except ObjectNotFoundError:
+        raise HTTPException(status_code=404, detail="Document not found")
+    body = await anyio.to_thread.run_sync(obj["Body"].read)
+    filename = (row.name or "document").replace('"', "")
+    return Response(
+        content=body,
+        media_type=obj.get("ContentType") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/collections/{collection_id}/documents/{document_id}")

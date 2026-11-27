@@ -163,6 +163,32 @@ async def list_conversation_documents(
     return [Document.from_dict(row) for row in await _ingested_rows(collection.id)]
 
 
+async def list_conversation_documents_with_pending(
+    user_id: str, conversation_id: str
+) -> list[Document]:
+    """Like :func:`list_conversation_documents`, plus uploads still being processed.
+
+    With background ingest a document is ``queued`` until the worker finishes,
+    and the composer shows it as Processing. It is still neither searched nor
+    named to the model until it is ready.
+    """
+    collection = await get_conversation_collection(user_id, conversation_id)
+    if collection is None:
+        return []
+    rows = (
+        await Document.get_primary_collection()
+        .find(
+            {
+                "collection_id": collection.id,
+                "$or": [{"chunk_count": {"$gt": 0}}, {"status": "queued"}],
+            }
+        )
+        .sort([("timestamp", 1), ("_id", 1)])
+        .to_list(length=None)
+    )
+    return [Document.from_dict(row) for row in rows]
+
+
 async def attached_document_names(collection_id: str) -> list[str]:
     """Names of a conversation collection's documents, oldest first.
 
@@ -241,6 +267,9 @@ async def delete_conversation_document(
     if not removed:
         return False
     await _release_slots(user_id, removed)
+    from src.services.document_ingest import delete_document_objects
+
+    await delete_document_objects(user_id, document_id, conversation_id)
     await delete_conversation_collection_if_empty(collection)
     return True
 
@@ -278,6 +307,12 @@ async def delete_conversation_documents(user_id: str, conversation_id: str) -> N
             exc_info=True,
         )
         raise _cleanup_failed()
+    document_ids = [
+        str(row["_id"])
+        for row in await Document.get_primary_collection()
+        .find(row_filter, {"_id": 1})
+        .to_list(length=None)
+    ]
     try:
         deleted = await Document.delete_many(row_filter)
     except Exception:
@@ -288,6 +323,10 @@ async def delete_conversation_documents(user_id: str, conversation_id: str) -> N
         )
         raise _cleanup_failed()
     await _release_slots(user_id, deleted)
+    from src.services.document_ingest import delete_document_objects
+
+    for document_id in document_ids:
+        await delete_document_objects(user_id, document_id, conversation_id)
     if collection is None:
         return
     try:

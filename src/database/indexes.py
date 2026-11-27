@@ -39,6 +39,9 @@ async def _create_index(collection: AsyncIOMotorCollection, keys, **kwargs) -> N
 
 async def ensure_indexes() -> None:
     """Create MongoDB indexes required by MCP proxy, usage tracking, API keys, artifacts, and messages."""
+    await _create_index(
+        get_collection("document_ingest_jobs"), [("status", 1), ("available_at", 1)]
+    )
     mcp_servers = get_collection("mcp_servers")
     skills = get_collection("skills")
     mcp_usage = get_collection("mcp_usage")
