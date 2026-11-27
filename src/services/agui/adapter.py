@@ -42,6 +42,11 @@ from ag_ui.core import (
     ActivitySnapshotEvent,
     BaseEvent,
     CustomEvent,
+    ReasoningEndEvent,
+    ReasoningMessageContentEvent,
+    ReasoningMessageEndEvent,
+    ReasoningMessageStartEvent,
+    ReasoningStartEvent,
     RunErrorEvent,
     RunFinishedCancelledOutcome,
     RunFinishedEvent,
@@ -557,6 +562,9 @@ class AguiAdapter:
         self._started = False
         self._terminated = False
         self._thinking_open = False
+        self._reasoning_open = False
+        self._reasoning_message_id = ""
+        self._reasoning_count = 0
         self._text_open = False
         self._text_streamed = False
         # Text with more than whitespace went out: the answer rule of
@@ -656,18 +664,49 @@ class AguiAdapter:
     def _on_status(self, frame: LegacyFrame) -> List[AguiEvent]:
         return self._open_thinking()
 
+    def _on_reasoning(self, frame: LegacyFrame) -> List[AguiEvent]:
+        """One fragment of model reasoning, as an AG-UI reasoning message.
+
+        The message stays open across fragments of one think and closes on
+        the first answer token or tool call (``_close_reasoning``).
+        """
+        content = frame.get("content")
+        if not isinstance(content, str) or not content:
+            return []
+        events: List[AguiEvent] = []
+        if not self._reasoning_open:
+            self._reasoning_count += 1
+            self._reasoning_message_id = (
+                f"{self.context.message_id}:reasoning:{self._reasoning_count}"
+            )
+            self._reasoning_open = True
+            events.append(ReasoningStartEvent(message_id=self._reasoning_message_id))
+            events.append(
+                ReasoningMessageStartEvent(
+                    message_id=self._reasoning_message_id, role="reasoning"
+                )
+            )
+        events.append(
+            ReasoningMessageContentEvent(
+                message_id=self._reasoning_message_id, delta=content
+            )
+        )
+        return events
+
     def _on_token(self, frame: LegacyFrame) -> List[AguiEvent]:
         content = frame.get("content")
         if not isinstance(content, str) or not content:
             return []
-        events = self._close_thinking()
+        events = self._close_reasoning()
+        events.extend(self._close_thinking())
         citations = frame.get("citations")
         metadata = {META_CITATIONS: citations} if isinstance(citations, list) else None
         events.extend(self._text_delta(content, metadata))
         return events
 
     def _on_tool_call(self, frame: LegacyFrame) -> List[AguiEvent]:
-        events = self._close_thinking()
+        events = self._close_reasoning()
+        events.extend(self._close_thinking())
         events.extend(self._close_text())
         name = _str_or_none(frame.get("tool")) or "tool"
         raw_id = _frame_call_id(frame)
@@ -827,7 +866,8 @@ class AguiAdapter:
         )
         usage = _usage(frame.get("usage"))
 
-        events = self._close_thinking()
+        events = self._close_reasoning()
+        events.extend(self._close_thinking())
         if not self._text_streamed and answer:
             # A text-format turn flushed at the end, or a final with no token
             # frame before it: the answer still travels as standard text.
@@ -902,6 +942,7 @@ class AguiAdapter:
 
     _HANDLERS = {
         "status": _on_status,
+        "reasoning": _on_reasoning,
         "token": _on_token,
         "tool_call": _on_tool_call,
         "tool_result": _on_tool_result,
@@ -963,6 +1004,7 @@ class AguiAdapter:
                 )
             self._pending_results.clear()
         events.extend(self._close_text(None, text_meta))
+        events.extend(self._close_reasoning())
         events.extend(self._close_thinking())
         events.extend(self._close_summary())
         return events
@@ -978,6 +1020,17 @@ class AguiAdapter:
             return []
         self._thinking_open = False
         return [StepFinishedEvent(step_name=STEP_THINKING)]
+
+    def _close_reasoning(self) -> List[AguiEvent]:
+        """End the open reasoning message. Empty when none is open."""
+        if not self._reasoning_open:
+            return []
+        self._reasoning_open = False
+        message_id = self._reasoning_message_id
+        return [
+            ReasoningMessageEndEvent(message_id=message_id),
+            ReasoningEndEvent(message_id=message_id),
+        ]
 
     def _text_delta(
         self, delta: str, metadata: Optional[Dict[str, Any]] = None
