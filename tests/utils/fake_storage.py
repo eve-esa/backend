@@ -59,6 +59,9 @@ class FakeStorage:
     async def delete_object(self, key):
         self.objects.pop(key, None)
 
+    async def list_keys(self, prefix, max_keys):
+        return [{"key": k} for k in sorted(self.objects) if k.startswith(prefix)][:max_keys]
+
     async def delete_prefix(self, prefix, max_keys=10_000):
         doomed = [k for k in self.objects if k.startswith(prefix)][:max_keys]
         for key in doomed:

@@ -10,6 +10,8 @@ from src.config import APP_VERSION, CORS_ALLOWED_ORIGINS, configure_logging
 from src import observability
 from src.database.indexes import ensure_indexes
 from src.database.mongo import async_mongo_manager
+from src.services.document_ingest import start_workers as start_ingest_workers
+from src.services.document_ingest import stop_workers as stop_ingest_workers
 from src.services.provider_catalog import ensure_provider_catalog_seeded
 from src.routers import (
     OpenAIProxyDispatcher,
@@ -116,6 +118,7 @@ def create_app(debug=False, **kwargs):
         logging.info("Database connection established")
         observability.start_runtime_metrics()
         log_rate_limit_config()
+        app.state.ingest_workers = start_ingest_workers()
         # In the background: readiness never waits for the limiter store.
         app.state.rate_limit_warm_up = None
         try:
@@ -137,6 +140,7 @@ def create_app(debug=False, **kwargs):
         try:
             yield
         finally:
+            await stop_ingest_workers(app.state.ingest_workers)
             try:
                 await mail_template_store.stop()
             except Exception:

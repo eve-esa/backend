@@ -25,6 +25,12 @@ class Document(MongoModel):
     )
     file_size: Optional[int] = Field(None, description="File size in bytes")
 
+    # None or "ready": searchable. "queued": a background job has not finished it.
+    status: Optional[str] = Field(None, description="Ingest state")
+    storage_key: Optional[str] = Field(None, description="Original file in object storage")
+    parser: Optional[str] = Field(None, description="Parser that produced the chunks")
+    pages: Optional[int] = Field(None, description="Page count reported by the parser")
+
     vector_ids: Optional[list[str]] = Field(
         None, description="Qdrant point IDs for this document's chunks"
     )

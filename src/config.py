@@ -378,6 +378,27 @@ FEATURE_AGUI_STREAM = getenv_or("FEATURE_AGUI_STREAM").lower() == "true"
 # (src/services/sources). Off: the model context, the stream and the stored
 # message are unchanged. Default off, like FEATURE_JSC_MODEL.
 FEATURE_INLINE_CITATIONS = getenv_or("FEATURE_INLINE_CITATIONS").lower() == "true"
+
+# On: an upload answers 202 with a job id; eve-esa/document-parser parses it (OCR on JSC
+# Blablador) through SQS and workers embed the result (src/services/document_ingest.py).
+# Off: the request parses in process and answers when it is done. The frontend must show the
+# job's progress before this goes on.
+FEATURE_BACKGROUND_INGEST = getenv_or("FEATURE_BACKGROUND_INGEST").lower() == "true"
+INGEST_POLL_SECONDS = float(getenv_or("INGEST_POLL_SECONDS", "2"))
+# SQS on AWS (empty endpoint, task role), ElasticMQ in compose.
+SQS_ENDPOINT_URL = getenv_or("SQS_ENDPOINT_URL").strip() or None
+SQS_ACCESS_KEY_ID = getenv_or("SQS_ACCESS_KEY_ID").strip() or None
+SQS_SECRET_ACCESS_KEY = getenv_or("SQS_SECRET_ACCESS_KEY").strip() or None
+SQS_REGION = getenv_or("SQS_REGION", getenv_or("AWS_REGION", "eu-west-1"))
+# Queue names (compose) or URLs (AWS, from stacks/app/parser.tf).
+PARSE_JOBS_QUEUE = getenv_or("PARSE_JOBS_QUEUE", "parse-jobs")
+PARSE_RESULTS_QUEUE = getenv_or("PARSE_RESULTS_QUEUE", "parse-results")
+# A job with no final result after this long fails as document_parser_unavailable. It waits
+# through queued documents ahead of it, Blablador rate limits and the parser's own retries.
+PARSE_TIMEOUT_SECONDS = float(getenv_or("PARSE_TIMEOUT_SECONDS", "3600"))
+PARSE_RESULT_CONSUMERS = int(getenv_or("PARSE_RESULT_CONSUMERS", "1"))
+# One embedding step (a parsed document's chunks into Qdrant).
+INGEST_JOB_TIMEOUT_SECONDS = float(getenv_or("INGEST_JOB_TIMEOUT_SECONDS", "240"))
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "").strip().rstrip("/")
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
@@ -480,6 +501,8 @@ BUG_REPORT_CONVERSATION_MAX_BYTES = _tolerant_int_env(
 # runs at once; past the cap a new generation answers 429 "overloaded" with
 # Retry-After instead of slowing every stream already running. Per worker, so
 # the task cap is this times WORKERS. <=0 disables the cap.
+# Ingest jobs per web process (src/services/document_ingest.py). 0 runs none here.
+INGEST_WORKER_CONCURRENCY = _tolerant_int_env("INGEST_WORKER_CONCURRENCY", 2)
 MAX_INFLIGHT_GENERATIONS_PER_WORKER = _tolerant_int_env(
     "MAX_INFLIGHT_GENERATIONS_PER_WORKER", 40
 )

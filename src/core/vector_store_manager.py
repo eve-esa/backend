@@ -1400,13 +1400,19 @@ class VectorStoreManager:
             collection_names, private_collections_map
         )
 
-        async def _query(collection_name: str, collection_filter: Any) -> List[Any]:
+        # ATTACHED-DOCS-RETRIEVAL (2026-11-27): ``threshold`` lets the attached documents
+        # skip score_threshold below. Revert: drop the parameter, use score_threshold.
+        async def _query(
+            collection_name: str,
+            collection_filter: Any,
+            threshold: Optional[float] = score_threshold,
+        ) -> List[Any]:
             async with _qdrant_read_slot(slots):
                 qp_response = await client.query_points(
                     collection_name=collection_name,
                     query=query_vector,
                     limit=limit_per_collection,
-                    score_threshold=score_threshold,
+                    score_threshold=threshold,
                     query_filter=collection_filter,
                     search_params=models.SearchParams(
                         quantization=models.QuantizationSearchParams(
@@ -1464,7 +1470,13 @@ class VectorStoreManager:
                         PRIVATE_COLLECTION_NAME, client_filter
                     ):
                         return []
-                    points = await _query(PRIVATE_COLLECTION_NAME, private_filter)
+                    # ATTACHED-DOCS-RETRIEVAL (2026-11-27): the user attached these documents
+                    # to this conversation, so their best chunks reach the model whatever the
+                    # UI threshold. On a scanned 1973 NASA paper the chunks holding the
+                    # answers scored 0.48-0.59 and were all dropped at 0.6
+                    # (conversation 6b090b07c755a9689cd90846). Revert: pass private_filter only.
+                    threshold = None if collection_id in unfiltered else score_threshold
+                    points = await _query(PRIVATE_COLLECTION_NAME, private_filter, threshold)
             except Exception as e:
                 if _is_timeout_error(e):
                     logger.warning(
